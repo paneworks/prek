@@ -1,0 +1,52 @@
+# Written by wing. It records which template generated this project and what each
+# file looked like at the time, so `wing template update` can tell a file you edited
+# from one the template changed. Commit it.
+
+template = "rust"
+name = "prek"
+generated_at = "2026-10-09T13:10:26Z"
+
+[[files]]
+path = ".env.lua"
+hash = "f9be513bf58ff99e6eceeadfd7e9cbd9"
+
+[[files]]
+path = ".github/workflows/release.yml"
+hash = "c2086d421d8037f4db3b42ec64289fcc"
+
+[[files]]
+path = ".github/workflows/tests.yml"
+hash = "927278f544005e809480b4ef63410301"
+
+[[files]]
+path = ".gitignore"
+hash = "a52f898e2e1413d91bd64156fc69a71f"
+
+[[files]]
+path = ".make.lua"
+hash = "4d0c65523b1f1b15cf1799c52de01110"
+
+[[files]]
+path = "Cargo.toml"
+hash = "2d303933a7f11481cd3a2de4bc73efc6"
+
+[[files]]
+path = "LICENSE"
+hash = "027844bab838e520052bffafa4752f4f"
+
+[[files]]
+path = "README.md"
+hash = "b775f3d9db443a9fed618437dbcf973d"
+
+[[files]]
+path = "examples/main.rs"
+hash = "6c381886a67777b3d465ed521b78374f"
+
+[[files]]
+path = "flake.nix"
+hash = "4af0c352e1977efce3ae6861fc73cc0f"
+
+[[files]]
+path = "src/lib.rs"
+hash = "21c4e4c468fef43a497b8d6b3da579b4"
+
