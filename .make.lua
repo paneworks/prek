@@ -74,17 +74,6 @@ local function report(path)
   print("")
 end
 
--- The same, for artifacts whose exact path the build system decides. Walked with find rather than
--- globbed: oslo's `**` matches a single directory level, and build trees nest deeper than that.
-local function report_found(root, pattern)
-  local found = oslo.run{ "find", root, "-type", "f", "-name", pattern, capture = true }
-  for path in (found.out or ""):gmatch("[^\n]+") do
-    report(path)
-    return
-  end
-end
-
-
 make.recipe{ name = "version", desc = "what this checkout calls itself",
              run = function() print(("%s v%s"):format(NAME, VERSION)) end }
 
@@ -170,39 +159,46 @@ make.recipe{
 
 ---------------------------------------------------------------------------- rust
 
-local EXAMPLE = os.getenv("EXAMPLE") or "main"
-
-make.recipe{ name = "build", desc = "the library",
+make.recipe{ name = "build", desc = "build the input tools",
              run = function()
-               sh.cargo("build", "--lib")
-               report_found("target", "*.rlib")
+               sh.cargo("build", "--locked", "--bin", NAME)
+               report("target/debug/" .. NAME)
              end }
 make.alias("b", "build")
 
 make.recipe{
   name = "run",
-  desc = "run a development example: --example NAME",
-  params = { { "--example", desc = "which example to run", default = EXAMPLE } },
-  run = function(a) sh.cargo("run", "--example", a.example or EXAMPLE) end,
+  desc = "list devices, or observe one with --device PATH",
+  params = { { "--device", desc = "event device to observe" } },
+  run = function(a)
+    if a.device then
+      sh.cargo("run", "--locked", "--", "watch", a.device)
+    else
+      sh.cargo("run", "--locked", "--", "devices")
+    end
+  end,
 }
 make.alias("r", "run")
 
+make.recipe{ name = "example", desc = "recognize a simulated double tap without hardware",
+             run = function() sh.cargo("run", "--locked", "--example", "main") end }
+
 make.recipe{ name = "test", desc = "the suite",
-             run = function() sh.cargo("test", "--all-targets") end }
+             run = function() sh.cargo("test", "--locked", "--all-targets") end }
 make.alias("t", "test")
 
 make.recipe{ name = "test-all", desc = "the suite, with every feature on",
-             run = function() sh.cargo("test", "--all-targets", "--all-features") end }
+             run = function() sh.cargo("test", "--locked", "--all-targets", "--all-features") end }
 
 make.recipe{ name = "check", desc = "type-check every target",
-             run = function() sh.cargo("check", "--all-targets") end }
+             run = function() sh.cargo("check", "--locked", "--all-targets") end }
 
 make.recipe{ name = "check-all", desc = "type-check every target, every feature",
-             run = function() sh.cargo("check", "--all-targets", "--all-features") end }
+             run = function() sh.cargo("check", "--locked", "--all-targets", "--all-features") end }
 
 make.recipe{ name = "clippy", desc = "clippy, with warnings denied",
              run = function()
-               sh.cargo("clippy", "--all-targets", "--all-features", "--", "-Dwarnings")
+               sh.cargo("clippy", "--locked", "--all-targets", "--all-features", "--", "-Dwarnings")
              end }
 
 make.recipe{
@@ -210,7 +206,7 @@ make.recipe{
   desc = "build the docs, with warnings denied",
   run = function()
     local built = oslo.run{ "env", "RUSTDOCFLAGS=-Dwarnings",
-                            "cargo", "doc", "--all-features", "--no-deps" }
+                            "cargo", "doc", "--locked", "--all-features", "--no-deps" }
     assert(built.ok, "rustdoc failed")
   end,
 }
@@ -230,6 +226,6 @@ make.alias("c", "compile")
 make.recipe{
   name = "verify",
   desc = "the whole local gate",
-  deps = { "fmt-check", "check", "test", "check-all", "test-all", "clippy", "rustdoc" },
+  deps = { "fmt-check", "check-all", "test-all", "clippy", "rustdoc" },
 }
 make.alias("v", "verify")

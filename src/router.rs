@@ -1,0 +1,1015 @@
+//! Bounded per-device ownership and scheduled raw-frame delivery.
+//!
+//! This is a deterministic transport model, not an evdev/uinput backend. A
+//! trusted policy/context layer chooses candidates; recognizers must claim
+//! before passthrough commits. The caller writes each due frame and then
+//! acknowledges it. Failed writes require descriptor teardown and recovery.
+
+use crate::{
+    input::{
+        ABS_MT_SLOT, ABS_MT_TRACKING_ID, Device, EV_ABS, EV_KEY, EV_SYN, Frame, RawEvent,
+        SYN_REPORT, Source,
+    },
+    transport::Ready,
+};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    time::Duration,
+};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Policy {
+    Observe,
+    /// Only a trusted preflight may dedicate a verified noninteractive scope.
+    Reserve,
+    Buffer {
+        join: Duration,
+        decision: Duration,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Candidate {
+    pub id: u64,
+    pub authorization: u64,
+    pub policy: Policy,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Ownership {
+    Forwarded,
+    Pending,
+    Claimed,
+    Draining,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Limits {
+    pub frames: usize,
+    pub events: usize,
+    pub offset: Duration,
+    pub scheduler_slack: Duration,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            frames: 1024,
+            events: 32768,
+            offset: Duration::from_millis(300),
+            scheduler_slack: Duration::from_millis(20),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Scheduled {
+    pub ticket: u64,
+    pub due: Duration,
+    pub frame: Frame,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Fault {
+    StaleSource,
+    InvalidFrame,
+    BackwardTime,
+    Overflow,
+    MissedDelivery,
+    Stopped,
+    InvalidCandidate,
+    Unauthorized,
+    TooLate,
+    WrongTicket,
+}
+
+#[derive(Clone, Debug, Default)]
+struct State {
+    keys: BTreeSet<u16>,
+    contacts: BTreeMap<u16, i32>,
+    slot: u16,
+}
+
+impl State {
+    fn neutral(&self) -> bool {
+        self.keys.is_empty() && self.contacts.is_empty()
+    }
+
+    fn apply(&mut self, frame: &Frame, device: &Device) -> Result<bool, Fault> {
+        let mut starts = false;
+        for event in &frame.events {
+            if event.kind == EV_SYN {
+                continue;
+            }
+            if !device.has(event.kind, event.code) {
+                return Err(Fault::InvalidFrame);
+            }
+            match event.kind {
+                EV_KEY => match event.value {
+                    0 => {
+                        self.keys.remove(&event.code);
+                    }
+                    1 => {
+                        starts |= self.keys.insert(event.code);
+                    }
+                    2 if self.keys.contains(&event.code) => {}
+                    _ => return Err(Fault::InvalidFrame),
+                },
+                EV_ABS if event.code == ABS_MT_SLOT => {
+                    let slot = u16::try_from(event.value).map_err(|_| Fault::InvalidFrame)?;
+                    let axis = device.axes.get(&ABS_MT_SLOT).ok_or(Fault::InvalidFrame)?;
+                    if !(axis.minimum..=axis.maximum).contains(&event.value) {
+                        return Err(Fault::InvalidFrame);
+                    }
+                    self.slot = slot;
+                }
+                EV_ABS if event.code == ABS_MT_TRACKING_ID => match event.value {
+                    -1 => {
+                        self.contacts.remove(&self.slot);
+                    }
+                    value if value >= 0 => {
+                        starts |= self.contacts.insert(self.slot, value).is_none();
+                    }
+                    _ => return Err(Fault::InvalidFrame),
+                },
+                _ => {}
+            }
+        }
+        Ok(starts)
+    }
+
+    fn releases(&self) -> Vec<RawEvent> {
+        let mut events = Vec::new();
+        // BTN_TOUCH comes first for the kernel's legacy mouse emulation path.
+        if self.keys.contains(&0x14a) {
+            events.push(RawEvent {
+                kind: EV_KEY,
+                code: 0x14a,
+                value: 0,
+            });
+        }
+        events.extend(
+            self.keys
+                .iter()
+                .filter(|key| **key != 0x14a)
+                .map(|key| RawEvent {
+                    kind: EV_KEY,
+                    code: *key,
+                    value: 0,
+                }),
+        );
+        for slot in self.contacts.keys() {
+            events.push(RawEvent {
+                kind: EV_ABS,
+                code: ABS_MT_SLOT,
+                value: i32::from(*slot),
+            });
+            events.push(RawEvent {
+                kind: EV_ABS,
+                code: ABS_MT_TRACKING_ID,
+                value: -1,
+            });
+        }
+        if !events.is_empty() {
+            events.push(RawEvent {
+                kind: EV_SYN,
+                code: SYN_REPORT,
+                value: 0,
+            });
+        }
+        events
+    }
+}
+
+#[derive(Debug)]
+struct Group {
+    candidate: Option<Candidate>,
+    first: Duration,
+    ownership: Ownership,
+    pending: Vec<Frame>,
+}
+
+/// All descriptor lifetime operations remain the backend's responsibility.
+/// Teardown is mandatory even if neutral events cannot be written (including
+/// partial/uncertain writes); returning this value is not proof of recovery.
+#[derive(Debug)]
+pub struct Recovery {
+    pub source: Source,
+    pub neutral_events: Vec<RawEvent>,
+    pub destroy_virtual_and_release_grab: bool,
+}
+
+#[derive(Debug)]
+pub struct Router {
+    device: Device,
+    authorization: u64,
+    limits: Limits,
+    physical: State,
+    delivered: State,
+    group: Option<Group>,
+    queue: VecDeque<Scheduled>,
+    offset: Duration,
+    last_at: Duration,
+    last_sequence: Option<u64>,
+    next_ticket: u64,
+    last_candidate: u64,
+    stopped: bool,
+    recovered: bool,
+}
+
+impl Router {
+    pub fn new(
+        device: Device,
+        ready: &Ready,
+        authorization: u64,
+        limits: Limits,
+        at: Duration,
+    ) -> Result<Self, Fault> {
+        if !ready.matches(&device)
+            || !ready.valid_at(at)
+            || authorization == 0
+            || limits.frames == 0
+            || limits.frames > 4096
+            || limits.events < 2
+            || limits.events > 262144
+            || limits.offset.is_zero()
+            || limits.offset > Duration::from_millis(300)
+            || limits.scheduler_slack > Duration::from_millis(100)
+        {
+            return Err(Fault::InvalidCandidate);
+        }
+        Ok(Self {
+            device,
+            authorization,
+            limits,
+            physical: State::default(),
+            delivered: State::default(),
+            group: None,
+            queue: VecDeque::new(),
+            offset: Duration::ZERO,
+            last_at: at,
+            last_sequence: None,
+            next_ticket: 0,
+            last_candidate: 0,
+            stopped: false,
+            recovered: false,
+        })
+    }
+
+    pub fn ownership(&self) -> Option<Ownership> {
+        self.group.as_ref().map(|group| group.ownership)
+    }
+    pub fn queued_frames(&self) -> usize {
+        self.queue.len()
+    }
+    pub fn delivery_offset(&self) -> Duration {
+        self.offset
+    }
+
+    pub fn next_deadline(&self) -> Option<Duration> {
+        let decision = self.group.as_ref().and_then(|group| {
+            if group.ownership != Ownership::Pending {
+                return None;
+            }
+            match group.candidate?.policy {
+                Policy::Buffer { decision, .. } => group.first.checked_add(decision),
+                _ => None,
+            }
+        });
+        self.queue
+            .front()
+            .map(|entry| entry.due)
+            .into_iter()
+            .chain(decision)
+            .min()
+    }
+
+    fn fail<T>(&mut self, fault: Fault) -> Result<T, Fault> {
+        self.stopped = true;
+        Err(fault)
+    }
+
+    fn storage(&self) -> (usize, usize) {
+        let pending = self
+            .group
+            .as_ref()
+            .map(|group| group.pending.as_slice())
+            .unwrap_or_default();
+        (
+            self.queue.len() + pending.len(),
+            self.queue
+                .iter()
+                .map(|entry| entry.frame.events.len())
+                .sum::<usize>()
+                + pending
+                    .iter()
+                    .map(|frame| frame.events.len())
+                    .sum::<usize>(),
+        )
+    }
+
+    fn capacity(&mut self, count: usize) -> Result<(), Fault> {
+        let (frames, events) = self.storage();
+        if frames >= self.limits.frames || events.saturating_add(count) > self.limits.events {
+            self.fail(Fault::Overflow)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn schedule(&mut self, frame: Frame) -> Result<(), Fault> {
+        self.capacity(frame.events.len())?;
+        let Some(due) = frame.at.checked_add(self.offset) else {
+            return self.fail(Fault::Overflow);
+        };
+        if self.queue.back().is_some_and(|previous| previous.due > due) {
+            return self.fail(Fault::BackwardTime);
+        }
+        let Some(ticket) = self.next_ticket.checked_add(1) else {
+            return self.fail(Fault::Overflow);
+        };
+        self.next_ticket = ticket;
+        self.queue.push_back(Scheduled { ticket, due, frame });
+        Ok(())
+    }
+
+    fn reset_epoch(&mut self) {
+        if self.physical.neutral()
+            && self.delivered.neutral()
+            && self.queue.is_empty()
+            && self.group.is_none()
+        {
+            self.offset = Duration::ZERO;
+        }
+    }
+
+    fn forward(&mut self, at: Duration) -> Result<(), Fault> {
+        let Some(group) = &mut self.group else {
+            return Err(Fault::WrongTicket);
+        };
+        if group.ownership != Ownership::Pending {
+            return Err(Fault::TooLate);
+        }
+        let delay = at.saturating_sub(group.first);
+        if delay > self.limits.offset {
+            return self.fail(Fault::MissedDelivery);
+        }
+        self.offset = self.offset.max(delay);
+        group.ownership = Ownership::Forwarded;
+        let pending = std::mem::take(&mut group.pending);
+        for frame in pending {
+            self.schedule(frame)?;
+        }
+        if self.physical.neutral() {
+            self.group = None;
+        }
+        Ok(())
+    }
+
+    /// Advance the scheduler to a safe input watermark: callers must drain
+    /// older physical frames first. Decision timeouts commit ordinary delivery.
+    pub fn advance(&mut self, at: Duration) -> Result<(), Fault> {
+        if self.stopped {
+            return Err(Fault::Stopped);
+        }
+        if at < self.last_at {
+            return self.fail(Fault::BackwardTime);
+        }
+        if let Some(group) = &self.group
+            && group.ownership == Ownership::Pending
+            && let Some(Candidate {
+                policy: Policy::Buffer { decision, .. },
+                ..
+            }) = group.candidate
+        {
+            let Some(deadline) = group.first.checked_add(decision) else {
+                return self.fail(Fault::Overflow);
+            };
+            if at >= deadline {
+                self.forward(deadline)?;
+            }
+        }
+        self.last_at = at;
+        if self
+            .queue
+            .front()
+            .is_some_and(|first| at.saturating_sub(first.due) > self.limits.scheduler_slack)
+        {
+            return self.fail(Fault::MissedDelivery);
+        }
+        self.reset_epoch();
+        Ok(())
+    }
+
+    pub fn push(
+        &mut self,
+        frame: Frame,
+        candidate: Option<Candidate>,
+        at: Duration,
+    ) -> Result<(), Fault> {
+        // A delayed old reader must not stop a newly connected stream.
+        if frame.source != self.device.source {
+            return Err(Fault::StaleSource);
+        }
+        if self.stopped {
+            return Err(Fault::Stopped);
+        }
+        if frame.at > at
+            || frame.at < self.last_at
+            || self.last_sequence.is_some_and(|seq| frame.sequence <= seq)
+        {
+            return self.fail(Fault::BackwardTime);
+        }
+        if frame.events.is_empty()
+            || frame.events.len() > 4096
+            || frame
+                .events
+                .last()
+                .is_none_or(|event| event.kind != EV_SYN || event.code != SYN_REPORT)
+            || frame.events[..frame.events.len() - 1]
+                .iter()
+                .any(|event| event.kind == EV_SYN)
+        {
+            return self.fail(Fault::InvalidFrame);
+        }
+        let mut physical = self.physical.clone();
+        let starts = match physical.apply(&frame, &self.device) {
+            Ok(starts) => starts,
+            Err(error) => return self.fail(error),
+        };
+        // Reject caller mistakes before mutating physical state or decisions.
+        if let Some(value) = candidate
+            && (!starts
+                || self.group.as_ref().is_some_and(|group| {
+                    !self.physical.neutral() || group.ownership != Ownership::Pending
+                })
+                || value.id <= self.last_candidate
+                || value.authorization != self.authorization
+                || matches!(value.policy, Policy::Buffer { join, decision }
+                    if join > decision || decision.is_zero() || decision > self.limits.offset))
+        {
+            return Err(Fault::InvalidCandidate);
+        }
+        self.advance(frame.at)?;
+        // A completed pending tap may be followed by another group before its
+        // decision deadline. Commit that tap before accepting the new start.
+        if self.physical.neutral()
+            && self
+                .group
+                .as_ref()
+                .is_some_and(|group| group.ownership == Ownership::Pending)
+        {
+            self.forward(frame.at)?;
+        }
+        if self.group.is_none() && starts {
+            if let Some(value) = candidate {
+                self.last_candidate = value.id;
+            }
+            let ownership = match candidate.map(|value| value.policy) {
+                Some(Policy::Buffer { .. }) => Ownership::Pending,
+                Some(Policy::Reserve) => Ownership::Claimed,
+                Some(Policy::Observe) | None => Ownership::Forwarded,
+            };
+            self.group = Some(Group {
+                candidate,
+                first: frame.at,
+                ownership,
+                pending: Vec::new(),
+            });
+        } else if candidate.is_some() {
+            return Err(Fault::InvalidCandidate);
+        }
+        self.physical = physical;
+        self.last_sequence = Some(frame.sequence);
+        match self.ownership() {
+            Some(Ownership::Pending) => {
+                self.capacity(frame.events.len())?;
+                self.group.as_mut().unwrap().pending.push(frame);
+            }
+            Some(Ownership::Claimed | Ownership::Draining) => {}
+            Some(Ownership::Forwarded) | None => self.schedule(frame)?,
+        }
+        if self.physical.neutral() && self.ownership() != Some(Ownership::Pending) {
+            self.group = None;
+        }
+        self.advance(at)
+    }
+
+    fn authorized(&self, id: u64, authorization: u64) -> Result<(), Fault> {
+        if self.stopped {
+            return Err(Fault::Stopped);
+        }
+        if authorization != self.authorization {
+            return Err(Fault::Unauthorized);
+        }
+        if self
+            .group
+            .as_ref()
+            .and_then(|group| group.candidate)
+            .is_none_or(|candidate| candidate.id != id)
+        {
+            return Err(Fault::WrongTicket);
+        }
+        Ok(())
+    }
+
+    pub fn claim(&mut self, id: u64, authorization: u64, at: Duration) -> Result<(), Fault> {
+        self.authorized(id, authorization)?;
+        self.advance(at)?;
+        let group = self.group.as_mut().ok_or(Fault::TooLate)?;
+        if group.ownership != Ownership::Pending {
+            return Err(Fault::TooLate);
+        }
+        if let Some(Candidate {
+            policy: Policy::Buffer { join, .. },
+            ..
+        }) = group.candidate
+            && at.saturating_sub(group.first) < join
+        {
+            return Err(Fault::TooLate);
+        }
+        group.pending.clear();
+        group.ownership = Ownership::Claimed;
+        if self.physical.neutral() {
+            self.group = None;
+        }
+        self.reset_epoch();
+        Ok(())
+    }
+
+    /// A rejected pre-claim candidate returns to its ordinary path. Once
+    /// claimed, cancellation consumes the remaining releases through neutral.
+    pub fn cancel(&mut self, id: u64, authorization: u64, at: Duration) -> Result<(), Fault> {
+        self.authorized(id, authorization)?;
+        self.advance(at)?;
+        match self.ownership() {
+            Some(Ownership::Pending) => self.forward(at)?,
+            Some(Ownership::Claimed) => {
+                self.group.as_mut().unwrap().ownership = Ownership::Draining;
+            }
+            _ => return Err(Fault::TooLate),
+        }
+        if self.physical.neutral() {
+            self.group = None;
+        }
+        self.reset_epoch();
+        Ok(())
+    }
+
+    pub fn due(&mut self, at: Duration) -> Result<Option<&Scheduled>, Fault> {
+        self.advance(at)?;
+        Ok(self.queue.front().filter(|entry| entry.due <= at))
+    }
+
+    /// Call only after an entire frame was successfully written. An uncertain
+    /// partial write is a teardown/recovery event, never an automatic retry.
+    pub fn delivered(&mut self, ticket: u64, at: Duration) -> Result<(), Fault> {
+        self.advance(at)?;
+        let first = self.queue.front().ok_or(Fault::WrongTicket)?;
+        if first.ticket != ticket || at < first.due {
+            return Err(Fault::WrongTicket);
+        }
+        let mut state = self.delivered.clone();
+        if let Err(error) = state.apply(&first.frame, &self.device) {
+            return self.fail(error);
+        }
+        self.delivered = state;
+        self.queue.pop_front();
+        self.reset_epoch();
+        Ok(())
+    }
+
+    /// A session handoff must not replay buffered authentication input into
+    /// another session. Backend teardown is required before reinitialization.
+    pub fn revoke(&mut self) {
+        self.stopped = true;
+    }
+
+    pub fn recover(&mut self) -> Option<Recovery> {
+        if self.recovered {
+            return None;
+        }
+        self.recovered = true;
+        self.stopped = true;
+        self.group = None;
+        self.queue.clear();
+        Some(Recovery {
+            source: self.device.source.clone(),
+            neutral_events: self.delivered.releases(),
+            destroy_virtual_and_release_grab: true,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        input::{ABS_MT_POSITION_X, ABS_MT_POSITION_Y},
+        transport::{Consumer, ConsumerEvidence, Descriptor, KernelIdentity, Readiness},
+    };
+
+    fn ms(time: u64) -> Duration {
+        Duration::from_millis(time)
+    }
+    fn candidate(id: u64) -> Candidate {
+        Candidate {
+            id,
+            authorization: 1,
+            policy: Policy::Buffer {
+                join: ms(120),
+                decision: ms(300),
+            },
+        }
+    }
+
+    fn router(limits: Limits) -> Router {
+        let device = crate::transport::tests::touch();
+        router_for(device, limits)
+    }
+
+    fn router_for(device: Device, limits: Limits) -> Router {
+        let descriptor = Descriptor::mirror(
+            &device,
+            KernelIdentity {
+                bus: 3,
+                vendor: 1,
+                product: 2,
+                version: 1,
+            },
+            None,
+            &BTreeMap::new(),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        let consumer = Consumer::IsolatedReceiver { pid: 1, start: 1 };
+        let mut gate =
+            Readiness::new(descriptor.clone(), consumer.clone(), Duration::ZERO).unwrap();
+        gate.metadata(&descriptor, Duration::ZERO).unwrap();
+        gate.consumer(
+            &ConsumerEvidence {
+                consumer,
+                marker: descriptor.marker.clone(),
+                name: descriptor.name.clone(),
+                class: descriptor.class,
+                seat: "seat0".into(),
+                settings: BTreeMap::new(),
+                at: Duration::ZERO,
+            },
+            Duration::ZERO,
+        )
+        .unwrap();
+        gate.neutral(true, Duration::ZERO).unwrap();
+        let ready = gate.finish(Duration::ZERO).unwrap();
+        Router::new(device, &ready, 1, limits, Duration::ZERO).unwrap()
+    }
+
+    fn frame(seq: u64, at: u64, events: &[(u16, u16, i32)]) -> Frame {
+        let mut events: Vec<_> = events
+            .iter()
+            .map(|&(kind, code, value)| RawEvent { kind, code, value })
+            .collect();
+        events.push(RawEvent {
+            kind: EV_SYN,
+            code: SYN_REPORT,
+            value: 0,
+        });
+        Frame {
+            source: crate::transport::tests::touch().source,
+            at: ms(at),
+            sequence: seq,
+            events,
+        }
+    }
+    fn down(seq: u64, at: u64, slot: i32, id: i32) -> Frame {
+        frame(
+            seq,
+            at,
+            &[
+                (EV_ABS, ABS_MT_SLOT, slot),
+                (EV_ABS, ABS_MT_TRACKING_ID, id),
+                (EV_ABS, ABS_MT_POSITION_X, 100),
+                (EV_ABS, ABS_MT_POSITION_Y, 200),
+            ],
+        )
+    }
+    fn up(seq: u64, at: u64, slot: i32) -> Frame {
+        frame(
+            seq,
+            at,
+            &[
+                (EV_ABS, ABS_MT_SLOT, slot),
+                (EV_ABS, ABS_MT_TRACKING_ID, -1),
+            ],
+        )
+    }
+    fn deliver(router: &mut Router, at: u64) -> Option<Frame> {
+        let entry = router.due(ms(at)).unwrap()?.clone();
+        router.delivered(entry.ticket, ms(at)).unwrap();
+        Some(entry.frame)
+    }
+
+    #[test]
+    fn completed_tap_keeps_down_up_interval_and_delivers_exactly_once() {
+        let mut router = router(Limits::default());
+        let start = down(1, 0, 0, 10);
+        let end = up(2, 40, 0);
+        router
+            .push(start.clone(), Some(candidate(1)), ms(0))
+            .unwrap();
+        router.push(end.clone(), None, ms(40)).unwrap();
+        assert!(router.due(ms(40)).unwrap().is_none());
+        router.cancel(1, 1, ms(40)).unwrap();
+        assert_eq!(deliver(&mut router, 40), Some(start));
+        assert!(deliver(&mut router, 79).is_none());
+        assert_eq!(deliver(&mut router, 80), Some(end));
+        assert!(deliver(&mut router, 80).is_none());
+        assert_eq!(router.delivery_offset(), Duration::ZERO);
+    }
+
+    #[test]
+    fn once_forwarded_late_fingers_cannot_steal_the_sequence() {
+        let mut router = router(Limits::default());
+        router
+            .push(down(1, 0, 0, 10), Some(candidate(1)), ms(0))
+            .unwrap();
+        router.cancel(1, 1, ms(120)).unwrap();
+        deliver(&mut router, 120).unwrap();
+        router.push(down(2, 140, 1, 11), None, ms(140)).unwrap();
+        assert_eq!(router.claim(1, 1, ms(140)), Err(Fault::TooLate));
+        assert_eq!(deliver(&mut router, 260).unwrap().sequence, 2);
+        router.push(up(3, 270, 0), None, ms(270)).unwrap();
+        router.push(up(4, 290, 1), None, ms(290)).unwrap();
+        assert_eq!(deliver(&mut router, 390).unwrap().sequence, 3);
+        assert_eq!(deliver(&mut router, 410).unwrap().sequence, 4);
+    }
+
+    #[test]
+    fn claimed_and_cancelled_group_never_leaks_a_release_or_late_finger() {
+        let mut router = router(Limits::default());
+        router
+            .push(down(1, 0, 0, 10), Some(candidate(1)), ms(0))
+            .unwrap();
+        router.claim(1, 1, ms(120)).unwrap();
+        router.cancel(1, 1, ms(130)).unwrap();
+        assert_eq!(router.ownership(), Some(Ownership::Draining));
+        router.push(down(2, 140, 1, 11), None, ms(140)).unwrap();
+        router.push(up(3, 150, 0), None, ms(150)).unwrap();
+        router.push(up(4, 160, 1), None, ms(160)).unwrap();
+        assert!(deliver(&mut router, 160).is_none());
+        let ordinary = down(5, 170, 0, 20);
+        router.push(ordinary.clone(), None, ms(170)).unwrap();
+        assert_eq!(deliver(&mut router, 170), Some(ordinary));
+    }
+
+    #[test]
+    fn reused_slot_inherits_epoch_offset_until_queued_release_is_delivered() {
+        let mut router = router(Limits::default());
+        router
+            .push(down(1, 0, 0, 10), Some(candidate(1)), ms(0))
+            .unwrap();
+        router.push(up(2, 30, 0), None, ms(30)).unwrap();
+        router.cancel(1, 1, ms(30)).unwrap();
+        deliver(&mut router, 30).unwrap();
+        router.push(down(3, 40, 0, 20), None, ms(40)).unwrap();
+        assert_eq!(router.delivery_offset(), ms(30));
+        assert!(deliver(&mut router, 59).is_none());
+        assert_eq!(deliver(&mut router, 60).unwrap().sequence, 2);
+        assert_eq!(deliver(&mut router, 70).unwrap().sequence, 3);
+    }
+
+    #[test]
+    fn later_buffer_raises_offset_without_adding_offsets_cumulatively() {
+        let mut router = router(Limits::default());
+        router
+            .push(down(1, 0, 0, 10), Some(candidate(1)), ms(0))
+            .unwrap();
+        router.cancel(1, 1, ms(120)).unwrap();
+        deliver(&mut router, 120).unwrap();
+        router.push(up(2, 125, 0), None, ms(125)).unwrap();
+        router
+            .push(down(3, 130, 0, 20), Some(candidate(2)), ms(130))
+            .unwrap();
+        deliver(&mut router, 245).unwrap();
+        router.cancel(2, 1, ms(370)).unwrap();
+        assert_eq!(router.delivery_offset(), ms(240));
+        assert_eq!(deliver(&mut router, 370).unwrap().sequence, 3);
+    }
+
+    #[test]
+    fn claiming_new_group_does_not_discard_older_queued_app_release() {
+        let mut router = router(Limits::default());
+        router
+            .push(down(1, 0, 0, 10), Some(candidate(1)), ms(0))
+            .unwrap();
+        router.push(up(2, 20, 0), None, ms(20)).unwrap();
+        router.cancel(1, 1, ms(120)).unwrap();
+        deliver(&mut router, 120).unwrap();
+        router
+            .push(
+                down(3, 130, 0, 20),
+                Some(Candidate {
+                    policy: Policy::Buffer {
+                        join: ms(0),
+                        decision: ms(300),
+                    },
+                    ..candidate(2)
+                }),
+                ms(130),
+            )
+            .unwrap();
+        router.claim(2, 1, ms(130)).unwrap();
+        assert_eq!(router.queued_frames(), 1);
+        assert_eq!(deliver(&mut router, 140).unwrap().sequence, 2);
+        router.push(up(4, 260, 0), None, ms(260)).unwrap();
+        assert!(deliver(&mut router, 260).is_none());
+    }
+
+    #[test]
+    fn max_decision_timeout_forwards_instead_of_allowing_late_claim() {
+        let mut router = router(Limits::default());
+        router
+            .push(down(1, 0, 0, 10), Some(candidate(1)), ms(0))
+            .unwrap();
+        assert_eq!(router.claim(1, 1, ms(300)), Err(Fault::TooLate));
+        assert_eq!(deliver(&mut router, 300).unwrap().sequence, 1);
+        assert_eq!(router.delivery_offset(), ms(300));
+    }
+
+    #[test]
+    fn two_devices_have_independent_delivery_epochs() {
+        let mut slow = router(Limits::default());
+        let mut other = router(Limits::default());
+        slow.push(down(1, 0, 0, 10), Some(candidate(1)), ms(0))
+            .unwrap();
+        other.push(down(1, 10, 0, 20), None, ms(10)).unwrap();
+        assert!(deliver(&mut slow, 10).is_none());
+        assert!(deliver(&mut other, 10).is_some());
+        assert_eq!(slow.ownership(), Some(Ownership::Pending));
+    }
+
+    #[test]
+    fn overflow_recovers_delivered_state_explicitly_and_never_drops_just_a_release() {
+        let mut router = router(Limits {
+            frames: 1,
+            ..Limits::default()
+        });
+        router.push(down(1, 0, 0, 10), None, ms(0)).unwrap();
+        deliver(&mut router, 0).unwrap();
+        router
+            .push(
+                frame(2, 10, &[(EV_ABS, ABS_MT_POSITION_Y, 300)]),
+                None,
+                ms(10),
+            )
+            .unwrap();
+        assert_eq!(
+            router.push(up(3, 11, 0), None, ms(11)),
+            Err(Fault::Overflow)
+        );
+        let recovery = router.recover().unwrap();
+        assert!(recovery.destroy_virtual_and_release_grab);
+        assert!(
+            recovery
+                .neutral_events
+                .iter()
+                .any(|event| event.code == ABS_MT_TRACKING_ID && event.value == -1)
+        );
+        assert!(router.recover().is_none());
+        assert_eq!(router.due(ms(11)).unwrap_err(), Fault::Stopped);
+    }
+
+    #[test]
+    fn old_source_and_invalid_candidate_cannot_disrupt_a_working_group() {
+        let mut router = router(Limits::default());
+        router
+            .push(down(1, 0, 0, 10), Some(candidate(1)), ms(0))
+            .unwrap();
+        let mut stale = up(2, 1000, 0);
+        stale.source.generation = 0;
+        assert_eq!(router.push(stale, None, ms(1000)), Err(Fault::StaleSource));
+        assert_eq!(router.claim(1, 2, ms(1000)), Err(Fault::Unauthorized));
+        assert_eq!(
+            router.push(down(2, 10, 1, 11), Some(candidate(2)), ms(10)),
+            Err(Fault::InvalidCandidate)
+        );
+        router.claim(1, 1, ms(120)).unwrap();
+        assert_eq!(router.ownership(), Some(Ownership::Claimed));
+    }
+
+    #[test]
+    fn acknowledgement_cannot_release_unwritten_frames_or_retry_old_tickets() {
+        let mut router = router(Limits::default());
+        router
+            .push(down(1, 0, 0, 10), Some(candidate(1)), ms(0))
+            .unwrap();
+        router.cancel(1, 1, ms(120)).unwrap();
+        assert_eq!(router.delivered(99, ms(120)), Err(Fault::WrongTicket));
+        assert_eq!(router.queued_frames(), 1);
+        deliver(&mut router, 120).unwrap();
+        assert_eq!(router.delivered(1, ms(120)), Err(Fault::WrongTicket));
+    }
+
+    #[test]
+    fn stalled_scheduler_and_session_handoff_require_teardown_not_password_replay() {
+        let mut router = router(Limits::default());
+        router
+            .push(down(1, 0, 0, 10), Some(candidate(1)), ms(0))
+            .unwrap();
+        router.push(up(2, 20, 0), None, ms(20)).unwrap();
+        router.cancel(1, 1, ms(120)).unwrap();
+        assert_eq!(router.due(ms(200)).unwrap_err(), Fault::MissedDelivery);
+        assert!(router.recover().unwrap().neutral_events.is_empty());
+        let mut router = self::router(Limits::default());
+        router
+            .push(down(1, 0, 0, 10), Some(candidate(1)), ms(0))
+            .unwrap();
+        router.revoke();
+        assert_eq!(router.due(ms(120)).unwrap_err(), Fault::Stopped);
+        assert!(router.recover().unwrap().destroy_virtual_and_release_grab);
+        assert_eq!(router.queued_frames(), 0);
+    }
+
+    #[test]
+    fn keyboard_repeat_and_mouse_wheels_pass_through_as_original_frames() {
+        let mut device = crate::transport::tests::touch();
+        device.axes.clear();
+        device.properties.clear();
+        device.capabilities = BTreeMap::from([(0, vec![0]), (1, vec![30, 125])]);
+        let mut keyboard = router_for(device.clone(), Limits::default());
+        for (seq, at, events) in [
+            (1, 0, vec![(EV_KEY, 125, 1), (EV_KEY, 30, 1)]),
+            (2, 10, vec![(EV_KEY, 30, 2)]),
+            (3, 20, vec![(EV_KEY, 30, 0)]),
+            (4, 30, vec![(EV_KEY, 125, 0)]),
+        ] {
+            let input = frame(seq, at, &events);
+            keyboard.push(input.clone(), None, ms(at)).unwrap();
+            assert_eq!(deliver(&mut keyboard, at), Some(input));
+        }
+        assert_eq!(keyboard.delivery_offset(), Duration::ZERO);
+        device.capabilities =
+            BTreeMap::from([(0, vec![0]), (1, vec![0x110]), (2, vec![0, 1, 8, 11])]);
+        let mut mouse = router_for(device, Limits::default());
+        let input = frame(1, 0, &[(2, 0, 10), (2, 1, -20), (2, 8, 1), (2, 11, 120)]);
+        mouse.push(input.clone(), None, ms(0)).unwrap();
+        assert_eq!(deliver(&mut mouse, 0), Some(input));
+    }
+
+    #[test]
+    fn reserve_and_observe_have_distinct_delivery_and_recovery_behavior() {
+        let mut reserved = router(Limits::default());
+        reserved
+            .push(
+                down(1, 0, 0, 10),
+                Some(Candidate {
+                    policy: Policy::Reserve,
+                    ..candidate(1)
+                }),
+                ms(0),
+            )
+            .unwrap();
+        reserved.push(up(2, 10, 0), None, ms(10)).unwrap();
+        assert!(deliver(&mut reserved, 10).is_none());
+        let mut observed = router(Limits::default());
+        let first = down(1, 0, 0, 10);
+        observed
+            .push(
+                first.clone(),
+                Some(Candidate {
+                    policy: Policy::Observe,
+                    ..candidate(1)
+                }),
+                ms(0),
+            )
+            .unwrap();
+        assert_eq!(deliver(&mut observed, 0), Some(first));
+        assert_eq!(observed.claim(1, 1, ms(0)), Err(Fault::TooLate));
+        let recovery = observed.recover().unwrap();
+        assert!(
+            recovery
+                .neutral_events
+                .iter()
+                .any(|event| event.code == ABS_MT_TRACKING_ID && event.value == -1)
+        );
+        assert_eq!(recovery.neutral_events.last().unwrap().kind, EV_SYN);
+    }
+
+    #[test]
+    fn nonexistent_start_cannot_advance_or_commit_an_earlier_pending_tap() {
+        let mut router = router(Limits::default());
+        router
+            .push(down(1, 0, 0, 10), Some(candidate(1)), ms(0))
+            .unwrap();
+        router.push(up(2, 20, 0), None, ms(20)).unwrap();
+        assert_eq!(
+            router.push(frame(3, 30, &[]), Some(candidate(2)), ms(30)),
+            Err(Fault::InvalidCandidate)
+        );
+        assert_eq!(router.ownership(), Some(Ownership::Pending));
+        assert_eq!(router.next_deadline(), Some(ms(300)));
+        router.cancel(1, 1, ms(20)).unwrap();
+        assert_eq!(deliver(&mut router, 20).unwrap().sequence, 1);
+        assert_eq!(deliver(&mut router, 40).unwrap().sequence, 2);
+    }
+}

@@ -10,11 +10,17 @@ permissions:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        rust: [stable, "1.88.0"]
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: ${{ matrix.rust }}
           components: rustfmt, clippy
       - uses: actions/cache@v4
         with:
@@ -22,13 +28,16 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ matrix.rust }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            cargo-${{ runner.os }}-
+            cargo-${{ runner.os }}-${{ runner.arch }}-${{ matrix.rust }}-
       - name: Verify
         run: |
           cargo fmt --all -- --check
-          cargo check --all-targets --all-features
-          cargo clippy --all-targets --all-features -- -Dwarnings
-          cargo test --all-targets --all-features
+          cargo check --locked --all-targets --all-features
+          cargo clippy --locked --all-targets --all-features -- -Dwarnings
+          cargo test --locked --all-targets --all-features
+          RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps
+          cargo build --locked --bin prek
+          cargo run --locked -- --help
 

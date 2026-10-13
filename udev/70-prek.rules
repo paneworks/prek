@@ -1,0 +1,2 @@
+# Import only root-owned metadata published before UI_DEV_CREATE.
+ACTION=="add", SUBSYSTEM=="input", KERNEL=="event*", ATTRS{phys}=="prek/*", IMPORT{program}="@prek@ udev-import --marker $attr{phys}"
