@@ -3,12 +3,12 @@
 let
   receiver = package.overrideAttrs (_: {
     pname = "prek-routing-tests";
-    cargoBuildFlags = [ "--test" "routing" "--test" "supervisor" ];
+    cargoBuildFlags = [ "--test" "routing" "--test" "supervisor" "--test" "recovery" ];
     doCheck = false;
     installPhase = ''
       runHook preInstall
       mkdir -p "$out/bin"
-      for suite in routing supervisor; do
+      for suite in routing supervisor recovery; do
         count=0
         for candidate in target/*/release/deps/$suite-* target/release/deps/$suite-*; do
           if [ -f "$candidate" ] && [ -x "$candidate" ]; then
@@ -47,6 +47,8 @@ pkgs.testers.runNixOSTest {
     machine.succeed("test -c /dev/uinput")
     machine.succeed("udevadm settle")
     machine.succeed("PREK_ISOLATED_ROUTING=1 ${receiver}/bin/prek-routing-tests --ignored --test-threads=1 --nocapture", timeout=60)
+    machine.succeed("test -z \"$(ls -A /run/prek/devices)\"")
+    machine.succeed("PREK_ISOLATED_ROUTING=1 ${receiver}/bin/prek-recovery-tests", timeout=60)
     machine.succeed("test -z \"$(ls -A /run/prek/devices)\"")
 
     # Actual evdev idle polling, with no injected events and no production nodes.

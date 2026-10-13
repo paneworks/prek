@@ -73,7 +73,16 @@ SIGTERM request orderly shutdown, and parent death kills the worker. Process tes
 use private sockets and subprocesses. The disposable VM also verifies idle
 observation, input descriptors owned only by the worker, graceful shutdown and
 forced teardown of a stopped observer within two seconds. Recovery of real grabs
-and held virtual input remains an isolated kernel and downstream-consumer gate.
+and held virtual input is also tested with isolated keyboard/touch sources:
+orderly stop delivers a neutral frame, while worker/parent death and stalls release
+the original grab and remove the virtual device. Application state after device
+removal and production broker handoff still require downstream-consumer gates.
+
+Supervised virtual devices carry their worker's process birth and supervision
+epoch in the private runtime registry. Complete metadata is published atomically.
+Cleanup after a reaped worker preserves other lifetimes; restart cleanup also
+checks kernel process handles before reclaiming orphaned records. Live and
+unmanaged publications remain intact. These APIs do not enable route mode.
 
 Event loss cancels that source's recognition. The current live observer removes
 a lost/disconnected source; other selected sources continue. Automatic reopening
@@ -177,11 +186,15 @@ by that harness; it never opens or grabs a production event node.
 `tests/supervisor.rs` runs eleven process gates for healthy/stalled workers,
 termination escalation, health-channel failure, worker identity and parent death.
 It uses a separate executable so fixtures run on their process's original thread.
+`tests/recovery.rs` runs only in the explicit isolated VM. Its eight cases cover
+held keyboard modifiers and touch slots during orderly stop, worker death,
+supervisor death and stopped forwarding. The supervising process retains no
+input descriptors; a separate harness owns each synthetic source generator.
 
 `nix build .#checks.x86_64-linux.routing` runs those gates in a disposable NixOS VM
 without host device passthrough. The gates check metadata/capabilities, ordinary
-keyboard/mouse/touchpad frames, consumed touch, replay timing, LED feedback and
-supervised observation shutdown. Building the normal
+keyboard/mouse/touchpad frames, consumed touch, replay timing, LED feedback,
+supervised observation shutdown and kernel recovery. Building the normal
 package installs its udev rule in the package output; it does not activate it on
 the host or start input routing. ARM kernel execution remains a separate gate.
 

@@ -11,7 +11,7 @@ use nix::{
     time::{ClockId, clock_gettime},
 };
 use std::{
-    io,
+    fs, io,
     marker::PhantomData,
     os::{
         fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd},
@@ -28,6 +28,7 @@ pub const STALL_TIMEOUT: Duration = Duration::from_secs(1);
 pub const TERMINATION_GRACE: Duration = Duration::from_millis(250);
 const LINK_ENV: &str = "PREK_WORKER_LINK_FD";
 const PARENT_ENV: &str = "PREK_WORKER_PARENT";
+const EPOCH_ENV: &str = "PREK_WORKER_EPOCH_NS";
 const PACKET_SIZE: usize = 20;
 static CONNECTED: AtomicBool = AtomicBool::new(false);
 static SIGNALS_INSTALLED: AtomicBool = AtomicBool::new(false);
@@ -99,6 +100,96 @@ fn invalid(message: &'static str) -> io::Error {
 fn now() -> io::Result<Duration> {
     let time = clock_gettime(ClockId::CLOCK_MONOTONIC).map_err(io::Error::from)?;
     Ok(Duration::new(time.tv_sec() as u64, time.tv_nsec() as u32))
+}
+
+fn start_ticks(pid: u32) -> io::Result<u64> {
+    parse_start_ticks(&fs::read_to_string(format!("/proc/{pid}/stat"))?)
+}
+
+fn parse_start_ticks(stat: &str) -> io::Result<u64> {
+    // comm may contain whitespace and parentheses. Fields after its final ')'
+    // start at field 3; starttime is field 22 (proc_pid_stat(5)).
+    stat.rsplit_once(')')
+        .and_then(|(_, fields)| fields.split_whitespace().nth(19))
+        .and_then(|field| field.parse().ok())
+        .filter(|value| *value > 0)
+        .ok_or_else(|| invalid("invalid process birth identity"))
+}
+
+/// Kernel process birth plus a supervisor-specific epoch. Registry records may
+/// serialize this identity; identities alone are never a teardown acknowledgement.
+#[derive(
+    Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerIdentity {
+    pid: u32,
+    birth: u64,
+    epoch: u64,
+}
+
+impl WorkerIdentity {
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+    pub(crate) fn valid(&self) -> bool {
+        self.pid > 1 && self.pid <= i32::MAX as u32 && self.birth > 0 && self.epoch > 0
+    }
+    pub(crate) fn tag(&self) -> String {
+        format!("{:08x}-{:016x}-{:016x}", self.pid, self.birth, self.epoch)
+    }
+    pub(crate) fn from_tag(tag: &str) -> Option<Self> {
+        let parts: Vec<_> = tag.split('-').collect();
+        let [pid, birth, epoch] = parts.as_slice() else {
+            return None;
+        };
+        let identity = Self {
+            pid: u32::from_str_radix(pid, 16).ok()?,
+            birth: u64::from_str_radix(birth, 16).ok()?,
+            epoch: u64::from_str_radix(epoch, 16).ok()?,
+        };
+        (identity.valid() && identity.tag() == tag).then_some(identity)
+    }
+
+    /// Used only for trusted persisted registry entries. Pin any current PID
+    /// before checking its birth and exit; permission/inspection errors refuse
+    /// recovery instead of treating an unknown process as dead.
+    pub(crate) fn confirmed_dead(&self) -> io::Result<bool> {
+        if !self.valid() {
+            return Err(invalid("invalid persisted worker identity"));
+        }
+        // SAFETY: read-only process handle for a bounded positive PID.
+        let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, self.pid, 0) };
+        if raw < 0 {
+            let error = io::Error::last_os_error();
+            return if error.raw_os_error() == Some(libc::ESRCH) {
+                Ok(true)
+            } else {
+                Err(error)
+            };
+        }
+        // SAFETY: successful pidfd_open returns a new owned descriptor.
+        let fd = unsafe { OwnedFd::from_raw_fd(raw as i32) };
+        match start_ticks(self.pid) {
+            Ok(birth) if birth != self.birth => return Ok(true),
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let mut event = libc::pollfd {
+            fd: fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one initialized pollfd; zero timeout never waits for death.
+        if unsafe { libc::poll(&mut event, 1, 0) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if event.revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
+            return Err(invalid("worker lifetime probe failed"));
+        }
+        Ok(event.revents & (libc::POLLIN | libc::POLLHUP) != 0)
+    }
 }
 
 #[derive(Debug)]
@@ -194,6 +285,7 @@ impl AsFd for Link {
 #[derive(Debug)]
 pub struct Heartbeat {
     link: Link,
+    identity: WorkerIdentity,
     sequence: u64,
     last: Option<Duration>,
     _forwarding_thread: PhantomData<Rc<()>>,
@@ -256,6 +348,19 @@ impl Heartbeat {
                 "worker health channel is not bound to its supervisor",
             ));
         }
+        let epoch: u64 = std::env::var(EPOCH_ENV)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|epoch| {
+                *epoch > 0 && u128::from(*epoch) <= now().map(|time| time.as_nanos()).unwrap_or(0)
+            })
+            .ok_or_else(|| invalid("worker supervisor epoch is missing or invalid"))?;
+        let pid = std::process::id();
+        let identity = WorkerIdentity {
+            pid,
+            birth: start_ticks(pid)?,
+            epoch,
+        };
         // SAFETY: this trusted inherited descriptor is now owned exactly once.
         let link = Link(unsafe { OwnedFd::from_raw_fd(fd) });
         // SAFETY: live owned fd; prevent future action execs retaining it.
@@ -264,10 +369,15 @@ impl Heartbeat {
         }
         Ok(Self {
             link,
+            identity,
             sequence: 0,
             last: None,
             _forwarding_thread: PhantomData,
         })
+    }
+
+    pub fn worker_identity(&self) -> WorkerIdentity {
+        self.identity
     }
 
     /// Checks stop/parent loss on every call; emits at most four health packets
@@ -332,8 +442,7 @@ pub struct Report {
     status: ExitStatus,
     heartbeats: u64,
     forced: bool,
-    worker_pid: u32,
-    started: Duration,
+    identity: WorkerIdentity,
 }
 impl Report {
     pub fn reason(&self) -> Reason {
@@ -349,11 +458,14 @@ impl Report {
         self.forced
     }
     pub fn worker_pid(&self) -> u32 {
-        self.worker_pid
+        self.identity.pid
+    }
+    pub fn worker_identity(&self) -> WorkerIdentity {
+        self.identity
     }
     /// Fences old teardown reports from a different worker lifetime.
     pub fn belongs_to(&self, supervisor: &Supervisor) -> bool {
-        self.worker_pid == supervisor.worker_pid() && self.started == supervisor.started
+        self.identity == supervisor.identity
     }
 }
 #[derive(Clone, Copy, Debug)]
@@ -376,7 +488,7 @@ enum Phase {
 pub struct Supervisor {
     child: Child,
     link: Link,
-    started: Duration,
+    identity: WorkerIdentity,
     last: Duration,
     sequence: u64,
     closed: Option<Duration>,
@@ -392,7 +504,13 @@ impl Supervisor {
         let fd = worker.0.as_raw_fd();
         command
             .env(LINK_ENV, fd.to_string())
-            .env(PARENT_ENV, parent.to_string());
+            .env(PARENT_ENV, parent.to_string())
+            .env(
+                EPOCH_ENV,
+                u64::try_from(last.as_nanos())
+                    .map_err(|_| invalid("supervisor epoch exhausted"))?
+                    .to_string(),
+            );
         // SAFETY: after fork, only direct prctl/getppid/fcntl syscalls and
         // allocation-free OS errors run. No locks, formatting or Rust I/O.
         unsafe {
@@ -410,12 +528,25 @@ impl Supervisor {
                 Ok(())
             });
         }
-        let child = command.spawn()?;
+        let mut child = command.spawn()?;
         drop(worker);
+        let birth = match start_ticks(child.id()) {
+            Ok(birth) => birth,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
+        let identity = WorkerIdentity {
+            pid: child.id(),
+            birth,
+            epoch: last.as_nanos() as u64,
+        };
         Ok(Self {
             child,
             link,
-            started: last,
+            identity,
             last,
             sequence: 0,
             closed: None,
@@ -425,6 +556,9 @@ impl Supervisor {
     }
     pub fn worker_pid(&self) -> u32 {
         self.child.id()
+    }
+    pub fn worker_identity(&self) -> WorkerIdentity {
+        self.identity
     }
     pub fn heartbeats(&self) -> u64 {
         self.sequence
@@ -468,8 +602,7 @@ impl Supervisor {
                 status,
                 heartbeats: self.sequence,
                 forced,
-                worker_pid: self.child.id(),
-                started: self.started,
+                identity: self.identity,
             };
             self.phase = Phase::Exited(report);
             return Ok(Some(report));
@@ -601,6 +734,18 @@ impl Drop for Supervisor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn process_stat_comm_parentheses_do_not_shift_birth_identity() {
+        let fields = std::iter::repeat_n("0", 19)
+            .chain(["12345", "0", "0"])
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(
+            parse_start_ticks(&format!("42 (odd ) name) {fields}")).unwrap(),
+            12345
+        );
+        assert!(parse_start_ticks("42 (truncated) S 0").is_err());
+    }
     #[test]
     fn private_channel_preserves_packets_and_rejects_oversized_messages() {
         let (a, b) = Link::pair().unwrap();

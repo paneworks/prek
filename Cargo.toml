@@ -16,6 +16,10 @@ name = "supervisor"
 # Worker fixtures must start on the exec thread for parent-death protection.
 harness = false
 
+[[test]]
+name = "recovery"
+harness = false
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

@@ -7,6 +7,7 @@
 
 use crate::{
     input::{EV_SYN, Frame, RawEvent, SYN_REPORT},
+    supervisor::{Heartbeat, Report, WorkerIdentity},
     transport::{Descriptor, permitted_property},
 };
 use nix::libc;
@@ -22,7 +23,10 @@ use std::{
         unix::fs::{MetadataExt, OpenOptionsExt},
     },
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 const REGISTRY: &str = "/run/prek/devices";
@@ -86,12 +90,15 @@ struct Metadata {
     marker: String,
     isolated: bool,
     properties: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner: Option<WorkerIdentity>,
 }
 
 impl Metadata {
     fn validate(&self, marker: &str) -> io::Result<()> {
         filename(marker)?;
         if self.version != 1
+            || self.owner.is_some_and(|owner| !owner.valid())
             || self.marker != marker
             || self.properties.len() > 32
             || self.isolated != marker.starts_with("prek/test/")
@@ -133,6 +140,29 @@ impl Metadata {
 struct Directory {
     file: File,
     owner: u32,
+    mutation: Mutex<()>,
+}
+
+struct Mutation<'a> {
+    directory: &'a Directory,
+    _memory: MutexGuard<'a, ()>,
+}
+impl Drop for Mutation<'_> {
+    fn drop(&mut self) {
+        // SAFETY: owned directory fd; this guard holds the only mutation lock.
+        unsafe { libc::flock(self.directory.file.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+struct FileCleanup {
+    directory: Arc<Directory>,
+    name: CString,
+    inode: u64,
+}
+impl Drop for FileCleanup {
+    fn drop(&mut self) {
+        self.directory.unlink_same(&self.name, self.inode);
+    }
 }
 
 impl Directory {
@@ -147,7 +177,40 @@ impl Directory {
                 "device registry must have trusted ownership and no group/other writes",
             ));
         }
-        Ok(Self { file, owner })
+        Ok(Self {
+            file,
+            owner,
+            mutation: Mutex::new(()),
+        })
+    }
+
+    fn lock(&self) -> io::Result<Mutation<'_>> {
+        let memory = self
+            .mutation
+            .try_lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::WouldBlock, "registry mutation is busy"))?;
+        // Serialize separate processes and separately opened Registry handles.
+        // SAFETY: owned directory fd, nonblocking advisory lock only.
+        if unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Mutation {
+            directory: self,
+            _memory: memory,
+        })
+    }
+
+    fn unlink_same(&self, name: &CString, inode: u64) -> bool {
+        if let Ok(file) = self.open_file(name, libc::O_RDONLY | libc::O_NONBLOCK)
+            && let Ok(stat) = file.metadata()
+            && stat.is_file()
+            && stat.ino() == inode
+            && stat.uid() == self.owner
+        {
+            // SAFETY: canonical single-component name under the held directory.
+            return unsafe { libc::unlinkat(self.file.as_raw_fd(), name.as_ptr(), 0) } == 0;
+        }
+        false
     }
 
     fn open_file(&self, name: &CString, flags: i32) -> io::Result<File> {
@@ -211,7 +274,12 @@ impl Registry {
         })
     }
 
-    fn publish(&self, descriptor: Descriptor, isolated: bool) -> io::Result<Publication> {
+    fn publish(
+        &self,
+        descriptor: Descriptor,
+        isolated: bool,
+        owner: Option<WorkerIdentity>,
+    ) -> io::Result<Publication> {
         descriptor.validate().map_err(invalid)?;
         if descriptor.is_isolated() != isolated {
             return Err(denied("descriptor isolation does not match publication"));
@@ -221,6 +289,7 @@ impl Registry {
             marker: descriptor.marker.clone(),
             isolated,
             properties: descriptor.udev.clone(),
+            owner,
         };
         metadata.validate(&metadata.marker)?;
         let bytes = serde_json::to_vec(&metadata).map_err(io::Error::other)?;
@@ -228,33 +297,186 @@ impl Registry {
             return Err(invalid("metadata exceeds size limit"));
         }
         let name = filename(&metadata.marker)?;
+        let _mutation = self.directory.lock()?;
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let nonce = NEXT
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                next.checked_add(1)
+            })
+            .map_err(|_| invalid("publication sequence exhausted"))?;
+        let temporary = CString::new(match owner {
+            Some(owner) => format!(".prek-tmp-{}-{nonce:016x}", owner.tag()),
+            None => format!(".prek-unmanaged-{:08x}-{nonce:016x}", std::process::id()),
+        })
+        .map_err(|_| invalid("invalid publication temporary name"))?;
         let mut file = self
             .directory
-            .open_file(&name, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL)?;
+            .open_file(&temporary, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL)?;
         let stat = file.metadata()?;
-        let publication = Publication {
+        let _cleanup = FileCleanup {
+            directory: Arc::clone(&self.directory),
+            name: temporary.clone(),
+            inode: stat.ino(),
+        };
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        // Publish complete metadata atomically, without replacing another
+        // lifetime's record. A killed writer leaves only an owned temporary.
+        // SAFETY: two bounded single-component names and a retained directory.
+        if unsafe {
+            libc::linkat(
+                self.directory.file.as_raw_fd(),
+                temporary.as_ptr(),
+                self.directory.file.as_raw_fd(),
+                name.as_ptr(),
+                0,
+            )
+        } < 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Publication {
             directory: Arc::clone(&self.directory),
             name,
             inode: stat.ino(),
             descriptor,
             metadata,
-        };
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        Ok(publication)
+        })
     }
 
     /// Prepare a physical counterpart's metadata before UI_DEV_CREATE.
     pub fn prepare(&self, descriptor: Descriptor) -> io::Result<Publication> {
-        self.publish(descriptor, false)
+        self.publish(descriptor, false, None)
     }
 
     /// Only an explicitly authorized isolated test harness may use this path.
     /// Its downstream event receiver must exclusively grab its own virtual
     /// node before injection, so the console also receives no test keystrokes.
     pub fn prepare_isolated(&self, descriptor: Descriptor) -> io::Result<Publication> {
-        self.publish(descriptor.for_isolated().map_err(denied)?, true)
+        self.publish(descriptor.for_isolated().map_err(denied)?, true, None)
     }
+
+    /// Bind pre-add metadata to the authenticated worker that owns all uinput
+    /// descriptors. The supervisor can remove it after confirmed worker exit.
+    pub fn prepare_for_worker(
+        &self,
+        descriptor: Descriptor,
+        health: &Heartbeat,
+    ) -> io::Result<Publication> {
+        self.prepare_bound(descriptor, health, false)
+    }
+
+    pub fn prepare_isolated_for_worker(
+        &self,
+        descriptor: Descriptor,
+        health: &Heartbeat,
+    ) -> io::Result<Publication> {
+        self.prepare_bound(descriptor.for_isolated().map_err(denied)?, health, true)
+    }
+
+    fn prepare_bound(
+        &self,
+        descriptor: Descriptor,
+        health: &Heartbeat,
+        isolated: bool,
+    ) -> io::Result<Publication> {
+        let owner = health.worker_identity();
+        if owner.pid() != std::process::id() {
+            return Err(denied("publication belongs to a different worker"));
+        }
+        self.publish(descriptor, isolated, Some(owner))
+    }
+
+    /// A Report exists only after the supervising process has reaped its child.
+    /// Unmanaged records and other worker lifetimes are preserved.
+    pub fn recover_worker(&self, report: &Report) -> io::Result<usize> {
+        self.recover(Some(report.worker_identity()))
+    }
+
+    /// Restart recovery also covers supervisor death. Each persisted owner is
+    /// checked against a kernel PID handle and process birth before deletion.
+    pub fn recover_orphans(&self) -> io::Result<usize> {
+        self.recover(None)
+    }
+
+    fn recover(&self, reported: Option<WorkerIdentity>) -> io::Result<usize> {
+        let _mutation = self.directory.lock()?;
+        let mut selected = Vec::new();
+        let mut lifetimes = BTreeMap::new();
+        // The proc link resolves our retained fd, never a replaced registry path.
+        for (count, entry) in
+            fs::read_dir(format!("/proc/self/fd/{}", self.directory.file.as_raw_fd()))?.enumerate()
+        {
+            if count >= 4096 {
+                return Err(invalid("registry recovery scan exceeds bounds"));
+            }
+            let entry = entry?;
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let owner = if let Some(rest) = name.strip_prefix(".prek-tmp-") {
+                let Some((tag, nonce)) = rest.rsplit_once('-') else {
+                    continue;
+                };
+                if nonce.len() != 16 || u64::from_str_radix(nonce, 16).is_err() {
+                    continue;
+                }
+                WorkerIdentity::from_tag(tag)
+            } else if let Some(marker) = registry_marker(&name) {
+                self.directory.read(&marker)?.owner
+            } else {
+                None
+            };
+            let Some(owner) = owner else {
+                continue;
+            };
+            let dead = if let Some(reported) = reported {
+                owner == reported
+            } else if let Some(dead) = lifetimes.get(&owner) {
+                *dead
+            } else {
+                let dead = owner.confirmed_dead()?;
+                lifetimes.insert(owner, dead);
+                dead
+            };
+            if !dead {
+                continue;
+            }
+            let name = CString::new(name).map_err(|_| invalid("invalid registry filename"))?;
+            let file = self
+                .directory
+                .open_file(&name, libc::O_RDONLY | libc::O_NONBLOCK)?;
+            let stat = file.metadata()?;
+            if !stat.is_file()
+                || stat.uid() != self.directory.owner
+                || stat.mode() & 0o077 != 0
+                || stat.len() > MAX_METADATA
+            {
+                return Err(denied("untrusted recovery record"));
+            }
+            selected.push((name, stat.ino()));
+        }
+        // Validate the full scan before mutation, so an unreadable/malformed
+        // owned entry cannot produce a partial success acknowledgement.
+        let mut removed = 0;
+        for (name, inode) in selected {
+            if !self.directory.unlink_same(&name, inode) {
+                return Err(invalid("recovery record changed before removal"));
+            }
+            removed += 1;
+        }
+        Ok(removed)
+    }
+}
+
+fn registry_marker(name: &str) -> Option<String> {
+    let parts: Vec<_> = name.strip_suffix(".json")?.split('-').collect();
+    let marker = match parts.as_slice() {
+        ["prek", device, generation] => format!("prek/{device}/{generation}"),
+        ["prek", "test", device, generation] => format!("prek/test/{device}/{generation}"),
+        _ => return None,
+    };
+    filename(&marker).ok().map(|_| marker)
 }
 
 #[derive(Debug)]
@@ -269,17 +491,8 @@ pub struct Publication {
 impl Drop for Publication {
     fn drop(&mut self) {
         // Do not remove a replacement file belonging to a newer publication.
-        if let Ok(file) = self
-            .directory
-            .open_file(&self.name, libc::O_RDONLY | libc::O_NONBLOCK)
-            && let Ok(stat) = file.metadata()
-            && stat.ino() == self.inode
-            && stat.uid() == self.directory.owner
-        {
-            // SAFETY: owned directory fd and validated single-component name.
-            unsafe {
-                libc::unlinkat(self.directory.file.as_raw_fd(), self.name.as_ptr(), 0);
-            }
+        if let Ok(_mutation) = self.directory.lock() {
+            self.directory.unlink_same(&self.name, self.inode);
         }
     }
 }
@@ -678,6 +891,7 @@ mod tests {
     use crate::{input::Device, transport::KernelIdentity};
     use std::{
         collections::VecDeque,
+        process::Command,
         sync::atomic::{AtomicU64, Ordering},
     };
 
@@ -735,6 +949,101 @@ mod tests {
             BTreeMap::new(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn atomic_publication_does_not_replace_existing_metadata_or_leave_temporaries() {
+        let temporary = Temporary::new();
+        let registry = temporary.registry();
+        let original = registry.prepare_isolated(descriptor()).unwrap();
+        let contents = registry.directory.read(&original.metadata.marker).unwrap();
+        assert_eq!(
+            registry.prepare_isolated(descriptor()).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(
+            registry.directory.read(&original.metadata.marker).unwrap(),
+            contents
+        );
+        assert_eq!(fs::read_dir(&temporary.path).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn orphan_recovery_preserves_live_workers_and_unmanaged_publications() {
+        let temporary = Temporary::new();
+        let registry = temporary.registry();
+        let mut command = Command::new("sleep");
+        command.arg("10");
+        let supervisor = crate::supervisor::Supervisor::spawn(command).unwrap();
+        let managed = registry
+            .publish(
+                descriptor().for_isolated().unwrap(),
+                true,
+                Some(supervisor.worker_identity()),
+            )
+            .unwrap();
+        // Rebuild rather than altering a validated descriptor.
+        let mut source = crate::transport::tests::touch();
+        source.identity = "test:other".into();
+        source.name = "Prek test other".into();
+        source.physical = "fixture/other".into();
+        source.path.clear();
+        source.source.generation += 1;
+        for axis in source.axes.values_mut() {
+            axis.fuzz = 0;
+        }
+        let spec = Descriptor::mirror(
+            &source,
+            KernelIdentity {
+                bus: 3,
+                vendor: 1,
+                product: 2,
+                version: 1,
+            },
+            None,
+            &BTreeMap::new(),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        let unmanaged = registry.prepare_isolated(spec).unwrap();
+        assert_eq!(registry.recover_orphans().unwrap(), 0);
+        drop(supervisor);
+        assert_eq!(registry.recover_orphans().unwrap(), 1);
+        assert!(registry.directory.read(&managed.metadata.marker).is_err());
+        assert_eq!(
+            registry.directory.read(&unmanaged.metadata.marker).unwrap(),
+            unmanaged.metadata
+        );
+    }
+
+    #[test]
+    fn report_recovery_fences_epochs_and_removes_incomplete_owned_temporaries() {
+        let temporary = Temporary::new();
+        let registry = temporary.registry();
+        let mut supervisor = crate::supervisor::Supervisor::spawn(Command::new("true")).unwrap();
+        let report = supervisor.wait().unwrap();
+        let own = report.worker_identity();
+        let mut json = serde_json::to_value(own).unwrap();
+        json["epoch"] = serde_json::json!(json["epoch"].as_u64().unwrap() + 1);
+        let newer = serde_json::from_value(json).unwrap();
+        let preserved = registry
+            .publish(descriptor().for_isolated().unwrap(), true, Some(newer))
+            .unwrap();
+        let name = format!(".prek-tmp-{}-0000000000000000", own.tag());
+        let file = registry
+            .directory
+            .open_file(
+                &CString::new(name).unwrap(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+            )
+            .unwrap();
+        assert_eq!(file.metadata().unwrap().len(), 0);
+        drop(file);
+        assert_eq!(registry.recover_worker(&report).unwrap(), 1);
+        assert_eq!(
+            registry.directory.read(&preserved.metadata.marker).unwrap(),
+            preserved.metadata
+        );
     }
 
     #[test]
