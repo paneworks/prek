@@ -25,6 +25,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Internal observer worker; requires a bound supervisor health channel.
+    #[command(hide = true)]
+    ObserveWorker {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        json: bool,
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=3600))]
+        duration: Option<u64>,
+    },
     /// Internal root-only udev metadata helper.
     #[command(hide = true)]
     UdevImport {
@@ -129,13 +139,23 @@ fn run(command: Command) -> io::Result<()> {
             json,
             duration,
         } => {
-            let config =
-                prek::config::Config::parse(&read_config(&path)?).map_err(io::Error::other)?;
+            prek::config::Config::parse(&read_config(&path)?).map_err(io::Error::other)?;
             if mode != "observe" {
                 return Err(io::Error::other(
                     "routing is unavailable: virtual-device readiness, ownership and recovery gates are pending",
                 ));
             }
+            supervise_observer(&path, json, duration)
+        }
+        Command::ObserveWorker {
+            config: path,
+            json,
+            duration,
+        } => {
+            let mut health = prek::supervisor::Heartbeat::connect()?;
+            health.progress()?;
+            let config =
+                prek::config::Config::parse(&read_config(&path)?).map_err(io::Error::other)?;
             let engine = prek::rules::Engine::new(config.clone())?;
             let paths = linux::inventory()?
                 .into_iter()
@@ -166,7 +186,12 @@ fn run(command: Command) -> io::Result<()> {
                 output: &mut output,
                 json,
             };
-            linux::observe(&paths, duration.map(Duration::from_secs), &mut sink)
+            linux::observe_supervised(
+                &paths,
+                duration.map(Duration::from_secs),
+                &mut sink,
+                &mut health,
+            )
         }
         Command::Doctor { config: path, json } => {
             let config =
@@ -338,6 +363,38 @@ fn run(command: Command) -> io::Result<()> {
             }
             Ok(())
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn supervise_observer(
+    config: &std::path::Path,
+    json: bool,
+    duration: Option<u64>,
+) -> io::Result<()> {
+    use prek::supervisor::{Reason, Supervisor, TerminationSignals};
+    let signals = TerminationSignals::install()?;
+    let mut command = std::process::Command::new(std::env::current_exe()?);
+    command.arg("observe-worker").arg("--config").arg(config);
+    if json {
+        command.arg("--json");
+    }
+    if let Some(duration) = duration {
+        command.arg("--duration").arg(duration.to_string());
+    }
+    let mut supervisor = Supervisor::spawn(command)?;
+    let report = supervisor.wait_with_stop(|| signals.requested())?;
+    if signals.requested()
+        || report.reason() == Reason::Requested
+        || report.reason() == Reason::Exited && report.status().success()
+    {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "observation worker {:?}: {}",
+            report.reason(),
+            report.status()
+        )))
     }
 }
 

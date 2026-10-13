@@ -404,6 +404,29 @@ pub fn observe(
     duration: Option<Duration>,
     sink: &mut impl InputSink,
 ) -> io::Result<()> {
+    observe_loop(paths, duration, sink, None)
+}
+
+/// Supervised observation reports health from this same reader/timer loop.
+/// The parent owns no event descriptors, and an idle poll still reports health.
+pub fn observe_supervised(
+    paths: &[PathBuf],
+    duration: Option<Duration>,
+    sink: &mut impl InputSink,
+    health: &mut prek::supervisor::Heartbeat,
+) -> io::Result<()> {
+    observe_loop(paths, duration, sink, Some(health))
+}
+
+fn observe_loop(
+    paths: &[PathBuf],
+    duration: Option<Duration>,
+    sink: &mut impl InputSink,
+    mut health: Option<&mut prek::supervisor::Heartbeat>,
+) -> io::Result<()> {
+    if let Some(health) = health.as_mut() {
+        health.progress()?;
+    }
     let mut readers = Vec::new();
     let mut identities = BTreeSet::new();
     let header = Record::Header {
@@ -411,6 +434,9 @@ pub fn observe(
     };
     sink.push(header)?;
     for path in paths {
+        if let Some(health) = health.as_mut() {
+            health.progress()?;
+        }
         let (reader, record) = Reader::new(path).map_err(|error| {
             io::Error::new(
                 error.kind(),
@@ -442,11 +468,27 @@ pub fn observe(
         .transpose()?;
     let mut pending = Vec::<Frame>::new();
     loop {
+        if let Some(health) = health.as_mut() {
+            match health.progress() {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => break,
+                Err(error) => return Err(error),
+            }
+        }
         let now = monotonic()?;
         if stop_at.is_some_and(|stop| now >= stop) {
             break;
         }
-        let deadline = sink.deadline().into_iter().chain(stop_at).min();
+        let health_deadline = health
+            .as_ref()
+            .map(|health| health.deadline())
+            .transpose()?;
+        let deadline = sink
+            .deadline()
+            .into_iter()
+            .chain(stop_at)
+            .chain(health_deadline)
+            .min();
         let timeout = if !pending.is_empty() {
             PollTimeout::ZERO
         } else {
@@ -459,6 +501,9 @@ pub fn observe(
                 .iter()
                 .map(|reader| PollFd::new(reader.raw.as_fd(), PollFlags::POLLIN))
                 .collect();
+            if let Some(health) = health.as_ref() {
+                fds.push(PollFd::new(health.as_fd(), PollFlags::POLLIN));
+            }
             match poll(&mut fds, timeout) {
                 Ok(_) => fds
                     .iter()

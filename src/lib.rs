@@ -23,6 +23,8 @@ pub mod paths;
 pub mod replay;
 pub mod router;
 pub mod rules;
+#[cfg(target_os = "linux")]
+pub mod supervisor;
 pub mod transport;
 
 pub use buttons::{Button, Buttons, Gesture, Timing};

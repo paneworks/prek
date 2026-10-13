@@ -63,6 +63,22 @@ fn t01_help_requires_no_desktop_or_input_access() {
     assert!(text.contains("check"));
     assert!(text.contains("doctor"));
     assert!(text.contains("run"));
+    assert!(!text.contains("observe-worker"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn t59_unbound_worker_refuses_before_configuration_or_device_access() {
+    let result = run(&[
+        "observe-worker",
+        "--config",
+        "/this/prek/test/configuration/does/not/exist",
+    ]);
+    assert!(!result.status.success());
+    assert!(result.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("worker health descriptor is missing")
+    );
 }
 
 #[test]

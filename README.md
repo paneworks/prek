@@ -22,9 +22,10 @@ feedback requirements and neutral handoff. The router models reserve/buffer/obse
 ownership, scheduled fallback, slot reuse, delivery acknowledgements and neutral
 recovery. The Linux backend now publishes pre-add metadata, creates per-source
 uinput devices and writes bounded complete frames. It also reads declared LED
-feedback. Real consumer readiness, reverse feedback, policy arbitration and the
-supervisor are still pending. Devices with repeat support or nonzero axis fuzz
-are refused until transparent forwarding is verified for those capabilities.
+feedback. Real consumer readiness, the reverse-feedback bridge, policy arbitration
+and supervised input takeover are still pending. Devices with repeat support or
+nonzero axis fuzz are refused until transparent forwarding is verified for those
+capabilities.
 Production routing remains disabled.
 
 ## Commands
@@ -63,6 +64,16 @@ configuration/session generations and the proposed action. Repeats share a gestu
 ID and have distinct ordinals. Observation evaluates each rule; it makes no claim
 about exclusive arbitration or input consumption. `--mode route` currently refuses
 before device takeover.
+
+Configured observation runs in a supervised worker. Only that worker opens input
+devices; the parent watches a private health channel. The input loop reports
+progress every 250 ms, including while idle. One second without progress triggers
+termination, followed by a forced kill after a 250 ms grace period. Ctrl-C and
+SIGTERM request orderly shutdown, and parent death kills the worker. Process tests
+use private sockets and subprocesses. The disposable VM also verifies idle
+observation, input descriptors owned only by the worker, graceful shutdown and
+forced teardown of a stopped observer within two seconds. Recovery of real grabs
+and held virtual input remains an isolated kernel and downstream-consumer gate.
 
 Event loss cancels that source's recognition. The current live observer removes
 a lost/disconnected source; other selected sources continue. Automatic reopening
@@ -152,6 +163,7 @@ commands. Raw recordings are an explicit diagnostic operation, not service logs.
 - `transport` validates virtual-device descriptors and readiness evidence.
 - `router` owns sequences and schedules bounded, ordered raw-frame delivery.
 - `kernel` owns Linux virtual-device creation, metadata and nonblocking writes.
+- `supervisor` bounds worker lifetime and handles foreground/service termination.
 - `diagnostics` checks device selection/capacity and reports missing consumers.
 - `replay` connects frame normalization with button/touch recognition.
 - `linux` handles read-only device access; `main` exposes the CLI.
@@ -162,10 +174,14 @@ input permissions or display server. Separate kernel tests in `tests/routing.rs`
 are ignored by default: they require a prepared isolated environment, root-owned
 runtime metadata and this package's udev rule. Every test event node is created
 by that harness; it never opens or grabs a production event node.
+`tests/supervisor.rs` runs eleven process gates for healthy/stalled workers,
+termination escalation, health-channel failure, worker identity and parent death.
+It uses a separate executable so fixtures run on their process's original thread.
 
 `nix build .#checks.x86_64-linux.routing` runs those gates in a disposable NixOS VM
 without host device passthrough. The gates check metadata/capabilities, ordinary
-keyboard frames, consumed touch, replay timing and teardown. Building the normal
+keyboard/mouse/touchpad frames, consumed touch, replay timing, LED feedback and
+supervised observation shutdown. Building the normal
 package installs its udev rule in the package output; it does not activate it on
 the host or start input routing. ARM kernel execution remains a separate gate.
 
