@@ -2,8 +2,10 @@
   description = "Prek: low-level Linux input tools";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs?rev=4c1018dae018162ec878d42fec712642d214fdfa";
+  inputs.rust-overlay.url = "github:oxalica/rust-overlay/dbc715a4b7c0ace63b9769a032d1dd34cd89e5bd";
+  inputs.rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
 
-  outputs = { self, nixpkgs }:
+  outputs = { self, nixpkgs, rust-overlay }:
     let
       forSystems = nixpkgs.lib.genAttrs [ "x86_64-linux" "aarch64-linux" ];
     in
@@ -19,7 +21,7 @@
               root = ./.;
               fileset = pkgs.lib.fileset.unions [
                 ./Cargo.toml ./Cargo.lock ./src ./examples ./docs ./udev ./README.md ./LICENSE
-                # VM controllers and the standalone C receiver are separate
+                # Desktop test controllers and the C receiver are separate
                 # derivations; changing them must not recompile Rust packages.
                 (pkgs.lib.fileset.fileFilter (file: file.hasExt "rs") ./tests)
               ];
@@ -58,29 +60,24 @@
         };
       });
 
-      checks = forSystems (system: {
-        cage = import ./tests/cage.nix {
-          pkgs = nixpkgs.legacyPackages.${system};
-          package = self.packages.${system}.default;
-        };
-        lua = import ./tests/compositor.nix {
-          pkgs = nixpkgs.legacyPackages.${system};
-          package = self.packages.${system}.default;
-          lua = true;
-        };
-        compositor = import ./tests/compositor.nix {
-          pkgs = nixpkgs.legacyPackages.${system};
-          package = self.packages.${system}.default;
-        };
-        routing = import ./tests/routing.nix {
-          pkgs = nixpkgs.legacyPackages.${system};
-          package = self.packages.${system}.default;
-        };
-      });
-
       devShells = forSystems (system:
-        let pkgs = nixpkgs.legacyPackages.${system};
+        let
+          pkgs = import nixpkgs { inherit system; overlays = [ rust-overlay.overlays.default ]; };
+          crossTriple = "aarch64-unknown-linux-musl";
+          crossPkgs = import nixpkgs { inherit system; crossSystem.config = crossTriple; };
+          crossCc = "${crossPkgs.stdenv.cc}/bin/${crossPkgs.stdenv.cc.targetPrefix}cc";
         in {
+          cross-aarch64 = pkgs.mkShell {
+            packages = [
+              (pkgs.rust-bin.stable.latest.default.override { targets = [ crossTriple ]; })
+              crossPkgs.stdenv.cc
+            ];
+            CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER = crossCc;
+            CC_aarch64_unknown_linux_musl = crossCc;
+            # Use the phone's loader so runtime systemd loading remains possible.
+            CARGO_BUILD_RUSTFLAGS = "-C target-feature=-crt-static -C link-arg=-Wl,--dynamic-linker=/lib/ld-musl-aarch64.so.1";
+            LD_LIBRARY_PATH = "";
+          };
           default = pkgs.mkShell {
             packages = with pkgs; [
               rustc cargo rustfmt clippy rust-analyzer git-cliff

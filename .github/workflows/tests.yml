@@ -10,6 +10,8 @@ permissions:
 
 jobs:
   verify:
+    env:
+      RUST_TEST_THREADS: '1'
     strategy:
       fail-fast: false
       matrix:

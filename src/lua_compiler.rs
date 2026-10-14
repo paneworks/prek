@@ -56,7 +56,11 @@ fn nonblocking(fd: &impl AsFd) -> io::Result<()> {
     }
     Ok(())
 }
-fn limit(resource: libc::__rlimit_resource_t, value: u64) -> io::Result<()> {
+#[cfg(target_env = "musl")]
+type LimitResource = libc::c_int;
+#[cfg(not(target_env = "musl"))]
+type LimitResource = libc::__rlimit_resource_t;
+fn limit(resource: LimitResource, value: u64) -> io::Result<()> {
     let limit = libc::rlimit {
         rlim_cur: value,
         rlim_max: value,

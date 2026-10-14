@@ -21,8 +21,12 @@ let
   };
 in
 pkgs.writeShellScriptBin "prek-cage-host-test" ''
-  exec ${pkgs.python3}/bin/python3 ${./cage-host.py} \
+  exec ${pkgs.dbus}/bin/dbus-run-session --config-file=${./support/dbus-session.conf} -- \
+    ${pkgs.bash}/bin/bash -c 'export PREK_TEST_SESSION_BUS="$DBUS_SESSION_BUS_ADDRESS"; exec "$@"' -- \
+    ${pkgs.python3}/bin/python3 ${./cage-host.py} \
     --cage ${pkgs.cage}/bin/cage \
+    --hyprland ${pkgs.hyprland}/bin/Hyprland \
+    --inner ${./cage-inner.py} --proxy ${./support/wlproxy.py} \
     --receiver ${receiver}/bin/prek-wayland-receiver \
     --keyboard ${keyboard}/bin/prek-wayland-keyboard "$@"
 ''

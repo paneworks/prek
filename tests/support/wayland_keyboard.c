@@ -68,6 +68,10 @@ int main(int argc, char **argv) {
         fd, (uint32_t)length);
     close(fd);
     if (wl_display_roundtrip(display) < 0) return 1;
+    puts("ready"); fflush(stdout);
+    if (getchar() != '\n') {
+        fprintf(stderr, "keyboard test requires a start acknowledgement\n"); return 1;
+    }
     zwp_virtual_keyboard_v1_key(keyboard, 1, 48, WL_KEYBOARD_KEY_STATE_PRESSED);
     zwp_virtual_keyboard_v1_key(keyboard, 2, 48, WL_KEYBOARD_KEY_STATE_RELEASED);
     zwp_virtual_keyboard_v1_key(keyboard, 3, 42, WL_KEYBOARD_KEY_STATE_PRESSED);

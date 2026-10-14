@@ -386,7 +386,7 @@ impl Channel {
         message.msg_iov = &mut vector;
         message.msg_iovlen = 1;
         message.msg_control = control.as_mut_ptr().cast();
-        message.msg_controllen = size_of_val(&control);
+        message.msg_controllen = size_of_val(&control) as _;
         // SAFETY: initialized vectors/control buffer with exact writable sizes.
         let read = unsafe {
             libc::recvmsg(
@@ -413,11 +413,16 @@ impl Channel {
             while !header.is_null() {
                 let item = &*header;
                 let base = libc::CMSG_LEN(0) as usize;
-                if item.cmsg_len < base {
+                // musl uses a 32-bit control length; glibc uses size_t.
+                #[cfg(target_env = "musl")]
+                let control_length = item.cmsg_len as usize;
+                #[cfg(not(target_env = "musl"))]
+                let control_length = item.cmsg_len;
+                if control_length < base {
                     forbidden = true;
                     break;
                 }
-                let length = item.cmsg_len - base;
+                let length = control_length - base;
                 if item.cmsg_level == libc::SOL_SOCKET && item.cmsg_type == libc::SCM_RIGHTS {
                     for index in 0..length / size_of::<i32>() {
                         let fd = libc::CMSG_DATA(header)

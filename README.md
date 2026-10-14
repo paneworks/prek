@@ -48,11 +48,10 @@ Dispatch requests retain gesture/configuration/session identity and frozen
 targets, and are checked again when dequeued. Queues and deadlines are bounded;
 stalled output or dispatch consumers require transport recovery. The default
 decision delay remains 300 ms; explicit configurations may increase it to five
-seconds and callers can inspect the scheduled delivery offset. The isolated VM
-proves configured consumption and unmatched tap delivery against actual evdev
-receivers. Context in those tests is a model fixture. Live broker context/action
-bridges, pre-grab handoff and remaining application behaviors are required
-before the CLI can enable routing.
+seconds and callers can inspect the scheduled delivery offset. Native replay
+and routing-library tests cover configured consumption with model context.
+Local application delivery, live broker bridges, pre-grab handoff and remaining
+application behaviors are required before the CLI can enable routing.
 
 The Hyprland client verifies the IPC socket's owner, compositor process identity
 and executable before querying bounded device inventories. It supports the
@@ -118,9 +117,9 @@ devices; the parent watches a private health channel. The input loop reports
 progress every 250 ms, including while idle. One second without progress triggers
 termination, followed by a forced kill after a 250 ms grace period. Ctrl-C and
 SIGTERM request orderly shutdown, and parent death kills the worker. Process tests
-use private sockets and subprocesses. The disposable VM also verifies idle
-observation, input descriptors owned only by the worker, graceful shutdown and
-forced teardown of a stopped observer within two seconds. Recovery of real grabs
+use private sockets and subprocesses. Idle observation, exclusive worker input
+descriptors and kernel teardown remain guarded acceptance cases for a prepared
+isolated Linux environment. Recovery of real grabs
 and held virtual input is also tested with isolated keyboard/touch sources:
 orderly stop delivers a neutral frame, while worker/parent death and stalls release
 the original grab and remove the virtual device. Application state after device
@@ -214,7 +213,7 @@ and refused, and packet order/time plus broker/configuration/session generations
 are fenced. A private kernel lease permits one broker per runtime directory.
 Bad, disconnected or stalled clients lose their queued replies and seat ownership;
 the device worker continues independently. Startup, control traffic and device
-supervision are tested in the disposable VM. Route mode still refuses before
+supervision have native process tests; privileged kernel acceptance remains a separate gate. Route mode still refuses before
 runtime/device takeover.
 
 Supervised virtual devices carry their worker's process birth and supervision
@@ -433,51 +432,35 @@ by that harness; it never opens or grabs a production event node.
 `tests/supervisor.rs` runs eleven process gates for healthy/stalled workers,
 termination escalation, health-channel failure, worker identity and parent death.
 It uses a separate executable so fixtures run on their process's original thread.
-`tests/recovery.rs` runs only in the explicit isolated VM. Its eight cases cover
-held keyboard modifiers and touch slots during orderly stop, worker death,
-supervisor death and stopped forwarding. The supervising process retains no
-input descriptors; a separate harness owns each synthetic source generator.
+`tests/recovery.rs` and the other privileged kernel fixtures remain manual gates
+for a prepared isolated Linux environment. They are excluded from ordinary
+Cargo and local compositor runs; they must not inject into the host session.
 
-`nix build .#checks.x86_64-linux.routing` runs those gates in a disposable NixOS VM
-without host device passthrough. The gates check metadata/capabilities, ordinary
-keyboard/mouse/touchpad frames, consumed touch, replay timing, LED feedback,
-supervised observation shutdown and kernel recovery. Building the normal
-package installs its udev rule in the package output; it does not activate it on
-the host or start input routing. ARM kernel execution remains a separate gate.
+The desktop test setup follows Mold's `tools/sandbox/nested.sh`:
 
-`nix build .#checks.x86_64-linux.compositor` tests the client against stock
-Hyprland in a separate disposable VM. It checks virtual keyboard acceptance,
-processed metadata, keymap verification and removal. Ordinary IPC tests cover
-endpoint replacement, executable/permission checks, malformed replies and timeouts.
-The VM also checks actual logind registration, rejection of another process with
-the same UID outside the session, agent death, disconnect and active VT changes.
-The real `broker`, `session` and `status` commands also run there against a
-synthetic idle source, including single-owner enforcement, descriptor isolation,
-lease renewal, graceful shutdown and agent exit on broker loss. Live desktop-only
-rules use actual compositor snapshots; an acknowledged Wayland session lock
-inhibits observations and a bare unlock leaves provider inhibition in place.
-`nix build .#checks.x86_64-linux.cage` runs the instrumented Wayland application
-in a disposable Cage VM. Owned uinput sources exercise Lua-configured reserved
-keys and buffered touch gestures through the routing library and kernel output.
-The receiver displays and records text, modifiers, pressed keys, contacts,
-coordinates and touch frames. Assertions check consumption, ordinary delivery
-and cleanup with a modifier/contact held. Context is a model fixture; production
-broker routing, remapping/repeats, handoff races and phone parity need their own
-remaining gates. The VM captures receipts and screenshots for diagnosis.
+```sh
+nix run .#cage-test                     # headless Cage -> nested Hyprland -> receiver
+nix run .#cage-test -- --visible        # watch the owned session as a window
+```
 
-`nix run .#cage-test` runs a short keyboard smoke test directly in your Wayland
-session. It starts nested Cage with a private socket and the same receiver,
-injects B and Shift+A through Cage's virtual keyboard protocol, checks the six
-ordered key events, text and modifier cleanup, then stops its processes. Logs
-and receipts are saved under `target/cage-host/run-*`. It opens no host evdev
-devices. This local check covers Cage keyboard delivery; the VM check above
-covers Prek routing and touchscreen gestures.
+The runner uses private Wayland sockets, a scratch home/XDG directories and a
+private session bus with service activation disabled. The system bus and seatd
+socket point to nonexistent paths. It injects B and Shift+A into the nested
+compositor only, checks six ordered events, text and neutral modifier cleanup,
+then stops its Cage, Hyprland, proxy and receiver processes. Logs and receipts
+remain under `target/cage-host/run-*`. No host evdev devices are opened.
+`RENDER_NODE` selects the rendering device, defaulting to `/dev/dri/renderD128`.
+The compatibility proxy is adapted from Mold's sandbox at commit `36261df7`.
+
+This local check currently proves keyboard delivery. Touch, Prek consumption,
+remapping/repeats, broker/lock integration and handoff races retain their own
+required acceptance gates. The old NixOS/QEMU test drivers are retired; ARM
+builds and execution follow the native-CI and phone cross-build paths below.
 
 `tests/protocol.rs` covers schema/size/order/time bounds, nonblocking backpressure,
 descriptor rejection/cleanup, endpoint lifetimes and inherited-socket misuse.
-The isolated routing VM also exercises live `learn-shape` on a synthetic mouse,
-checks the saved private template and verifies idle Ctrl-C cancellation without
-an output file. Offline learning tests reuse the exported template in replay.
+Privileged `learn-shape` checks on owned synthetic devices remain a manual
+acceptance gate, including saved templates and idle Ctrl-C cancellation. Offline learning tests reuse the exported template in replay.
 Configured shape tests cover touch/mouse V, circle/zigzag, fixed multi-finger
 centroids, arming changes, release-frame motion, confidence/size/resource limits
 and mapping/contact replacement. CLI shape replay checks a hand-written expected
@@ -506,12 +489,21 @@ Direct checks are `cargo fmt --all -- --check`,
 `RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps`.
 
 The flake declares packages/apps and development shells for x86-64 and ARM64
-Linux. Build natively on the corresponding architecture, or use a configured
-cross/remote builder. Both x86-64 and GNU ARM64 release binaries build, and
-the full library and CLI test suites pass on each (ARM64 under QEMU). The x86-64 Nix
-package also builds and runs. Physical phone tests and distribution/cache outputs
-remain pending. CI is configured to build/test natively on both architectures,
-including the declared Rust 1.88 minimum; those remote jobs have not run yet.
+Linux. CI runs builds and tests natively on `ubuntu-24.04` and
+`ubuntu-24.04-arm`, including the Rust 1.88 minimum. These jobs are configured;
+a local cross-build does not establish native ARM execution or phone behavior.
+
+Like Mold, the phone shell targets postmarketOS/Alpine's musl loader:
+
+```sh
+nix develop .#cross-aarch64
+cargo build --release --target aarch64-unknown-linux-musl --bin prek
+```
+
+The shell supplies the ARM standard library and cross linker. It uses dynamic
+musl linking with `/lib/ld-musl-aarch64.so.1`, allowing runtime system libraries
+to load on the phone. Run device acceptance on the actual ARM phone; desktop
+Cage checks run locally without a machine emulator.
 
 For Nix builds of a Git checkout, add new source files to Git's index so they are
 included. The package source excludes recordings, sockets and local build output.
