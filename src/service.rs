@@ -376,6 +376,7 @@ pub struct Broker {
     lock_proofs: BTreeMap<(u32, u64), crate::morf::Proof>,
     completed_providers: BTreeSet<crate::morf::Proof>,
     routing: Option<crate::config::Config>,
+    lua_source: Option<Vec<u8>>,
 }
 impl Broker {
     /// Context is sampled directly from a verified compositor. Action dispatch
@@ -411,6 +412,7 @@ impl Broker {
             lock_proofs: BTreeMap::new(),
             completed_providers: BTreeSet::new(),
             routing: None,
+            lua_source: None,
         })
     }
     pub fn clients(&self) -> usize {
@@ -445,6 +447,24 @@ impl Broker {
     }
     pub fn configuration(&self) -> u64 {
         self.configuration
+    }
+    pub fn install_lua_source(
+        &mut self,
+        definition: Option<&crate::lua::Definition>,
+    ) -> io::Result<()> {
+        self.lua_source = definition
+            .map(|definition| {
+                definition.validate().map_err(io::Error::other)?;
+                let bytes = serde_json::to_vec(definition).map_err(io::Error::other)?;
+                if bytes.len() > crate::lua::MAX_SNAPSHOT_BYTES {
+                    return Err(protocol::invalid(
+                        "approved Lua snapshot exceeds byte limit",
+                    ));
+                }
+                Ok(bytes)
+            })
+            .transpose()?;
+        Ok(())
     }
     pub fn take_reload_request(&mut self) -> bool {
         std::mem::take(&mut self.reload_requested)
@@ -974,6 +994,10 @@ impl Broker {
                     });
                     if capabilities.iter().any(|capability| {
                         !(matches!(capability, Capability::Observations | Capability::Context)
+                            || *capability == Capability::LuaEvents
+                                && self.lua_source.is_some()
+                                && capabilities.contains(&Capability::Observations)
+                                && capabilities.contains(&Capability::Context)
                             || *capability == Capability::Commands
                                 && commands
                                 && capabilities.contains(&Capability::Context))
@@ -1065,7 +1089,7 @@ impl Broker {
                     // An in-flight status read may precede a transition notice.
                     // Discard it without acting on stale authority or closing
                     // the agent before that notice can reach it.
-                    let old_status = matches!(&request, Request::Status { fence }
+                    let old_status = matches!(&request, Request::Status { fence } | Request::LuaSource { fence, .. }
                         if now < bound.previous.expires && bound.previous.fences.contains(fence));
                     if !current && !old_heartbeat && !old_status {
                         return Err(protocol::invalid(
@@ -1080,6 +1104,18 @@ impl Broker {
                     }
                     let fence = bound.fence;
                     match request {
+                        Request::LuaSource { .. } if !current => {}
+                        Request::LuaSource { offset, .. }
+                            if bound.role == Role::Agent
+                                && bound.capabilities.contains(&Capability::LuaEvents) =>
+                        {
+                            let reply = crate::lua::source_transfer::chunk(
+                                fence,
+                                self.lua_source.as_deref(),
+                                offset,
+                            )?;
+                            connection.push(reply)?;
+                        }
                         Request::Heartbeat { .. } => {
                             bound.renewed = now;
                             let revision = bound

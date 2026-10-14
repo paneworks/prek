@@ -422,7 +422,7 @@ fn t85_installed_api_discovery_matches_the_configuration_manifest() {
     let documented: serde_json::Value =
         serde_json::from_str(include_str!("../docs/lua-api.json")).unwrap();
     assert_eq!(actual, documented);
-    assert_eq!(actual["runtime_api"], "pending");
+    assert_eq!(actual["runtime_api"], "partial");
 }
 
 #[test]

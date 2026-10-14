@@ -21,7 +21,7 @@ let
     postInstall = "";
   });
   compositorConfig = pkgs.writeText "prek-hyprland-test.conf" ''
-    exec-once = env PREK_BROKER_CLI_FIXTURE=1 PREK_BROKER_APP=${package}/bin/prek PREK_LOCK_PYTHON=${pkgs.python3}/bin/python3 PREK_LOCK_SCRIPT=${lockScript} ${pkgs.lib.optionalString (morf != null) "PREK_LOCK_MORF=${morf}/bin/morf PREK_LOCK_MORF_CONFIG=${morfLock}"} ${tests}/bin/prek-compositor-tests --ignored --exact broker_cli_session_fixture --nocapture
+    exec-once = env PREK_BROKER_CLI_FIXTURE=1 PREK_BROKER_APP=${package}/bin/prek ${pkgs.lib.optionalString lua "PREK_LUA_EVENTS=1"} PREK_LOCK_PYTHON=${pkgs.python3}/bin/python3 PREK_LOCK_SCRIPT=${lockScript} ${pkgs.lib.optionalString (morf != null) "PREK_LOCK_MORF=${morf}/bin/morf PREK_LOCK_MORF_CONFIG=${morfLock}"} ${tests}/bin/prek-compositor-tests --ignored --exact broker_cli_session_fixture --nocapture
     exec-once = env PREK_SESSION_AGENT_FIXTURE=1 PREK_AGENT_SOCKET=/run/prek-session/agent.sock ${tests}/bin/prek-compositor-tests --ignored --exact logind_session_agent_fixture --nocapture
     exec-once = env PREK_SESSION_AGENT_FIXTURE=1 PREK_AGENT_SOCKET=/run/prek-session/seat.sock ${tests}/bin/prek-compositor-tests --ignored --exact logind_session_agent_fixture --nocapture
     monitor = , preferred, auto, 1
@@ -44,6 +44,13 @@ let
   '';
   brokerConfig = pkgs.writeText "prek-broker-fixture" (if lua then ''
     local prek = require("prek")
+    prek.events.on("ready", function(event)
+      prek.log.info("lua-ready", {generation=event.fence.configuration})
+    end)
+    prek.events.on("matched", function(event)
+      if event.fence.configuration == 2 then while true do end end
+      prek.log.info("lua-match", {rule=event.event.rule, generation=event.fence.configuration})
+    end)
     return prek.config.new {
       policy = { allowed_devices = { "fixture" } },
       devices = { fixture = { name = "Prek broker fixture" } },
@@ -144,6 +151,14 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds(f"test \"$(cat /run/prek-control/emitted)\" = {command}", timeout=3)
     def rule_matches():
         return [__import__("json").loads(line)["event"] for line in machine.succeed("cat /run/user/1000/prek-broker-agent.jsonl").splitlines() if '"outcome":"matched"' in line]
+    ${pkgs.lib.optionalString lua ''
+    machine.wait_until_succeeds("grep -q lua-match /run/user/1000/prek-broker-agent.jsonl", timeout=3)
+    lua_logs = [__import__("json").loads(line) for line in machine.succeed("cat /run/user/1000/prek-broker-agent.jsonl").splitlines() if '"kind":"lua_log"' in line]
+    assert any(row["record"]["message"] == "lua-ready" for row in lua_logs), lua_logs
+    matches = [row for row in lua_logs if row["record"]["message"] == "lua-match"]
+    assert len(matches) == 1 and matches[0]["record"]["fields"]["rule"] == "broker-a", matches
+    assert matches[0]["record"]["fields"]["generation"] == matches[0]["fence"]["configuration"] == 1, matches
+    ''}
     # Change the complete file while the old key is held. Successful reload
     # preserves the process and requires a real release before the new hold.
     revised = machine.succeed("cat /run/prek-control/config.toml").replace('kind = "key", key = "KEY_A"', 'kind = "button_hold", key = "KEY_A", after = "600ms"').replace('fixture_press', 'reloaded_hold')
@@ -160,6 +175,10 @@ pkgs.testers.runNixOSTest {
     machine.wait_until_succeeds("grep -q reloaded_hold /run/user/1000/prek-broker-agent.jsonl", timeout=3)
     fresh = rule_matches()[-1]
     assert fresh["config_generation"] == 2 and fresh["action"]["name"] == "reloaded_hold", fresh
+    ${pkgs.lib.optionalString lua ''
+    machine.wait_until_succeeds("grep -q 'Lua runtime unavailable' /run/user/1000/prek-broker-agent.stderr", timeout=3)
+    machine.succeed("systemctl is-active prek-broker")
+    ''}
     ${pkgs.lib.optionalString lua ''
     # Shared Lua tables expand into independent Rust strings. Failure stays
     # inside the disposable compiler and leaves the held-key rule active.
@@ -218,6 +237,9 @@ pkgs.testers.runNixOSTest {
     worker_now = int(machine.succeed("cat /proc/$(systemctl show -p MainPID --value prek-broker)/task/$(systemctl show -p MainPID --value prek-broker)/children").strip())
     machine.wait_until_succeeds(f"! readlink /proc/{worker_now}/fd/* | grep -Fx {source}", timeout=3)
     machine.succeed(f"test -e {source}")
+    # A valid hold can finish before exclusion activates when command transport
+    # is slow. Measure held-input suppression from the acknowledged exclusion.
+    before = len(rule_matches())
     machine.succeed("cat > /run/prek-control/config.toml <<'CONFIG'\n" + revised + "\nCONFIG")
     result = __import__("json").loads(machine.succeed("${package}/bin/prek reload --socket /run/prek-control/control.sock --json"))
     assert result["configuration"] == 4 and result["error"] is None, result

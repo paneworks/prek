@@ -31,6 +31,9 @@ enum Command {
         #[arg(long)]
         name: String,
     },
+    /// Internal supervised, unprivileged Lua event component.
+    #[command(hide = true)]
+    LuaRuntimeWorker,
     /// Deliberately learn one shape without grabbing input or binding an action.
     LearnShape {
         name: String,
@@ -98,6 +101,9 @@ enum Command {
         /// a routing broker; fresh compositor context is negotiated implicitly.
         #[arg(long)]
         commands: bool,
+        /// Run approved Lua event subscriptions in a separate unprivileged VM.
+        #[arg(long)]
+        lua: bool,
     },
     /// Query broker status from a verified compositor login session.
     Status {
@@ -227,6 +233,7 @@ fn main() -> ExitCode {
 fn run(command: Command) -> io::Result<()> {
     let mut output = io::stdout().lock();
     match command {
+        Command::LuaRuntimeWorker => prek::lua::session::worker(),
         Command::LuaCompileWorker { name } => {
             prek::lua_compiler::worker_limits()?;
             let mut source = String::new();
@@ -234,12 +241,9 @@ fn run(command: Command) -> io::Result<()> {
                 &mut io::Read::take(io::stdin(), (prek::config::MAX_CONFIG_BYTES + 1) as u64),
                 &mut source,
             )?;
-            let config = prek::lua::compile(&source, &name).map_err(io::Error::other)?;
-            let text = toml::to_string(&config).map_err(io::Error::other)?;
-            if text.len() > prek::config::MAX_CONFIG_BYTES {
-                return Err(io::Error::other("expanded Lua model exceeds 1 MiB"));
-            }
-            write!(output, "{text}")
+            let definition =
+                prek::lua::Definition::compile(&source, &name).map_err(io::Error::other)?;
+            serde_json::to_writer(&mut output, &definition).map_err(io::Error::other)
         }
         Command::Api { json } => {
             let api = prek::lua::api();
@@ -249,7 +253,7 @@ fn run(command: Command) -> io::Result<()> {
             } else {
                 writeln!(
                     output,
-                    "Lua API {}: configuration bindings; runtime bindings are pending",
+                    "Lua API {}: configuration and session events; runtime adapters are pending",
                     prek::lua::API_VERSION
                 )?;
                 for symbol in api["symbols"].as_array().unwrap() {
@@ -373,6 +377,7 @@ fn run(command: Command) -> io::Result<()> {
             observations,
             context,
             commands,
+            lua,
         } => run_session(
             &socket,
             instance,
@@ -383,6 +388,7 @@ fn run(command: Command) -> io::Result<()> {
                 observations,
                 context,
                 commands,
+                lua,
             },
             &mut output,
         ),
@@ -664,7 +670,7 @@ fn run_broker(
     }
     let text = read_system_config(config_path)?;
     let compiled = compile_config(text, config_path)?;
-    let (text, config) = (compiled.text, compiled.config);
+    let (text, config, runtime_definition) = (compiled.text, compiled.config, compiled.runtime);
     // Compile before touching runtime state or starting the device worker.
     prek::rules::Engine::new(config.clone())?;
     std::fs::create_dir_all(runtime)?;
@@ -680,6 +686,7 @@ fn run_broker(
             allowed_seats: config.policy.allowed_seats.iter().cloned().collect(),
         },
     )?;
+    broker.install_lua_source(runtime_definition.as_ref())?;
     let signals = TerminationSignals::install()?;
     let mut command = std::process::Command::new(std::env::current_exe()?);
     command
@@ -702,6 +709,7 @@ fn run_broker(
     let mut installation = Some((
         1,
         config,
+        runtime_definition,
         monotonic()? + prek::configuration::INSTALL_TIMEOUT,
     ));
     let mut compiler: Option<prek::lua_compiler::Job> = None;
@@ -728,7 +736,7 @@ fn run_broker(
         let now = monotonic()?;
         if installation
             .as_ref()
-            .is_some_and(|(_, _, deadline)| now >= *deadline)
+            .is_some_and(|(_, _, _, deadline)| now >= *deadline)
         {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -769,6 +777,7 @@ fn run_broker(
                         installation = Some((
                             generation,
                             config,
+                            compiled.runtime,
                             now + prek::configuration::INSTALL_TIMEOUT,
                         ));
                     }
@@ -794,6 +803,7 @@ fn run_broker(
                             installation = Some((
                                 generation,
                                 compiled.config,
+                                compiled.runtime,
                                 now + prek::configuration::INSTALL_TIMEOUT,
                             ));
                         }
@@ -856,9 +866,10 @@ fn run_broker(
                         broker.report(report, monotonic()?)?
                     }
                     prek::worker::Message::Configuration { generation, error } => {
-                        let (expected, config, _) = installation.take().ok_or_else(|| {
-                            io::Error::other("unsolicited worker configuration acknowledgement")
-                        })?;
+                        let (expected, config, runtime_definition, _) =
+                            installation.take().ok_or_else(|| {
+                                io::Error::other("unsolicited worker configuration acknowledgement")
+                            })?;
                         if generation != expected {
                             return Err(io::Error::other(
                                 "worker acknowledged a different configuration generation",
@@ -870,10 +881,14 @@ fn run_broker(
                             }
                             startup = false;
                         } else {
+                            let previous = broker.configuration();
                             broker.finish_configuration(
                                 error.map_or(Ok(config), Err),
                                 monotonic()?,
                             )?;
+                            if broker.configuration() != previous {
+                                broker.install_lua_source(runtime_definition.as_ref())?;
+                            }
                             refresh = monotonic()?;
                             subscriptions = None;
                         }
@@ -899,7 +914,7 @@ fn run_broker(
             .into_iter()
             .chain([supervisor.deadline()?])
             .chain([refresh])
-            .chain(installation.as_ref().map(|(_, _, deadline)| *deadline))
+            .chain(installation.as_ref().map(|(_, _, _, deadline)| *deadline))
             .chain(compiler.as_ref().map(prek::lua_compiler::Job::deadline))
             .min()
             .unwrap();
@@ -1021,6 +1036,7 @@ struct SessionOptions {
     observations: bool,
     context: bool,
     commands: bool,
+    lua: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -1037,6 +1053,7 @@ fn run_session(
         observations,
         context,
         commands,
+        lua,
     } = options;
     use nix::{
         libc,
@@ -1062,14 +1079,18 @@ fn run_session(
             )
         })?;
     let mut requested = std::collections::BTreeSet::new();
+    let observations = observations || lua;
     if observations {
         requested.insert(Capability::Observations);
     }
-    if context || commands {
+    if context || commands || lua {
         requested.insert(Capability::Context);
     }
     if commands {
         requested.insert(Capability::Commands);
+    }
+    if lua {
+        requested.insert(Capability::LuaEvents);
     }
     let registration = Request::Register {
         instance,
@@ -1095,9 +1116,43 @@ fn run_session(
     let mut last_reply = started;
     let mut broker_mode = Mode::Observe;
     let mut executor = None::<prek::actions::Executor>;
+    let mut lua_download = None::<prek::lua::source_transfer::Assembly>;
+    let mut lua_runtime = None::<prek::lua::session::Session>;
+    let mut lua_seat = String::new();
+    let mut lua_pending = prek::lua::session::PendingEvents::default();
+    let mut lua_lifecycle = None;
     loop {
         let now = monotonic()?;
         if signals.requested() || stop_at.is_some_and(|deadline| now >= deadline) {
+            if let Some(runtime) = lua_runtime.as_mut() {
+                runtime.stop()?;
+                let until = monotonic()? + Duration::from_millis(250);
+                while monotonic()? < until && !runtime.finished() {
+                    let logs = match runtime.step(monotonic()?) {
+                        Ok(logs) => logs,
+                        Err(_) => break,
+                    };
+                    for record in logs {
+                        if json {
+                            serde_json::to_writer(
+                                &mut *output,
+                                &serde_json::json!({"version":1,"kind":"lua_log","fence":fence,"record":record}),
+                            )?;
+                            writeln!(output)?;
+                        } else {
+                            writeln!(output, "Lua: {} {}", record.message, record.fields)?;
+                        }
+                    }
+                    let timeout = PollTimeout::try_from(
+                        until
+                            .saturating_sub(monotonic()?)
+                            .min(Duration::from_millis(10)),
+                    )
+                    .map_err(io::Error::other)?;
+                    let _ = poll(&mut runtime.poll_sources(), timeout);
+                }
+                output.flush()?;
+            }
             if let Some(fence) = fence {
                 let _ = channel.send(&Request::Disconnect { fence }, now);
             }
@@ -1134,6 +1189,20 @@ fn run_session(
                         )?);
                     }
                     fence = Some(accepted);
+                    lua_seat = seat.clone();
+                    if lua {
+                        lua_download =
+                            Some(prek::lua::source_transfer::Assembly::new(accepted, now)?);
+                        if !channel.send(
+                            &Request::LuaSource {
+                                fence: accepted,
+                                offset: 0,
+                            },
+                            now,
+                        )? {
+                            return Err(io::ErrorKind::WouldBlock.into());
+                        }
+                    }
                     if !channel.send(&Request::Status { fence: accepted }, now)? {
                         return Err(io::ErrorKind::WouldBlock.into());
                     }
@@ -1191,6 +1260,25 @@ fn run_session(
                         executor.transition(next_fence)?;
                     }
                     fence = Some(next_fence);
+                    if lua {
+                        lua_runtime = None;
+                        lua_pending = Default::default();
+                        lua_lifecycle = Some((
+                            prek::lua::EventKind::Reload,
+                            serde_json::json!({"fence":next_fence}),
+                        ));
+                        lua_download =
+                            Some(prek::lua::source_transfer::Assembly::new(next_fence, now)?);
+                        if !channel.send(
+                            &Request::LuaSource {
+                                fence: next_fence,
+                                offset: 0,
+                            },
+                            now,
+                        )? {
+                            return Err(io::ErrorKind::WouldBlock.into());
+                        }
+                    }
                     if json {
                         serde_json::to_writer(
                             &mut *output,
@@ -1226,6 +1314,25 @@ fn run_session(
                         executor.transition(next_fence)?;
                     }
                     fence = Some(next_fence);
+                    if lua {
+                        lua_runtime = None;
+                        lua_pending = Default::default();
+                        lua_lifecycle = Some((
+                            prek::lua::EventKind::SessionChanged,
+                            serde_json::json!({"fence":next_fence,"state":state}),
+                        ));
+                        lua_download =
+                            Some(prek::lua::source_transfer::Assembly::new(next_fence, now)?);
+                        if !channel.send(
+                            &Request::LuaSource {
+                                fence: next_fence,
+                                offset: 0,
+                            },
+                            now,
+                        )? {
+                            return Err(io::ErrorKind::WouldBlock.into());
+                        }
+                    }
                     if json {
                         serde_json::to_writer(
                             &mut *output,
@@ -1267,6 +1374,47 @@ fn run_session(
                     fence: observed,
                     event,
                 } if observations && Some(observed) == fence => {
+                    if lua_runtime.is_some() || lua_download.is_some() {
+                        let payload = serde_json::json!({"fence":observed,"event":event});
+                        let kind = match event.as_ref() {
+                            prek::rules::Event::Matched { stage, .. } => match stage {
+                                prek::rules::Stage::Discrete => prek::lua::EventKind::Matched,
+                                prek::rules::Stage::Begin => prek::lua::EventKind::Begin,
+                                prek::rules::Stage::Update => prek::lua::EventKind::Update,
+                                prek::rules::Stage::End => prek::lua::EventKind::End,
+                                prek::rules::Stage::Cancel => prek::lua::EventKind::Cancel,
+                            },
+                            prek::rules::Event::Cancelled { .. } => prek::lua::EventKind::Cancel,
+                            prek::rules::Event::Skipped { .. } => prek::lua::EventKind::Skipped,
+                        };
+                        let result = if let Some(runtime) = lua_runtime.as_mut() {
+                            if kind != prek::lua::EventKind::Matched
+                                && matches!(event.as_ref(), prek::rules::Event::Matched { .. })
+                            {
+                                runtime
+                                    .notify(prek::lua::EventKind::Matched, payload.clone())
+                                    .and_then(|()| runtime.notify(kind, payload))
+                            } else {
+                                runtime.notify(kind, payload)
+                            }
+                        } else {
+                            if kind != prek::lua::EventKind::Matched
+                                && matches!(event.as_ref(), prek::rules::Event::Matched { .. })
+                            {
+                                lua_pending
+                                    .push(prek::lua::EventKind::Matched, payload.clone())
+                                    .and_then(|()| lua_pending.push(kind, payload))
+                            } else {
+                                lua_pending.push(kind, payload)
+                            }
+                        };
+                        if let Err(error) = result {
+                            eprintln!("Lua runtime unavailable: {error}");
+                            lua_runtime = None;
+                            lua_download = None;
+                            lua_pending = Default::default();
+                        }
+                    }
                     if json {
                         serde_json::to_writer(
                             &mut *output,
@@ -1289,6 +1437,70 @@ fn run_session(
                         .as_mut()
                         .unwrap()
                         .offer(offered, event, monotonic()?)?;
+                }
+                Reply::LuaSource {
+                    fence: incoming,
+                    offset,
+                    bytes,
+                    data,
+                } if lua && Some(incoming) == fence => {
+                    let Some(download) = lua_download.as_mut() else {
+                        continue;
+                    };
+                    match download.push(incoming, offset, bytes, &data, now)? {
+                        Some(definition) => {
+                            lua_download = None;
+                            let loaded = definition
+                                .map(|definition| {
+                                    prek::lua::session::Session::spawn(
+                                        &std::env::current_exe()?,
+                                        incoming,
+                                        &lua_seat,
+                                        definition,
+                                    )
+                                })
+                                .transpose();
+                            lua_runtime = match loaded {
+                                Ok(runtime) => runtime,
+                                Err(error) => {
+                                    eprintln!("Lua runtime unavailable: {error}");
+                                    None
+                                }
+                            };
+                            if let Some(runtime) = lua_runtime.as_mut()
+                                && let Some((kind, payload)) = lua_lifecycle.take()
+                            {
+                                runtime.notify(kind, payload.clone())?;
+                                if kind == prek::lua::EventKind::SessionChanged
+                                    && payload["state"] != "desktop"
+                                {
+                                    runtime.notify(prek::lua::EventKind::Recovery, payload)?;
+                                }
+                            }
+                            if let Some(runtime) = lua_runtime.as_mut()
+                                && let Err(error) =
+                                    std::mem::take(&mut lua_pending).drain_into(runtime)
+                            {
+                                eprintln!("Lua runtime unavailable: {error}");
+                                lua_runtime = None;
+                            }
+                            if lua_runtime.is_none() {
+                                lua_pending = Default::default();
+                                lua_lifecycle = None;
+                            }
+                        }
+                        None => {
+                            if !channel.send(
+                                &Request::LuaSource {
+                                    fence: incoming,
+                                    offset: download.offset(),
+                                },
+                                now,
+                            )? {
+                                return Err(io::ErrorKind::WouldBlock.into());
+                            }
+                        }
+                    }
                 }
                 Reply::Execute {
                     fence: granted,
@@ -1321,6 +1533,35 @@ fn run_session(
             }
             executor.flush(&mut channel)?;
         }
+        if drained && let Some(runtime) = lua_runtime.as_mut() {
+            match runtime.step(monotonic()?) {
+                Ok(logs) => {
+                    for record in logs {
+                        if json {
+                            serde_json::to_writer(
+                                &mut *output,
+                                &serde_json::json!({"version":1,"kind":"lua_log","fence":fence,"record":record}),
+                            )?;
+                            writeln!(output)?;
+                        } else {
+                            writeln!(output, "Lua: {} {}", record.message, record.fields)?;
+                        }
+                    }
+                    output.flush()?;
+                }
+                Err(error) => {
+                    eprintln!("Lua runtime unavailable: {error}");
+                    lua_runtime = None;
+                }
+            }
+        }
+        if lua_download
+            .as_ref()
+            .is_some_and(|download| now >= download.deadline())
+        {
+            eprintln!("Lua source transfer timed out");
+            lua_download = None;
+        }
         if now.saturating_sub(last_reply) >= Duration::from_secs(1) {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -1337,6 +1578,14 @@ fn run_session(
         }
         let until = next.min(last_reply + Duration::from_secs(1));
         let until = stop_at.map_or(until, |stop| until.min(stop));
+        let until = lua_download
+            .as_ref()
+            .map_or(until, |download| until.min(download.deadline()));
+        let until = if let Some(runtime) = &lua_runtime {
+            until.min(runtime.deadline()?)
+        } else {
+            until
+        };
         let timeout =
             PollTimeout::try_from(until.saturating_sub(monotonic()?)).map_err(io::Error::other)?;
         if !drained {
@@ -1356,6 +1605,9 @@ fn run_session(
         )];
         if let Some(executor) = executor.as_ref() {
             sources.extend(executor.poll_sources());
+        }
+        if let Some(runtime) = &lua_runtime {
+            sources.extend(runtime.poll_sources());
         }
         if let Err(error) = poll(&mut sources, timeout)
             && error != nix::errno::Errno::EINTR
@@ -1526,7 +1778,11 @@ fn compile_config(
         spawn_compiler(text, path)?.wait()
     } else {
         let config = prek::config::Config::parse(&text).map_err(io::Error::other)?;
-        Ok(prek::lua_compiler::Compiled { text, config })
+        Ok(prek::lua_compiler::Compiled {
+            text,
+            config,
+            runtime: None,
+        })
     }
 }
 

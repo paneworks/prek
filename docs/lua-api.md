@@ -1,13 +1,13 @@
-# Lua configuration API
+# Lua API
 
 Prek embeds [onix-os/luna](https://github.com/onix-os/luna), pinned to version
 0.5.1. Files ending in `.lua` return one configuration table. Legacy TOML is
 also accepted. Configuration evaluation declares actions and does not execute
 them. Live production routing remains disabled.
 
-This reference covers the implemented configuration bindings. Runtime callbacks,
-custom recognizers, event subscriptions, timers and live adapter bindings are
-required ongoing work in `PLAN.md`; they are not advertised as implemented.
+This reference covers configuration and session event subscriptions. Named action
+handlers, custom recognizers, timers and live adapter bindings remain required
+work in `PLAN.md`. Discovery labels the runtime API partial.
 Run `prek api --json` for the installed manifest or inspect `prek.api` in Lua.
 
 ```lua
@@ -33,7 +33,67 @@ it with `prek check --config config.lua`, and use it with `replay`, `doctor`,
 the compiled Rust model to the device worker; that worker evaluates no Lua
 while reading or forwarding input. The broker compiles reloads asynchronously
 in a disposable unprivileged process and retains its last approved model on
-failure. Runtime callback generations remain work.
+failure. `prek session --lua` opts the authenticated session agent into approved
+Lua subscriptions and implies observation/context capabilities. The broker
+transfers the exact approved source, model and registration snapshot; the agent
+starts a separate unprivileged VM and verifies its model and registrations.
+It never rereads the configuration filepath. Standalone `run` evaluates rules;
+session callbacks require the authenticated agent.
+
+## Session callbacks
+
+Register subscriptions during configuration evaluation:
+
+```lua
+local p = require("prek")
+local seen = 0
+local subscription = p.events.on("matched", function(payload)
+    seen = seen + 1
+    p.log.info("matched rule", {rule = payload.event.rule, count = seen})
+end)
+return p.config.preset("minimal")
+```
+
+`events.on(kind, callback)` returns a `Subscription` table.
+`subscription:dispose()` is idempotent and disables subsequent invocation,
+including a later subscriber for the event currently being dispatched.
+Subscriptions execute in registration order and retain closure state. A
+subscription added by a callback starts with the next event. At most 256
+subscriptions can be registered over one VM's lifetime, including disposed ones.
+
+Supported kinds are `matched` (all matching phases), `begin`, `update`, `end`,
+`cancel`, `skipped`, `ready`, `reload`, `session_changed`, `recovery` and `stop`.
+Rule callbacks receive `{fence, event}`; `event` is the existing typed rule
+outcome, including its source, monotonic time and applicable gesture identity,
+ordinal, stage, action declaration and frozen target. No raw input is supplied.
+The fence contains broker, configuration and session generations. `ready`
+receives `{fence, seat}`; reload/stop receive `{fence}` and session/recovery
+receive `{fence, state}`. Recovery here describes session inhibition, not all
+future device/routing recovery hooks. Stop delivery has a 250 ms grace; stalled
+or still-initializing VMs are terminated after it.
+
+Successful configuration/session transitions discard the retired VM, queued
+work and logs, then instantiate the approved source for the new fence. Closure
+state and subscriptions restart. Failed configuration reloads retain the current
+source generation. Input events arriving during source loading are queued with
+byte/count bounds. Progress may be coalesced; overflow retires the Lua component.
+
+Callbacks are observational: action constructors still produce declarations and
+these subscriptions cannot execute commands, claim input or call adapters.
+`log.info(message, fields)` appends a structured record; `fields` defaults to
+nil and must be JSON-compatible, at most 16 levels deep. Messages have a 1 KiB
+limit; the whole event can produce at most 32 records/16 KiB. Logs appear as
+`lua_log` JSON rows from `session --json --lua`, with their active fence.
+Logging during configuration evaluation is rejected. Logs commit only if every
+callback for that event succeeds.
+
+Each callback has 100,000 fuel units and the complete event dispatch has a
+20 ms elapsed budget. Callbacks cannot yield or return data. Syntax, runtime,
+resource or transport failure retires the Lua component until a new generation;
+the agent keeps its broker lease and ordinary observations. The parent also
+bounds response time, queues and source assembly. The helper has no new
+privileges, no inherited input descriptors, and Linux data/heap/core limits.
+CPU limits are renewed per operation while preserving an inherited hard limit.
 
 ## Configuration and rule constructors
 
@@ -113,7 +173,8 @@ deadline. Root brokers clear supplementary groups and use UID/GID 65534 for
 that process; it has no new privileges and is killed if its parent dies.
 Trusted VM/API setup is separate from the user-source budget; its bootstrap has
 a separate bounded execution window. The approved serialized model is capped
-at 1 MiB, and compiler diagnostics at 4 KiB. Failed or abandoned children are
+at 1 MiB; the source/model/registration snapshot is capped at 4 MiB, and compiler
+diagnostics at 4 KiB. Failed or abandoned children are
 killed and reaped. These bounds do not establish a complete system-call sandbox.
 Syntax/runtime errors include the named Lua chunk; schema errors identify invalid
 data. A rejected model does not become the worker's active configuration.

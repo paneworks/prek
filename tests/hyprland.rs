@@ -640,9 +640,14 @@ fn broker_cli_session_fixture() {
         .mode(0o600)
         .open("/run/user/1000/prek-broker-agent.stderr")
         .unwrap();
-    let mut agent = Command::new(&binary)
+    let mut command = Command::new(&binary);
+    if std::env::var("PREK_LUA_EVENTS").as_deref() == Ok("1") {
+        command.arg("session").arg("--lua");
+    } else {
+        command.arg("session");
+    }
+    let mut agent = command
         .args([
-            "session",
             "--socket",
             "/run/prek-control/control.sock",
             "--json",

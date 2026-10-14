@@ -7,6 +7,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod runtime;
+#[cfg(target_os = "linux")]
+pub mod session;
+pub mod source_transfer;
+pub use runtime::{Definition, EventKind, LogRecord, MAX_SNAPSHOT_BYTES, Registration, Runtime};
+
 pub const API_VERSION: u32 = 1;
 /// Implemented configuration exports. Runtime families remain explicit work
 /// in PLAN.md; discovery never advertises an unimplemented binding.
@@ -17,6 +23,9 @@ pub fn api() -> serde_json::Value {
         serde_json::json!({"name":"rules.define", "signature":"rules.define(table) -> Rule", "description":"Declare a rule; strict validation occurs at compilation."}),
         serde_json::json!({"name":"units.duration", "signature":"units.duration(string) -> string", "description":"Declare an explicitly unit-qualified duration."}),
         serde_json::json!({"name":"units.distance", "signature":"units.distance(string) -> string", "description":"Declare an explicitly unit-qualified distance."}),
+        serde_json::json!({"name":"events.on", "signature":"events.on(kind, callback) -> Subscription", "description":"Subscribe to approved semantic or lifecycle events in this session generation; registration has no evaluation effects."}),
+        serde_json::json!({"name":"Subscription.dispose", "receiver":"Subscription", "signature":"subscription:dispose() -> nil", "description":"Idempotently disable this subscription before its next invocation."}),
+        serde_json::json!({"name":"log.info", "signature":"log.info(message, fields = nil) -> nil", "description":"Append a bounded structured log in an event callback; unavailable during configuration evaluation."}),
     ];
     for kind in [
         "key",
@@ -45,10 +54,13 @@ pub fn api() -> serde_json::Value {
             "description":"Declare an action; configuration evaluation does not execute it."}));
     }
     serde_json::json!({"api_version":API_VERSION,"schema_version":crate::config::SCHEMA_VERSION,
-        "engine":"onix-os/luna", "engine_version":"0.5.1", "phase":"configuration",
+        "engine":"onix-os/luna", "engine_version":"0.5.1", "phase":"configuration_and_session_events",
         "symbols":symbols, "limits":{"source_bytes":MAX_CONFIG_BYTES,"memory_bytes":MEMORY,
         "instructions":INSTRUCTIONS,"time_ms":TIME.as_millis(),"value_depth":64},
-        "runtime_api":"pending"})
+        "runtime_limits":{"subscriptions":256,"callback_instructions":100000,"callback_time_ms":20,"event_bytes":65536,"log_bytes":16384,"logs_per_event":32},
+        "event_kinds":["matched","begin","update","end","cancel","skipped","ready","reload","stop","recovery","session_changed"],
+        "runtime_requires":{"uid":"unprivileged active session","capabilities":["context","observations","lua_events"],"thread":"owning Luna arena","generation":"current broker/configuration/session fence"},
+        "runtime_api":"partial"})
 }
 const MEMORY: usize = 32 * 1024 * 1024;
 const INSTRUCTIONS: i32 = 1_000_000;
@@ -57,6 +69,21 @@ const TIME: Duration = Duration::from_millis(250);
 const BOOTSTRAP: &str = r#"
 local api = __prek
 __prek = nil
+local registrations = __prek_registry
+__prek_registry = nil
+local allowed_events = {
+    matched=true, begin=true, update=true, ["end"]=true, cancel=true,
+    skipped=true, ready=true, reload=true, stop=true, recovery=true,
+    session_changed=true,
+}
+function api.events.on(kind, callback)
+    assert(allowed_events[kind], "unsupported event subscription")
+    assert(type(callback) == "function", "events.on expects a callback")
+    assert(#registrations < 256, "Lua subscription limit exceeded")
+    local entry = {id=#registrations+1, kind=kind, callback=callback, active=true}
+    registrations[entry.id] = entry
+    return {dispose=function(self) entry.active=false end}
+end
 function api.config.new(value)
     assert(type(value) == "table", "config.new expects a table")
     if value.version == nil then value.version = 1 end
@@ -107,22 +134,42 @@ fn error(value: impl std::fmt::Display) -> ConfigError {
     ConfigError(value.to_string())
 }
 
-fn drive(
+fn drive_budget(
     lua: &mut Lua,
     executor: &StashedExecutor,
     started: Instant,
     time_limit: Duration,
+    instructions: i32,
 ) -> Result<(), ConfigError> {
-    let mut remaining = INSTRUCTIONS;
+    drive_progress(
+        lua,
+        executor,
+        started,
+        time_limit,
+        instructions,
+        &mut || Ok(()),
+    )
+}
+
+fn drive_progress(
+    lua: &mut Lua,
+    executor: &StashedExecutor,
+    started: Instant,
+    time_limit: Duration,
+    instructions: i32,
+    progress: &mut dyn FnMut() -> io::Result<()>,
+) -> Result<(), ConfigError> {
+    let mut remaining = instructions;
     loop {
+        progress().map_err(error)?;
         if started.elapsed() >= time_limit {
-            return Err(error("Lua configuration time limit exceeded"));
+            return Err(error("Lua execution time limit exceeded"));
         }
         if lua.total_memory() > MEMORY {
-            return Err(error("Lua configuration memory limit exceeded"));
+            return Err(error("Lua execution memory limit exceeded"));
         }
         if remaining <= 0 {
-            return Err(error("Lua configuration instruction limit exceeded"));
+            return Err(error("Lua execution instruction limit exceeded"));
         }
         let budget = remaining.min(SLICE);
         let mut fuel = Fuel::with(budget);
@@ -132,10 +179,10 @@ fn drive(
         remaining -= budget.saturating_sub(fuel.remaining()).max(1);
         if done {
             if lua.total_memory() > MEMORY {
-                return Err(error("Lua configuration memory limit exceeded"));
+                return Err(error("Lua execution memory limit exceeded"));
             }
             if started.elapsed() >= time_limit {
-                return Err(error("Lua configuration time limit exceeded"));
+                return Err(error("Lua execution time limit exceeded"));
             }
             return Ok(());
         }
@@ -154,48 +201,78 @@ fn start(lua: &mut Lua, name: &str, source: &str) -> Result<StashedExecutor, Con
 /// Callers loading untrusted sources must isolate compilation from their input
 /// loop; the returned model owns no arena values, callbacks or descriptors.
 pub fn compile(source: &str, name: &str) -> Result<Config, ConfigError> {
+    let mut runtime = Runtime::load(source, name)?;
+    if !runtime.registrations()?.is_empty() {
+        return Err(error(
+            "Lua subscriptions require the runtime snapshot loader",
+        ));
+    }
+    Ok(runtime.config)
+}
+
+fn instantiate(
+    source: &str,
+    name: &str,
+    progress: &mut dyn FnMut() -> io::Result<()>,
+) -> Result<Runtime, ConfigError> {
     if source.len() > MAX_CONFIG_BYTES {
         return Err(error("configuration exceeds 1 MiB"));
     }
     let mut lua = Lua::core();
     lua.set_memory_limit(Some(MEMORY));
-    lua.try_enter(|ctx| {
-        ctx.set_max_call_depth(256);
-        let module = Table::new(&ctx);
-        module.set(ctx, "api_version", API_VERSION)?;
-        module.set(ctx, "version", env!("CARGO_PKG_VERSION"))?;
-        module.set(
-            ctx,
-            "api",
-            luna_util::serde::to_value(ctx, &api()).map_err(io::Error::other)?,
-        )?;
-        for namespace in ["config", "rules", "triggers", "actions", "units"] {
-            module.set(ctx, namespace, Table::new(&ctx))?;
-        }
-        let config: Table = module.get(ctx, "config")?;
-        config.set(
-            ctx,
-            "preset",
-            Callback::from_fn(&ctx, |ctx, _, mut stack| {
-                let name: luna::String = stack.consume(ctx)?;
-                let preset = Config::preset(
-                    name.to_str()
-                        .map_err(|err| io::Error::other(err.to_string()))?,
-                )
-                .map_err(io::Error::other)?;
-                let value = luna_util::serde::to_value(ctx, &preset).map_err(io::Error::other)?;
-                stack.replace(ctx, value);
-                Ok(CallbackReturn::Return)
-            }),
-        )?;
-        ctx.globals().set(ctx, "__prek", module)?;
-        Ok(())
-    })
-    .map_err(error)?;
+    let host = std::rc::Rc::new(std::cell::RefCell::new(runtime::Host::default()));
+    let registry = lua
+        .try_enter(|ctx| {
+            ctx.set_max_call_depth(256);
+            let module = Table::new(&ctx);
+            module.set(ctx, "api_version", API_VERSION)?;
+            module.set(ctx, "version", env!("CARGO_PKG_VERSION"))?;
+            module.set(
+                ctx,
+                "api",
+                luna_util::serde::to_value(ctx, &api()).map_err(io::Error::other)?,
+            )?;
+            for namespace in [
+                "config", "rules", "triggers", "actions", "units", "events", "log",
+            ] {
+                module.set(ctx, namespace, Table::new(&ctx))?;
+            }
+            let config: Table = module.get(ctx, "config")?;
+            config.set(
+                ctx,
+                "preset",
+                Callback::from_fn(&ctx, |ctx, _, mut stack| {
+                    let name: luna::String = stack.consume(ctx)?;
+                    let preset = Config::preset(
+                        name.to_str()
+                            .map_err(|err| io::Error::other(err.to_string()))?,
+                    )
+                    .map_err(io::Error::other)?;
+                    let value =
+                        luna_util::serde::to_value(ctx, &preset).map_err(io::Error::other)?;
+                    stack.replace(ctx, value);
+                    Ok(CallbackReturn::Return)
+                }),
+            )?;
+            ctx.globals().set(ctx, "__prek", module)?;
+            let registry = Table::new(&ctx);
+            ctx.globals().set(ctx, "__prek_registry", registry)?;
+            let log: Table = module.get(ctx, "log")?;
+            log.set(ctx, "info", runtime::logger(&ctx, host.clone()))?;
+            Ok(ctx.stash(registry))
+        })
+        .map_err(error)?;
     let bootstrap = start(&mut lua, "prek configuration API", BOOTSTRAP)?;
     // The pinned library/bootstrap contains no user code. Its initialization
     // is separate from the untrusted source's compilation/execution budget.
-    drive(&mut lua, &bootstrap, Instant::now(), Duration::from_secs(1))?;
+    drive_progress(
+        &mut lua,
+        &bootstrap,
+        Instant::now(),
+        Duration::from_secs(1),
+        INSTRUCTIONS,
+        progress,
+    )?;
     lua.try_enter(|ctx| {
         ctx.fetch(&bootstrap)
             .take_result::<()>(ctx)
@@ -205,7 +282,7 @@ pub fn compile(source: &str, name: &str) -> Result<Config, ConfigError> {
     .map_err(error)?;
     let started = Instant::now();
     let executor = start(&mut lua, name, source)?;
-    drive(&mut lua, &executor, started, TIME)?;
+    drive_progress(&mut lua, &executor, started, TIME, INSTRUCTIONS, progress)?;
     let config = lua
         .try_enter(|ctx| {
             let active = ctx.fetch(&executor);
@@ -227,7 +304,13 @@ pub fn compile(source: &str, name: &str) -> Result<Config, ConfigError> {
             Ok(config)
         })
         .map_err(error)?;
-    Ok(config)
+    Ok(Runtime {
+        lua,
+        registry,
+        host,
+        config,
+        failed: false,
+    })
 }
 
 #[cfg(test)]
@@ -279,12 +362,16 @@ mod tests {
     fn manifest_exports_resolve_to_real_configuration_functions() {
         let mut source = "local p=require('prek');\n".to_owned();
         for symbol in api()["symbols"].as_array().unwrap() {
+            if symbol["receiver"] == "Subscription" {
+                source.push_str("local handle=p.events.on('ready',function()end); assert(type(handle.dispose)=='function'); handle:dispose();\n");
+                continue;
+            }
             source.push_str(&format!(
                 "assert(type(p.{}) == 'function');\n",
                 symbol["name"].as_str().unwrap()
             ));
         }
         source.push_str("return {version=1}");
-        compile(&source, "api-parity.lua").unwrap();
+        Definition::compile(&source, "api-parity.lua").unwrap();
     }
 }

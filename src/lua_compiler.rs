@@ -26,6 +26,7 @@ const IO_SLICE: usize = 64 * 1024;
 pub struct Compiled {
     pub text: String,
     pub config: Config,
+    pub runtime: Option<crate::lua::Definition>,
 }
 pub struct Job {
     child: Child,
@@ -37,6 +38,7 @@ pub struct Job {
     written: usize,
     result: Vec<u8>,
     diagnostics: Vec<u8>,
+    name: String,
     expires: Duration,
     finished: bool,
 }
@@ -69,6 +71,11 @@ fn limit(resource: libc::__rlimit_resource_t, value: u64) -> io::Result<()> {
 }
 /// Called after exec, so loader setup is independent from the Lua heap limit.
 pub fn worker_limits() -> io::Result<()> {
+    runtime_limits()?;
+    limit(libc::RLIMIT_CPU, 2)?;
+    Ok(())
+}
+pub(crate) fn runtime_limits() -> io::Result<()> {
     if unsafe { libc::geteuid() } == 0 {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -77,7 +84,26 @@ pub fn worker_limits() -> io::Result<()> {
     }
     limit(libc::RLIMIT_CORE, 0)?;
     limit(libc::RLIMIT_DATA, PROCESS_MEMORY)?;
-    limit(libc::RLIMIT_CPU, 2)?;
+    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+pub(crate) fn runtime_cpu_budget() -> io::Result<()> {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+    let mut limits = std::mem::MaybeUninit::<libc::rlimit>::zeroed();
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } != 0
+        || unsafe { libc::getrlimit(libc::RLIMIT_CPU, limits.as_mut_ptr()) } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let usage = unsafe { usage.assume_init() };
+    let mut limits = unsafe { limits.assume_init() };
+    let used = (usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) as u64;
+    limits.rlim_cur = used.saturating_add(3).min(limits.rlim_max);
+    if unsafe { libc::setrlimit(libc::RLIMIT_CPU, &limits) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
     Ok(())
 }
 impl Job {
@@ -142,6 +168,7 @@ impl Job {
             written: 0,
             result: Vec::new(),
             diagnostics: Vec::new(),
+            name: name.into(),
             expires,
             finished: false,
         };
@@ -202,10 +229,13 @@ impl Job {
             }
             if self.written == self.source.len() {
                 self.input.take();
-                self.source.clear();
             }
         }
-        drain(&mut self.output, &mut self.result, MAX_CONFIG_BYTES)?;
+        drain(
+            &mut self.output,
+            &mut self.result,
+            crate::lua::MAX_SNAPSHOT_BYTES,
+        )?;
         drain(&mut self.error, &mut self.diagnostics, MAX_ERROR)?;
         if let Some(status) = self.child.try_wait()? {
             if self.output.is_some() || self.error.is_some() {
@@ -220,10 +250,21 @@ impl Job {
                     reason
                 }));
             }
-            let text =
-                String::from_utf8(std::mem::take(&mut self.result)).map_err(io::Error::other)?;
-            let config = Config::parse(&text).map_err(io::Error::other)?;
-            return Ok(Some(Compiled { text, config }));
+            let definition: crate::lua::Definition =
+                serde_json::from_slice(&self.result).map_err(io::Error::other)?;
+            if definition.source.as_bytes() != self.source || definition.name != self.name {
+                return Err(io::Error::other(
+                    "Lua compiler returned a different source snapshot",
+                ));
+            }
+            let config = definition.validate().map_err(io::Error::other)?;
+            let text = definition.model.clone();
+            let runtime = (!definition.registrations.is_empty()).then_some(definition);
+            return Ok(Some(Compiled {
+                text,
+                config,
+                runtime,
+            }));
         }
         Ok(None)
     }

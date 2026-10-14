@@ -43,6 +43,7 @@ impl Fence {
 pub enum Capability {
     Context,
     Observations,
+    LuaEvents,
     HyprlandActions,
     MorfActions,
     PowerActions,
@@ -87,6 +88,10 @@ pub enum Request {
     Heartbeat {
         fence: Fence,
     },
+    LuaSource {
+        fence: Fence,
+        offset: usize,
+    },
     Context {
         fence: Fence,
         snapshot: Box<Snapshot>,
@@ -124,6 +129,7 @@ impl Request {
         match self {
             Self::Register { .. } | Self::Reload { .. } => None,
             Self::Heartbeat { fence }
+            | Self::LuaSource { fence, .. }
             | Self::Context { fence, .. }
             | Self::LockRequested { fence }
             | Self::Authorize { fence, .. }
@@ -138,6 +144,12 @@ impl Request {
             fence.validate()?;
         }
         match self {
+            Self::LuaSource { offset, .. }
+                if *offset > crate::lua::MAX_SNAPSHOT_BYTES
+                    || *offset % crate::lua::source_transfer::CHUNK_BYTES != 0 =>
+            {
+                return Err(invalid("invalid Lua source request offset"));
+            }
             Self::Register { instance, .. }
                 if instance.is_empty()
                     || instance.len() > 160
@@ -208,6 +220,13 @@ pub enum Reply {
         fence: Fence,
         event: Box<Event>,
     },
+    LuaSource {
+        fence: Fence,
+        offset: usize,
+        bytes: usize,
+        #[serde(with = "crate::lua::source_transfer::chunk_bytes")]
+        data: Vec<u8>,
+    },
     /// Only the routing/action service may construct dispatches after checking
     /// ownership, current registration, frozen target and negotiated capability.
     Dispatch {
@@ -241,6 +260,7 @@ impl Reply {
             | Self::Configuration { fence }
             | Self::SessionChanged { fence, .. }
             | Self::Observation { fence, .. }
+            | Self::LuaSource { fence, .. }
             | Self::Dispatch { fence, .. }
             | Self::Execute { fence, .. }
             | Self::Revoked { fence, .. } => Some(*fence),
@@ -254,6 +274,18 @@ impl Reply {
             !value.is_empty() && value.len() <= 1024 && !value.chars().any(char::is_control)
         };
         match self {
+            Self::LuaSource {
+                offset,
+                bytes,
+                data,
+                ..
+            } if *bytes > crate::lua::MAX_SNAPSHOT_BYTES
+                || *offset > *bytes
+                || data.len() > crate::lua::source_transfer::CHUNK_BYTES
+                || data.len() != crate::lua::source_transfer::CHUNK_BYTES.min(*bytes - *offset) =>
+            {
+                return Err(invalid("invalid Lua source reply size or offset"));
+            }
             Self::ReloadResult {
                 configuration,
                 error,
