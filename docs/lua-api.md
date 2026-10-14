@@ -31,8 +31,9 @@ Create a preset with `prek init --preset minimal --output config.lua`, validate
 it with `prek check --config config.lua`, and use it with `replay`, `doctor`,
 `run` or `broker`. The broker validates its protected system file and transfers
 the compiled Rust model to the device worker; that worker evaluates no Lua
-while reading or forwarding input. The current compiler runs synchronously;
-isolated asynchronous compilation and runtime callback generations remain work.
+while reading or forwarding input. The broker compiles reloads asynchronously
+in a disposable unprivileged process and retains its last approved model on
+failure. Runtime callback generations remain work.
 
 ## Configuration and rule constructors
 
@@ -106,9 +107,13 @@ deterministic. A configuration cannot yield or return multiple values.
 Source is limited to 1 MiB, execution to 1,000,000 instruction-fuel units and
 250 ms for user source evaluation, arena memory to a 32 MiB check between VM slices, and returned values to
 64 nesting levels. Memory checks are slice-granular and do not promise a hard
-allocation ceiling. Compilation/process isolation remains a separate requirement.
+allocation ceiling. Each CLI compilation runs in a separate process with a
+256 MiB Linux data/heap limit, two-second CPU limit and two-second parent
+deadline. Root brokers clear supplementary groups and use UID/GID 65534 for
+that process; it has no new privileges and is killed if its parent dies.
 Trusted VM/API setup is separate from the user-source budget; its bootstrap has
-a separate bounded execution window. Expanded model size and total process
-memory need the isolated compiler limits planned for the next integration stage.
+a separate bounded execution window. The approved serialized model is capped
+at 1 MiB, and compiler diagnostics at 4 KiB. Failed or abandoned children are
+killed and reaped. These bounds do not establish a complete system-call sandbox.
 Syntax/runtime errors include the named Lua chunk; schema errors identify invalid
 data. A rejected model does not become the worker's active configuration.

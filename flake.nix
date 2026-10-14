@@ -29,7 +29,8 @@
               substitute ${./udev/70-prek.rules} "$out/lib/udev/rules.d/70-prek.rules" \
                 --replace-fail '@prek@' "$out/bin/prek"
               mkdir -p "$out/share/doc/prek"
-              cp ${./docs/lua-api.md} ${./docs/lua-api.json} "$out/share/doc/prek/"
+              cp ${./docs/lua-api.md} "$out/share/doc/prek/lua-api.md"
+              cp ${./docs/lua-api.json} "$out/share/doc/prek/lua-api.json"
             '';
             meta = {
               description = "Low-level Linux input tools and gesture recognition";

@@ -32,6 +32,8 @@ pub mod learner;
 pub mod linux;
 pub mod lua;
 #[cfg(target_os = "linux")]
+pub mod lua_compiler;
+#[cfg(target_os = "linux")]
 pub mod morf;
 pub mod paths;
 pub mod protocol;

@@ -160,6 +160,32 @@ pkgs.testers.runNixOSTest {
     machine.wait_until_succeeds("grep -q reloaded_hold /run/user/1000/prek-broker-agent.jsonl", timeout=3)
     fresh = rule_matches()[-1]
     assert fresh["config_generation"] == 2 and fresh["action"]["name"] == "reloaded_hold", fresh
+    ${pkgs.lib.optionalString lua ''
+    # Shared Lua tables expand into independent Rust strings. Failure stays
+    # inside the disposable compiler and leaves the held-key rule active.
+    oversized = "\n".join([
+        "local p = require('prek')",
+        "local config = p.config.preset('minimal')",
+        "local argv = {'fixture'}",
+        "local argument = string.rep('x', 4096)",
+        "for i = 2, 256 do argv[i] = argument end",
+        "config.rules = {}",
+        "for i = 1, 1024 do",
+        "  config.rules[i] = {id = 'expanded-' .. i,",
+        "    trigger = p.triggers.key {key = 'KEY_A'},",
+        "    action = p.actions.command {argv = argv}}",
+        "end", "return config",
+    ])
+    before = len(rule_matches())
+    inject("release-before-oversized")
+    inject("press-during-oversized")
+    machine.succeed("cat > /run/prek-control/config.toml <<'CONFIG'\n" + oversized + "\nCONFIG")
+    machine.fail("${package}/bin/prek reload --socket /run/prek-control/control.sock --json", timeout=5)
+    machine.wait_until_succeeds(f"test $(grep -c '\"outcome\":\"matched\"' /run/user/1000/prek-broker-agent.jsonl) -gt {before}", timeout=3)
+    fresh = rule_matches()[-1]
+    assert fresh["config_generation"] == 2 and fresh["action"]["name"] == "reloaded_hold", fresh
+    machine.succeed("systemctl is-active prek-broker")
+    ''}
     machine.succeed("printf failed-reload > /run/user/1000/prek-broker-inspect")
     machine.wait_until_succeeds("test -s /run/user/1000/prek-broker-status.json", timeout=3)
     status = __import__("json").loads(machine.succeed("cat /run/user/1000/prek-broker-status.json"))

@@ -425,6 +425,61 @@ fn t85_installed_api_discovery_matches_the_configuration_manifest() {
     assert_eq!(actual["runtime_api"], "pending");
 }
 
+#[test]
+fn t88_isolated_lua_rejects_expansion_and_recovers_for_the_next_compile() {
+    let directory = Directory::new();
+    let path = directory.0.join("bounded.lua");
+    // Reused Lua tables occupy little arena memory but expand when decoded
+    // into owned Rust strings. Neither failure may terminate the CLI parent.
+    for (rules, arguments, bytes) in [(32, 32, 4096), (1024, 256, 4096)] {
+        let source = format!(
+            r#"
+local p = require("prek")
+local config = p.config.preset("minimal")
+local argv = {{"fixture"}}
+local argument = string.rep("x", {bytes})
+for i = 2, {arguments} do argv[i] = argument end
+config.rules = {{}}
+for i = 1, {rules} do
+    config.rules[i] = {{id = "expanded-" .. i, enabled = true,
+        trigger = p.triggers.key {{key = "KEY_A"}},
+        action = p.actions.command {{argv = argv}}}}
+end
+return config
+"#
+        );
+        fs::write(&path, source).unwrap();
+        let rejected = run(&["check", "--config", path.to_str().unwrap()]);
+        assert!(!rejected.status.success());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            assert_eq!(
+                rejected.status.signal(),
+                None,
+                "parent must survive helper failure"
+            );
+        }
+        assert!(!rejected.stderr.is_empty());
+        let error = String::from_utf8_lossy(&rejected.stderr);
+        assert!(
+            error.contains("model exceeds")
+                || error.contains("compiler failed")
+                || error.contains("timed out")
+                || error.contains("memory allocation")
+                || (rules == 1024 && error.contains("time limit exceeded")),
+            "{error}"
+        );
+    }
+    fs::write(&path, "return require('prek').config.preset('minimal')").unwrap();
+    let checked = run(&["check", "--config", path.to_str().unwrap(), "--json"]);
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+}
+
 impl Directory {
     fn new() -> Self {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

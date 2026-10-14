@@ -25,6 +25,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Internal disposable compiler; reads source on stdin and owns no input.
+    #[command(hide = true)]
+    LuaCompileWorker {
+        #[arg(long)]
+        name: String,
+    },
     /// Deliberately learn one shape without grabbing input or binding an action.
     LearnShape {
         name: String,
@@ -221,6 +227,20 @@ fn main() -> ExitCode {
 fn run(command: Command) -> io::Result<()> {
     let mut output = io::stdout().lock();
     match command {
+        Command::LuaCompileWorker { name } => {
+            prek::lua_compiler::worker_limits()?;
+            let mut source = String::new();
+            io::Read::read_to_string(
+                &mut io::Read::take(io::stdin(), (prek::config::MAX_CONFIG_BYTES + 1) as u64),
+                &mut source,
+            )?;
+            let config = prek::lua::compile(&source, &name).map_err(io::Error::other)?;
+            let text = toml::to_string(&config).map_err(io::Error::other)?;
+            if text.len() > prek::config::MAX_CONFIG_BYTES {
+                return Err(io::Error::other("expanded Lua model exceeds 1 MiB"));
+            }
+            write!(output, "{text}")
+        }
         Command::Api { json } => {
             let api = prek::lua::api();
             if json {
@@ -388,8 +408,7 @@ fn run(command: Command) -> io::Result<()> {
             json,
             duration,
         } => {
-            prek::config::Config::parse_named(&read_config(&path)?, &path.to_string_lossy())
-                .map_err(io::Error::other)?;
+            compile_config(read_config(&path)?, &path)?;
             if mode != "observe" {
                 return Err(io::Error::other(
                     "routing is unavailable: virtual-device readiness, ownership and recovery gates are pending",
@@ -408,8 +427,7 @@ fn run(command: Command) -> io::Result<()> {
             let config = if let Some(channel) = control.as_mut() {
                 prek::worker::bootstrap(channel, &mut health)?
             } else {
-                prek::config::Config::parse_named(&read_config(&path)?, &path.to_string_lossy())
-                    .map_err(io::Error::other)?
+                compile_config(read_config(&path)?, &path)?.config
             };
             let engine = prek::rules::Engine::new(config.clone())?;
             let paths = Vec::new();
@@ -440,9 +458,7 @@ fn run(command: Command) -> io::Result<()> {
             )
         }
         Command::Doctor { config: path, json } => {
-            let config =
-                prek::config::Config::parse_named(&read_config(&path)?, &path.to_string_lossy())
-                    .map_err(io::Error::other)?;
+            let config = compile_config(read_config(&path)?, &path)?.config;
             let report = prek::diagnostics::Report::inspect(&config, &linux::inventory()?);
             if json {
                 serde_json::to_writer(&mut output, &report).map_err(io::Error::other)?;
@@ -481,13 +497,14 @@ fn run(command: Command) -> io::Result<()> {
         }
         Command::Check { config: path, json } => {
             let text = read_config(&path)?;
-            let config = prek::config::Config::parse_named(&text, &path.to_string_lossy())
+            let config = compile_config(text, &path)
                 .map_err(|error| {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!("{}: {error}", path.display()),
                     )
-                })?;
+                })?
+                .config;
             if json {
                 serde_json::to_writer(&mut output,&serde_json::json!({ "version":prek::config::SCHEMA_VERSION,"status":"valid","mode":config.mode,"rules":config.rules.len(),"selectors":config.devices.len() })).map_err(io::Error::other)?;
                 writeln!(output)?;
@@ -565,11 +582,7 @@ fn run(command: Command) -> io::Result<()> {
             check,
             json,
         } => {
-            let config = prek::config::Config::parse_named(
-                &read_config(&config_path)?,
-                &config_path.to_string_lossy(),
-            )
-            .map_err(io::Error::other)?;
+            let config = compile_config(read_config(&config_path)?, &config_path)?.config;
             let mut engine = prek::rules::Engine::new(config)?;
             prek::replay::visit(&mut BufReader::new(File::open(path)?), |record| {
                 engine.push(record)
@@ -650,9 +663,8 @@ fn run_broker(
         ));
     }
     let text = read_system_config(config_path)?;
-    let config = prek::config::Config::parse_named(&text, &config_path.to_string_lossy())
-        .map_err(io::Error::other)?;
-    let text = approved_worker_source(text, config_path, &config)?;
+    let compiled = compile_config(text, config_path)?;
+    let (text, config) = (compiled.text, compiled.config);
     // Compile before touching runtime state or starting the device worker.
     prek::rules::Engine::new(config.clone())?;
     std::fs::create_dir_all(runtime)?;
@@ -692,6 +704,7 @@ fn run_broker(
         config,
         monotonic()? + prek::configuration::INSTALL_TIMEOUT,
     ));
+    let mut compiler: Option<prek::lua_compiler::Job> = None;
     let mut startup = true;
     loop {
         if signals.requested() {
@@ -723,34 +736,74 @@ fn run_broker(
             ));
         }
         if broker.take_reload_request() {
-            if installation.is_some() {
+            if installation.is_some() || compiler.is_some() {
                 broker.finish_reload(
-                    Err("worker configuration installation is in progress".into()),
+                    Err("configuration compilation or installation is in progress".into()),
                     now,
                 )?;
             } else {
                 let proposed = read_system_config(config_path).and_then(|text| {
-                    let config =
-                        prek::config::Config::parse_named(&text, &config_path.to_string_lossy())
-                            .map_err(io::Error::other)?;
-                    let text = approved_worker_source(text, config_path, &config)?;
-                    prek::rules::Engine::new(config.clone())?;
-                    Ok((text, config))
+                    if config_path
+                        .extension()
+                        .is_some_and(|extension| extension == "lua")
+                    {
+                        compiler = Some(spawn_compiler(text, config_path)?);
+                        Ok(None)
+                    } else {
+                        let compiled = compile_config(text, config_path)?;
+                        prek::rules::Engine::new(compiled.config.clone())?;
+                        Ok(Some(compiled))
+                    }
                 });
                 match proposed {
-                    Ok((text, config)) => {
+                    Ok(Some(compiled)) => {
+                        let config = compiled.config;
                         let generation =
                             broker.configuration().checked_add(1).ok_or_else(|| {
                                 io::Error::other("configuration generation exhausted")
                             })?;
-                        transfer = Some(prek::configuration::Transfer::new(text, generation)?);
+                        transfer = Some(prek::configuration::Transfer::new(
+                            compiled.text,
+                            generation,
+                        )?);
                         installation = Some((
                             generation,
                             config,
                             now + prek::configuration::INSTALL_TIMEOUT,
                         ));
                     }
+                    Ok(None) => {}
                     Err(error) => broker.finish_reload(Err(error.to_string()), now)?,
+                }
+            }
+        }
+        if let Some(job) = compiler.as_mut() {
+            match job.step() {
+                Ok(Some(compiled)) => {
+                    compiler = None;
+                    match prek::rules::Engine::new(compiled.config.clone()) {
+                        Ok(_) => {
+                            let generation =
+                                broker.configuration().checked_add(1).ok_or_else(|| {
+                                    io::Error::other("configuration generation exhausted")
+                                })?;
+                            transfer = Some(prek::configuration::Transfer::new(
+                                compiled.text,
+                                generation,
+                            )?);
+                            installation = Some((
+                                generation,
+                                compiled.config,
+                                now + prek::configuration::INSTALL_TIMEOUT,
+                            ));
+                        }
+                        Err(error) => broker.finish_reload(Err(error.to_string()), now)?,
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    compiler = None;
+                    broker.finish_reload(Err(error.to_string()), now)?;
                 }
             }
         }
@@ -847,11 +900,15 @@ fn run_broker(
             .chain([supervisor.deadline()?])
             .chain([refresh])
             .chain(installation.as_ref().map(|(_, _, deadline)| *deadline))
+            .chain(compiler.as_ref().map(prek::lua_compiler::Job::deadline))
             .min()
             .unwrap();
         let timeout =
             PollTimeout::try_from(until.saturating_sub(monotonic()?)).map_err(io::Error::other)?;
         let mut fds = broker.poll_sources();
+        if let Some(job) = &compiler {
+            fds.extend(job.poll_sources());
+        }
         fds.push(PollFd::new(supervisor.as_fd(), PollFlags::POLLIN));
         if !control_closed {
             fds.push(PollFd::new(
@@ -1444,17 +1501,32 @@ impl<W: Write> linux::InputSink for RuleSink<'_, W> {
     }
 }
 
-fn approved_worker_source(
+fn spawn_compiler(text: String, path: &std::path::Path) -> io::Result<prek::lua_compiler::Job> {
+    let executable = std::env::current_exe()?;
+    // Release builds accept no environment-selected compiler executable.
+    #[cfg(debug_assertions)]
+    if let Some(runner) = std::env::var_os("PREK_TEST_RUNNER") {
+        return prek::lua_compiler::Job::spawn_with_runner(
+            std::path::Path::new(&runner),
+            &executable,
+            text,
+            &path.to_string_lossy(),
+        );
+    }
+    prek::lua_compiler::Job::spawn(&executable, text, &path.to_string_lossy())
+}
+
+fn compile_config(
     text: String,
     path: &std::path::Path,
-    config: &prek::config::Config,
-) -> io::Result<String> {
+) -> io::Result<prek::lua_compiler::Compiled> {
     if path.extension().is_some_and(|extension| extension == "lua") {
         // The root-validated model crosses the private channel. The device
         // worker never evaluates the source or rereads its Lua filepath.
-        toml::to_string(config).map_err(io::Error::other)
+        spawn_compiler(text, path)?.wait()
     } else {
-        Ok(text)
+        let config = prek::config::Config::parse(&text).map_err(io::Error::other)?;
+        Ok(prek::lua_compiler::Compiled { text, config })
     }
 }
 
