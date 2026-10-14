@@ -15,7 +15,8 @@ replay. Ordered temporal sequences now compose those recognizers. Exclusive inpu
 routing, broker/session integration and desktop actions are still in progress.
 The current executable does not grab devices or execute configured actions.
 
-The library now also has virtual-device preflight and a bounded raw-frame router.
+The library also has virtual-device preflight, a bounded raw-frame router and
+a configured routing coordinator.
 Preflight models capability/axis preservation, consumer mapping and acknowledgement,
 feedback requirements and neutral handoff. The router models reserve/buffer/observe
 ownership, scheduled fallback, slot reuse, delivery acknowledgements and neutral
@@ -26,6 +27,25 @@ and supervised input takeover are still pending. Devices with repeat support or
 nonzero axis fuzz are refused until transparent forwarding is verified for those
 capabilities.
 Production routing remains disabled.
+
+The configured routing core connects rule candidates to reserve/buffer/observe
+ownership. Consuming candidates require a current context permit and a negotiated
+action consumer; unavailable authority or actions preserve ordinary input.
+Finger joining, rule priority and coherent direction determine ownership before
+passthrough. One-finger input falls through at the join boundary when no eligible
+rule remains, and forwarded input cannot be promoted by later fingers. Swipes
+claim on coherent motion before final travel succeeds; failure or extra fingers
+after claim drain without replay or a trailing click.
+
+Dispatch requests retain gesture/configuration/session identity and frozen
+targets, and are checked again when dequeued. Queues and deadlines are bounded;
+stalled output or dispatch consumers require transport recovery. The default
+decision delay remains 300 ms; explicit configurations may increase it to five
+seconds and callers can inspect the scheduled delivery offset. The isolated VM
+proves configured consumption and unmatched tap delivery against actual evdev
+receivers. Context in those tests is a model fixture. Live broker context/action
+bridges, pre-grab handoff and real application interpretation remain required
+before the CLI can enable routing.
 
 The Hyprland client verifies the IPC socket's owner, compositor process identity
 and executable before querying bounded device inventories. It supports the

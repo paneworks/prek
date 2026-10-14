@@ -233,7 +233,7 @@ impl Router {
             || limits.events < 2
             || limits.events > 262144
             || limits.offset.is_zero()
-            || limits.offset > Duration::from_millis(300)
+            || limits.offset > Duration::from_secs(5)
             || limits.scheduler_slack > Duration::from_millis(100)
         {
             return Err(Fault::InvalidCandidate);
@@ -258,6 +258,9 @@ impl Router {
 
     pub fn ownership(&self) -> Option<Ownership> {
         self.group.as_ref().map(|group| group.ownership)
+    }
+    pub fn physical_neutral(&self) -> bool {
+        self.physical.neutral()
     }
     pub fn queued_frames(&self) -> usize {
         self.queue.len()
@@ -437,9 +440,15 @@ impl Router {
             Ok(starts) => starts,
             Err(error) => return self.fail(error),
         };
+        let begins = starts
+            || candidate.is_some()
+                && frame.events.iter().any(|event| {
+                    matches!(event.kind, crate::input::EV_REL | crate::input::EV_SW)
+                        && event.value != 0
+                });
         // Reject caller mistakes before mutating physical state or decisions.
         if let Some(value) = candidate
-            && (!starts
+            && (!begins
                 || self.group.as_ref().is_some_and(|group| {
                     !self.physical.neutral() || group.ownership != Ownership::Pending
                 })
@@ -461,7 +470,7 @@ impl Router {
         {
             self.forward(frame.at)?;
         }
-        if self.group.is_none() && starts {
+        if self.group.is_none() && begins {
             if let Some(value) = candidate {
                 self.last_candidate = value.id;
             }
@@ -514,6 +523,28 @@ impl Router {
     }
 
     pub fn claim(&mut self, id: u64, authorization: u64, at: Duration) -> Result<(), Fault> {
+        self.claim_inner(id, authorization, at, false)
+    }
+    /// A fully recognized, already-neutral interaction cannot admit another
+    /// contact. The trusted recognizer may resolve it before the join deadline.
+    pub fn claim_finished(
+        &mut self,
+        id: u64,
+        authorization: u64,
+        at: Duration,
+    ) -> Result<(), Fault> {
+        if !self.physical.neutral() {
+            return Err(Fault::InvalidCandidate);
+        }
+        self.claim_inner(id, authorization, at, true)
+    }
+    fn claim_inner(
+        &mut self,
+        id: u64,
+        authorization: u64,
+        at: Duration,
+        finished: bool,
+    ) -> Result<(), Fault> {
         self.authorized(id, authorization)?;
         self.advance(at)?;
         let group = self.group.as_mut().ok_or(Fault::TooLate)?;
@@ -524,6 +555,7 @@ impl Router {
             policy: Policy::Buffer { join, .. },
             ..
         }) = group.candidate
+            && !finished
             && at.saturating_sub(group.first) < join
         {
             return Err(Fault::TooLate);
@@ -537,6 +569,25 @@ impl Router {
         Ok(())
     }
 
+    pub fn claimable(&self, id: u64, authorization: u64, at: Duration) -> Result<(), Fault> {
+        self.authorized(id, authorization)?;
+        let group = self.group.as_ref().ok_or(Fault::TooLate)?;
+        if at < self.last_at {
+            return Err(Fault::BackwardTime);
+        }
+        if group.ownership != Ownership::Pending {
+            return Err(Fault::TooLate);
+        }
+        if let Some(Candidate {
+            policy: Policy::Buffer { join, decision },
+            ..
+        }) = group.candidate
+            && (at >= group.first + decision || !self.physical.neutral() && at < group.first + join)
+        {
+            return Err(Fault::TooLate);
+        }
+        Ok(())
+    }
     /// A rejected pre-claim candidate returns to its ordinary path. Once
     /// claimed, cancellation consumes the remaining releases through neutral.
     pub fn cancel(&mut self, id: u64, authorization: u64, at: Duration) -> Result<(), Fault> {

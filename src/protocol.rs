@@ -45,6 +45,7 @@ pub enum Capability {
     Observations,
     HyprlandActions,
     MorfActions,
+    PowerActions,
     Commands,
     SyntheticInput,
 }

@@ -125,6 +125,37 @@ struct Candidate {
     started: Duration,
     contacts: BTreeSet<crate::input::ContactId>,
     sources: BTreeSet<Source>,
+    peak_contacts: usize,
+    peak_at: Duration,
+}
+#[derive(Clone)]
+pub(crate) struct RouteIntent {
+    pub rule: Rule,
+    candidate: Candidate,
+}
+impl RouteIntent {
+    pub fn id(&self) -> u64 {
+        self.candidate.id
+    }
+    pub fn source(&self) -> &Source {
+        &self.candidate.source
+    }
+    pub fn started(&self) -> Duration {
+        self.candidate.started
+    }
+    pub fn contacts(&self) -> usize {
+        self.candidate.peak_contacts
+    }
+    pub fn joined_at(&self) -> Duration {
+        self.candidate.peak_at
+    }
+    pub fn sources(&self) -> &BTreeSet<Source> {
+        &self.candidate.sources
+    }
+}
+pub(crate) struct RouteOutcome {
+    pub event: Event,
+    pub intent: RouteIntent,
 }
 #[derive(Clone)]
 struct StepMatch {
@@ -156,6 +187,8 @@ struct Worker {
     trace: bool,
     matches: Vec<StepMatch>,
     released: BTreeMap<Source, Duration>,
+    routing: bool,
+    claims: Vec<Candidate>,
 }
 
 /// All current schema triggers have an observation/replay implementation.
@@ -220,6 +253,8 @@ impl Worker {
             trace: false,
             matches: Vec::new(),
             released: BTreeMap::new(),
+            routing: false,
+            claims: Vec::new(),
         })
     }
     fn register(&mut self, state: &DeviceState, config: &Config) -> io::Result<()> {
@@ -307,6 +342,7 @@ pub struct Engine {
     capture_rule: Option<String>,
     captured: Vec<Stroke>,
     sequences: Vec<Sequence>,
+    routing: bool,
 }
 impl Engine {
     pub fn new(config: Config) -> io::Result<Self> {
@@ -348,6 +384,7 @@ impl Engine {
             capture_rule: None,
             captured: Vec::new(),
             sequences,
+            routing: false,
         })
     }
     /// Explicit diagnostic capture only. Ordinary engines never retain or
@@ -383,6 +420,96 @@ impl Engine {
     }
     pub fn config(&self) -> &Config {
         &self.config
+    }
+    pub(crate) fn enable_routing(&mut self) {
+        self.routing = true;
+        for worker in &mut self.workers {
+            worker.routing = true;
+            worker.trace = true;
+        }
+        for sequence in &mut self.sequences {
+            sequence.routing = true;
+            for engine in &mut sequence.steps {
+                engine.enable_routing();
+            }
+        }
+    }
+    pub(crate) fn route_intents(&self) -> Vec<RouteIntent> {
+        let mut result = Vec::new();
+        for worker in &self.workers {
+            result.extend(
+                worker
+                    .candidates
+                    .values()
+                    .cloned()
+                    .map(|candidate| RouteIntent {
+                        rule: worker.rule.clone(),
+                        candidate,
+                    }),
+            );
+        }
+        for sequence in &self.sequences {
+            result.extend(sequence.pending.values().map(|pending| {
+                let mut candidate = pending.first.clone();
+                candidate.id = pending.id;
+                candidate.sources = pending.sources.clone();
+                RouteIntent {
+                    rule: sequence.rule.clone(),
+                    candidate,
+                }
+            }));
+        }
+        result
+    }
+    pub(crate) fn take_route_outcomes(&mut self) -> Vec<RouteOutcome> {
+        let mut result = Vec::new();
+        for worker in &mut self.workers {
+            result.extend(
+                std::mem::take(&mut worker.matches)
+                    .into_iter()
+                    .map(|trace| RouteOutcome {
+                        event: trace.event,
+                        intent: RouteIntent {
+                            rule: worker.rule.clone(),
+                            candidate: trace.candidate,
+                        },
+                    }),
+            );
+        }
+        for sequence in &mut self.sequences {
+            result.append(&mut sequence.outcomes);
+        }
+        result
+    }
+    pub(crate) fn take_route_claims(&mut self) -> Vec<RouteIntent> {
+        let mut result = Vec::new();
+        for worker in &mut self.workers {
+            result.extend(
+                std::mem::take(&mut worker.claims)
+                    .into_iter()
+                    .map(|candidate| RouteIntent {
+                        rule: worker.rule.clone(),
+                        candidate,
+                    }),
+            );
+        }
+        result
+    }
+    pub(crate) fn validate_route(
+        &self,
+        intent: &RouteIntent,
+        at: Duration,
+    ) -> Result<(), Rejection> {
+        if intent.candidate.session_generation != self.authority.generation() {
+            return Err(Rejection::StaleGeneration);
+        }
+        let state = self
+            .devices
+            .get(&intent.source().device)
+            .filter(|state| &state.device.source == intent.source())
+            .ok_or(Rejection::SourceChanged)?;
+        let permit = intent.candidate.permit.as_ref().ok_or(Rejection::Unbound)?;
+        self.authority.validate(permit, input(state, at))
     }
     pub(crate) fn fork_observer(
         &self,
@@ -714,6 +841,9 @@ impl Engine {
         next.generation = generation;
         next.next_id = self.next_id;
         next.authority = self.authority.clone();
+        if self.routing {
+            next.enable_routing();
+        }
         next.last_at = Some(at);
         Ok(next)
     }
@@ -857,6 +987,10 @@ impl Engine {
                     && !frame.contacts.is_empty()
                 {
                     candidate.contacts = frame.contacts.iter().map(|contact| contact.id).collect();
+                    if candidate.contacts.len() > candidate.peak_contacts {
+                        candidate.peak_contacts = candidate.contacts.len();
+                        candidate.peak_at = at;
+                    }
                 }
                 if matches!(worker.rule.trigger, Trigger::Chord { .. }) {
                     for candidate in worker
@@ -1282,6 +1416,8 @@ struct Sequence {
     groups: Vec<SequenceGroup>,
     pending: BTreeMap<String, PendingSequence>,
     reset: BTreeSet<String>,
+    routing: bool,
+    outcomes: Vec<RouteOutcome>,
 }
 fn flatten_sequence(
     trigger: &Trigger,
@@ -1347,6 +1483,8 @@ impl Sequence {
             groups,
             pending: BTreeMap::new(),
             reset: BTreeSet::new(),
+            routing: false,
+            outcomes: Vec::new(),
         })
     }
     fn deadline(&self) -> Option<Duration> {
@@ -1463,6 +1601,7 @@ impl Sequence {
             engine.push(record.clone())?;
             for worker in &mut engine.workers {
                 traces.extend(worker.matches.drain(..).map(|trace| (index, trace)));
+                worker.claims.clear();
             }
             for event in engine.take_events() {
                 match event {
@@ -1675,6 +1814,18 @@ impl Sequence {
                         .and_then(Permit::output)
                         .and_then(|output| output.active_workspace),
                 });
+                if self.routing {
+                    let mut candidate = pending.first.clone();
+                    candidate.id = pending.id;
+                    candidate.sources = pending.sources.clone();
+                    self.outcomes.push(RouteOutcome {
+                        event: events.last().unwrap().clone(),
+                        intent: RouteIntent {
+                            rule: self.rule.clone(),
+                            candidate,
+                        },
+                    });
+                }
                 if *stage == Stage::Begin && !matches!(self.triggers[index], Trigger::Key { .. }) {
                     pending.progress = true;
                 } else if matches!(stage, Stage::Discrete | Stage::End)
@@ -2103,7 +2254,7 @@ fn start_candidate(
     let source = &state.device.source;
     let permit = if !conditions(&worker.rule, keys, &source.seat) {
         Err("activation condition not met".into())
-    } else if context_free(&worker.rule) {
+    } else if context_free(&worker.rule) && !worker.routing {
         Ok(None)
     } else {
         authority
@@ -2130,6 +2281,8 @@ fn start_candidate(
                     started: at,
                     contacts: state.contacts.iter().map(|contact| contact.id).collect(),
                     sources: BTreeSet::from([source.clone()]),
+                    peak_contacts: state.contacts.len(),
+                    peak_at: at,
                 },
             );
         }
@@ -2279,6 +2432,27 @@ fn report_signals(
     events: &mut Vec<Event>,
 ) {
     for signal in signals {
+        if worker.routing
+            && let (
+                Trigger::Swipe {
+                    fingers: wanted,
+                    direction: wanted_direction,
+                    ..
+                },
+                Signal::Touch(event),
+            ) = (&worker.rule.trigger, &signal)
+            && let TouchGesture::Pan {
+                fingers,
+                direction,
+                phase: Phase::Begin | Phase::Update,
+                ..
+            } = &event.gesture
+            && wanted == fingers
+            && direction_matches(*wanted_direction, *direction)
+            && let Some(candidate) = worker.candidates.get(&event.source)
+        {
+            worker.claims.push(candidate.clone());
+        }
         let proposal = match (&worker.rule.trigger, signal) {
             (
                 Trigger::Shape { name, .. },

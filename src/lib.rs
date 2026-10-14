@@ -30,6 +30,7 @@ pub mod paths;
 pub mod protocol;
 pub mod replay;
 pub mod router;
+pub mod routing;
 pub mod rules;
 #[cfg(target_os = "linux")]
 pub mod service;

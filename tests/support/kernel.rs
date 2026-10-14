@@ -14,7 +14,7 @@ use prek::{
     },
     kernel::{Flush, Registry, Virtual},
     router::{Limits, Router},
-    transport::{Consumer, ConsumerEvidence, Descriptor, KernelIdentity, Readiness},
+    transport::{Consumer, ConsumerEvidence, Descriptor, KernelIdentity, Readiness, Ready},
 };
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -381,7 +381,7 @@ fn receiver_identity() -> Consumer {
     }
 }
 
-pub fn route(device: Device, output: &Virtual) -> Router {
+pub fn readiness(device: &Device, output: &Virtual) -> Ready {
     let time = now();
     let spec = output.descriptor();
     let consumer = receiver_identity();
@@ -401,8 +401,11 @@ pub fn route(device: Device, output: &Virtual) -> Router {
     )
     .unwrap();
     gate.neutral(true, time).unwrap();
-    let ready = gate.finish(time).unwrap();
-    Router::new(device, &ready, 1, Limits::default(), time).unwrap()
+    gate.finish(time).unwrap()
+}
+pub fn route(device: Device, output: &Virtual) -> Router {
+    let ready = readiness(&device, output);
+    Router::new(device, &ready, 1, Limits::default(), now()).unwrap()
 }
 
 pub fn deliver(router: &mut Router, output: &mut Virtual, time: Duration) -> bool {

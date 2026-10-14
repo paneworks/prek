@@ -24,6 +24,222 @@ use std::{
     time::{Duration, Instant},
 };
 
+fn configured_touch_delivery(fingers: u16) {
+    use prek::{
+        config::{
+            Action, Config, Context, Delivery, Direction, Distance, Screen, Selector, Trigger,
+        },
+        context::{Binding, OutputState, SessionKind, Snapshot, State},
+        gestures::{Mapping, Output, Point, Transform},
+        protocol::Capability,
+        replay::Record,
+        routing::Routing,
+    };
+    use std::collections::BTreeSet;
+    let registry = authorized();
+    let original = fixture(true);
+    let device = fixture(true);
+    let mut source =
+        Virtual::create(registry.prepare_isolated(descriptor(&original)).unwrap()).unwrap();
+    let mut output_device =
+        Virtual::create(registry.prepare_isolated(descriptor(&device)).unwrap()).unwrap();
+    let mut input = Receiver::open(&source, &device.source);
+    let mut target = Receiver::open(&output_device, &device.source);
+    let mut config = Config::preset("desktop").unwrap();
+    config.mode = prek::config::Mode::Route;
+    config.devices = BTreeMap::from([(
+        "touch".into(),
+        Selector {
+            identity: Some(device.identity.clone()),
+            ..Selector::default()
+        },
+    )]);
+    config.policy.allowed_devices = vec!["touch".into()];
+    let rule = &mut config.rules[0];
+    rule.enabled = true;
+    rule.devices = vec!["touch".into()];
+    rule.contexts = vec![Context::Desktop];
+    rule.delivery = Delivery::Buffer;
+    rule.trigger = Trigger::Swipe {
+        fingers: 2,
+        direction: Direction::Down,
+        travel: Distance::Millimetres(40.0),
+        fallback_travel: Distance::Normalized(0.2),
+        continuous: false,
+    };
+    rule.action = Action::Event {
+        name: "configured-down".into(),
+    };
+    let mut routing = Routing::new(config).unwrap();
+    // Context is a model fixture, not a claim about a real desktop session.
+    // The kernel readiness/delivery proof uses this actual isolated receiver.
+    let geometry = Output {
+        name: "fixture".into(),
+        pixel_width: 600.0,
+        pixel_height: 1200.0,
+        scale: 1.0,
+        origin: Point { x: 0.0, y: 0.0 },
+        transform: Transform::Normal,
+    };
+    routing
+        .authority_mut()
+        .bind(
+            Binding {
+                seat: "seat0".into(),
+                session: "isolated-context".into(),
+                uid: 1000,
+                compositor_pid: 10,
+                compositor_start: 20,
+                kind: SessionKind::User,
+            },
+            true,
+            false,
+        )
+        .unwrap();
+    let time = now();
+    routing
+        .authority_mut()
+        .update(
+            Snapshot {
+                generation: 1,
+                revision: 1,
+                captured_at: time,
+                state: State::Desktop,
+                outputs: vec![OutputState {
+                    geometry: geometry.clone(),
+                    geometry_generation: 2,
+                    active_workspace: Some(1),
+                    screen: Screen::On,
+                    keyboard: None,
+                }],
+                windows: vec![],
+                regions: vec![],
+                secure_overlay: false,
+            },
+            time,
+        )
+        .unwrap();
+    routing.actions_available(1, BTreeSet::from([Capability::Observations]), time);
+    let mut mapping = Mapping::from_device(&device).unwrap();
+    mapping.output = Some(geometry);
+    mapping.generation = 2;
+    routing
+        .attach(
+            device.clone(),
+            &readiness(&device, &output_device),
+            Some(mapping),
+            now(),
+        )
+        .unwrap();
+    let mut down = vec![(EV_KEY, 0x14a, 1)];
+    for slot in 0..fingers {
+        down.extend([
+            (EV_ABS, ABS_MT_SLOT, i32::from(slot)),
+            (EV_ABS, ABS_MT_TRACKING_ID, i32::from(slot) + 10),
+            (EV_ABS, ABS_MT_POSITION_X, 1000 + i32::from(slot) * 500),
+            (EV_ABS, ABS_MT_POSITION_Y, 1000),
+        ]);
+    }
+    send(&mut source, 1, &down);
+    let first = input.next(Duration::from_secs(1)).unwrap();
+    routing
+        .push(Record::Frame {
+            frame: first.clone(),
+        })
+        .unwrap();
+    assert!(routing.due(&device.source, now()).unwrap().is_none());
+    thread::sleep(if fingers == 2 {
+        Duration::from_millis(140)
+    } else {
+        Duration::from_millis(40)
+    });
+    if fingers == 2 {
+        send(
+            &mut source,
+            2,
+            &[
+                (EV_ABS, ABS_MT_SLOT, 0),
+                (EV_ABS, ABS_MT_POSITION_Y, 2000),
+                (EV_ABS, ABS_MT_SLOT, 1),
+                (EV_ABS, ABS_MT_POSITION_Y, 2000),
+            ],
+        );
+        routing
+            .push(Record::Frame {
+                frame: input.next(Duration::from_secs(1)).unwrap(),
+            })
+            .unwrap();
+    }
+    let mut release = vec![(EV_KEY, 0x14a, 0)];
+    for slot in 0..fingers {
+        release.extend([
+            (EV_ABS, ABS_MT_SLOT, i32::from(slot)),
+            (EV_ABS, ABS_MT_TRACKING_ID, -1),
+        ]);
+    }
+    send(&mut source, 3, &release);
+    let last = input.next(Duration::from_secs(1)).unwrap();
+    routing
+        .push(Record::Frame {
+            frame: last.clone(),
+        })
+        .unwrap();
+    if fingers == 2 {
+        assert!(routing.due(&device.source, now()).unwrap().is_none());
+        assert!(
+            target.next(Duration::from_millis(40)).is_none(),
+            "consumed contact or click leaked"
+        );
+        let actions = routing.take_dispatches(now());
+        assert_eq!(actions.len(), 1, "{:?}", routing.take_events());
+        assert!(
+            matches!(&actions[0], prek::rules::Event::Matched { action: Action::Event { name }, .. } if name == "configured-down")
+        );
+    } else {
+        let mut received = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while received.len() < 2 {
+            let time = now();
+            if let Some(scheduled) = routing.due(&device.source, time).unwrap().cloned() {
+                output_device.enqueue(&scheduled.frame).unwrap();
+                assert_eq!(
+                    output_device.flush().unwrap(),
+                    prek::kernel::Flush::Complete
+                );
+                routing
+                    .delivered(&device.source, scheduled.ticket, now())
+                    .unwrap();
+                received.push(target.next(Duration::from_secs(1)).unwrap());
+            } else {
+                thread::sleep(Duration::from_millis(1));
+            }
+            assert!(Instant::now() < deadline);
+        }
+        assert_eq!(received[0].events, first.events);
+        assert_eq!(received[1].events, last.events);
+        let physical_gap = last.at - first.at;
+        let output_gap = received[1].at - received[0].at;
+        assert!(
+            output_gap.abs_diff(physical_gap) < Duration::from_millis(20),
+            "tap cadence changed: {physical_gap:?} -> {output_gap:?}"
+        );
+        assert!(routing.take_dispatches(now()).is_empty());
+        assert!(target.next(Duration::from_millis(30)).is_none());
+    }
+}
+
+#[test]
+#[ignore = "requires authorized isolated uinput environment and packaged pre-add udev rule"]
+fn t50_configured_swipe_consumes_the_actual_downstream_touch_stream() {
+    configured_touch_delivery(2);
+}
+
+#[test]
+#[ignore = "requires authorized isolated uinput environment and packaged pre-add udev rule"]
+fn t51_configured_unmatched_tap_reaches_the_receiver_once_with_its_cadence() {
+    configured_touch_delivery(1);
+}
+
 fn passthrough(original: Device, device: Device, frames: &[Vec<(u16, u16, i32)>]) {
     let registry = authorized();
     let mut source =
