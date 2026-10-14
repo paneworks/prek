@@ -58,6 +58,9 @@ enum Command {
         /// Trusted actual Hyprland executable (the ELF, rather than a wrapper).
         #[arg(long)]
         compositor_executable: PathBuf,
+        /// Trusted actual Morf ELF for native lock handoff.
+        #[arg(long)]
+        morf_executable: Option<PathBuf>,
         /// Trusted absolute path to the system libsystemd.so.0.
         #[arg(long)]
         logind_library: PathBuf,
@@ -295,6 +298,7 @@ fn run(command: Command) -> io::Result<()> {
             config,
             mode,
             compositor_executable,
+            morf_executable,
             logind_library,
             runtime_dir,
             json,
@@ -309,6 +313,7 @@ fn run(command: Command) -> io::Result<()> {
                 &config,
                 &runtime_dir,
                 &compositor_executable,
+                morf_executable.as_deref(),
                 &logind_library,
                 json,
                 duration,
@@ -582,6 +587,7 @@ fn run_broker(
     config_path: &std::path::Path,
     runtime: &std::path::Path,
     compositor: &std::path::Path,
+    morf: Option<&std::path::Path>,
     library: &std::path::Path,
     json: bool,
     duration: Option<u64>,
@@ -615,6 +621,7 @@ fn run_broker(
             runtime_root: "/run/user".into(),
             compositor_executable: compositor.into(),
             agent_executable: std::env::current_exe()?,
+            morf_executable: morf.map(Into::into),
             allowed_seats: config.policy.allowed_seats.iter().cloned().collect(),
         },
     )?;

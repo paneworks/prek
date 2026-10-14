@@ -690,6 +690,7 @@ fn broker_cli_session_fixture() {
     let mut inspected = String::new();
     let mut lock_client = None;
     let mut restarted = false;
+    let mut morf_unlock_requested = false;
     loop {
         if let Some(status) = agent.try_wait().unwrap() {
             assert!(!status.success());
@@ -716,13 +717,62 @@ fn broker_cli_session_fixture() {
             inspected = request;
         }
         if lock_client.is_none() && Path::new("/run/user/1000/prek-lock-start").exists() {
-            lock_client = Some(
+            lock_client = Some(if let Some(morf) = std::env::var_os("PREK_LOCK_MORF") {
+                let log = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open("/run/user/1000/prek-lock-native.log")
+                    .unwrap();
+                Command::new(morf)
+                    .arg(std::env::var_os("PREK_LOCK_MORF_CONFIG").unwrap())
+                    .env("PREK_LOCK_PROVIDER", "1")
+                    .stdout(Stdio::from(log.try_clone().unwrap()))
+                    .stderr(Stdio::from(log))
+                    .spawn()
+                    .unwrap()
+            } else {
                 Command::new(std::env::var_os("PREK_LOCK_PYTHON").unwrap())
                     .arg(std::env::var_os("PREK_LOCK_SCRIPT").unwrap())
                     .env("PREK_COMPOSITOR_VM", "1")
                     .spawn()
-                    .unwrap(),
-            );
+                    .unwrap()
+            });
+            if std::env::var_os("PREK_LOCK_MORF").is_some() {
+                fs::write(
+                    "/run/user/1000/prek-lock-acknowledged",
+                    "native provider starting",
+                )
+                .unwrap();
+            }
+        }
+        if !morf_unlock_requested
+            && Path::new("/run/user/1000/prek-lock-unlock").exists()
+            && let Some(morf) = std::env::var_os("PREK_LOCK_MORF")
+        {
+            let reply = Command::new(morf)
+                .args(["--lock", "ipc", "call", "fixture_unlock"])
+                .output()
+                .unwrap();
+            fs::write(
+                "/run/user/1000/prek-lock-unlock-response.log",
+                format!(
+                    "status: {}\nstdout: {}\nstderr: {}",
+                    reply.status,
+                    String::from_utf8_lossy(&reply.stdout),
+                    String::from_utf8_lossy(&reply.stderr)
+                ),
+            )
+            .unwrap();
+            assert!(reply.status.success());
+            let status = lock_client.as_mut().unwrap().wait().unwrap();
+            assert!(status.success());
+            fs::write(
+                "/run/user/1000/prek-lock-completed",
+                "native unlock completed",
+            )
+            .unwrap();
+            morf_unlock_requested = true;
         }
         if !restarted && Path::new("/run/user/1000/prek-broker-restart").exists() {
             agent.kill().unwrap();
@@ -756,7 +806,9 @@ fn broker_cli_session_fixture() {
         }
         thread::sleep(Duration::from_millis(10));
     }
-    if let Some(mut lock_client) = lock_client {
+    if let Some(mut lock_client) = lock_client
+        && !morf_unlock_requested
+    {
         assert!(lock_client.wait().unwrap().success());
     }
     fs::write("/run/user/1000/prek-broker-agent-stopped", "stopped").unwrap();

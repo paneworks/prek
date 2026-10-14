@@ -159,12 +159,22 @@ and report an error instead of truncating targets or crashing the broker.
 Every observation is checked against the compositor lock before delivery, including
 agents without `--context`. A witnessed lock inhibits all observation subscriptions
 and remains latched across agent reconnection. A bare compositor unlock cannot
-resume observations: the bound lock provider's completed transition is required
-and its integration remains pending. Locked/greeter region actions and authentication
-remain the provider's responsibility. Stock window coordinates describe animation
+resume observations: the bound lock provider's completed transition is required.
+With an adapter-enabled Morf build, pass its actual ELF as `broker --morf-executable`
+and enable `PREK_LOCK_PROVIDER=1` for the lock process. The broker verifies the
+native endpoint's exact process/executable, active logind session and actual
+Wayland compositor identity. It accepts unlock only for the bound native lock
+epoch after Morf observed its compositor acknowledgement, flushed unlock, and
+the compositor independently reports unlocked. Morf briefly retains its native
+endpoint until the broker acknowledges completion; timeout or provider loss keeps
+inhibition in place. Caller-supplied Lua lock state and socket disappearance cannot
+authorize unlock. Locked/greeter region actions and authentication remain the
+provider's responsibility. Stock window coordinates describe animation
 goals, so application-content targets remain ineligible until rendered geometry is
 proven by a provider. Layer bounds reserve interactive space conservatively;
-Morf-specific regions and device-to-output mapping are still required.
+Morf-specific regions and device-to-output mapping are still required. The native
+adapter gate is [tests/morf.nix](tests/morf.nix), which takes a separately built
+upstream Morf package; generic Prek builds retain no Morf dependency.
 
 The private worker channel carries subscriptions and semantic outcomes, with no
 raw frames or device descriptors. Its health channel remains separate. Progress

@@ -1,5 +1,5 @@
 # Real stock compositor in a disposable VM, with no host device passthrough.
-{ pkgs, package }:
+{ pkgs, package, morf ? null }:
 let
   tests = package.overrideAttrs (_: {
     pname = "prek-compositor-tests";
@@ -21,7 +21,7 @@ let
     postInstall = "";
   });
   compositorConfig = pkgs.writeText "prek-hyprland-test.conf" ''
-    exec-once = env PREK_BROKER_CLI_FIXTURE=1 PREK_BROKER_APP=${package}/bin/prek PREK_LOCK_PYTHON=${pkgs.python3}/bin/python3 PREK_LOCK_SCRIPT=${lockScript} ${tests}/bin/prek-compositor-tests --ignored --exact broker_cli_session_fixture --nocapture
+    exec-once = env PREK_BROKER_CLI_FIXTURE=1 PREK_BROKER_APP=${package}/bin/prek PREK_LOCK_PYTHON=${pkgs.python3}/bin/python3 PREK_LOCK_SCRIPT=${lockScript} ${pkgs.lib.optionalString (morf != null) "PREK_LOCK_MORF=${morf}/bin/morf PREK_LOCK_MORF_CONFIG=${morfLock}"} ${tests}/bin/prek-compositor-tests --ignored --exact broker_cli_session_fixture --nocapture
     exec-once = env PREK_SESSION_AGENT_FIXTURE=1 PREK_AGENT_SOCKET=/run/prek-session/agent.sock ${tests}/bin/prek-compositor-tests --ignored --exact logind_session_agent_fixture --nocapture
     exec-once = env PREK_SESSION_AGENT_FIXTURE=1 PREK_AGENT_SOCKET=/run/prek-session/seat.sock ${tests}/bin/prek-compositor-tests --ignored --exact logind_session_agent_fixture --nocapture
     monitor = , preferred, auto, 1
@@ -34,6 +34,14 @@ let
     }
   '';
   lockScript = pkgs.writeText "prek-session-lock-fixture.py" (builtins.readFile ./support/session_lock.py);
+  morfLock = pkgs.writeText "prek-morf-lock-fixture.lua" ''
+    local ui = require("morf.ui")
+    morf.surface.session_lock = true
+    morf.ipc.fixture_unlock = function()
+      morf.surface.session_lock = false
+    end
+    ui.Rect { color = "#101010", width = 64, height = 64 }
+  '';
   brokerConfig = pkgs.writeText "prek-broker-fixture.toml" ''
     version = 1
     [policy]
@@ -66,7 +74,7 @@ pkgs.testers.runNixOSTest {
       "d /run/prek-session 0755 root root -"
       "d /run/prek-control 0755 root root -"
     ];
-    environment.systemPackages = [ package tests ];
+    environment.systemPackages = [ package tests ] ++ pkgs.lib.optional (morf != null) morf;
     programs.bash.loginShellInit = ''
       if [ "$(tty)" = /dev/tty1 ]; then
         exec env LIBGL_ALWAYS_SOFTWARE=1 ${pkgs.hyprland}/bin/Hyprland --config ${compositorConfig}
@@ -94,7 +102,7 @@ pkgs.testers.runNixOSTest {
     machine.succeed("printf press-initial > /run/prek-control/emit")
     machine.wait_until_succeeds("test \"$(cat /run/prek-control/emitted)\" = press-initial", timeout=3)
     machine.succeed("cp ${brokerConfig} /run/prek-control/config.toml && chmod 0600 /run/prek-control/config.toml")
-    broker = "${package}/bin/prek broker --config /run/prek-control/config.toml --runtime-dir /run/prek-control --compositor-executable ${pkgs.hyprland}/bin/.Hyprland-wrapped --logind-library ${pkgs.systemd}/lib/libsystemd.so.0"
+    broker = "${package}/bin/prek broker --config /run/prek-control/config.toml --runtime-dir /run/prek-control --compositor-executable ${pkgs.hyprland}/bin/.Hyprland-wrapped --logind-library ${pkgs.systemd}/lib/libsystemd.so.0 ${pkgs.lib.optionalString (morf != null) "--morf-executable ${morf}/bin/.morf-wrapped"}"
     machine.succeed(f"systemd-run --unit prek-broker --property=Type=exec {broker}")
     try:
         machine.wait_until_succeeds("test -s /run/user/1000/prek-broker-ready", timeout=10)
@@ -205,11 +213,14 @@ pkgs.testers.runNixOSTest {
     machine.succeed(f"XDG_RUNTIME_DIR=/run/user/1000 HYPRLAND_INSTANCE_SIGNATURE={instance} ${pkgs.hyprland}/bin/hyprctl dispatch dpms off")
     machine.succeed("touch /run/user/1000/prek-lock-start")
     machine.wait_until_succeeds("test -s /run/user/1000/prek-lock-acknowledged", timeout=10)
+    locked_state = "${if morf != null then "locked" else "locking"}"
     try:
-        machine.wait_until_succeeds("grep -q '\"state\":\"locking\"' /run/user/1000/prek-broker-agent.jsonl", timeout=3)
+        machine.wait_until_succeeds(f"grep -q '\"state\":\"{locked_state}\"' /run/user/1000/prek-broker-agent.jsonl", timeout=15 if locked_state == "locked" else 3)
     except Exception:
         machine.log(machine.succeed("cat /run/user/1000/prek-broker-agent.jsonl /run/user/1000/prek-broker-agent.stderr"))
+        machine.log(machine.succeed("cat /run/user/1000/prek-lock-native.log 2>/dev/null || true"))
         machine.log(machine.succeed("journalctl -u prek-broker --no-pager -n 30"))
+        machine.log(machine.succeed("ls -la /run/user/1000/morf 2>/dev/null || true"))
         raise
     inject("press-authentication")
     inject("release-authentication")
@@ -218,24 +229,49 @@ pkgs.testers.runNixOSTest {
     machine.succeed("rm -f /run/user/1000/prek-broker-status.json && printf locked > /run/user/1000/prek-broker-inspect")
     machine.wait_until_succeeds("test -s /run/user/1000/prek-broker-status.json", timeout=3)
     status = __import__("json").loads(machine.succeed("cat /run/user/1000/prek-broker-status.json"))
-    assert status["state"] == "locking" and status["context_error"], status
-    # A bare compositor unlock cannot clear Prek's bound-provider requirement.
+    assert status["state"] == locked_state and status["context_error"], status
+    if locked_state == "locked":
+        inject("press-native-handoff-held")
+    # In the native variant, Morf performs its real unlock and waits for the
+    # verified broker acknowledgement; the stock variant uses a bare unlock.
     machine.succeed("touch /run/user/1000/prek-lock-unlock")
-    machine.wait_until_succeeds("test -s /run/user/1000/prek-lock-completed", timeout=3)
+    try:
+        machine.wait_until_succeeds("test -s /run/user/1000/prek-lock-completed", timeout=10 if locked_state == "locked" else 3)
+    except Exception:
+        machine.log(machine.succeed("cat /run/user/1000/prek-broker-agent.jsonl /run/user/1000/prek-broker-agent.stderr /run/user/1000/prek-lock-native.log /run/user/1000/prek-lock-unlock-response.log 2>/dev/null || true"))
+        machine.log(machine.succeed("journalctl -u prek-broker --no-pager -n 30"))
+        raise
     machine.succeed(f"XDG_RUNTIME_DIR=/run/user/1000 HYPRLAND_INSTANCE_SIGNATURE={instance} ${pkgs.hyprland}/bin/hyprctl dispatch dpms on")
+    if locked_state == "locked":
+        machine.wait_until_succeeds("test $(grep -c '\"session_changed\":true.*\"state\":\"desktop\"' /run/user/1000/prek-broker-agent.jsonl) -gt 1", timeout=5)
+        machine.wait_until_succeeds("test $(grep -c '\"subscribed\":true' /run/user/1000/prek-broker-agent.jsonl) -gt 4", timeout=5)
+        machine.sleep(1)
+        assert len(rule_matches()) == before, rule_matches()
+        inject("release-native-handoff-held")
+        inject("press-native-unlock-fresh")
+        machine.wait_until_succeeds(f"test $(grep -c '\"outcome\":\"matched\"' /run/user/1000/prek-broker-agent.jsonl) -gt {before}", timeout=3)
+        before = len(rule_matches())
+        inject("release-native-unlock-fresh")
     inject("press-after-unverified-unlock")
     inject("release-after-unverified-unlock")
     machine.sleep(1)
-    assert len(rule_matches()) == before, rule_matches()
+    if locked_state == "locking":
+        assert len(rule_matches()) == before, rule_matches()
     # Restart with context-free observation only. The compositor lifetime's
     # lock latch must survive and keep authentication observations disabled.
+    if locked_state == "locked":
+        # Resume the native client once without retaining stale provider state.
+        machine.succeed("rm -f /run/user/1000/prek-broker-status.json && printf native-unlocked > /run/user/1000/prek-broker-inspect")
+        machine.wait_until_succeeds("test -s /run/user/1000/prek-broker-status.json", timeout=3)
+        status = __import__("json").loads(machine.succeed("cat /run/user/1000/prek-broker-status.json"))
+        assert status["state"] == "desktop" and status["context_error"] is None, status
     machine.succeed("touch /run/user/1000/prek-broker-restart")
     machine.wait_until_succeeds("test -s /run/user/1000/prek-broker-restarted", timeout=3)
     machine.wait_until_succeeds("test $(grep -c '\"registered\":true' /run/user/1000/prek-broker-agent.jsonl) -eq 2", timeout=3)
     machine.succeed("rm -f /run/user/1000/prek-broker-status.json && printf reconnected > /run/user/1000/prek-broker-inspect")
     machine.wait_until_succeeds("test -s /run/user/1000/prek-broker-status.json", timeout=3)
     status = __import__("json").loads(machine.succeed("cat /run/user/1000/prek-broker-status.json"))
-    assert status["state"] == "locking", status
+    assert status["state"] == ("locking" if locked_state == "locking" else "unknown"), status
     inject("press-after-agent-reconnect")
     inject("release-after-agent-reconnect")
     machine.sleep(1)

@@ -22,6 +22,11 @@ pub struct ContextSampler {
     inhibited: bool,
 }
 impl ContextSampler {
+    /// Broker calls this only after accepting the bound native provider's
+    /// completed unlock and independently verifying compositor unlock.
+    pub(crate) fn provider_unlock_completed(&mut self) {
+        self.inhibited = false;
+    }
     /// Used by observation-only agents too: authentication input must never be
     /// exposed merely because desktop context was not requested.
     pub fn check_lock(&mut self, client: &Client) -> io::Result<bool> {

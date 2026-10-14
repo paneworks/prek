@@ -16,7 +16,7 @@ use nix::{
     poll::{PollFd, PollFlags},
 };
 use std::{
-    collections::{BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs, io,
     os::{
         fd::{AsFd, BorrowedFd},
@@ -88,16 +88,16 @@ impl ContextFeed {
             })
     }
     fn state(&self, now: Duration) -> State {
-        if self.state == State::Locking {
-            State::Locking
-        } else if self.fresh(now) {
+        if matches!(self.state, State::Locking | State::Locked) || self.fresh(now) {
             self.state
         } else {
             State::Unknown
         }
     }
     fn inhibit(&mut self) {
-        self.state = State::Locking;
+        if self.state != State::Locked {
+            self.state = State::Locking;
+        }
         self.usable = false;
         self.value = None;
         self.error =
@@ -144,6 +144,7 @@ pub struct Policy {
     pub runtime_root: PathBuf,
     pub compositor_executable: PathBuf,
     pub agent_executable: PathBuf,
+    pub morf_executable: Option<PathBuf>,
     pub allowed_seats: BTreeSet<String>,
 }
 struct Bound {
@@ -159,6 +160,7 @@ struct Bound {
     previous: Grace,
     context: ContextFeed,
     compositor: (u32, u64),
+    native: Option<crate::morf::Client>,
 }
 struct Connection {
     channel: Channel,
@@ -255,6 +257,8 @@ pub struct Broker {
     reload_pending: bool,
     last_reload_error: Option<String>,
     inhibited: BTreeSet<(u32, u64)>,
+    lock_proofs: BTreeMap<(u32, u64), crate::morf::Proof>,
+    completed_providers: BTreeSet<crate::morf::Proof>,
 }
 impl Broker {
     /// Context is sampled directly from a verified compositor. Action dispatch
@@ -264,6 +268,10 @@ impl Broker {
             || !policy.runtime_root.is_absolute()
             || !policy.agent_executable.is_absolute()
             || !policy.compositor_executable.is_absolute()
+            || policy
+                .morf_executable
+                .as_ref()
+                .is_some_and(|path| !path.is_absolute())
         {
             return Err(protocol::invalid(
                 "broker requires explicit trusted registration policy",
@@ -283,6 +291,8 @@ impl Broker {
             reload_pending: false,
             last_reload_error: None,
             inhibited: BTreeSet::new(),
+            lock_proofs: BTreeMap::new(),
+            completed_providers: BTreeSet::new(),
         })
     }
     pub fn clients(&self) -> usize {
@@ -481,7 +491,7 @@ impl Broker {
         let bound = connection.bound.as_mut().unwrap();
         let fence = bound.fence;
         if matches!(report, Report::ContextLost { .. }) {
-            if bound.context.state == State::Locking
+            if matches!(bound.context.state, State::Locking | State::Locked)
                 || !bound.capabilities.contains(&Capability::Context)
             {
                 self.connections.insert(index, connection);
@@ -726,6 +736,7 @@ impl Broker {
                         previous: Grace::default(),
                         context,
                         compositor,
+                        native: None,
                     });
                     connection.push(Reply::Welcome {
                         fence,
@@ -823,7 +834,7 @@ impl Broker {
     ) -> io::Result<bool> {
         let bound = connection.bound.as_mut().unwrap();
         if !bound.context.fresh(now) {
-            if bound.context.state != State::Locking {
+            if !matches!(bound.context.state, State::Locking | State::Locked) {
                 bound.context.state = State::Unknown;
             }
             bound.context.usable = false;
@@ -883,7 +894,80 @@ impl Broker {
         let was_fresh = bound.context.fresh(now);
         let old_usable = bound.context.usable;
         let old_state = bound.context.state;
-        let result = if bound.context.state == State::Locking {
+        if let Some(executable) = &self.policy.morf_executable {
+            if bound.native.is_none() {
+                match crate::morf::Client::discover(
+                    &self.policy.runtime_root.join(binding.uid.to_string()),
+                    binding.uid,
+                    executable,
+                    &self.logind,
+                    &bound.client,
+                ) {
+                    Ok(client) => bound.native = client,
+                    Err(error) => {
+                        bound.context.inhibit();
+                        bound.context.error = Some(error.to_string());
+                    }
+                }
+            }
+            if let Some(native) = bound.native.as_mut() {
+                match native.sample(&self.logind, &bound.client) {
+                    Ok(state) => {
+                        let proof = native.proof(&state);
+                        match state.phase {
+                            crate::morf::Phase::Pending => {
+                                self.lock_proofs.insert(bound.compositor, proof);
+                                bound.context.inhibit();
+                            }
+                            crate::morf::Phase::Locked => {
+                                if bound.client.lock_state()? {
+                                    self.lock_proofs.insert(bound.compositor, proof);
+                                    bound.context.state = State::Locked;
+                                }
+                                bound.context.inhibit();
+                            }
+                            crate::morf::Phase::UnlockDispatched => {
+                                if self.completed_providers.contains(&proof) {
+                                    let _ = native.release(&state);
+                                    bound.native = None;
+                                } else if self.lock_proofs.get(&bound.compositor) == Some(&proof)
+                                    && !bound.client.lock_state()?
+                                {
+                                    // The same live native producer observed its
+                                    // lock acknowledgement and flushed unlock;
+                                    // actual compositor unlock is independently
+                                    // confirmed before retiring the provider.
+                                    bound.registration.check(&self.logind, &bound.client)?;
+                                    self.inhibited.remove(&bound.compositor);
+                                    self.lock_proofs.remove(&bound.compositor);
+                                    if self.completed_providers.len() >= 4096 {
+                                        return Err(protocol::invalid(
+                                            "native provider completion history exhausted",
+                                        ));
+                                    }
+                                    self.completed_providers.insert(proof);
+                                    bound.context.sampler.provider_unlock_completed();
+                                    bound.context.state = State::Unknown;
+                                    bound.context.usable = false;
+                                    bound.context.value = None;
+                                    let _ = native.release(&state);
+                                    bound.native = None;
+                                } else {
+                                    bound.context.inhibit();
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        bound.native = None;
+                        bound.context.state = State::Locking;
+                        bound.context.inhibit();
+                        bound.context.error = Some(error.to_string());
+                    }
+                }
+            }
+        }
+        let result = if matches!(bound.context.state, State::Locking | State::Locked) {
             Ok(None)
         } else if bound.capabilities.contains(&Capability::Context) {
             bound
@@ -901,7 +985,9 @@ impl Broker {
         bound.registration.check(&self.logind, &bound.client)?;
         let checked = monotonic()?;
         bound.context.checked = checked;
-        if bound.context.state == State::Locking || bound.context.sampler.inhibited() {
+        if matches!(bound.context.state, State::Locking | State::Locked)
+            || bound.context.sampler.inhibited()
+        {
             // Persist inhibition across agent disconnect/re-registration for
             // the same compositor lifetime. No caller can clear this latch.
             if self.inhibited.len() >= 4096 && !self.inhibited.contains(&bound.compositor) {

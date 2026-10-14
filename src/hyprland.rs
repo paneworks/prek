@@ -116,7 +116,7 @@ fn wait(fd: i32, events: i16, until: Instant) -> io::Result<()> {
     }
 }
 
-fn connect(path: &Path, until: Instant) -> io::Result<UnixStream> {
+pub(crate) fn connect(path: &Path, until: Instant) -> io::Result<UnixStream> {
     use std::os::unix::ffi::OsStrExt;
     let bytes = path.as_os_str().as_bytes();
     let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
@@ -363,6 +363,12 @@ impl Client {
 
     pub fn version(&self) -> &Version {
         &self.version
+    }
+    pub(crate) fn lock_state(&self) -> io::Result<bool> {
+        self.query("locked")?
+            .get("locked")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| invalid("compositor lock state is unavailable"))
     }
     /// Recheck the retained socket, peer, process birth and executable without
     /// reading desktop state. Registration uses this around logind inspection.
