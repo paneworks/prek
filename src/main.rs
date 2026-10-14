@@ -82,6 +82,9 @@ enum Command {
         /// Receive configured rule outcomes from this session's seat.
         #[arg(long)]
         observations: bool,
+        /// Use fresh context sampled from the broker-verified compositor.
+        #[arg(long)]
+        context: bool,
     },
     /// Query broker status from a verified compositor login session.
     Status {
@@ -317,20 +320,33 @@ fn run(command: Command) -> io::Result<()> {
             json,
             duration,
             observations,
+            context,
         } => run_session(
             &socket,
             instance,
-            json,
-            duration,
-            false,
-            observations,
+            SessionOptions {
+                json,
+                duration,
+                inspect: false,
+                observations,
+                context,
+            },
             &mut output,
         ),
         Command::Status {
             socket,
             instance,
             json,
-        } => run_session(&socket, instance, json, None, true, false, &mut output),
+        } => run_session(
+            &socket,
+            instance,
+            SessionOptions {
+                json,
+                inspect: true,
+                ..Default::default()
+            },
+            &mut output,
+        ),
         Command::Reload { socket, json } => reload_broker(&socket, json, &mut output),
         Command::UdevImport { marker } => prek::kernel::import_metadata(&marker, &mut output),
         Command::Run {
@@ -699,9 +715,9 @@ fn run_broker(
                 .ok_or_else(|| io::Error::other("worker subscription revision exhausted"))?;
             subscriptions = Some(prek::worker::Subscriptions {
                 revision,
-                seats: broker.subscriptions(now),
+                seats: broker.subscriptions(now)?,
             });
-            refresh = now + prek::service::REFRESH;
+            refresh = now + prek::service::CONTEXT_REFRESH;
         }
         if !control_closed
             && (!startup || transfer.is_none())
@@ -722,7 +738,9 @@ fn run_broker(
                 Err(error) => return Err(error),
             }
         }
-        for _ in 0..16 {
+        // A report may require a bounded compositor lock recheck. Return to
+        // supervision after each packet so failed IPC cannot delay health.
+        for _ in 0..1 {
             if control_closed {
                 break;
             }
@@ -878,15 +896,29 @@ fn reload_broker(socket: &std::path::Path, json: bool, output: &mut impl Write) 
 }
 
 #[cfg(target_os = "linux")]
-fn run_session(
-    socket: &std::path::Path,
-    instance: Option<String>,
+#[derive(Default)]
+struct SessionOptions {
     json: bool,
     duration: Option<u64>,
     inspect: bool,
     observations: bool,
+    context: bool,
+}
+
+#[cfg(target_os = "linux")]
+fn run_session(
+    socket: &std::path::Path,
+    instance: Option<String>,
+    options: SessionOptions,
     output: &mut impl Write,
 ) -> io::Result<()> {
+    let SessionOptions {
+        json,
+        duration,
+        inspect,
+        observations,
+        context,
+    } = options;
     use nix::{
         libc,
         poll::{PollFd, PollFlags, PollTimeout, poll},
@@ -910,14 +942,17 @@ fn run_session(
                 "select the live compositor with --instance or HYPRLAND_INSTANCE_SIGNATURE",
             )
         })?;
+    let mut requested = std::collections::BTreeSet::new();
+    if observations {
+        requested.insert(Capability::Observations);
+    }
+    if context {
+        requested.insert(Capability::Context);
+    }
     let registration = Request::Register {
         instance,
         role: if inspect { Role::Inspect } else { Role::Agent },
-        capabilities: if observations {
-            std::collections::BTreeSet::from([Capability::Observations])
-        } else {
-            Default::default()
-        },
+        capabilities: requested.clone(),
     };
     registration.validate()?;
     let mut channel = Channel::connect(socket)?;
@@ -955,11 +990,6 @@ fn run_session(
                     mode,
                     capabilities,
                 } if fence.is_none() => {
-                    let requested = if observations {
-                        std::collections::BTreeSet::from([Capability::Observations])
-                    } else {
-                        Default::default()
-                    };
                     if mode != Mode::Observe || capabilities != requested {
                         return Err(io::Error::other(
                             "session adapter does not support these broker capabilities",
@@ -989,11 +1019,12 @@ fn run_session(
                     revision,
                     pending,
                     last_reload_error,
+                    context_error,
                 } if Some(observed) == fence => {
                     if json {
                         serde_json::to_writer(
                             &mut *output,
-                            &serde_json::json!({"version": 1, "fence": observed, "mode": "observe", "state": state, "revision": revision, "pending": pending, "last_reload_error": last_reload_error}),
+                            &serde_json::json!({"version": 1, "fence": observed, "mode": "observe", "state": state, "revision": revision, "pending": pending, "last_reload_error": last_reload_error, "context_error": context_error}),
                         )?;
                         writeln!(output)?;
                     } else {
@@ -1014,7 +1045,7 @@ fn run_session(
                 Reply::Configuration { fence: next_fence }
                     if fence.is_some_and(|old| {
                         old.broker == next_fence.broker
-                            && old.session == next_fence.session
+                            && old.session <= next_fence.session
                             && old.configuration < next_fence.configuration
                     }) =>
                 {
@@ -1037,6 +1068,39 @@ fn run_session(
                         return Err(io::ErrorKind::WouldBlock.into());
                     }
                     if inspect && !channel.send(&Request::Status { fence: next_fence }, now)? {
+                        return Err(io::ErrorKind::WouldBlock.into());
+                    }
+                    next = now + Duration::from_millis(250);
+                }
+                Reply::SessionChanged {
+                    fence: next_fence,
+                    state,
+                } if fence.is_some_and(|old| {
+                    old.broker == next_fence.broker
+                        && old.configuration <= next_fence.configuration
+                        && old.session < next_fence.session
+                }) =>
+                {
+                    fence = Some(next_fence);
+                    if json {
+                        serde_json::to_writer(
+                            &mut *output,
+                            &serde_json::json!({"version": 1,
+                            "session_changed": true, "fence": next_fence, "state": state,
+                            "configuration": next_fence.configuration}),
+                        )?;
+                        writeln!(output)?;
+                    } else {
+                        writeln!(
+                            output,
+                            "context {state:?}; previous gesture progress cancelled"
+                        )?;
+                    }
+                    output.flush()?;
+                    if !channel.send(&Request::Heartbeat { fence: next_fence }, now)? {
+                        return Err(io::ErrorKind::WouldBlock.into());
+                    }
+                    if !channel.send(&Request::Status { fence: next_fence }, now)? {
                         return Err(io::ErrorKind::WouldBlock.into());
                     }
                     next = now + Duration::from_millis(250);

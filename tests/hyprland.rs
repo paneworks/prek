@@ -58,7 +58,18 @@ impl Server {
                         let _ = stream.write_all(b"{\"version\":\"0.55.4\"}");
                     } else {
                         thread::sleep(delay);
-                        let _ = stream.write_all(reply(&bytes[..length]).as_bytes());
+                        let request = &bytes[..length];
+                        let response = if request.starts_with(b"[[BATCH]]") {
+                            std::str::from_utf8(&request[9..])
+                                .unwrap()
+                                .split(';')
+                                .map(|command| reply(command.as_bytes()))
+                                .collect::<Vec<_>>()
+                                .join("\n\n\n")
+                        } else {
+                            reply(request)
+                        };
+                        let _ = stream.write_all(response.as_bytes());
                     }
                 } else {
                     thread::sleep(Duration::from_millis(1));
@@ -174,7 +185,7 @@ fn witnessed_compositor_lock_latches_desktop_inhibition() {
 
 #[test]
 fn context_queries_share_one_deadline() {
-    let server = Server::new("{\"locked\":false}", Duration::from_millis(80));
+    let server = Server::new("{\"locked\":false}", Duration::from_millis(500));
     let client = server.client();
     let mut sampler = prek::hyprland::ContextSampler::default();
     let started = Instant::now();
@@ -260,6 +271,11 @@ fn stock_compositor_queries_use_the_verified_live_socket() {
     let uid = std::env::var("PREK_HYPR_UID").unwrap().parse().unwrap();
     let client = Client::open(&runtime, &instance, uid, &executable).unwrap();
     assert!(client.inventory().unwrap().is_object());
+    let snapshot = prek::hyprland::ContextSampler::default()
+        .sample(&client, 1, prek::context::SessionKind::User)
+        .unwrap();
+    assert!(!snapshot.outputs.is_empty());
+    assert_eq!(snapshot.state, prek::context::State::Desktop);
     println!(
         "verified stock Hyprland {:?}: {:?}",
         client.version(),
@@ -618,6 +634,12 @@ fn broker_cli_session_fixture() {
         .mode(0o600)
         .open(witness)
         .unwrap();
+    let errors = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open("/run/user/1000/prek-broker-agent.stderr")
+        .unwrap();
     let mut agent = Command::new(&binary)
         .args([
             "session",
@@ -625,8 +647,10 @@ fn broker_cli_session_fixture() {
             "/run/prek-control/control.sock",
             "--json",
             "--observations",
+            "--context",
         ])
         .stdout(Stdio::from(output))
+        .stderr(Stdio::from(errors))
         .spawn()
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -658,11 +682,14 @@ fn broker_cli_session_fixture() {
     );
     let status: serde_json::Value = serde_json::from_slice(&inspected.stdout).unwrap();
     assert_eq!(status["mode"], "observe");
-    assert_eq!(status["state"], "unknown");
+    assert_eq!(status["state"], "desktop");
+    assert!(status["revision"].as_u64().unwrap() > 0);
     fs::write("/run/user/1000/prek-broker-ready", agent.id().to_string()).unwrap();
     // The VM stops the broker while this real CLI connection remains active.
     // A disconnected broker must not leave an agent acting on stale authority.
     let mut inspected = String::new();
+    let mut lock_client = None;
+    let mut restarted = false;
     loop {
         if let Some(status) = agent.try_wait().unwrap() {
             assert!(!status.success());
@@ -688,7 +715,49 @@ fn broker_cli_session_fixture() {
             fs::write("/run/user/1000/prek-broker-status.json", &status.stdout).unwrap();
             inspected = request;
         }
+        if lock_client.is_none() && Path::new("/run/user/1000/prek-lock-start").exists() {
+            lock_client = Some(
+                Command::new(std::env::var_os("PREK_LOCK_PYTHON").unwrap())
+                    .arg(std::env::var_os("PREK_LOCK_SCRIPT").unwrap())
+                    .env("PREK_COMPOSITOR_VM", "1")
+                    .spawn()
+                    .unwrap(),
+            );
+        }
+        if !restarted && Path::new("/run/user/1000/prek-broker-restart").exists() {
+            agent.kill().unwrap();
+            agent.wait().unwrap();
+            // Allow the broker to observe the old endpoint's closure before
+            // requesting its one-agent seat ownership again.
+            thread::sleep(Duration::from_millis(300));
+            let output = fs::OpenOptions::new().append(true).open(witness).unwrap();
+            let errors = fs::OpenOptions::new()
+                .append(true)
+                .open("/run/user/1000/prek-broker-agent.stderr")
+                .unwrap();
+            agent = Command::new(&binary)
+                .args([
+                    "session",
+                    "--socket",
+                    "/run/prek-control/control.sock",
+                    "--json",
+                    "--observations",
+                ])
+                .stdout(Stdio::from(output))
+                .stderr(Stdio::from(errors))
+                .spawn()
+                .unwrap();
+            fs::write(
+                "/run/user/1000/prek-broker-restarted",
+                agent.id().to_string(),
+            )
+            .unwrap();
+            restarted = true;
+        }
         thread::sleep(Duration::from_millis(10));
+    }
+    if let Some(mut lock_client) = lock_client {
+        assert!(lock_client.wait().unwrap().success());
     }
     fs::write("/run/user/1000/prek-broker-agent-stopped", "stopped").unwrap();
 }

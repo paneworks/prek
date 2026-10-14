@@ -167,6 +167,8 @@ pub enum Reply {
         pending: usize,
         #[serde(default)]
         last_reload_error: Option<String>,
+        #[serde(default)]
+        context_error: Option<String>,
     },
     Accepted {
         fence: Fence,
@@ -178,6 +180,10 @@ pub enum Reply {
     },
     Configuration {
         fence: Fence,
+    },
+    SessionChanged {
+        fence: Fence,
+        state: State,
     },
     ReloadResult {
         configuration: u64,
@@ -210,6 +216,7 @@ impl Reply {
             | Self::Accepted { fence, .. }
             | Self::Subscribed { fence }
             | Self::Configuration { fence }
+            | Self::SessionChanged { fence, .. }
             | Self::Observation { fence, .. }
             | Self::Dispatch { fence, .. }
             | Self::Revoked { fence, .. } => Some(*fence),
@@ -234,6 +241,12 @@ impl Reply {
                 ..
             } if !text(error) => {
                 return Err(invalid("invalid reload status"));
+            }
+            Self::Status {
+                context_error: Some(error),
+                ..
+            } if !text(error) => {
+                return Err(invalid("invalid context status"));
             }
             Self::Welcome { seat, session, .. } if !text(seat) || !text(session) => {
                 return Err(invalid("invalid session description"));

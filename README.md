@@ -59,8 +59,8 @@ and verifies that agent and compositor belong to the same active local logind
 session and seat. Checks retain kernel process handles and expire after 250 ms.
 Process exit, socket disconnect, compositor replacement or session deactivation
 revokes registration; returning to the seat requires a new registration.
-This proves session membership. Live context snapshots, lock-provider
-acknowledgements and action dispatch remain pending.
+This proves session membership. Optional live compositor context is sampled
+separately; bound lock-provider acknowledgements and action dispatch remain pending.
 
 ## Commands
 
@@ -75,6 +75,7 @@ cargo run --locked -- doctor --config prek.toml --json
 cargo run --locked -- run --config prek.toml --mode observe --duration 10 --json
 cargo run --locked -- session --json
 cargo run --locked -- session --observations --json
+cargo run --locked -- session --context --observations --json
 cargo run --locked -- status --json
 sudo target/release/prek reload --json
 cargo run --locked -- learn-shape my-v --device /dev/input/by-id/YOUR-MOUSE --mouse --output my-v.toml
@@ -133,17 +134,37 @@ Start `session` from the compositor's own login session. It uses
 250 ms acknowledged heartbeat. A second agent for the same seat is refused;
 `status` uses a separate authenticated inspection role. A shared user-manager
 process without session membership is refused. Both commands accept `--socket`
-for a different broker endpoint. The current status describes observation and
-registration, with context reported as unknown. It does not yet include device
-ownership/latency counters or authorize desktop actions.
+for a different broker endpoint. Status reports the active agent's current
+context, snapshot revision and any context/reload error. Device ownership/latency
+counters and desktop action dispatch remain pending.
 
 `session --observations` subscribes to configured outcomes from its verified seat.
 The worker acknowledges readiness with `subscribed: true` in JSON output after
 reconciling held keys and contacts. Already-held or unread input older than that
 activation cannot become a new gesture. Outcomes carry the current broker,
 configuration and session fences. Inspection clients receive status only. Session
-membership permits context-free observations; context-dependent rules still
-require a verified provider and produce skipped outcomes while it is unavailable.
+membership permits context-free observations after a fresh compositor lock check.
+Add `--context` to enable rules scoped to the verified desktop or greeter. The
+broker samples output geometry, workspaces, DPMS, focus and layers directly from
+the bound compositor, rechecks logind, and publishes context on its private worker
+channel. Caller-supplied context snapshots remain refused.
+
+Context refreshes run at 100 ms intervals with a shared 200 ms IPC deadline and
+250 ms snapshot freshness. Context loss, restoration or a witnessed lock advances
+the session fence, discards queued outcomes and reconciles held input before
+recognition resumes. Workers expire context independently while idle; delayed
+context cannot stop their input reader. Oversized snapshots disable publication
+and report an error instead of truncating targets or crashing the broker.
+
+Every observation is checked against the compositor lock before delivery, including
+agents without `--context`. A witnessed lock inhibits all observation subscriptions
+and remains latched across agent reconnection. A bare compositor unlock cannot
+resume observations: the bound lock provider's completed transition is required
+and its integration remains pending. Locked/greeter region actions and authentication
+remain the provider's responsibility. Stock window coordinates describe animation
+goals, so application-content targets remain ineligible until rendered geometry is
+proven by a provider. Layer bounds reserve interactive space conservatively;
+Morf-specific regions and device-to-output mapping are still required.
 
 The private worker channel carries subscriptions and semantic outcomes, with no
 raw frames or device descriptors. Its health channel remains separate. Progress
@@ -284,8 +305,9 @@ Ordinary OS repeat is separate from configured repeat-while-held.
 
 An unbound event rule can be observed without a desktop if its scope is everywhere
 and it has no context, screen or keyboard condition. Other rules require a verified
-session provider. The current session agent supplies authenticated membership
-and status; context publication remains pending, so these rules are skipped.
+session provider. `session --context --observations` supplies verified compositor
+context for observation. Rules requiring app targets, keyboard geometry or
+Morf regions remain skipped until their providers are integrated.
 
 The library's context model freezes the first target and validates later fingers
 against it. A focus change cannot redirect a swipe. Session/lock changes, stale
@@ -293,7 +315,7 @@ snapshots, target removal, relevant geometry changes and overlays cancel it.
 Compositor visibility is distinct from a mapped window on another workspace.
 The model requires 250 ms snapshot freshness and a one-second provider lease.
 The Linux session library supplies verified socket/process/logind membership
-for agents launched inside the compositor's session. Context/action integration,
+for agents launched inside the compositor's session. Action integration,
 delegation for shared user services and real lock-provider registration remain
 pending. The lockscreen/greeter UI and authentication remain Morf's responsibility.
 
@@ -372,7 +394,9 @@ The VM also checks actual logind registration, rejection of another process with
 the same UID outside the session, agent death, disconnect and active VT changes.
 The real `broker`, `session` and `status` commands also run there against a
 synthetic idle source, including single-owner enforcement, descriptor isolation,
-lease renewal, graceful shutdown and agent exit on broker loss.
+lease renewal, graceful shutdown and agent exit on broker loss. Live desktop-only
+rules use actual compositor snapshots; an acknowledged Wayland session lock
+inhibits observations and a bare unlock leaves provider inhibition in place.
 `tests/protocol.rs` covers schema/size/order/time bounds, nonblocking backpressure,
 descriptor rejection/cleanup, endpoint lifetimes and inherited-socket misuse.
 The isolated routing VM also exercises live `learn-shape` on a synthetic mouse,

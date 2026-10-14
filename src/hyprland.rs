@@ -127,49 +127,69 @@ fn connect(path: &Path, until: Instant) -> io::Result<UnixStream> {
     for (slot, byte) in address.sun_path.iter_mut().zip(bytes) {
         *slot = *byte as libc::c_char;
     }
-    // SAFETY: no pointers; successful socket creates a new owned descriptor.
-    let raw = unsafe {
-        libc::socket(
-            libc::AF_UNIX,
-            libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
-            0,
-        )
-    };
-    if raw < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
     let length = (offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1) as libc::socklen_t;
-    // SAFETY: correctly initialized address and precise bounded length.
-    if unsafe { libc::connect(raw, (&address as *const libc::sockaddr_un).cast(), length) } < 0 {
-        let error = io::Error::last_os_error();
-        if !matches!(
-            error.raw_os_error(),
-            Some(libc::EINPROGRESS) | Some(libc::EAGAIN)
-        ) {
-            return Err(error);
+    loop {
+        if Instant::now() >= until {
+            return Err(io::ErrorKind::TimedOut.into());
         }
-        wait(raw, libc::POLLOUT, until)?;
-        let mut status: libc::c_int = 0;
-        let mut length = size_of::<libc::c_int>() as libc::socklen_t;
-        // SAFETY: live socket and initialized integer status output.
-        if unsafe {
-            libc::getsockopt(
-                raw,
-                libc::SOL_SOCKET,
-                libc::SO_ERROR,
-                (&mut status as *mut libc::c_int).cast(),
-                &mut length,
+        // SAFETY: no pointers; successful socket creates a new owned descriptor.
+        let raw = unsafe {
+            libc::socket(
+                libc::AF_UNIX,
+                libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+                0,
             )
-        } < 0
-        {
+        };
+        if raw < 0 {
             return Err(io::Error::last_os_error());
         }
-        if status != 0 {
-            return Err(io::Error::from_raw_os_error(status));
+        let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+        // SAFETY: correctly initialized address and precise bounded length.
+        if unsafe { libc::connect(raw, (&address as *const libc::sockaddr_un).cast(), length) } == 0
+        {
+            return Ok(UnixStream::from(fd));
+        }
+        let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::EAGAIN) => {
+                // AF_UNIX backlog pressure leaves this socket unconnected.
+                // POLLOUT/SO_ERROR=0 is not proof of connection; retry with a
+                // fresh socket and bounded backoff, then verify the real peer.
+                drop(fd);
+                std::thread::sleep(
+                    until
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_millis(1)),
+                );
+            }
+            Some(libc::EINTR) => {}
+            Some(libc::EINPROGRESS) => {
+                wait(raw, libc::POLLOUT, until)?;
+                let mut status: libc::c_int = 0;
+                let mut status_length = size_of::<libc::c_int>() as libc::socklen_t;
+                // SAFETY: live socket and initialized integer status output.
+                if unsafe {
+                    libc::getsockopt(
+                        raw,
+                        libc::SOL_SOCKET,
+                        libc::SO_ERROR,
+                        (&mut status as *mut libc::c_int).cast(),
+                        &mut status_length,
+                    )
+                } < 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+                if status != 0 {
+                    return Err(io::Error::from_raw_os_error(status));
+                }
+                let stream = UnixStream::from(fd);
+                stream.peer_addr()?;
+                return Ok(stream);
+            }
+            _ => return Err(error),
         }
     }
-    Ok(UnixStream::from(fd))
 }
 
 /// A policy-selected compositor executable and private instance directory.
@@ -289,9 +309,21 @@ impl Client {
         ) {
             return Err(invalid("unsupported compositor query"));
         }
+        let bytes = self.exchange(&format!("j/{kind}"), until)?;
+        serde_json::from_slice(&bytes).map_err(io::Error::other)
+    }
+    fn query_context(&self, until: Instant) -> io::Result<Vec<u8>> {
+        // Both supported stock schemas accept read-only batches, whose JSON
+        // replies are whitespace-separated. One connection avoids spending
+        // the context freshness budget on seven separate IPC round trips.
+        self.exchange(
+            "[[BATCH]]j/locked;j/monitors;j/clients;j/layers;j/activewindow;j/monitors;j/locked",
+            until,
+        )
+    }
+    fn exchange(&self, request: &str, until: Instant) -> io::Result<Vec<u8>> {
         let mut stream = connect(&self.socket_path(), until)?;
         self.verify(&stream)?;
-        let request = format!("j/{kind}");
         let mut pending = request.as_bytes();
         while !pending.is_empty() {
             match stream.write(pending) {
@@ -326,7 +358,7 @@ impl Client {
             }
         }
         self.verify(&stream)?;
-        serde_json::from_slice(&bytes).map_err(io::Error::other)
+        Ok(bytes)
     }
 
     pub fn version(&self) -> &Version {
@@ -503,6 +535,85 @@ fn verified_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        os::unix::net::UnixListener,
+        sync::atomic::{AtomicU64, Ordering},
+        thread,
+    };
+    struct Backlog {
+        directory: PathBuf,
+        listener: UnixListener,
+        _queued: UnixStream,
+    }
+    impl Backlog {
+        fn new() -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let directory = std::env::temp_dir().join(format!(
+                "prek-backlog-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&directory).unwrap();
+            let path = directory.join("socket");
+            let listener = UnixListener::bind(&path).unwrap();
+            // SAFETY: a live listening UNIX socket; backlog zero leaves room
+            // for exactly one queued connection on Linux.
+            assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 0) }, 0);
+            let queued = UnixStream::connect(&path).unwrap();
+            Self {
+                directory,
+                listener,
+                _queued: queued,
+            }
+        }
+        fn path(&self) -> PathBuf {
+            self.directory.join("socket")
+        }
+    }
+    impl Drop for Backlog {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.directory).unwrap();
+        }
+    }
+    #[test]
+    fn full_unix_backlog_times_out_instead_of_returning_an_unconnected_socket() {
+        let fixture = Backlog::new();
+        let started = Instant::now();
+        assert_eq!(
+            connect(&fixture.path(), started + Duration::from_millis(30))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert!(started.elapsed() < Duration::from_millis(200));
+    }
+    #[test]
+    fn transient_unix_backlog_pressure_still_verifies_the_actual_peer() {
+        let fixture = Backlog::new();
+        let listener = fixture.listener.try_clone().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let accepting = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(15));
+            drop(listener.accept().unwrap());
+            let deadline = Instant::now() + Duration::from_millis(400);
+            loop {
+                match listener.accept() {
+                    Ok((stream, _)) => return stream,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline);
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(error) => panic!("accept: {error}"),
+                }
+            }
+        });
+        let stream = connect(&fixture.path(), Instant::now() + REQUEST_TIME).unwrap();
+        let _accepted = accepting.join().unwrap();
+        assert!(stream.peer_addr().is_ok());
+        let peer = credentials(&stream).unwrap();
+        assert_eq!(peer.pid as u32, std::process::id());
+        assert_eq!(peer.uid, unsafe { libc::geteuid() });
+    }
     #[test]
     fn versions_are_explicit_and_unknown_schemas_refuse() {
         for version in ["0.54.3", "0.55.4"] {

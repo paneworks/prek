@@ -1,15 +1,15 @@
 //! Authenticated, bounded broker control plane. Device descriptors belong to a
 //! separate supervised worker; this service performs no desktop actions.
-//! Context/dispatch capabilities stay unavailable until their provider gates
-//! are connected. Membership alone never establishes an unlocked desktop.
+//! Desktop context comes from the bound compositor, never client snapshots.
+//! Membership alone never establishes an unlocked desktop.
 
 use crate::{
-    context::State,
-    hyprland::Client,
+    context::{SNAPSHOT_MAX_AGE, State},
+    hyprland::{Client, ContextSampler},
     ipc::{Channel, Endpoint},
     protocol::{self, Capability, Epoch, Fence, Mode, Reply, Request, Role},
     session::{Logind, Peer, Registration},
-    worker::{Report, Subscription},
+    worker::{ProvidedContext, Report, Subscription},
 };
 use nix::{
     libc,
@@ -28,6 +28,82 @@ use std::{
 
 pub const MAX_CLIENTS: usize = 8;
 pub const REFRESH: Duration = Duration::from_millis(250);
+pub const CONTEXT_REFRESH: Duration = Duration::from_millis(100);
+
+#[derive(Default)]
+struct Grace {
+    fences: Vec<Fence>,
+    expires: Duration,
+}
+impl Grace {
+    fn remember(&mut self, fence: Fence, now: Duration) -> io::Result<()> {
+        if now >= self.expires {
+            self.fences.clear();
+            self.expires = now + protocol::MAX_PACKET_AGE;
+        }
+        if !self.fences.contains(&fence) {
+            if self.fences.len() >= 32 {
+                return Err(protocol::invalid(
+                    "unacknowledged session transitions exceeded limit",
+                ));
+            }
+            self.fences.push(fence);
+        }
+        Ok(())
+    }
+    fn permits(&self, request: &Request, now: Duration) -> bool {
+        matches!(request, Request::Heartbeat { fence }
+            if now < self.expires && self.fences.contains(fence))
+    }
+}
+
+struct ContextFeed {
+    sampler: ContextSampler,
+    value: Option<Box<ProvidedContext>>,
+    state: State,
+    usable: bool,
+    checked: Duration,
+    error: Option<String>,
+}
+impl Default for ContextFeed {
+    fn default() -> Self {
+        Self {
+            sampler: ContextSampler::default(),
+            value: None,
+            state: State::Unknown,
+            usable: false,
+            checked: Duration::ZERO,
+            error: None,
+        }
+    }
+}
+impl ContextFeed {
+    fn fresh(&self, now: Duration) -> bool {
+        self.usable
+            && now >= self.checked
+            && now - self.checked <= SNAPSHOT_MAX_AGE
+            && self.value.as_ref().is_none_or(|context| {
+                now >= context.snapshot.captured_at
+                    && now - context.snapshot.captured_at <= SNAPSHOT_MAX_AGE
+            })
+    }
+    fn state(&self, now: Duration) -> State {
+        if self.state == State::Locking {
+            State::Locking
+        } else if self.fresh(now) {
+            self.state
+        } else {
+            State::Unknown
+        }
+    }
+    fn inhibit(&mut self) {
+        self.state = State::Locking;
+        self.usable = false;
+        self.value = None;
+        self.error =
+            Some("compositor lock requires a completed bound-provider unlock transition".into());
+    }
+}
 
 pub use crate::ipc::monotonic;
 fn epoch() -> io::Result<Epoch> {
@@ -80,7 +156,9 @@ struct Bound {
     checked: Duration,
     capabilities: BTreeSet<Capability>,
     observing: bool,
-    previous: Option<(Fence, Duration)>,
+    previous: Grace,
+    context: ContextFeed,
+    compositor: (u32, u64),
 }
 struct Connection {
     channel: Channel,
@@ -138,6 +216,31 @@ fn reply_size(reply: &Reply) -> io::Result<usize> {
     .len())
 }
 
+fn subscriptions_fit(seats: &[Subscription]) -> bool {
+    #[derive(serde::Serialize)]
+    struct Update<'a> {
+        revision: u64,
+        seats: &'a [Subscription],
+    }
+    #[derive(serde::Serialize)]
+    #[serde(tag = "kind", rename_all = "snake_case")]
+    enum Command<'a> {
+        Subscriptions { update: Update<'a> },
+    }
+    protocol::encode(&protocol::Packet {
+        version: protocol::VERSION,
+        sequence: u64::MAX,
+        at: Duration::MAX,
+        message: Command::Subscriptions {
+            update: Update {
+                revision: u64::MAX,
+                seats,
+            },
+        },
+    })
+    .is_ok()
+}
+
 pub struct Broker {
     endpoint: Endpoint,
     logind: Logind,
@@ -151,10 +254,11 @@ pub struct Broker {
     reload_requested: bool,
     reload_pending: bool,
     last_reload_error: Option<String>,
+    inhibited: BTreeSet<(u32, u64)>,
 }
 impl Broker {
-    /// This currently exposes authenticated status in observation mode. It does
-    /// not advertise context, synthetic input or action dispatch prematurely.
+    /// Context is sampled directly from a verified compositor. Action dispatch
+    /// and synthetic input require separate routing/provider capabilities.
     pub fn open(endpoint: Endpoint, library: &std::path::Path, policy: Policy) -> io::Result<Self> {
         if policy.allowed_seats.is_empty()
             || !policy.runtime_root.is_absolute()
@@ -178,6 +282,7 @@ impl Broker {
             reload_requested: false,
             reload_pending: false,
             last_reload_error: None,
+            inhibited: BTreeSet::new(),
         })
     }
     pub fn clients(&self) -> usize {
@@ -223,11 +328,9 @@ impl Broker {
                     if !self.policy.allowed_seats.contains(&bound.seat) {
                         return false;
                     }
-                    bound.previous = Some(
-                        bound
-                            .previous
-                            .unwrap_or((bound.fence, now + protocol::MAX_PACKET_AGE)),
-                    );
+                    if bound.previous.remember(bound.fence, now).is_err() {
+                        return false;
+                    }
                     bound.fence.configuration = self.configuration;
                     bound.observing = false;
                     let fence = bound.fence;
@@ -261,30 +364,74 @@ impl Broker {
         self.reload_pending = false;
         Ok(())
     }
-    pub fn subscriptions(&mut self, now: Duration) -> Vec<Subscription> {
+    pub fn subscriptions(&mut self, now: Duration) -> io::Result<Vec<Subscription>> {
         self.connections.retain_mut(|connection| {
             let Some(bound) = connection.bound.as_mut() else {
                 return true;
             };
-            now >= bound.checked
-                && now.saturating_sub(bound.renewed) < protocol::MAX_PACKET_AGE
-                && bound
-                    .registration
-                    .check(&self.logind, &bound.client)
-                    .is_ok()
+            let result = if now < bound.checked {
+                Err(protocol::invalid("session timeline moved backward"))
+            } else if now.saturating_sub(bound.renewed) >= protocol::MAX_PACKET_AGE {
+                Err(protocol::invalid("session agent lease expired"))
+            } else {
+                bound.registration.check(&self.logind, &bound.client)
+            };
+            if let Err(error) = result {
+                let reason = error
+                    .to_string()
+                    .chars()
+                    .filter(|character| !character.is_control())
+                    .take(512)
+                    .collect();
+                let _ = connection.channel.send(
+                    &Reply::Revoked {
+                        fence: bound.fence,
+                        reason,
+                    },
+                    now,
+                );
+                return false;
+            }
+            true
         });
-        self.connections
+        let subscriptions: Vec<_> = self
+            .connections
             .iter()
             .filter_map(|connection| connection.bound.as_ref())
             .filter(|bound| {
-                bound.role == Role::Agent && bound.capabilities.contains(&Capability::Observations)
+                bound.role == Role::Agent
+                    && bound.capabilities.contains(&Capability::Observations)
+                    && bound.context.fresh(now)
             })
             .map(|bound| Subscription {
                 seat: bound.seat.clone(),
                 fence: bound.fence,
-                context: None,
+                context: bound.context.value.clone(),
             })
-            .collect()
+            .collect();
+        if !subscriptions_fit(&subscriptions) {
+            // Never publish a truncated target list or let an oversized
+            // optional context snapshot stop the supervised input reader.
+            for index in (0..self.connections.len()).rev() {
+                let mut connection = self.connections.remove(index);
+                if let Some(bound) = connection.bound.as_mut()
+                    && bound.context.value.is_some()
+                {
+                    bound.context.value = None;
+                    bound.context.state = State::Unknown;
+                    bound.context.usable = false;
+                    bound.context.error =
+                        Some("context snapshots exceed private transport packet limit".into());
+                    self.advance_session(&mut connection, now)?;
+                }
+                self.connections.insert(index, connection);
+            }
+            return Ok(subscriptions
+                .into_iter()
+                .filter(|subscription| subscription.context.is_none())
+                .collect());
+        }
+        Ok(subscriptions)
     }
     pub fn report(&mut self, report: Report, now: Duration) -> io::Result<()> {
         let subscription = report.subscription();
@@ -294,22 +441,61 @@ impl Broker {
                     && bound.seat == subscription.seat
                     && bound.role == Role::Agent
                     && bound.capabilities.contains(&Capability::Observations)
+                    && (bound.context.fresh(now) || matches!(&report, Report::ContextLost { .. }))
             })
         }) else {
             return Ok(());
         };
         let mut connection = self.connections.remove(index);
         let bound = connection.bound.as_mut().unwrap();
-        if now.saturating_sub(bound.renewed) >= protocol::MAX_PACKET_AGE
-            || bound
+        let verification = if now.saturating_sub(bound.renewed) >= protocol::MAX_PACKET_AGE {
+            Err(protocol::invalid("session agent lease expired"))
+        } else {
+            bound
                 .registration
                 .check(&self.logind, &bound.client)
-                .is_err()
-            || self.verify_agent(connection.channel.peer().pid).is_err()
-        {
+                .and_then(|()| self.verify_agent(connection.channel.peer().pid))
+        };
+        if let Err(error) = verification {
+            let reason = error
+                .to_string()
+                .chars()
+                .filter(|character| !character.is_control())
+                .take(512)
+                .collect();
+            let _ = connection.channel.send(
+                &Reply::Revoked {
+                    fence: bound.fence,
+                    reason,
+                },
+                now,
+            );
             return Ok(());
         }
+        if matches!(&report, Report::Observation { .. })
+            && !self.guard_observation(&mut connection, now)?
+        {
+            self.connections.insert(index, connection);
+            return Ok(());
+        }
+        let bound = connection.bound.as_mut().unwrap();
         let fence = bound.fence;
+        if matches!(report, Report::ContextLost { .. }) {
+            if bound.context.state == State::Locking
+                || !bound.capabilities.contains(&Capability::Context)
+            {
+                self.connections.insert(index, connection);
+                return Ok(());
+            }
+            bound.context.value = None;
+            bound.context.state = State::Unknown;
+            bound.context.usable = false;
+            bound.context.checked = Duration::ZERO;
+            bound.context.error = Some("worker context lease expired".into());
+            self.advance_session(&mut connection, now)?;
+            self.connections.insert(index, connection);
+            return Ok(());
+        }
         let reply = match report {
             Report::Ready { .. } if !bound.observing => {
                 bound.observing = true;
@@ -357,7 +543,15 @@ impl Broker {
                         } else {
                             protocol::MAX_PACKET_AGE
                         },
-                    |bound| (bound.checked + REFRESH).min(bound.renewed + protocol::MAX_PACKET_AGE),
+                    |bound| {
+                        (bound.checked + REFRESH)
+                            .min(bound.renewed + protocol::MAX_PACKET_AGE)
+                            .min(if bound.role == Role::Agent {
+                                bound.context.checked + CONTEXT_REFRESH
+                            } else {
+                                Duration::MAX
+                            })
+                    },
                 )
             })
             .min()
@@ -419,6 +613,7 @@ impl Broker {
         Ok(())
     }
     fn process(&mut self, connection: &mut Connection, now: Duration) -> io::Result<()> {
+        let registered = connection.bound.is_some();
         if now < connection.opened {
             return Err(protocol::invalid("broker timeline moved backward"));
         }
@@ -470,10 +665,9 @@ impl Broker {
                     role,
                     capabilities,
                 } if connection.bound.is_none() => {
-                    if capabilities
-                        .iter()
-                        .any(|capability| *capability != Capability::Observations)
-                        || !capabilities.is_empty() && (!self.observations || role != Role::Agent)
+                    if capabilities.iter().any(|capability| {
+                        !matches!(capability, Capability::Observations | Capability::Context)
+                    }) || !capabilities.is_empty() && (!self.observations || role != Role::Agent)
                     {
                         return Err(protocol::invalid(
                             "requested capabilities are not implemented by this broker",
@@ -514,6 +708,11 @@ impl Broker {
                     };
                     let seat = binding.seat.clone();
                     let session = binding.session.clone();
+                    let compositor = (binding.compositor_pid, binding.compositor_start);
+                    let mut context = ContextFeed::default();
+                    if self.inhibited.contains(&compositor) {
+                        context.inhibit();
+                    }
                     connection.bound = Some(Bound {
                         client,
                         registration,
@@ -524,7 +723,9 @@ impl Broker {
                         checked: now,
                         capabilities: capabilities.clone(),
                         observing: false,
-                        previous: None,
+                        previous: Grace::default(),
+                        context,
+                        compositor,
                     });
                     connection.push(Reply::Welcome {
                         fence,
@@ -539,16 +740,13 @@ impl Broker {
                         protocol::invalid("register before requesting control state")
                     })?;
                     let current = request.fence() == Some(bound.fence);
-                    let old_heartbeat = matches!(request, Request::Heartbeat { .. })
-                        && bound.previous.is_some_and(|(previous, expires)| {
-                            request.fence().is_some_and(|fence| {
-                                fence.broker == previous.broker
-                                    && fence.session == previous.session
-                                    && fence.configuration >= previous.configuration
-                                    && fence.configuration < bound.fence.configuration
-                            }) && now < expires
-                        });
-                    if !current && !old_heartbeat {
+                    let old_heartbeat = bound.previous.permits(&request, now);
+                    // An in-flight status read may precede a transition notice.
+                    // Discard it without acting on stale authority or closing
+                    // the agent before that notice can reach it.
+                    let old_status = matches!(&request, Request::Status { fence }
+                        if now < bound.previous.expires && bound.previous.fences.contains(fence));
+                    if !current && !old_heartbeat && !old_status {
                         return Err(protocol::invalid(
                             "stale broker/configuration/session generation",
                         ));
@@ -557,22 +755,45 @@ impl Broker {
                     self.verify_agent(connection.channel.peer().pid)?;
                     bound.checked = now;
                     if current {
-                        bound.previous = None;
+                        bound.previous = Grace::default();
                     }
                     let fence = bound.fence;
                     match request {
                         Request::Heartbeat { .. } => {
                             bound.renewed = now;
-                            connection.push(Reply::Accepted { fence, revision: 0 })?;
+                            let revision = bound
+                                .context
+                                .value
+                                .as_ref()
+                                .map_or(0, |value| value.snapshot.revision);
+                            connection.push(Reply::Accepted { fence, revision })?;
                         }
+                        Request::Status { .. } if !current => {}
                         Request::Status { .. } => {
                             let fence = bound.fence;
+                            let provider = self
+                                .connections
+                                .iter()
+                                .filter_map(|other| other.bound.as_ref())
+                                .find(|other| {
+                                    other.role == Role::Agent
+                                        && other.compositor == bound.compositor
+                                })
+                                .unwrap_or(bound);
+                            let state = provider.context.state(now);
+                            let revision = provider
+                                .context
+                                .value
+                                .as_ref()
+                                .map_or(0, |value| value.snapshot.revision);
+                            let context_error = provider.context.error.clone();
                             connection.push(Reply::Status {
                                 fence,
-                                state: State::Unknown,
-                                revision: 0,
+                                state,
+                                revision,
                                 pending: connection.outgoing.len(),
                                 last_reload_error: self.last_reload_error.clone(),
+                                context_error,
                             })?;
                         }
                         Request::Disconnect { .. } => {
@@ -587,7 +808,148 @@ impl Broker {
                 }
             }
         }
+        if registered {
+            self.refresh_context(connection, monotonic()?)?;
+        }
+        if matches!(connection.outgoing.front(), Some(Reply::Observation { .. })) {
+            self.guard_observation(connection, monotonic()?)?;
+        }
         connection.flush(monotonic()?)
+    }
+    fn guard_observation(
+        &mut self,
+        connection: &mut Connection,
+        now: Duration,
+    ) -> io::Result<bool> {
+        let bound = connection.bound.as_mut().unwrap();
+        if !bound.context.fresh(now) {
+            if bound.context.state != State::Locking {
+                bound.context.state = State::Unknown;
+            }
+            bound.context.usable = false;
+            bound.context.value = None;
+            bound.context.checked = Duration::ZERO;
+            bound.context.error =
+                Some("compositor context expired before observation delivery".into());
+            self.advance_session(connection, now)?;
+            return Ok(false);
+        }
+        let result = bound.context.sampler.check_lock(&bound.client);
+        bound.registration.check(&self.logind, &bound.client)?;
+        match result {
+            Ok(false) if bound.context.fresh(monotonic()?) => return Ok(true),
+            Ok(true) => {
+                if self.inhibited.len() >= 4096 && !self.inhibited.contains(&bound.compositor) {
+                    return Err(protocol::invalid("locked compositor history exhausted"));
+                }
+                self.inhibited.insert(bound.compositor);
+                bound.context.inhibit();
+            }
+            Ok(false) | Err(_) => {
+                bound.context.state = State::Unknown;
+                bound.context.usable = false;
+                bound.context.value = None;
+                bound.context.error = Some("compositor lock state is unavailable".into());
+            }
+        }
+        self.advance_session(connection, monotonic()?)?;
+        Ok(false)
+    }
+    fn advance_session(&mut self, connection: &mut Connection, now: Duration) -> io::Result<()> {
+        self.session = self
+            .session
+            .checked_add(1)
+            .ok_or_else(|| protocol::invalid("session generation exhausted"))?;
+        let bound = connection.bound.as_mut().unwrap();
+        bound.previous.remember(bound.fence, now)?;
+        bound.fence.session = self.session;
+        if let Some(context) = bound.context.value.as_mut() {
+            context.snapshot.generation = self.session;
+        }
+        bound.observing = false;
+        let fence = bound.fence;
+        let state = bound.context.state;
+        connection.outgoing.clear();
+        connection.bytes = 0;
+        connection.push(Reply::SessionChanged { fence, state })
+    }
+    fn refresh_context(&mut self, connection: &mut Connection, now: Duration) -> io::Result<()> {
+        let bound = connection.bound.as_mut().unwrap();
+        if bound.role != Role::Agent || now < bound.context.checked + CONTEXT_REFRESH {
+            return Ok(());
+        }
+        bound.registration.check(&self.logind, &bound.client)?;
+        let binding = bound.registration.binding()?.clone();
+        let was_fresh = bound.context.fresh(now);
+        let old_usable = bound.context.usable;
+        let old_state = bound.context.state;
+        let result = if bound.context.state == State::Locking {
+            Ok(None)
+        } else if bound.capabilities.contains(&Capability::Context) {
+            bound
+                .context
+                .sampler
+                .sample(&bound.client, bound.fence.session, binding.kind)
+                .map(Some)
+        } else {
+            bound
+                .context
+                .sampler
+                .check_lock(&bound.client)
+                .map(|_| None)
+        };
+        bound.registration.check(&self.logind, &bound.client)?;
+        let checked = monotonic()?;
+        bound.context.checked = checked;
+        if bound.context.state == State::Locking || bound.context.sampler.inhibited() {
+            // Persist inhibition across agent disconnect/re-registration for
+            // the same compositor lifetime. No caller can clear this latch.
+            if self.inhibited.len() >= 4096 && !self.inhibited.contains(&bound.compositor) {
+                return Err(protocol::invalid("locked compositor history exhausted"));
+            }
+            self.inhibited.insert(bound.compositor);
+            bound.context.inhibit();
+        } else {
+            match result {
+                Ok(snapshot) => {
+                    bound.context.state = snapshot
+                        .as_ref()
+                        .map_or(State::Unknown, |snapshot| snapshot.state);
+                    bound.context.value =
+                        snapshot.map(|snapshot| Box::new(ProvidedContext { binding, snapshot }));
+                    bound.context.usable = true;
+                    bound.context.error = None;
+                }
+                Err(error) => {
+                    bound.context.value = None;
+                    bound.context.state = State::Unknown;
+                    bound.context.usable = false;
+                    bound.context.error = Some(
+                        error
+                            .to_string()
+                            .chars()
+                            .filter(|character| !character.is_control())
+                            .take(512)
+                            .collect(),
+                    );
+                }
+            }
+        }
+        if bound.context.value.as_ref().is_some_and(|value| {
+            checked.saturating_sub(value.snapshot.captured_at) > SNAPSHOT_MAX_AGE
+        }) {
+            bound.context.value = None;
+            bound.context.state = State::Unknown;
+            bound.context.usable = false;
+            bound.context.error = Some("compositor snapshot exceeded freshness budget".into());
+        }
+        if old_state != bound.context.state
+            || old_usable != bound.context.usable
+            || old_usable && !was_fresh
+        {
+            self.advance_session(connection, checked)?;
+        }
+        Ok(())
     }
     fn verify_agent(&self, pid: u32) -> io::Result<()> {
         let expected = fs::metadata(&self.policy.agent_executable)?;
@@ -616,6 +978,93 @@ mod tests {
         input::Source,
         rules::{Event, Evidence, Stage},
     };
+    #[test]
+    fn heartbeat_grace_accepts_only_issued_fences_and_never_control_requests() {
+        let fence = Fence {
+            broker: Epoch([1, 2]),
+            configuration: 1,
+            session: 3,
+        };
+        let next = Fence {
+            configuration: 2,
+            session: 5,
+            ..fence
+        };
+        let mut grace = Grace::default();
+        grace.remember(fence, Duration::ZERO).unwrap();
+        grace.remember(next, Duration::from_millis(500)).unwrap();
+        assert!(grace.permits(&Request::Heartbeat { fence }, Duration::from_millis(999)));
+        assert!(grace.permits(
+            &Request::Heartbeat { fence: next },
+            Duration::from_millis(999)
+        ));
+        assert!(!grace.permits(
+            &Request::Heartbeat {
+                fence: Fence {
+                    session: 4,
+                    ..fence
+                }
+            },
+            Duration::ZERO
+        ));
+        assert!(!grace.permits(&Request::Status { fence }, Duration::ZERO));
+        assert!(!grace.permits(&Request::LockRequested { fence }, Duration::ZERO));
+        assert!(!grace.permits(&Request::Heartbeat { fence }, Duration::from_secs(1)));
+        grace.remember(next, Duration::from_secs(1)).unwrap();
+        assert!(!grace.permits(&Request::Heartbeat { fence }, Duration::from_secs(1)));
+    }
+    #[test]
+    fn lock_inhibition_outlives_geometry_and_a_plain_lease_refresh() {
+        let mut feed = ContextFeed::default();
+        assert!(!feed.fresh(Duration::ZERO));
+        feed.usable = true;
+        feed.checked = Duration::from_millis(10);
+        feed.state = State::Desktop;
+        assert_eq!(feed.state(Duration::from_millis(20)), State::Desktop);
+        assert_eq!(feed.state(Duration::from_millis(261)), State::Unknown);
+        assert!(!feed.fresh(Duration::ZERO));
+        feed.inhibit();
+        feed.checked = Duration::from_secs(2);
+        assert!(!feed.fresh(Duration::from_secs(2)));
+        assert_eq!(feed.state(Duration::from_secs(3)), State::Locking);
+        assert!(feed.value.is_none());
+    }
+    #[test]
+    fn private_context_packet_limit_rejects_the_whole_snapshot() {
+        let subscription = Subscription {
+            seat: "seat0".into(),
+            fence: Fence {
+                broker: Epoch([1, 2]),
+                configuration: 1,
+                session: 3,
+            },
+            context: None,
+        };
+        assert!(subscriptions_fit(std::slice::from_ref(&subscription)));
+        let mut oversized = subscription;
+        oversized.context = Some(Box::new(ProvidedContext {
+            binding: crate::context::Binding {
+                seat: "seat0".into(),
+                session: "verified".into(),
+                uid: 1000,
+                compositor_pid: 42,
+                compositor_start: 123,
+                kind: crate::context::SessionKind::User,
+            },
+            snapshot: crate::context::Snapshot {
+                generation: 3,
+                revision: 1,
+                captured_at: Duration::ZERO,
+                state: State::Desktop,
+                outputs: vec![],
+                windows: vec![],
+                regions: vec![],
+                secure_overlay: false,
+            },
+        }));
+        oversized.context.as_mut().unwrap().binding.session = "x".repeat(protocol::MAX_PACKET);
+        assert!(!subscriptions_fit(&[oversized]));
+    }
     fn progress(fence: Fence, ordinal: u64, stage: Stage) -> Reply {
         let phase = match stage {
             Stage::Begin => Phase::Begin,

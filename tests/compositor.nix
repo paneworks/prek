@@ -21,7 +21,7 @@ let
     postInstall = "";
   });
   compositorConfig = pkgs.writeText "prek-hyprland-test.conf" ''
-    exec-once = env PREK_BROKER_CLI_FIXTURE=1 PREK_BROKER_APP=${package}/bin/prek ${tests}/bin/prek-compositor-tests --ignored --exact broker_cli_session_fixture --nocapture
+    exec-once = env PREK_BROKER_CLI_FIXTURE=1 PREK_BROKER_APP=${package}/bin/prek PREK_LOCK_PYTHON=${pkgs.python3}/bin/python3 PREK_LOCK_SCRIPT=${lockScript} ${tests}/bin/prek-compositor-tests --ignored --exact broker_cli_session_fixture --nocapture
     exec-once = env PREK_SESSION_AGENT_FIXTURE=1 PREK_AGENT_SOCKET=/run/prek-session/agent.sock ${tests}/bin/prek-compositor-tests --ignored --exact logind_session_agent_fixture --nocapture
     exec-once = env PREK_SESSION_AGENT_FIXTURE=1 PREK_AGENT_SOCKET=/run/prek-session/seat.sock ${tests}/bin/prek-compositor-tests --ignored --exact logind_session_agent_fixture --nocapture
     monitor = , preferred, auto, 1
@@ -33,6 +33,7 @@ let
       disable_splash_rendering = true
     }
   '';
+  lockScript = pkgs.writeText "prek-session-lock-fixture.py" (builtins.readFile ./support/session_lock.py);
   brokerConfig = pkgs.writeText "prek-broker-fixture.toml" ''
     version = 1
     [policy]
@@ -41,6 +42,7 @@ let
     name = "Prek broker fixture"
     [[rules]]
     id = "broker-a"
+    contexts = ["desktop"]
     trigger = { kind = "key", key = "KEY_A" }
     action = { kind = "event", name = "fixture_press" }
   '';
@@ -94,7 +96,14 @@ pkgs.testers.runNixOSTest {
     machine.succeed("cp ${brokerConfig} /run/prek-control/config.toml && chmod 0600 /run/prek-control/config.toml")
     broker = "${package}/bin/prek broker --config /run/prek-control/config.toml --runtime-dir /run/prek-control --compositor-executable ${pkgs.hyprland}/bin/.Hyprland-wrapped --logind-library ${pkgs.systemd}/lib/libsystemd.so.0"
     machine.succeed(f"systemd-run --unit prek-broker --property=Type=exec {broker}")
-    machine.wait_until_succeeds("test -s /run/user/1000/prek-broker-ready", timeout=10)
+    try:
+        machine.wait_until_succeeds("test -s /run/user/1000/prek-broker-ready", timeout=10)
+    except Exception:
+        machine.log(machine.succeed("cat /run/user/1000/prek-broker-agent.jsonl /run/user/1000/prek-broker-agent.stderr 2>/dev/null || true"))
+        machine.log(machine.succeed("journalctl -u prek-broker --no-pager -n 30"))
+        for query in ["monitors", "clients", "layers", "locked"]:
+            machine.log(machine.succeed(f"XDG_RUNTIME_DIR=/run/user/1000 HYPRLAND_INSTANCE_SIGNATURE={instance} ${pkgs.hyprland}/bin/hyprctl -j {query}"))
+        raise
     # The worker acknowledges neutral recognition entry; an initially held key
     # cannot become a new press when its session starts receiving observations.
     machine.succeed("! grep -q '\"outcome\":\"matched\"' /run/user/1000/prek-broker-agent.jsonl")
@@ -190,6 +199,47 @@ pkgs.testers.runNixOSTest {
     # Let actual heartbeat/lease renewal run beyond its one-second expiry.
     machine.sleep(2)
     machine.succeed("systemctl is-active prek-broker")
+    # Exercise an actual compositor lock, acknowledged through Wayland. No
+    # model snapshot or client-supplied lock flag establishes this transition.
+    before = len(rule_matches())
+    machine.succeed(f"XDG_RUNTIME_DIR=/run/user/1000 HYPRLAND_INSTANCE_SIGNATURE={instance} ${pkgs.hyprland}/bin/hyprctl dispatch dpms off")
+    machine.succeed("touch /run/user/1000/prek-lock-start")
+    machine.wait_until_succeeds("test -s /run/user/1000/prek-lock-acknowledged", timeout=10)
+    try:
+        machine.wait_until_succeeds("grep -q '\"state\":\"locking\"' /run/user/1000/prek-broker-agent.jsonl", timeout=3)
+    except Exception:
+        machine.log(machine.succeed("cat /run/user/1000/prek-broker-agent.jsonl /run/user/1000/prek-broker-agent.stderr"))
+        machine.log(machine.succeed("journalctl -u prek-broker --no-pager -n 30"))
+        raise
+    inject("press-authentication")
+    inject("release-authentication")
+    machine.sleep(1)
+    assert len(rule_matches()) == before, rule_matches()
+    machine.succeed("rm -f /run/user/1000/prek-broker-status.json && printf locked > /run/user/1000/prek-broker-inspect")
+    machine.wait_until_succeeds("test -s /run/user/1000/prek-broker-status.json", timeout=3)
+    status = __import__("json").loads(machine.succeed("cat /run/user/1000/prek-broker-status.json"))
+    assert status["state"] == "locking" and status["context_error"], status
+    # A bare compositor unlock cannot clear Prek's bound-provider requirement.
+    machine.succeed("touch /run/user/1000/prek-lock-unlock")
+    machine.wait_until_succeeds("test -s /run/user/1000/prek-lock-completed", timeout=3)
+    machine.succeed(f"XDG_RUNTIME_DIR=/run/user/1000 HYPRLAND_INSTANCE_SIGNATURE={instance} ${pkgs.hyprland}/bin/hyprctl dispatch dpms on")
+    inject("press-after-unverified-unlock")
+    inject("release-after-unverified-unlock")
+    machine.sleep(1)
+    assert len(rule_matches()) == before, rule_matches()
+    # Restart with context-free observation only. The compositor lifetime's
+    # lock latch must survive and keep authentication observations disabled.
+    machine.succeed("touch /run/user/1000/prek-broker-restart")
+    machine.wait_until_succeeds("test -s /run/user/1000/prek-broker-restarted", timeout=3)
+    machine.wait_until_succeeds("test $(grep -c '\"registered\":true' /run/user/1000/prek-broker-agent.jsonl) -eq 2", timeout=3)
+    machine.succeed("rm -f /run/user/1000/prek-broker-status.json && printf reconnected > /run/user/1000/prek-broker-inspect")
+    machine.wait_until_succeeds("test -s /run/user/1000/prek-broker-status.json", timeout=3)
+    status = __import__("json").loads(machine.succeed("cat /run/user/1000/prek-broker-status.json"))
+    assert status["state"] == "locking", status
+    inject("press-after-agent-reconnect")
+    inject("release-after-agent-reconnect")
+    machine.sleep(1)
+    assert len(rule_matches()) == before, rule_matches()
     machine.succeed("systemctl kill --kill-whom=main --signal=SIGTERM prek-broker")
     machine.wait_until_succeeds(f"test ! -e /proc/{worker}", timeout=3)
     machine.wait_until_succeeds("test -s /run/user/1000/prek-broker-agent-stopped", timeout=3)

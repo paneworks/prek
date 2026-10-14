@@ -64,6 +64,9 @@ pub enum Report {
         subscription: Subscription,
         reason: String,
     },
+    ContextLost {
+        subscription: Subscription,
+    },
 }
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -81,7 +84,8 @@ impl Report {
         match self {
             Self::Ready { subscription }
             | Self::Observation { subscription, .. }
-            | Self::Ended { subscription, .. } => subscription,
+            | Self::Ended { subscription, .. }
+            | Self::ContextLost { subscription } => subscription,
         }
     }
 }
@@ -191,7 +195,7 @@ impl Registry {
                         .map_err(io::Error::other)?;
                 }
                 if authority.generation() != subscription.fence.session {
-                    return Err(protocol::invalid("provided context authority was revoked"));
+                    return Err(io::Error::other(crate::context::Rejection::StaleGeneration));
                 }
                 if existing.is_none_or(|observer| {
                     observer
@@ -206,7 +210,7 @@ impl Registry {
                 } else {
                     authority.tick(now);
                     if authority.generation() != subscription.fence.session {
-                        return Err(protocol::invalid("provided context snapshot expired"));
+                        return Err(io::Error::other(crate::context::Rejection::StaleSnapshot));
                     }
                 }
                 authorities.insert(subscription.seat.clone(), authority);
@@ -305,6 +309,19 @@ impl Registry {
         )
     }
     fn expire(&mut self, now: Duration) -> io::Result<()> {
+        let lost: Vec<_> = self
+            .observers
+            .values_mut()
+            .filter_map(|observer| {
+                observer.subscription.context.as_ref()?;
+                observer.engine.authority_mut().tick(now);
+                (observer.engine.authority().generation() != observer.subscription.fence.session)
+                    .then(|| observer.subscription.identity())
+            })
+            .collect();
+        for subscription in lost {
+            self.context_lost(subscription, now)?;
+        }
         let expired: Vec<_> = self
             .observers
             .values()
@@ -315,6 +332,17 @@ impl Registry {
             self.end(subscription, "worker observation lease expired", now)?;
         }
         Ok(())
+    }
+    fn context_lost(&mut self, subscription: Subscription, now: Duration) -> io::Result<()> {
+        self.remove(&subscription);
+        self.blocked
+            .insert(subscription.seat.clone(), subscription.fence);
+        self.queue(
+            Report::ContextLost {
+                subscription: subscription.identity(),
+            },
+            now,
+        )
     }
     fn queue(&mut self, report: Report, now: Duration) -> io::Result<()> {
         // Assign transport sequence numbers only on successful sends. Account
@@ -457,6 +485,13 @@ impl Registry {
                     .deadline()
                     .into_iter()
                     .chain([observer.expires])
+                    .chain(observer.subscription.context.as_ref().map(|context| {
+                        context
+                            .snapshot
+                            .captured_at
+                            .saturating_add(crate::context::SNAPSHOT_MAX_AGE)
+                            .saturating_add(Duration::from_millis(1))
+                    }))
             })
             .min()
     }
@@ -558,7 +593,33 @@ impl Stream {
                 break;
             };
             match packet.message {
-                Command::Subscriptions { update } => self.registry.update(update, now)?,
+                Command::Subscriptions { update } => {
+                    let contexts: Vec<_> = update
+                        .seats
+                        .iter()
+                        .filter(|subscription| subscription.context.is_some())
+                        .map(Subscription::identity)
+                        .collect();
+                    if let Err(error) = self.registry.update(update, now) {
+                        if error
+                            .get_ref()
+                            .and_then(|error| error.downcast_ref::<crate::context::Rejection>())
+                            .is_some_and(|rejection| {
+                                matches!(
+                                    rejection,
+                                    crate::context::Rejection::StaleSnapshot
+                                        | crate::context::Rejection::StaleGeneration
+                                )
+                            })
+                        {
+                            for subscription in contexts {
+                                self.registry.context_lost(subscription, now)?;
+                            }
+                        } else {
+                            return Err(error);
+                        }
+                    }
+                }
                 command => {
                     if let Some(installation) = self.assembly.accept(command, now)? {
                         let result = installation.config.and_then(|config| {
@@ -1021,6 +1082,79 @@ mod tests {
         }
         assert_eq!(registry.revision, 1);
         assert_eq!(registry.observers["seat0"].expires, ms(1000));
+    }
+    #[test]
+    fn context_expiry_revokes_observation_before_an_idle_hold_and_keeps_reading() {
+        let mut config = config();
+        config.rules[0].contexts = vec![Context::Desktop];
+        let mut registry = registry(config);
+        update(
+            &mut registry,
+            1,
+            vec![with_context(subscription("seat0", 7), 1, 0)],
+            0,
+        );
+        key(&mut registry, source(1, "seat0"), 10, 1, true, 10);
+        assert_eq!(registry.deadline(), Some(ms(251)));
+        registry.expire(ms(251)).unwrap();
+        assert!(registry.observers.is_empty());
+        assert!(
+            matches!(&registry.reports.front().unwrap().0, Report::ContextLost { subscription }
+            if subscription.context.is_none() && subscription.fence.session == 7)
+        );
+        key(&mut registry, source(1, "seat0"), 300, 2, false, 300);
+        update(
+            &mut registry,
+            2,
+            vec![with_context(subscription("seat0", 8), 1, 300)],
+            300,
+        );
+        key(&mut registry, source(1, "seat0"), 310, 3, true, 310);
+        assert_eq!(registry.observers["seat0"].subscription.fence.session, 8);
+    }
+    #[test]
+    fn stale_private_context_does_not_stop_the_input_worker() {
+        let (mut broker, worker) = Channel::pair().unwrap();
+        let mut stream = Stream::new(config(), worker).unwrap();
+        let now = crate::ipc::monotonic().unwrap();
+        let update = Subscriptions {
+            revision: 1,
+            seats: vec![with_context(subscription("seat0", 7), 1, 0)],
+        };
+        assert!(
+            broker
+                .send(&Command::Subscriptions { update }, now)
+                .unwrap()
+        );
+        stream.service().unwrap();
+        stream.flush().unwrap();
+        assert!(matches!(
+            broker.receive::<Message>().unwrap().unwrap().message,
+            Message::Configuration { .. }
+        ));
+        assert!(matches!(
+            broker.receive::<Message>().unwrap().unwrap().message,
+            Message::Outcome {
+                report: Report::ContextLost { .. }
+            }
+        ));
+        let mut fresh = with_context(subscription("seat0", 8), 1, 0);
+        fresh.context.as_mut().unwrap().snapshot.captured_at = crate::ipc::monotonic().unwrap();
+        assert!(
+            broker
+                .send(
+                    &Command::Subscriptions {
+                        update: Subscriptions {
+                            revision: 2,
+                            seats: vec![fresh]
+                        }
+                    },
+                    crate::ipc::monotonic().unwrap()
+                )
+                .unwrap()
+        );
+        stream.service().unwrap();
+        assert_eq!(stream.registry.observers.len(), 1);
     }
     #[test]
     fn queue_overflow_revokes_observation_and_keeps_input_state_current() {

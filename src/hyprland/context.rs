@@ -22,6 +22,12 @@ pub struct ContextSampler {
     inhibited: bool,
 }
 impl ContextSampler {
+    /// Used by observation-only agents too: authentication input must never be
+    /// exposed merely because desktop context was not requested.
+    pub fn check_lock(&mut self, client: &Client) -> io::Result<bool> {
+        self.inhibited |= locked(&client.query_until("locked", Instant::now() + REQUEST_TIME)?)?;
+        Ok(self.inhibited)
+    }
     pub fn inhibited(&self) -> bool {
         self.inhibited
     }
@@ -39,21 +45,28 @@ impl ContextSampler {
         }
         let captured_at = crate::ipc::monotonic()?;
         let until = Instant::now() + REQUEST_TIME;
-        if locked(&client.query_until("locked", until)?)? {
-            self.inhibited = true;
-            return Err(invalid("compositor lock inhibits desktop context"));
-        }
         if self.inhibited {
             return Err(invalid("a completed lock-provider transition is required"));
         }
-        let monitors = client.query_until("monitors", until)?;
-        let clients = client.query_until("clients", until)?;
-        let layers = client.query_until("layers", until)?;
-        let active = client.query_until("activewindow", until)?;
-        let final_monitors = client.query_until("monitors", until)?;
-        if locked(&client.query_until("locked", until)?)? {
+        let bytes = client.query_context(until)?;
+        let mut replies = serde_json::Deserializer::from_slice(&bytes).into_iter::<Value>();
+        // Decode the leading lock witness first, retaining inhibition even if
+        // later geometry replies are malformed or incomplete.
+        if locked(&next_reply(&mut replies)?)? {
+            self.inhibited = true;
+            return Err(invalid("compositor lock inhibits desktop context"));
+        }
+        let monitors = next_reply(&mut replies)?;
+        let clients = next_reply(&mut replies)?;
+        let layers = next_reply(&mut replies)?;
+        let active = next_reply(&mut replies)?;
+        let final_monitors = next_reply(&mut replies)?;
+        if locked(&next_reply(&mut replies)?)? {
             self.inhibited = true;
             return Err(invalid("compositor locked during context sampling"));
+        }
+        if replies.next().is_some() {
+            return Err(invalid("unexpected extra context batch reply"));
         }
         let revision = self
             .revision
@@ -121,6 +134,12 @@ impl ContextSampler {
         Ok(snapshot)
     }
 }
+fn next_reply(replies: &mut impl Iterator<Item = serde_json::Result<Value>>) -> io::Result<Value> {
+    replies
+        .next()
+        .ok_or_else(|| invalid("incomplete context batch reply"))?
+        .map_err(io::Error::other)
+}
 fn locked(value: &Value) -> io::Result<bool> {
     value
         .get("locked")
@@ -154,7 +173,7 @@ fn flag(value: &Value, key: &str) -> io::Result<bool> {
     value
         .get(key)
         .and_then(Value::as_bool)
-        .ok_or_else(|| invalid("missing context boolean"))
+        .ok_or_else(|| invalid(&format!("missing context boolean: {key}")))
 }
 fn point(value: &Value, key: &str) -> io::Result<Point> {
     let values = value
