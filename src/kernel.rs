@@ -10,6 +10,7 @@ use crate::{
     supervisor::{Heartbeat, Report, WorkerIdentity},
     transport::{Descriptor, permitted_property},
 };
+use evdev::raw_stream::RawDevice;
 use nix::libc;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -719,6 +720,122 @@ impl Virtual {
     }
     pub fn descriptor(&self) -> &Descriptor {
         &self.publication.descriptor
+    }
+
+    /// Verify processed udev properties and the actual evdev ABI of this owned
+    /// virtual node. Node existence alone is never consumer readiness.
+    pub fn processed_metadata(&self) -> io::Result<bool> {
+        if self.publication.directory.read(self.marker())? != self.publication.metadata {
+            return Err(invalid("virtual metadata changed after preparation"));
+        }
+        let nodes = self.event_nodes()?;
+        if nodes.is_empty() {
+            return Ok(false);
+        }
+        if nodes.len() != 1 {
+            return Err(invalid("virtual device has ambiguous event nodes"));
+        }
+        let file = match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(&nodes[0])
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let number = file.metadata()?.rdev();
+        if number == 0 {
+            return Err(invalid("virtual event node is not a device"));
+        }
+        let properties = match fs::read_to_string(format!(
+            "/run/udev/data/c{}:{}",
+            libc::major(number),
+            libc::minor(number)
+        )) {
+            Ok(properties) => properties,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        if !properties.lines().any(|line| line == "E:PREK_VIRTUAL=1") {
+            return Ok(false);
+        }
+        let spec = self.descriptor();
+        for (key, value) in &spec.udev {
+            if !properties
+                .lines()
+                .any(|line| line == format!("E:{key}={value}"))
+            {
+                return Err(invalid(
+                    "processed virtual property differs from preparation",
+                ));
+            }
+        }
+        let raw = RawDevice::from_fd(file.into())?;
+        let id = raw.input_id();
+        if raw.name() != Some(spec.name.as_str())
+            || raw.physical_path() != Some(self.marker())
+            || (id.bus_type().0, id.vendor(), id.product(), id.version())
+                != (
+                    spec.identity.bus,
+                    spec.identity.vendor,
+                    spec.identity.product,
+                    spec.identity.version,
+                )
+            || raw
+                .properties()
+                .iter()
+                .map(|property| property.0)
+                .collect::<Vec<_>>()
+                != spec.properties
+            || raw
+                .supported_events()
+                .iter()
+                .map(|event| event.0)
+                .collect::<Vec<_>>()
+                != spec.capabilities.keys().copied().collect::<Vec<_>>()
+        {
+            return Err(invalid(
+                "created virtual identity/properties/capabilities differ",
+            ));
+        }
+        for (&kind, expected) in &spec.capabilities {
+            if kind == EV_SYN {
+                continue;
+            }
+            let mut bytes = [0u8; 128];
+            let request = nix::request_code_read!(b'E', 0x20 + u32::from(kind), bytes.len());
+            // SAFETY: read-only ioctl on this owned node with a bounded buffer.
+            if unsafe { libc::ioctl(raw.as_raw_fd(), request, bytes.as_mut_ptr()) } < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let codes = (0..bytes.len() * 8)
+                .filter(|bit| bytes[bit / 8] & (1 << (bit % 8)) != 0)
+                .map(|bit| bit as u16)
+                .collect::<Vec<_>>();
+            if &codes != expected {
+                return Err(invalid("created virtual event codes differ"));
+            }
+        }
+        let axes: BTreeMap<_, _> = raw
+            .get_absinfo()?
+            .map(|(code, info)| {
+                (
+                    code.0,
+                    crate::input::Axis {
+                        minimum: info.minimum(),
+                        maximum: info.maximum(),
+                        resolution: info.resolution(),
+                        fuzz: info.fuzz(),
+                        flat: info.flat(),
+                    },
+                )
+            })
+            .collect();
+        if axes != spec.axes {
+            return Err(invalid("created virtual axes differ"));
+        }
+        Ok(true)
     }
 
     /// Discover only this owned virtual node. Absence is not readiness; the

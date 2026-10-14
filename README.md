@@ -28,6 +28,13 @@ nonzero axis fuzz are refused until transparent forwarding is verified for those
 capabilities.
 Production routing remains disabled.
 
+The Hyprland client verifies the IPC socket's owner, compositor process identity
+and executable before querying bounded device inventories. It supports the
+verified 0.54/0.55 schemas and checks virtual-device acceptance and reported
+keyboard settings. The kernel backend also verifies processed udev metadata
+and the resulting evdev capabilities. Active logind session/seat authorization,
+settings absent from stock IPC and complete readiness handoff remain pending.
+
 ## Commands
 
 Build with `cargo build --locked`, or run commands through Cargo:
@@ -172,6 +179,7 @@ commands. Raw recordings are an explicit diagnostic operation, not service logs.
 - `transport` validates virtual-device descriptors and readiness evidence.
 - `router` owns sequences and schedules bounded, ordered raw-frame delivery.
 - `kernel` owns Linux virtual-device creation, metadata and nonblocking writes.
+- `hyprland` verifies compositor IPC identity and virtual-device inventory evidence.
 - `supervisor` bounds worker lifetime and handles foreground/service termination.
 - `diagnostics` checks device selection/capacity and reports missing consumers.
 - `replay` connects frame normalization with button/touch recognition.
@@ -197,6 +205,11 @@ keyboard/mouse/touchpad frames, consumed touch, replay timing, LED feedback,
 supervised observation shutdown and kernel recovery. Building the normal
 package installs its udev rule in the package output; it does not activate it on
 the host or start input routing. ARM kernel execution remains a separate gate.
+
+`nix build .#checks.x86_64-linux.compositor` tests the client against stock
+Hyprland in a separate disposable VM. It checks virtual keyboard acceptance,
+processed metadata, keymap verification and removal. Ordinary IPC tests cover
+endpoint replacement, executable/permission checks, malformed replies and timeouts.
 
 Shape matching preserves path order and aspect ratio;
 rotation/reflection invariance must be enabled explicitly. Too-small, unmatched

@@ -43,6 +43,10 @@
       });
 
       checks = forSystems (system: {
+        compositor = import ./tests/compositor.nix {
+          pkgs = nixpkgs.legacyPackages.${system};
+          package = self.packages.${system}.default;
+        };
         routing = import ./tests/routing.nix {
           pkgs = nixpkgs.legacyPackages.${system};
           package = self.packages.${system}.default;

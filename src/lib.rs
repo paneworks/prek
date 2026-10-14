@@ -15,6 +15,8 @@ pub mod config;
 pub mod context;
 pub mod diagnostics;
 pub mod gestures;
+#[cfg(target_os = "linux")]
+pub mod hyprland;
 pub mod input;
 #[cfg(target_os = "linux")]
 pub mod kernel;
