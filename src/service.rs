@@ -80,6 +80,7 @@ struct Bound {
     checked: Duration,
     capabilities: BTreeSet<Capability>,
     observing: bool,
+    previous: Option<(Fence, Duration)>,
 }
 struct Connection {
     channel: Channel,
@@ -87,6 +88,8 @@ struct Connection {
     bound: Option<Bound>,
     outgoing: VecDeque<Reply>,
     bytes: usize,
+    administrator: bool,
+    waiting_reload: bool,
 }
 impl Connection {
     fn push(&mut self, reply: Reply) -> io::Result<()> {
@@ -145,6 +148,9 @@ pub struct Broker {
     connections: Vec<Connection>,
     cursor: usize,
     observations: bool,
+    reload_requested: bool,
+    reload_pending: bool,
+    last_reload_error: Option<String>,
 }
 impl Broker {
     /// This currently exposes authenticated status in observation mode. It does
@@ -169,6 +175,9 @@ impl Broker {
             connections: Vec::new(),
             cursor: 0,
             observations: false,
+            reload_requested: false,
+            reload_pending: false,
+            last_reload_error: None,
         })
     }
     pub fn clients(&self) -> usize {
@@ -187,6 +196,70 @@ impl Broker {
     }
     pub fn enable_observations(&mut self) {
         self.observations = true;
+    }
+    pub fn configuration(&self) -> u64 {
+        self.configuration
+    }
+    pub fn take_reload_request(&mut self) -> bool {
+        std::mem::take(&mut self.reload_requested)
+    }
+    pub fn finish_reload(
+        &mut self,
+        result: Result<BTreeSet<String>, String>,
+        now: Duration,
+    ) -> io::Result<()> {
+        match result {
+            Ok(seats) => {
+                self.configuration = self
+                    .configuration
+                    .checked_add(1)
+                    .ok_or_else(|| protocol::invalid("configuration generation exhausted"))?;
+                self.policy.allowed_seats = seats;
+                self.last_reload_error = None;
+                self.connections.retain_mut(|connection| {
+                    let Some(bound) = connection.bound.as_mut() else {
+                        return true;
+                    };
+                    if !self.policy.allowed_seats.contains(&bound.seat) {
+                        return false;
+                    }
+                    bound.previous = Some(
+                        bound
+                            .previous
+                            .unwrap_or((bound.fence, now + protocol::MAX_PACKET_AGE)),
+                    );
+                    bound.fence.configuration = self.configuration;
+                    bound.observing = false;
+                    let fence = bound.fence;
+                    connection.outgoing.clear();
+                    connection.bytes = 0;
+                    connection.push(Reply::Configuration { fence }).is_ok()
+                });
+            }
+            Err(error) => {
+                self.last_reload_error = Some(
+                    error
+                        .lines()
+                        .next()
+                        .unwrap_or("configuration reload rejected")
+                        .chars()
+                        .filter(|ch| !ch.is_control())
+                        .take(512)
+                        .collect(),
+                );
+            }
+        }
+        for connection in &mut self.connections {
+            if connection.waiting_reload {
+                connection.waiting_reload = false;
+                connection.push(Reply::ReloadResult {
+                    configuration: self.configuration,
+                    error: self.last_reload_error.clone(),
+                })?;
+            }
+        }
+        self.reload_pending = false;
+        Ok(())
     }
     pub fn subscriptions(&mut self, now: Duration) -> Vec<Subscription> {
         self.connections.retain_mut(|connection| {
@@ -276,12 +349,15 @@ impl Broker {
         self.connections
             .iter()
             .map(|connection| {
-                connection
-                    .bound
-                    .as_ref()
-                    .map_or(connection.opened + protocol::MAX_PACKET_AGE, |bound| {
-                        (bound.checked + REFRESH).min(bound.renewed + protocol::MAX_PACKET_AGE)
-                    })
+                connection.bound.as_ref().map_or(
+                    connection.opened
+                        + if connection.administrator {
+                            crate::configuration::INSTALL_TIMEOUT
+                        } else {
+                            protocol::MAX_PACKET_AGE
+                        },
+                    |bound| (bound.checked + REFRESH).min(bound.renewed + protocol::MAX_PACKET_AGE),
+                )
             })
             .min()
     }
@@ -312,6 +388,8 @@ impl Broker {
                 bound: None,
                 outgoing: VecDeque::new(),
                 bytes: 0,
+                administrator: false,
+                waiting_reload: false,
             });
         }
         if self.connections.is_empty() {
@@ -354,12 +432,38 @@ impl Broker {
                 bound.registration.check(&self.logind, &bound.client)?;
                 bound.checked = now;
             }
-        } else if now - connection.opened >= protocol::MAX_PACKET_AGE {
+        } else if now - connection.opened
+            >= if connection.administrator {
+                crate::configuration::INSTALL_TIMEOUT
+            } else {
+                protocol::MAX_PACKET_AGE
+            }
+        {
             return Err(protocol::invalid("registration deadline expired"));
         }
         if let Some(packet) = connection.channel.receive::<Request>()? {
             packet.message.validate()?;
             match packet.message {
+                Request::Reload {} if connection.bound.is_none() && !connection.administrator => {
+                    if connection.channel.peer().uid != 0 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "configuration reload requires an administrator",
+                        ));
+                    }
+                    self.verify_agent(connection.channel.peer().pid)?;
+                    connection.administrator = true;
+                    if self.reload_pending {
+                        connection.push(Reply::ReloadResult {
+                            configuration: self.configuration,
+                            error: Some("configuration reload is already in progress".into()),
+                        })?;
+                    } else {
+                        connection.waiting_reload = true;
+                        self.reload_requested = true;
+                        self.reload_pending = true;
+                    }
+                }
                 Request::Register {
                     instance,
                     role,
@@ -419,6 +523,7 @@ impl Broker {
                         checked: now,
                         capabilities: capabilities.clone(),
                         observing: false,
+                        previous: None,
                     });
                     connection.push(Reply::Welcome {
                         fence,
@@ -432,7 +537,17 @@ impl Broker {
                     let bound = connection.bound.as_mut().ok_or_else(|| {
                         protocol::invalid("register before requesting control state")
                     })?;
-                    if request.fence() != Some(bound.fence) {
+                    let current = request.fence() == Some(bound.fence);
+                    let old_heartbeat = matches!(request, Request::Heartbeat { .. })
+                        && bound.previous.is_some_and(|(previous, expires)| {
+                            request.fence().is_some_and(|fence| {
+                                fence.broker == previous.broker
+                                    && fence.session == previous.session
+                                    && fence.configuration >= previous.configuration
+                                    && fence.configuration < bound.fence.configuration
+                            }) && now < expires
+                        });
+                    if !current && !old_heartbeat {
                         return Err(protocol::invalid(
                             "stale broker/configuration/session generation",
                         ));
@@ -440,6 +555,9 @@ impl Broker {
                     bound.registration.check(&self.logind, &bound.client)?;
                     self.verify_agent(connection.channel.peer().pid)?;
                     bound.checked = now;
+                    if current {
+                        bound.previous = None;
+                    }
                     let fence = bound.fence;
                     match request {
                         Request::Heartbeat { .. } => {
@@ -453,6 +571,7 @@ impl Broker {
                                 state: State::Unknown,
                                 revision: 0,
                                 pending: connection.outgoing.len(),
+                                last_reload_error: self.last_reload_error.clone(),
                             })?;
                         }
                         Request::Disconnect { .. } => {
@@ -552,6 +671,8 @@ mod tests {
             bound: None,
             outgoing: VecDeque::new(),
             bytes: 0,
+            administrator: false,
+            waiting_reload: false,
         };
         let fence = Fence {
             broker: Epoch([1, 2]),

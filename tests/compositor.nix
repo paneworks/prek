@@ -91,7 +91,8 @@ pkgs.testers.runNixOSTest {
     source = machine.succeed("cat /run/prek-control/source").strip()
     machine.succeed("printf press-initial > /run/prek-control/emit")
     machine.wait_until_succeeds("test \"$(cat /run/prek-control/emitted)\" = press-initial", timeout=3)
-    broker = "${package}/bin/prek broker --config ${brokerConfig} --runtime-dir /run/prek-control --compositor-executable ${pkgs.hyprland}/bin/.Hyprland-wrapped --logind-library ${pkgs.systemd}/lib/libsystemd.so.0"
+    machine.succeed("cp ${brokerConfig} /run/prek-control/config.toml && chmod 0600 /run/prek-control/config.toml")
+    broker = "${package}/bin/prek broker --config /run/prek-control/config.toml --runtime-dir /run/prek-control --compositor-executable ${pkgs.hyprland}/bin/.Hyprland-wrapped --logind-library ${pkgs.systemd}/lib/libsystemd.so.0"
     machine.succeed(f"systemd-run --unit prek-broker --property=Type=exec {broker}")
     machine.wait_until_succeeds("test -s /run/user/1000/prek-broker-ready", timeout=10)
     # The worker acknowledges neutral recognition entry; an initially held key
@@ -110,7 +111,74 @@ pkgs.testers.runNixOSTest {
     assert matched[0]["event"]["session_generation"] == matched[0]["fence"]["session"], matched
     assert matched[0]["event"]["config_generation"] == matched[0]["fence"]["configuration"], matched
     assert "frame" not in matched[0] and "events" not in matched[0]["event"], matched
-    machine.succeed("printf release-fresh > /run/prek-control/emit")
+    def inject(command):
+        machine.succeed(f"printf {command} > /run/prek-control/emit")
+        machine.wait_until_succeeds(f"test \"$(cat /run/prek-control/emitted)\" = {command}", timeout=3)
+    def rule_matches():
+        return [__import__("json").loads(line)["event"] for line in machine.succeed("cat /run/user/1000/prek-broker-agent.jsonl").splitlines() if '"outcome":"matched"' in line]
+    # Change the complete file while the old key is held. Successful reload
+    # preserves the process and requires a real release before the new hold.
+    revised = machine.succeed("cat /run/prek-control/config.toml").replace('kind = "key", key = "KEY_A"', 'kind = "button_hold", key = "KEY_A", after = "600ms"').replace('fixture_press', 'reloaded_hold')
+    machine.succeed("cat > /run/prek-control/config.toml <<'CONFIG'\n" + revised + "\nCONFIG")
+    reloaded = __import__("json").loads(machine.succeed("${package}/bin/prek reload --socket /run/prek-control/control.sock --json"))
+    assert reloaded["configuration"] == 2 and reloaded["error"] is None, reloaded
+    machine.wait_until_succeeds("grep -Eq '\"subscribed\":true.*\"configuration\":2|\"configuration\":2.*\"subscribed\":true' /run/user/1000/prek-broker-agent.jsonl", timeout=3)
+    machine.sleep(1)
+    assert len(rule_matches()) == 1, rule_matches()
+    inject("release-old")
+    inject("press-reloaded")
+    machine.succeed("printf 'version = 999' > /run/prek-control/config.toml")
+    machine.fail("${package}/bin/prek reload --socket /run/prek-control/control.sock --json")
+    machine.wait_until_succeeds("grep -q reloaded_hold /run/user/1000/prek-broker-agent.jsonl", timeout=3)
+    fresh = rule_matches()[-1]
+    assert fresh["config_generation"] == 2 and fresh["action"]["name"] == "reloaded_hold", fresh
+    machine.succeed("printf failed-reload > /run/user/1000/prek-broker-inspect")
+    machine.wait_until_succeeds("test -s /run/user/1000/prek-broker-status.json", timeout=3)
+    status = __import__("json").loads(machine.succeed("cat /run/user/1000/prek-broker-status.json"))
+    assert status["fence"]["configuration"] == 2 and status["last_reload_error"], status
+    machine.succeed("cat > /run/prek-control/config.toml <<'CONFIG'\n" + revised + "\nCONFIG")
+    # Drop every source, then recreate the same identity with its key held.
+    # The worker stays live, gives it a fresh generation and suppresses a hold.
+    before = len(rule_matches())
+    inject("disconnect")
+    machine.wait_until_succeeds(f"test ! -e {source}", timeout=3)
+    inject("recreate-held")
+    source = machine.succeed("cat /run/prek-control/source").strip()
+    machine.sleep(1)
+    assert len(rule_matches()) == before, rule_matches()
+    inject("release-reopened")
+    inject("press-reopened")
+    machine.wait_until_succeeds(f"test $(grep -c '\"outcome\":\"matched\"' /run/user/1000/prek-broker-agent.jsonl) -gt {before}", timeout=3)
+    reopened = rule_matches()[-1]
+    assert reopened["source"]["device"] == fresh["source"]["device"] and reopened["source"]["generation"] > fresh["source"]["generation"], reopened
+    assert reopened["config_generation"] == 2, reopened
+    inject("release-fresh")
+    # Whole-file selector changes close an old reader and reopen it with
+    # reconciled state, while the same physical test source remains present.
+    before = len(rule_matches())
+    inject("press-policy-held")
+    excluded = revised.replace('name = "Prek broker fixture"', 'name = "Absent broker fixture"')
+    machine.succeed("cat > /run/prek-control/config.toml <<'CONFIG'\n" + excluded + "\nCONFIG")
+    result = __import__("json").loads(machine.succeed("${package}/bin/prek reload --socket /run/prek-control/control.sock --json"))
+    assert result["configuration"] == 3 and result["error"] is None, result
+    worker_now = int(machine.succeed("cat /proc/$(systemctl show -p MainPID --value prek-broker)/task/$(systemctl show -p MainPID --value prek-broker)/children").strip())
+    machine.wait_until_succeeds(f"! readlink /proc/{worker_now}/fd/* | grep -Fx {source}", timeout=3)
+    machine.succeed(f"test -e {source}")
+    machine.succeed("cat > /run/prek-control/config.toml <<'CONFIG'\n" + revised + "\nCONFIG")
+    result = __import__("json").loads(machine.succeed("${package}/bin/prek reload --socket /run/prek-control/control.sock --json"))
+    assert result["configuration"] == 4 and result["error"] is None, result
+    machine.wait_until_succeeds(f"readlink /proc/{worker_now}/fd/* | grep -Fx {source}", timeout=3)
+    machine.sleep(1)
+    assert len(rule_matches()) == before, rule_matches()
+    inject("release-policy-held")
+    inject("press-policy-fresh")
+    machine.wait_until_succeeds(f"test $(grep -c '\"outcome\":\"matched\"' /run/user/1000/prek-broker-agent.jsonl) -gt {before}", timeout=3)
+    assert rule_matches()[-1]["config_generation"] == 4, rule_matches()
+    inject("release-policy-fresh")
+    # A writable system file is refused as policy, preserving generation four.
+    machine.succeed("chmod 0666 /run/prek-control/config.toml")
+    machine.fail("${package}/bin/prek reload --socket /run/prek-control/control.sock --json")
+    machine.succeed("chmod 0600 /run/prek-control/config.toml")
     parent = int(machine.succeed("systemctl show -p MainPID --value prek-broker").strip())
     worker = int(machine.succeed(f"cat /proc/{parent}/task/{parent}/children").strip())
     machine.succeed(f"! readlink /proc/{parent}/fd/* | grep -E '/dev/input|/dev/uinput'")
@@ -118,6 +186,7 @@ pkgs.testers.runNixOSTest {
     machine.fail(broker)
     # A shared UID outside this compositor's PAM session is still unauthorized.
     machine.fail(f"${pkgs.util-linux}/bin/runuser -u alice -- ${package}/bin/prek status --socket /run/prek-control/control.sock --instance {instance} --json")
+    machine.fail("${pkgs.util-linux}/bin/runuser -u alice -- ${package}/bin/prek reload --socket /run/prek-control/control.sock --json")
     # Let actual heartbeat/lease renewal run beyond its one-second expiry.
     machine.sleep(2)
     machine.succeed("systemctl is-active prek-broker")

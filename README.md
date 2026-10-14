@@ -56,6 +56,7 @@ cargo run --locked -- run --config prek.toml --mode observe --duration 10 --json
 cargo run --locked -- session --json
 cargo run --locked -- session --observations --json
 cargo run --locked -- status --json
+sudo target/release/prek reload --json
 cargo run --locked -- learn-shape my-v --device /dev/input/by-id/YOUR-MOUSE --mouse --output my-v.toml
 cargo run --locked --example main
 ```
@@ -97,11 +98,12 @@ the original grab and remove the virtual device. Application state after device
 removal and production broker handoff still require downstream-consumer gates.
 
 `broker` runs the same supervised observation worker alongside a privileged
-control service. It requires a system policy/configuration, the actual Hyprland
-ELF path and an absolute system libsystemd path:
+control service. It requires a protected root-owned system configuration and
+parent directories, the actual Hyprland ELF path and an absolute system
+libsystemd path:
 
 ```sh
-sudo prek broker --config prek.toml \
+sudo prek broker --config /etc/prek/prek.toml \
   --compositor-executable /YOUR/SYSTEM/Hyprland-ELF \
   --logind-library /YOUR/SYSTEM/libsystemd.so.0
 ```
@@ -132,6 +134,21 @@ Overflow or an expired observation lease revokes the affected stream while the
 worker continues reading input. Disconnect or registration replacement discards
 queued outcomes and requires fresh input on the next subscription.
 
+`sudo prek reload` rereads the broker's configured system file. Clients cannot
+supply a different path or configuration. The parent validates and compiles one
+bounded snapshot, transfers those exact bytes privately, and waits for the
+worker to validate against current device state before committing the new
+generation. Invalid files leave the active configuration and pending gestures
+intact; `status --json` reports the last rejection. Startup uses the same snapshot
+transfer, so the worker does not reopen a file that changed after validation.
+
+Successful reload cancels prior gesture progress and discards its queued outcomes.
+Sessions receive the new configuration fence, then a fresh subscription readiness
+acknowledgement. Already-held triggers must reach their neutral boundary before
+starting new recognition. A bounded grace period accepts in-flight heartbeats
+from the previous generation; other operations retain strict
+fencing. Observation reload also applies changes to device/seat selectors.
+
 The control protocol uses versioned, bounded sequenced packets. Kernel sender
 credentials are checked on every message, transferred descriptors are closed
 and refused, and packet order/time plus broker/configuration/session generations
@@ -147,10 +164,14 @@ Cleanup after a reaped worker preserves other lifetimes; restart cleanup also
 checks kernel process handles before reclaiming orphaned records. Live and
 unmanaged publications remain intact. These APIs do not enable route mode.
 
-Event loss cancels that source's recognition. The current live observer removes
-a lost/disconnected source; other selected sources continue. Automatic reopening
-and live kernel-state reconciliation remain pending. Offline replay supports
-explicit reconciliation and mapping-generation changes.
+Event loss cancels that source's recognition. Configured `run`/`broker` observation
+rescans the allowlist every 250 ms, waits for initialized udev metadata and reopens
+lost or newly selected devices with a fresh source generation and queried held
+state. It stays live while no selected source is present. Changed metadata,
+ambiguous identities and removed selectors cancel the affected source. Discovery
+retains at most 4,096 source identities. Explicit `watch`, `record` and learning
+commands keep their selected-source lifetime. Suspend/resume recovery remains
+pending. Offline replay supports reconciliation and mapping-generation changes.
 
 ## Configuration
 

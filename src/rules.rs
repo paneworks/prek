@@ -381,6 +381,9 @@ impl Engine {
     pub fn generation(&self) -> u64 {
         self.generation
     }
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
     pub(crate) fn fork_observer(
         &self,
         config: Config,
@@ -684,9 +687,7 @@ impl Engine {
         }
         Ok(())
     }
-    /// Compile before replacing; reconcile held state rather than inventing
-    /// presses. Failed reload leaves the previous engine/configuration intact.
-    pub fn reload(&mut self, config: Config, at: Duration) -> io::Result<()> {
+    pub(crate) fn prepare_replacement(&self, config: Config, at: Duration) -> io::Result<Self> {
         let generation = self
             .generation
             .checked_add(1)
@@ -709,16 +710,22 @@ impl Engine {
                 })?;
             }
         }
+        next.replay.inherit_history(&self.replay);
+        next.generation = generation;
+        next.next_id = self.next_id;
+        next.authority = self.authority.clone();
+        next.last_at = Some(at);
+        Ok(next)
+    }
+    /// Compile before replacing; reconcile held state rather than inventing
+    /// presses. Failed reload leaves the previous engine/configuration intact.
+    pub fn reload(&mut self, config: Config, at: Duration) -> io::Result<()> {
+        let mut next = self.prepare_replacement(config, at)?;
         self.cancel_all(at, "configuration replaced");
         for sequence in &mut self.sequences {
             sequence.cancel_all(at, "configuration replaced", &mut self.events);
         }
-        next.replay.inherit_history(&self.replay);
-        next.generation = generation;
-        next.next_id = self.next_id;
-        next.authority = std::mem::take(&mut self.authority);
         next.events = std::mem::take(&mut self.events);
-        next.last_at = Some(at);
         *self = next;
         Ok(())
     }

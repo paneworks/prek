@@ -14,7 +14,7 @@ use prek::{
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::{self, Write},
     os::{
         fd::{AsFd, AsRawFd},
@@ -269,13 +269,13 @@ struct Reader {
     assembler: FrameAssembler,
 }
 impl Reader {
-    fn new(path: &Path) -> io::Result<(Self, Record)> {
+    fn new(path: &Path, generation: u64) -> io::Result<(Self, Record)> {
         let raw = open(path)?;
         let clock = libc::CLOCK_MONOTONIC;
         // SAFETY: the owned descriptor and initialized c_int pointer match
         // EVIOCSCLOCKID; this changes only our own reader's clock.
         unsafe { set_clock_id(raw.as_raw_fd(), &clock) }.map_err(io::Error::from)?;
-        let device = describe(path, &raw, 1)?;
+        let device = describe(path, &raw, generation)?;
         let keys = if raw.supported_keys().is_some() {
             raw.get_key_state()?.iter().map(|key| key.0).collect()
         } else {
@@ -379,6 +379,9 @@ pub trait InputSink {
     fn poll_sources(&self) -> Vec<PollFd<'_>> {
         Vec::new()
     }
+    fn device_policy(&self) -> Option<(&prek::config::Config, u64)> {
+        None
+    }
 }
 struct WatchSink<'a, 'b, W: Write> {
     replay: Replay,
@@ -446,7 +449,7 @@ fn observe_loop(
         if let Some(health) = health.as_mut() {
             health.progress()?;
         }
-        let (reader, record) = Reader::new(path).map_err(|error| {
+        let (reader, record) = Reader::new(path, 1).map_err(|error| {
             io::Error::new(
                 error.kind(),
                 format!("cannot observe {}: {error}", path.display()),
@@ -466,7 +469,7 @@ fn observe_loop(
         sink.push(record)?;
         readers.push(reader);
     }
-    if readers.is_empty() {
+    if readers.is_empty() && sink.device_policy().is_none() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "select at least one device",
@@ -476,6 +479,13 @@ fn observe_loop(
         .map(|duration| monotonic().map(|start| start.saturating_add(duration)))
         .transpose()?;
     let mut pending = Vec::<Frame>::new();
+    let mut generations: BTreeMap<u64, u64> = readers
+        .iter()
+        .map(|reader| (reader.device.source.device, 1))
+        .collect();
+    let mut scan_at = monotonic()?;
+    let mut policy_generation = 0;
+    let mut input_at = Duration::ZERO;
     loop {
         sink.service()?;
         if sink.finished() {
@@ -489,6 +499,22 @@ fn observe_loop(
             }
         }
         let now = monotonic()?;
+        if let Some((config, generation)) = sink.device_policy()
+            && (now >= scan_at || generation != policy_generation)
+        {
+            let config = config.clone();
+            refresh_readers(
+                &config,
+                &mut readers,
+                &mut generations,
+                &mut pending,
+                sink,
+                input_at,
+            )?;
+            policy_generation = generation;
+            scan_at = monotonic()? + Duration::from_millis(250);
+        }
+        sink.flush()?;
         if stop_at.is_some_and(|stop| now >= stop) {
             break;
         }
@@ -501,6 +527,7 @@ fn observe_loop(
             .into_iter()
             .chain(stop_at)
             .chain(health_deadline)
+            .chain(sink.device_policy().map(|_| scan_at))
             .min();
         let timeout = if !pending.is_empty() {
             PollTimeout::ZERO
@@ -530,6 +557,7 @@ fn observe_loop(
         // Sample before draining all sources. Later frames stay pending so
         // no source can advance timers beyond another source's unread input.
         let watermark = monotonic()?;
+        input_at = watermark;
         let mut failed = Vec::new();
         for (index, reader) in readers.iter_mut().enumerate() {
             let error = if flags[index]
@@ -575,9 +603,148 @@ fn observe_loop(
         let tick = Record::Tick { at: watermark };
         sink.push(tick)?;
         sink.flush()?;
-        if readers.is_empty() {
+        if readers.is_empty() && sink.device_policy().is_none() {
             return Err(io::Error::other("no observed device remains available"));
         }
+    }
+    Ok(())
+}
+
+fn selected(config: &prek::config::Config, device: &Device) -> bool {
+    config.policy.allowed_seats.contains(&device.source.seat)
+        && config.devices.iter().any(|(id, selector)| {
+            config.policy.allowed_devices.contains(id) && selector.matches(device)
+        })
+}
+
+fn initialized_udev(path: &Path) -> bool {
+    let Ok(stat) = fs::metadata(path) else {
+        return false;
+    };
+    let number = stat.rdev();
+    let database = format!(
+        "/run/udev/data/c{}:{}",
+        libc::major(number),
+        libc::minor(number)
+    );
+    let Ok(file) = File::open(database) else {
+        return false;
+    };
+    let Ok(stat) = file.metadata() else {
+        return false;
+    };
+    if !stat.is_file() || stat.uid() != 0 || stat.mode() & 0o022 != 0 {
+        return false;
+    }
+    let mut text = String::new();
+    if io::Read::read_to_string(&mut io::Read::take(file, 65_537), &mut text).is_err()
+        || text.len() > 65_536
+    {
+        return false;
+    }
+    // systemd's completed database publication records usec_initialized as I:.
+    // https://github.com/systemd/systemd/blob/v259.3/src/libsystemd/sd-device/device-private.c
+    text.lines().any(|line| {
+        line.strip_prefix("I:")
+            .and_then(|value| value.parse::<u64>().ok())
+            .is_some_and(|value| value > 0)
+    })
+}
+
+fn same_node(reader: &Reader) -> bool {
+    let Ok(path) = fs::metadata(&reader.device.path) else {
+        return false;
+    };
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: retained event descriptor and correctly sized initialized output.
+    (unsafe { libc::fstat(reader.raw.as_raw_fd(), &mut stat) }) == 0
+        && stat.st_ino == path.ino()
+        && stat.st_dev == path.dev()
+        && stat.st_rdev == path.rdev()
+}
+
+fn refresh_readers(
+    config: &prek::config::Config,
+    readers: &mut Vec<Reader>,
+    generations: &mut BTreeMap<u64, u64>,
+    pending: &mut Vec<Frame>,
+    sink: &mut impl InputSink,
+    now: Duration,
+) -> io::Result<()> {
+    let entries = inventory()?;
+    let mut identities = BTreeMap::new();
+    let mut ambiguous = BTreeSet::new();
+    for entry in &entries {
+        if let Some(device) = &entry.device
+            && selected(config, device)
+            && initialized_udev(&entry.path)
+            && identities.insert(device.source.device, device).is_some()
+        {
+            ambiguous.insert(device.source.device);
+        }
+    }
+    for index in (0..readers.len()).rev() {
+        let device = &readers[index].device;
+        if !selected(config, device)
+            || ambiguous.contains(&device.source.device)
+            || !same_node(&readers[index])
+            || identities.get(&device.source.device).is_none_or(|current| {
+                current.path != device.path
+                    || current.source.seat != device.source.seat
+                    || current.identity != device.identity
+                    || current.capabilities != device.capabilities
+                    || current.axes != device.axes
+                    || current.properties != device.properties
+            })
+        {
+            let reader = readers.remove(index);
+            pending.retain(|frame| frame.source != reader.device.source);
+            sink.push(Record::Remove {
+                source: reader.device.source,
+                at: now,
+            })?;
+        }
+    }
+    for entry in entries {
+        let Some(device) = entry.device else {
+            continue;
+        };
+        if !selected(config, &device)
+            || !initialized_udev(&entry.path)
+            || ambiguous.contains(&device.source.device)
+            || readers
+                .iter()
+                .any(|reader| reader.device.source.device == device.source.device)
+        {
+            continue;
+        }
+        if !generations.contains_key(&device.source.device) && generations.len() >= 4096 {
+            continue;
+        }
+        let generation = generations
+            .get(&device.source.device)
+            .copied()
+            .unwrap_or_default()
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("input device generation exhausted"))?;
+        let Ok((reader, record)) = Reader::new(&entry.path, generation) else {
+            continue;
+        };
+        // Discovery/open races cannot replace a selected identity with an
+        // unselected source. Both the opened metadata and seat must agree.
+        if reader.device.identity != device.identity
+            || reader.device.source.device != device.source.device
+            || !selected(config, &reader.device)
+        {
+            continue;
+        }
+        sink.push(record)?;
+        generations.insert(reader.device.source.device, generation);
+        eprintln!(
+            "Observing {} ({:?}); input still reaches applications.",
+            reader.device.path, reader.device.name
+        );
+        readers.push(reader);
     }
     Ok(())
 }

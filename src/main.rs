@@ -92,6 +92,13 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Validate and reload the broker's configured system file as administrator.
+    Reload {
+        #[arg(long, default_value = "/run/prek/control.sock")]
+        socket: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
     /// Internal observer worker; requires a bound supervisor health channel.
     #[command(hide = true)]
     ObserveWorker {
@@ -324,6 +331,7 @@ fn run(command: Command) -> io::Result<()> {
             instance,
             json,
         } => run_session(&socket, instance, json, None, true, false, &mut output),
+        Command::Reload { socket, json } => reload_broker(&socket, json, &mut output),
         Command::UdevImport { marker } => prek::kernel::import_metadata(&marker, &mut output),
         Command::Run {
             config: path,
@@ -346,31 +354,14 @@ fn run(command: Command) -> io::Result<()> {
         } => {
             let mut health = prek::supervisor::Heartbeat::connect()?;
             health.progress()?;
-            let control = health.take_control();
-            let config =
-                prek::config::Config::parse(&read_config(&path)?).map_err(io::Error::other)?;
+            let mut control = health.take_control();
+            let config = if let Some(channel) = control.as_mut() {
+                prek::worker::bootstrap(channel, &mut health)?
+            } else {
+                prek::config::Config::parse(&read_config(&path)?).map_err(io::Error::other)?
+            };
             let engine = prek::rules::Engine::new(config.clone())?;
-            let paths = linux::inventory()?
-                .into_iter()
-                .filter_map(|entry| {
-                    entry
-                        .device
-                        .filter(|device| {
-                            entry.available
-                                && config.policy.allowed_seats.contains(&device.source.seat)
-                                && config.devices.iter().any(|(id, selector)| {
-                                    config.policy.allowed_devices.contains(id)
-                                        && selector.matches(device)
-                                })
-                        })
-                        .map(|_| entry.path)
-                })
-                .collect::<Vec<_>>();
-            if paths.is_empty() {
-                return Err(io::Error::other(
-                    "no readable physical devices match the configured allowlist",
-                ));
-            }
+            let paths = Vec::new();
             eprintln!(
                 "Rule observation only: matches are reported; no actions are executed. Session-dependent rules require a verified provider and are skipped when unavailable."
             );
@@ -595,8 +586,8 @@ fn run_broker(
             "broker requires administrator device policy",
         ));
     }
-    let config =
-        prek::config::Config::parse(&read_config(config_path)?).map_err(io::Error::other)?;
+    let text = read_system_config(config_path)?;
+    let config = prek::config::Config::parse(&text).map_err(io::Error::other)?;
     // Compile before touching runtime state or starting the device worker.
     prek::rules::Engine::new(config.clone())?;
     std::fs::create_dir_all(runtime)?;
@@ -608,7 +599,7 @@ fn run_broker(
             runtime_root: "/run/user".into(),
             compositor_executable: compositor.into(),
             agent_executable: std::env::current_exe()?,
-            allowed_seats: config.policy.allowed_seats.into_iter().collect(),
+            allowed_seats: config.policy.allowed_seats.iter().cloned().collect(),
         },
     )?;
     let signals = TerminationSignals::install()?;
@@ -629,6 +620,13 @@ fn run_broker(
     let mut revision = 0u64;
     let mut subscriptions = None;
     let mut control_closed = false;
+    let mut transfer = Some(prek::configuration::Transfer::new(text, 1)?);
+    let mut installation = Some((
+        1,
+        config,
+        monotonic()? + prek::configuration::INSTALL_TIMEOUT,
+    ));
+    let mut startup = true;
     loop {
         if signals.requested() {
             supervisor.request_stop()?;
@@ -649,6 +647,52 @@ fn run_broker(
         }
         broker.step(monotonic()?)?;
         let now = monotonic()?;
+        if installation
+            .as_ref()
+            .is_some_and(|(_, _, deadline)| now >= *deadline)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "worker configuration installation timed out",
+            ));
+        }
+        if broker.take_reload_request() {
+            if installation.is_some() {
+                broker.finish_reload(
+                    Err("worker configuration installation is in progress".into()),
+                    now,
+                )?;
+            } else {
+                let proposed = read_system_config(config_path).and_then(|text| {
+                    let config = prek::config::Config::parse(&text).map_err(io::Error::other)?;
+                    prek::rules::Engine::new(config.clone())?;
+                    Ok((text, config))
+                });
+                match proposed {
+                    Ok((text, config)) => {
+                        let generation =
+                            broker.configuration().checked_add(1).ok_or_else(|| {
+                                io::Error::other("configuration generation exhausted")
+                            })?;
+                        transfer = Some(prek::configuration::Transfer::new(text, generation)?);
+                        installation = Some((
+                            generation,
+                            config,
+                            now + prek::configuration::INSTALL_TIMEOUT,
+                        ));
+                    }
+                    Err(error) => broker.finish_reload(Err(error.to_string()), now)?,
+                }
+            }
+        }
+        if !control_closed && let Some(snapshot) = transfer.as_mut() {
+            match snapshot.send(&mut control, now) {
+                Ok(true) => transfer = None,
+                Ok(false) => {}
+                Err(error) if worker_link_closed(&error) => control_closed = true,
+                Err(error) => return Err(error),
+            }
+        }
         if now >= refresh {
             revision = revision
                 .checked_add(1)
@@ -659,8 +703,19 @@ fn run_broker(
             });
             refresh = now + prek::service::REFRESH;
         }
-        if !control_closed && let Some(update) = subscriptions.as_ref() {
-            match control.send(update, now) {
+        if !control_closed
+            && (!startup || transfer.is_none())
+            && let Some(update) = subscriptions.as_ref()
+        {
+            match control.send(
+                &prek::configuration::Command::Subscriptions {
+                    update: prek::worker::Subscriptions {
+                        revision: update.revision,
+                        seats: update.seats.clone(),
+                    },
+                },
+                now,
+            ) {
                 Ok(true) => subscriptions = None,
                 Ok(false) => {}
                 Err(error) if worker_link_closed(&error) => control_closed = true,
@@ -671,8 +726,38 @@ fn run_broker(
             if control_closed {
                 break;
             }
-            match control.receive::<prek::worker::Report>() {
-                Ok(Some(packet)) => broker.report(packet.message, monotonic()?)?,
+            match control.receive::<prek::worker::Message>() {
+                Ok(Some(packet)) => match packet.message {
+                    prek::worker::Message::Outcome { report } => {
+                        broker.report(report, monotonic()?)?
+                    }
+                    prek::worker::Message::Configuration { generation, error } => {
+                        let (expected, config, _) = installation.take().ok_or_else(|| {
+                            io::Error::other("unsolicited worker configuration acknowledgement")
+                        })?;
+                        if generation != expected {
+                            return Err(io::Error::other(
+                                "worker acknowledged a different configuration generation",
+                            ));
+                        }
+                        if startup {
+                            if let Some(error) = error {
+                                return Err(io::Error::other(error));
+                            }
+                            startup = false;
+                        } else {
+                            broker.finish_reload(
+                                error.map_or_else(
+                                    || Ok(config.policy.allowed_seats.into_iter().collect()),
+                                    Err,
+                                ),
+                                monotonic()?,
+                            )?;
+                            refresh = monotonic()?;
+                            subscriptions = None;
+                        }
+                    }
+                },
                 Ok(None) => break,
                 Err(error) if worker_link_closed(&error) => control_closed = true,
                 Err(error) => return Err(error),
@@ -683,6 +768,7 @@ fn run_broker(
             .into_iter()
             .chain([supervisor.deadline()?])
             .chain([refresh])
+            .chain(installation.as_ref().map(|(_, _, deadline)| *deadline))
             .min()
             .unwrap();
         let timeout =
@@ -693,7 +779,7 @@ fn run_broker(
             fds.push(PollFd::new(
                 control.as_fd(),
                 PollFlags::POLLIN
-                    | if subscriptions.is_some() {
+                    | if subscriptions.is_some() || transfer.is_some() {
                         PollFlags::POLLOUT
                     } else {
                         PollFlags::empty()
@@ -714,6 +800,81 @@ fn worker_link_closed(error: &io::Error) -> bool {
         error.kind(),
         io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset | io::ErrorKind::UnexpectedEof
     )
+}
+
+#[cfg(target_os = "linux")]
+fn reload_broker(socket: &std::path::Path, json: bool, output: &mut impl Write) -> io::Result<()> {
+    use nix::{
+        libc,
+        poll::{PollFd, PollFlags, PollTimeout, poll},
+    };
+    use prek::{
+        ipc::{Channel, monotonic},
+        protocol::{Reply, Request},
+    };
+    use std::os::fd::AsFd;
+    if unsafe { libc::geteuid() } != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "configuration reload requires an administrator",
+        ));
+    }
+    let mut channel = Channel::connect(socket)?;
+    if channel.peer().uid != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "reload endpoint is not a privileged broker",
+        ));
+    }
+    if !channel.send(&Request::Reload {}, monotonic()?)? {
+        return Err(io::ErrorKind::WouldBlock.into());
+    }
+    let deadline = monotonic()? + prek::configuration::INSTALL_TIMEOUT;
+    loop {
+        if let Some(packet) = channel.receive::<Reply>()? {
+            packet.message.validate()?;
+            match packet.message {
+                Reply::ReloadResult {
+                    configuration,
+                    error,
+                } => {
+                    if json {
+                        serde_json::to_writer(
+                            &mut *output,
+                            &serde_json::json!({"version": 1, "configuration": configuration, "error": error}),
+                        )?;
+                        writeln!(output)?;
+                        output.flush()?;
+                    }
+                    if let Some(error) = error {
+                        return Err(io::Error::other(error));
+                    }
+                    if !json {
+                        writeln!(output, "activated configuration {configuration}")?;
+                    }
+                    return Ok(());
+                }
+                Reply::Rejected { reason } => return Err(io::Error::other(reason)),
+                _ => return Err(io::Error::other("unexpected configuration reload reply")),
+            }
+        }
+        let now = monotonic()?;
+        if now >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "configuration reload acknowledgement timed out",
+            ));
+        }
+        let timeout =
+            PollTimeout::try_from(deadline.saturating_sub(now)).map_err(io::Error::other)?;
+        if let Err(error) = poll(
+            &mut [PollFd::new(channel.as_fd(), PollFlags::POLLIN)],
+            timeout,
+        ) && error != nix::errno::Errno::EINTR
+        {
+            return Err(error.into());
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -827,11 +988,12 @@ fn run_session(
                     state,
                     revision,
                     pending,
+                    last_reload_error,
                 } if Some(observed) == fence => {
                     if json {
                         serde_json::to_writer(
                             &mut *output,
-                            &serde_json::json!({"version": 1, "fence": observed, "mode": "observe", "state": state, "revision": revision, "pending": pending}),
+                            &serde_json::json!({"version": 1, "fence": observed, "mode": "observe", "state": state, "revision": revision, "pending": pending, "last_reload_error": last_reload_error}),
                         )?;
                         writeln!(output)?;
                     } else {
@@ -849,6 +1011,36 @@ fn run_session(
                 Reply::Accepted {
                     fence: accepted, ..
                 } if Some(accepted) == fence => {}
+                Reply::Configuration { fence: next_fence }
+                    if fence.is_some_and(|old| {
+                        old.broker == next_fence.broker
+                            && old.session == next_fence.session
+                            && old.configuration < next_fence.configuration
+                    }) =>
+                {
+                    fence = Some(next_fence);
+                    if json {
+                        serde_json::to_writer(
+                            &mut *output,
+                            &serde_json::json!({"version": 1, "configuration": next_fence.configuration, "fence": next_fence}),
+                        )?;
+                        writeln!(output)?;
+                    } else {
+                        writeln!(
+                            output,
+                            "configuration {} activated; previous gesture progress cancelled",
+                            next_fence.configuration
+                        )?;
+                    }
+                    output.flush()?;
+                    if !channel.send(&Request::Heartbeat { fence: next_fence }, now)? {
+                        return Err(io::ErrorKind::WouldBlock.into());
+                    }
+                    if inspect && !channel.send(&Request::Status { fence: next_fence }, now)? {
+                        return Err(io::ErrorKind::WouldBlock.into());
+                    }
+                    next = now + Duration::from_millis(250);
+                }
                 Reply::Subscribed { fence: subscribed }
                     if observations && Some(subscribed) == fence =>
                 {
@@ -970,13 +1162,16 @@ impl linux::InputSink for BrokerSink {
         self.stream.deadline()
     }
     fn flush(&mut self) -> io::Result<()> {
-        self.stream.service()
+        self.stream.flush()
     }
     fn service(&mut self) -> io::Result<()> {
         self.stream.service()
     }
     fn poll_sources(&self) -> Vec<nix::poll::PollFd<'_>> {
         vec![self.stream.poll_source()]
+    }
+    fn device_policy(&self) -> Option<(&prek::config::Config, u64)> {
+        Some((self.stream.config(), self.stream.generation()))
     }
 }
 
@@ -1047,13 +1242,16 @@ impl<W: Write> linux::InputSink for RuleSink<'_, W> {
     fn flush(&mut self) -> io::Result<()> {
         self.output.flush()
     }
+    fn device_policy(&self) -> Option<(&prek::config::Config, u64)> {
+        Some((self.engine.config(), self.engine.generation()))
+    }
 }
 
 fn read_config(path: &std::path::Path) -> io::Result<String> {
     let file = File::open(path)?;
     let mut text = String::new();
     io::Read::read_to_string(
-        &mut io::Read::take(file, (prek::config::MAX_CONFIG_BYTES + 1) as u64),
+        &mut io::Read::take(&file, (prek::config::MAX_CONFIG_BYTES + 1) as u64),
         &mut text,
     )?;
     if text.len() > prek::config::MAX_CONFIG_BYTES {
@@ -1061,6 +1259,64 @@ fn read_config(path: &std::path::Path) -> io::Result<String> {
             io::ErrorKind::InvalidData,
             "configuration exceeds 1 MiB",
         ));
+    }
+    Ok(text)
+}
+
+#[cfg(target_os = "linux")]
+fn read_system_config(path: &std::path::Path) -> io::Result<String> {
+    use std::os::unix::fs::MetadataExt;
+    let absolute = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    for directory in absolute
+        .parent()
+        .into_iter()
+        .flat_map(std::path::Path::ancestors)
+    {
+        let stat = std::fs::metadata(directory)?;
+        if !stat.is_dir() || stat.uid() != 0 || stat.mode() & 0o022 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "broker configuration requires protected root-owned parent directories",
+            ));
+        }
+    }
+    let file = File::open(path)?;
+    let stat = file.metadata()?;
+    if !stat.is_file() || stat.uid() != 0 || stat.mode() & 0o022 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "broker configuration must be a protected root-owned regular file",
+        ));
+    }
+    let mut text = String::new();
+    io::Read::read_to_string(
+        &mut io::Read::take(&file, (prek::config::MAX_CONFIG_BYTES + 1) as u64),
+        &mut text,
+    )?;
+    let after = file.metadata()?;
+    if (
+        stat.len(),
+        stat.mtime(),
+        stat.mtime_nsec(),
+        stat.ctime(),
+        stat.ctime_nsec(),
+    ) != (
+        after.len(),
+        after.mtime(),
+        after.mtime_nsec(),
+        after.ctime(),
+        after.ctime_nsec(),
+    ) {
+        return Err(io::Error::other(
+            "broker configuration changed during its snapshot read",
+        ));
+    }
+    if text.len() > prek::config::MAX_CONFIG_BYTES {
+        return Err(io::Error::other("configuration exceeds size limit"));
     }
     Ok(text)
 }

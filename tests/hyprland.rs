@@ -444,20 +444,25 @@ fn broker_observer_source_fixture() {
     use std::os::unix::fs::OpenOptionsExt;
     kernel_fixture::authorized();
     assert_eq!(std::env::var("PREK_COMPOSITOR_VM").as_deref(), Ok("1"));
-    let keys = AttributeSet::from_iter([KeyCode::KEY_A]);
-    let mut source = VirtualDevice::builder()
-        .unwrap()
-        .name("Prek broker fixture")
-        .with_keys(&keys)
-        .unwrap()
-        .build()
-        .unwrap();
-    let node = source
-        .enumerate_dev_nodes_blocking()
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap();
+    fn create_source() -> (VirtualDevice, PathBuf) {
+        let keys = AttributeSet::from_iter([KeyCode::KEY_A]);
+        let mut source = VirtualDevice::builder()
+            .unwrap()
+            .name("Prek broker fixture")
+            .with_keys(&keys)
+            .unwrap()
+            .build()
+            .unwrap();
+        let node = source
+            .enumerate_dev_nodes_blocking()
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        (source, node)
+    }
+    let (source, node) = create_source();
+    let mut source = Some(source);
     let mut witness = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -471,10 +476,19 @@ fn broker_observer_source_fixture() {
         if let Ok(command) = fs::read_to_string("/run/prek-control/emit")
             && command != previous
         {
-            let value = i32::from(command.starts_with("press"));
-            source
-                .emit(&[evdev::InputEvent::new(1, 30, value)])
-                .unwrap();
+            if command == "disconnect" {
+                source.take();
+            } else if command == "recreate-held" {
+                let (mut fresh, node) = create_source();
+                fresh.emit(&[evdev::InputEvent::new(1, 30, 1)]).unwrap();
+                fs::write("/run/prek-control/source", node.display().to_string()).unwrap();
+                source = Some(fresh);
+            } else if let Some(source) = source.as_mut() {
+                let value = i32::from(command.starts_with("press"));
+                source
+                    .emit(&[evdev::InputEvent::new(1, 30, value)])
+                    .unwrap();
+            }
             fs::write("/run/prek-control/emitted", &command).unwrap();
             previous = command;
         }
@@ -545,6 +559,33 @@ fn broker_cli_session_fixture() {
     fs::write("/run/user/1000/prek-broker-ready", agent.id().to_string()).unwrap();
     // The VM stops the broker while this real CLI connection remains active.
     // A disconnected broker must not leave an agent acting on stale authority.
-    assert!(!agent.wait().unwrap().success());
+    let mut inspected = String::new();
+    loop {
+        if let Some(status) = agent.try_wait().unwrap() {
+            assert!(!status.success());
+            break;
+        }
+        if let Ok(request) = fs::read_to_string("/run/user/1000/prek-broker-inspect")
+            && request != inspected
+        {
+            let status = Command::new(&binary)
+                .args([
+                    "status",
+                    "--socket",
+                    "/run/prek-control/control.sock",
+                    "--json",
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                status.status.success(),
+                "{}",
+                String::from_utf8_lossy(&status.stderr)
+            );
+            fs::write("/run/user/1000/prek-broker-status.json", &status.stdout).unwrap();
+            inspected = request;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
     fs::write("/run/user/1000/prek-broker-agent-stopped", "stopped").unwrap();
 }

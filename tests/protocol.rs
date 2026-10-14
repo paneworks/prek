@@ -91,6 +91,20 @@ fn protocol_codec_checks_schema_sequence_time_and_size() {
 }
 
 #[test]
+fn reload_request_cannot_supply_a_path_configuration_or_claimed_privilege() {
+    Request::Reload {}.validate().unwrap();
+    assert!(Request::Reload {}.fence().is_none());
+    for field in ["path", "config", "claimed_uid"] {
+        let mut request = serde_json::json!({"kind": "reload"});
+        request[field] = serde_json::json!("forbidden");
+        assert!(
+            serde_json::from_value::<Request>(request).is_err(),
+            "reload accepted {field}"
+        );
+    }
+}
+
+#[test]
 fn connected_packets_are_ordered_and_channel_failure_is_permanent() {
     let (mut left, mut right) = Channel::pair().unwrap();
     assert!(right.receive::<Request>().unwrap().is_none());

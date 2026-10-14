@@ -3,6 +3,7 @@
 
 use crate::{
     config::Config,
+    configuration::{Assembly, Command, INSTALL_TIMEOUT},
     ipc::Channel,
     protocol::{self, Fence, MAX_QUEUED_BYTES, MAX_QUEUED_PACKETS},
     replay::Record,
@@ -42,6 +43,17 @@ pub enum Report {
     Ended {
         subscription: Subscription,
         reason: String,
+    },
+}
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Message {
+    Configuration {
+        generation: u64,
+        error: Option<String>,
+    },
+    Outcome {
+        report: Report,
     },
 }
 impl Report {
@@ -86,6 +98,14 @@ impl Registry {
         })
     }
     fn update(&mut self, update: Subscriptions, now: Duration) -> io::Result<()> {
+        if !update.seats.is_empty()
+            && update
+                .seats
+                .iter()
+                .all(|subscription| subscription.fence.configuration < self.baseline.generation())
+        {
+            return Ok(());
+        }
         if update.revision <= self.revision || update.seats.len() > crate::service::MAX_CLIENTS {
             return Err(protocol::invalid(
                 "invalid worker subscription revision or count",
@@ -200,7 +220,9 @@ impl Registry {
             version: protocol::VERSION,
             sequence: u64::MAX,
             at: Duration::MAX,
-            message: &report,
+            message: Message::Outcome {
+                report: report.clone(),
+            },
         });
         let bytes = match encoded {
             Ok(bytes) => bytes.len(),
@@ -331,17 +353,91 @@ impl Registry {
             })
             .min()
     }
+    fn install(&mut self, config: Config, generation: u64, now: Duration) -> io::Result<()> {
+        if self.baseline.generation().checked_add(1) != Some(generation) {
+            return Err(protocol::invalid(
+                "configuration generation must advance exactly once",
+            ));
+        }
+        // Validate all new recognizers against retained device state before
+        // cancelling a single old candidate or changing the baseline.
+        self.baseline.prepare_replacement(config.clone(), now)?;
+        let mut baseline = config.clone();
+        for rule in &mut baseline.rules {
+            rule.enabled = false;
+        }
+        let baseline = self.baseline.prepare_replacement(baseline, now)?;
+        self.config = config;
+        self.baseline = baseline;
+        self.observers.clear();
+        self.blocked.clear();
+        self.reports.clear();
+        self.bytes = 0;
+        Ok(())
+    }
+}
+
+/// Receive exactly the broker's validated startup bytes. Input descriptors are
+/// opened only after this completes; the original path is never reread.
+pub fn bootstrap(
+    channel: &mut Channel,
+    health: &mut crate::supervisor::Heartbeat,
+) -> io::Result<Config> {
+    use nix::poll::{PollTimeout, poll};
+    let mut assembly = Assembly::default();
+    let deadline = crate::ipc::monotonic()? + INSTALL_TIMEOUT;
+    loop {
+        health.progress()?;
+        let now = crate::ipc::monotonic()?;
+        if now >= deadline {
+            return Err(protocol::invalid("startup configuration transfer expired"));
+        }
+        for _ in 0..8 {
+            let Some(packet) = channel.receive::<Command>()? else {
+                break;
+            };
+            if let Some(installation) = assembly.accept(packet.message, now)? {
+                if installation.generation != 1 {
+                    return Err(protocol::invalid("invalid startup generation"));
+                }
+                let config = installation.config?;
+                Engine::new(config.clone())?;
+                return Ok(config);
+            }
+        }
+        let timeout = PollTimeout::try_from(
+            (deadline.min(health.deadline()?)).saturating_sub(crate::ipc::monotonic()?),
+        )
+        .map_err(io::Error::other)?;
+        if let Err(error) = poll(
+            &mut [
+                PollFd::new(channel.as_fd(), PollFlags::POLLIN),
+                PollFd::new(health.as_fd(), PollFlags::POLLIN),
+            ],
+            timeout,
+        ) && error != nix::errno::Errno::EINTR
+        {
+            return Err(error.into());
+        }
+    }
 }
 
 pub struct Stream {
     channel: Channel,
     registry: Registry,
+    assembly: Assembly,
+    control: VecDeque<Message>,
 }
 impl Stream {
     pub fn new(config: Config, channel: Channel) -> io::Result<Self> {
         Ok(Self {
             channel,
             registry: Registry::new(config)?,
+            assembly: Assembly::default(),
+            control: VecDeque::from([Message::Configuration {
+                generation: 1,
+                error: None,
+            }]),
         })
     }
     pub fn push(&mut self, record: Record) -> io::Result<()> {
@@ -351,16 +447,63 @@ impl Stream {
         let now = crate::ipc::monotonic()?;
         self.registry.expire(now)?;
         for _ in 0..8 {
-            let Some(packet) = self.channel.receive::<Subscriptions>()? else {
+            let Some(packet) = self.channel.receive::<Command>()? else {
                 break;
             };
-            self.registry.update(packet.message, now)?;
+            match packet.message {
+                Command::Subscriptions { update } => self.registry.update(update, now)?,
+                command => {
+                    if let Some(installation) = self.assembly.accept(command, now)? {
+                        let result = installation.config.and_then(|config| {
+                            self.registry.install(config, installation.generation, now)
+                        });
+                        if !self.control.is_empty() {
+                            return Err(protocol::invalid(
+                                "configuration acknowledgements are not drained",
+                            ));
+                        }
+                        self.control.push_back(Message::Configuration {
+                            generation: installation.generation,
+                            error: result.err().map(|error| {
+                                error
+                                    .to_string()
+                                    .chars()
+                                    .filter(|ch| !ch.is_control())
+                                    .take(512)
+                                    .collect()
+                            }),
+                        });
+                    }
+                }
+            }
+        }
+        if self
+            .assembly
+            .deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            return Err(protocol::invalid("configuration transfer expired"));
+        }
+        Ok(())
+    }
+    pub fn flush(&mut self) -> io::Result<()> {
+        let now = crate::ipc::monotonic()?;
+        if let Some(message) = self.control.front() {
+            if !self.channel.send(message, now)? {
+                return Ok(());
+            }
+            self.control.pop_front();
         }
         for _ in 0..16 {
             let Some((report, bytes)) = self.registry.reports.front() else {
                 break;
             };
-            if !self.channel.send(report, now)? {
+            if !self.channel.send(
+                &Message::Outcome {
+                    report: report.clone(),
+                },
+                now,
+            )? {
                 break;
             }
             self.registry.bytes -= bytes;
@@ -369,13 +512,23 @@ impl Stream {
         Ok(())
     }
     pub fn deadline(&self) -> Option<Duration> {
-        self.registry.deadline()
+        self.registry
+            .deadline()
+            .into_iter()
+            .chain(self.assembly.deadline())
+            .min()
+    }
+    pub fn config(&self) -> &Config {
+        &self.registry.config
+    }
+    pub fn generation(&self) -> u64 {
+        self.registry.baseline.generation()
     }
     pub fn poll_source(&self) -> PollFd<'_> {
         PollFd::new(
             self.channel.as_fd(),
             PollFlags::POLLIN
-                | if self.registry.reports.is_empty() {
+                | if self.registry.reports.is_empty() && self.control.is_empty() {
                     PollFlags::empty()
                 } else {
                     PollFlags::POLLOUT
@@ -652,6 +805,58 @@ mod tests {
         };
         assert!(registry.update(invalid, ms(10)).is_err());
         assert_eq!(registry.revision, 1);
+    }
+    #[test]
+    fn reload_reconciles_held_input_and_reports_only_new_rules_and_generations() {
+        let mut registry = registry(config());
+        update(&mut registry, 1, vec![subscription("seat0", 7)], 0);
+        key(&mut registry, source(1, "seat0"), 10, 1, true, 10);
+        let mut next = config();
+        next.rules[0].trigger = Trigger::ButtonHold {
+            key: Key(30),
+            after: Millis(900),
+            repeat: None,
+        };
+        next.rules[0].action = crate::config::Action::Event {
+            name: "reloaded".into(),
+        };
+        registry.install(next, 2, ms(500)).unwrap();
+        let mut next_subscription = subscription("seat0", 7);
+        next_subscription.fence.configuration = 2;
+        update(&mut registry, 2, vec![subscription("seat0", 7)], 501);
+        assert!(
+            registry.observers.is_empty(),
+            "an in-flight old subscription cannot reactivate old rules"
+        );
+        update(&mut registry, 3, vec![next_subscription.clone()], 510);
+        tick(&mut registry, 1200);
+        assert!(outcomes(&registry).is_empty());
+        key(&mut registry, source(1, "seat0"), 1210, 2, false, 1210);
+        key(&mut registry, source(1, "seat0"), 1220, 3, true, 1220);
+        update(&mut registry, 4, vec![next_subscription], 1400);
+        tick(&mut registry, 2120);
+        assert!(matches!(outcomes(&registry)[0], Event::Matched {
+            config_generation: 2, session_generation: 7, action: crate::config::Action::Event { name }, at, ..
+        } if name == "reloaded" && *at == ms(2120)));
+    }
+    #[test]
+    fn rejected_reload_preserves_last_good_generation_and_an_active_hold() {
+        let mut registry = registry(config());
+        update(&mut registry, 1, vec![subscription("seat0", 1)], 0);
+        key(&mut registry, source(1, "seat0"), 10, 1, true, 10);
+        let mut invalid = config();
+        invalid.rules[0].trigger = Trigger::Shape {
+            name: "missing-template".into(),
+            fingers: None,
+            button: None,
+        };
+        assert!(registry.install(invalid, 2, ms(500)).is_err());
+        assert!(registry.install(config(), 3, ms(500)).is_err());
+        assert_eq!(registry.baseline.generation(), 1);
+        tick(&mut registry, 610);
+        assert!(
+            matches!(outcomes(&registry)[0], Event::Matched { config_generation: 1, at, .. } if *at == ms(610))
+        );
     }
     #[test]
     fn initial_touch_is_suppressed_until_all_contacts_are_lifted() {

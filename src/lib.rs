@@ -12,6 +12,8 @@
 
 mod buttons;
 pub mod config;
+#[cfg(target_os = "linux")]
+pub mod configuration;
 pub mod context;
 pub mod diagnostics;
 pub mod gestures;

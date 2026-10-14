@@ -74,6 +74,9 @@ pub enum Completion {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
+    /// Administrator asks the broker to reread its own system configuration.
+    /// No client-supplied path or configuration is accepted.
+    Reload {},
     Register {
         instance: String,
         #[serde(default)]
@@ -107,7 +110,7 @@ pub enum Request {
 impl Request {
     pub fn fence(&self) -> Option<Fence> {
         match self {
-            Self::Register { .. } => None,
+            Self::Register { .. } | Self::Reload { .. } => None,
             Self::Heartbeat { fence }
             | Self::Context { fence, .. }
             | Self::LockRequested { fence }
@@ -161,6 +164,8 @@ pub enum Reply {
         state: State,
         revision: u64,
         pending: usize,
+        #[serde(default)]
+        last_reload_error: Option<String>,
     },
     Accepted {
         fence: Fence,
@@ -169,6 +174,13 @@ pub enum Reply {
     /// The worker has reconciled held input and activated fresh observation.
     Subscribed {
         fence: Fence,
+    },
+    Configuration {
+        fence: Fence,
+    },
+    ReloadResult {
+        configuration: u64,
+        error: Option<String>,
     },
     Observation {
         fence: Fence,
@@ -191,11 +203,12 @@ pub enum Reply {
 impl Reply {
     pub fn fence(&self) -> Option<Fence> {
         match self {
-            Self::Rejected { .. } => None,
+            Self::Rejected { .. } | Self::ReloadResult { .. } => None,
             Self::Welcome { fence, .. }
             | Self::Status { fence, .. }
             | Self::Accepted { fence, .. }
             | Self::Subscribed { fence }
+            | Self::Configuration { fence }
             | Self::Observation { fence, .. }
             | Self::Dispatch { fence, .. }
             | Self::Revoked { fence, .. } => Some(*fence),
@@ -209,6 +222,18 @@ impl Reply {
             !value.is_empty() && value.len() <= 1024 && !value.chars().any(char::is_control)
         };
         match self {
+            Self::ReloadResult {
+                configuration,
+                error,
+            } if *configuration == 0 || error.as_ref().is_some_and(|error| !text(error)) => {
+                return Err(invalid("invalid reload result"));
+            }
+            Self::Status {
+                last_reload_error: Some(error),
+                ..
+            } if !text(error) => {
+                return Err(invalid("invalid reload status"));
+            }
             Self::Welcome { seat, session, .. } if !text(seat) || !text(session) => {
                 return Err(invalid("invalid session description"));
             }
