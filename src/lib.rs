@@ -19,12 +19,17 @@ pub mod gestures;
 pub mod hyprland;
 pub mod input;
 #[cfg(target_os = "linux")]
+pub mod ipc;
+#[cfg(target_os = "linux")]
 pub mod kernel;
 pub mod keys;
 pub mod paths;
+pub mod protocol;
 pub mod replay;
 pub mod router;
 pub mod rules;
+#[cfg(target_os = "linux")]
+pub mod service;
 #[cfg(target_os = "linux")]
 pub mod session;
 #[cfg(target_os = "linux")]

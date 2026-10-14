@@ -17,6 +17,28 @@ use std::{
 };
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[test]
+fn broker_route_mode_refuses_before_runtime_or_device_access() {
+    let directory = Directory::new();
+    let runtime = directory.0.join("broker-runtime");
+    let output = run(&[
+        "broker",
+        "--mode",
+        "route",
+        "--config",
+        "/missing/config.toml",
+        "--compositor-executable",
+        "/missing/Hyprland",
+        "--logind-library",
+        "/missing/libsystemd.so.0",
+        "--runtime-dir",
+        runtime.to_str().unwrap(),
+    ]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("broker routing is unavailable"));
+    assert!(!runtime.exists());
+}
 struct Directory(PathBuf);
 impl Directory {
     fn new() -> Self {

@@ -5,7 +5,7 @@ Low-level Linux input tools, named after Albanian **preke** — “touch it”.
 Prek reads evdev input below Wayland. Its recognition core is independent of Morf
 and the compositor. The current CLI supports read-only observation, private
 recordings, deterministic offline replay, declarative configuration validation,
-and configured rule observation.
+configured rule observation, and authenticated broker/session status.
 
 The library additionally provides seat-scoped chords, layers, repeatable holds,
 reference-counted logical keys, armed path capture and shape matching. These
@@ -40,8 +40,8 @@ and verifies that agent and compositor belong to the same active local logind
 session and seat. Checks retain kernel process handles and expire after 250 ms.
 Process exit, socket disconnect, compositor replacement or session deactivation
 revokes registration; returning to the seat requires a new registration.
-This proves session membership, while lock-provider acknowledgements and the
-broker/session protocol are still required before desktop actions can run.
+This proves session membership. Live context snapshots, lock-provider
+acknowledgements and action dispatch remain pending.
 
 ## Commands
 
@@ -54,6 +54,8 @@ cargo run --locked -- init --preset desktop --output prek.toml
 cargo run --locked -- check --config prek.toml --json
 cargo run --locked -- doctor --config prek.toml --json
 cargo run --locked -- run --config prek.toml --mode observe --duration 10 --json
+cargo run --locked -- session --json
+cargo run --locked -- status --json
 cargo run --locked --example main
 ```
 
@@ -92,6 +94,34 @@ and held virtual input is also tested with isolated keyboard/touch sources:
 orderly stop delivers a neutral frame, while worker/parent death and stalls release
 the original grab and remove the virtual device. Application state after device
 removal and production broker handoff still require downstream-consumer gates.
+
+`broker` runs the same supervised observation worker alongside a privileged
+control service. It requires a system policy/configuration, the actual Hyprland
+ELF path and an absolute system libsystemd path:
+
+```sh
+sudo prek broker --config prek.toml \
+  --compositor-executable /YOUR/SYSTEM/Hyprland-ELF \
+  --logind-library /YOUR/SYSTEM/libsystemd.so.0
+```
+
+Start `session` from the compositor's own login session. It uses
+`HYPRLAND_INSTANCE_SIGNATURE`, or an explicit `--instance`, and maintains a
+250 ms acknowledged heartbeat. A second agent for the same seat is refused;
+`status` uses a separate authenticated inspection role. A shared user-manager
+process without session membership is refused. Both commands accept `--socket`
+for a different broker endpoint. The current status describes observation and
+registration, with context reported as unknown. It does not yet include device
+ownership/latency counters or authorize desktop actions.
+
+The control protocol uses versioned, bounded sequenced packets. Kernel sender
+credentials are checked on every message, transferred descriptors are closed
+and refused, and packet order/time plus broker/configuration/session generations
+are fenced. A private kernel lease permits one broker per runtime directory.
+Bad, disconnected or stalled clients lose their queued replies and seat ownership;
+the device worker continues independently. Startup, control traffic and device
+supervision are tested in the disposable VM. Route mode still refuses before
+runtime/device takeover.
 
 Supervised virtual devices carry their worker's process birth and supervision
 epoch in the private runtime registry. Complete metadata is published atomically.
@@ -138,8 +168,8 @@ Ordinary OS repeat is separate from configured repeat-while-held.
 
 An unbound event rule can be observed without a desktop if its scope is everywhere
 and it has no context, screen or keyboard condition. Other rules require a verified
-session provider. The current CLI has no live provider registration, so it reports
-those rules as skipped rather than guessing the session or app.
+session provider. The current session agent supplies authenticated membership
+and status; context publication remains pending, so these rules are skipped.
 
 The library's context model freezes the first target and validates later fingers
 against it. A focus change cannot redirect a swipe. Session/lock changes, stale
@@ -147,7 +177,7 @@ snapshots, target removal, relevant geometry changes and overlays cancel it.
 Compositor visibility is distinct from a mapped window on another workspace.
 The model requires 250 ms snapshot freshness and a one-second provider lease.
 The Linux session library supplies verified socket/process/logind membership
-for agents launched inside the compositor's session. Service integration,
+for agents launched inside the compositor's session. Context/action integration,
 delegation for shared user services and real lock-provider registration remain
 pending. The lockscreen/greeter UI and authentication remain Morf's responsibility.
 
@@ -190,6 +220,8 @@ commands. Raw recordings are an explicit diagnostic operation, not service logs.
 - `kernel` owns Linux virtual-device creation, metadata and nonblocking writes.
 - `hyprland` verifies compositor IPC identity and virtual-device inventory evidence.
 - `session` verifies agent/compositor membership in logind's active seat/session.
+- `protocol` and `ipc` bound control messages, generations and kernel sender credentials.
+- `service` owns authenticated broker registrations and their bounded leases.
 - `supervisor` bounds worker lifetime and handles foreground/service termination.
 - `diagnostics` checks device selection/capacity and reports missing consumers.
 - `replay` connects frame normalization with button/touch recognition.
@@ -222,6 +254,11 @@ processed metadata, keymap verification and removal. Ordinary IPC tests cover
 endpoint replacement, executable/permission checks, malformed replies and timeouts.
 The VM also checks actual logind registration, rejection of another process with
 the same UID outside the session, agent death, disconnect and active VT changes.
+The real `broker`, `session` and `status` commands also run there against a
+synthetic idle source, including single-owner enforcement, descriptor isolation,
+lease renewal, graceful shutdown and agent exit on broker loss.
+`tests/protocol.rs` covers schema/size/order/time bounds, nonblocking backpressure,
+descriptor rejection/cleanup, endpoint lifetimes and inherited-socket misuse.
 
 Shape matching preserves path order and aspect ratio;
 rotation/reflection invariance must be enabled explicitly. Too-small, unmatched

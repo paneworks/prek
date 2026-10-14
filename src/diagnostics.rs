@@ -112,7 +112,7 @@ impl Report {
                 );
             }
             if crate::rules::requires_context(rule) {
-                add("context_provider_unavailable", None, Some(&rule.id), "Authenticated live session/context registration is not implemented yet; observation skips this rule until a verified provider is available".into());
+                add("context_provider_unavailable", None, Some(&rule.id), "Live context snapshots and lock-provider negotiation are not connected yet; observation skips this rule until a verified provider is available".into());
             }
             let finger_count = maximum_fingers(&rule.trigger);
             for (id, selector) in config
@@ -161,12 +161,13 @@ impl Report {
                     "hyprland_adapter_unavailable",
                     None,
                     Some(&rule.id),
-                    "Hyprland session/action negotiation is not implemented yet".into(),
+                    "Hyprland window context/actions are not connected to the session agent yet"
+                        .into(),
                 );
             }
         }
         if config.mode == Mode::Route {
-            add("routing_pending", None, None, "Device takeover, virtual output readiness and broker/session services are not implemented yet".into());
+            add("routing_pending", None, None, "Routing remains disabled: configured takeover, complete consumer readiness and action/context integration are pending".into());
         }
         Self {
             version: 1,

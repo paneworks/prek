@@ -21,6 +21,7 @@ let
     postInstall = "";
   });
   compositorConfig = pkgs.writeText "prek-hyprland-test.conf" ''
+    exec-once = env PREK_BROKER_CLI_FIXTURE=1 PREK_BROKER_APP=${package}/bin/prek ${tests}/bin/prek-compositor-tests --ignored --exact broker_cli_session_fixture --nocapture
     exec-once = env PREK_SESSION_AGENT_FIXTURE=1 PREK_AGENT_SOCKET=/run/prek-session/agent.sock ${tests}/bin/prek-compositor-tests --ignored --exact logind_session_agent_fixture --nocapture
     exec-once = env PREK_SESSION_AGENT_FIXTURE=1 PREK_AGENT_SOCKET=/run/prek-session/seat.sock ${tests}/bin/prek-compositor-tests --ignored --exact logind_session_agent_fixture --nocapture
     monitor = , preferred, auto, 1
@@ -31,6 +32,13 @@ let
       disable_hyprland_logo = true
       disable_splash_rendering = true
     }
+  '';
+  brokerConfig = pkgs.writeText "prek-broker-fixture.toml" ''
+    version = 1
+    [policy]
+    allowed_devices = ["fixture"]
+    [devices.fixture]
+    name = "Prek broker fixture"
   '';
 in
 pkgs.testers.runNixOSTest {
@@ -50,6 +58,7 @@ pkgs.testers.runNixOSTest {
     systemd.tmpfiles.rules = [
       "d /run/prek/devices 0700 root root -"
       "d /run/prek-session 0755 root root -"
+      "d /run/prek-control 0755 root root -"
     ];
     environment.systemPackages = [ package tests ];
     programs.bash.loginShellInit = ''
@@ -71,7 +80,30 @@ pkgs.testers.runNixOSTest {
     # Socket creation alone does not establish a responsive backend. Require
     # a successful query using the client's real 200 ms budget.
     machine.wait_until_succeeds(f"{environment} ${tests}/bin/prek-compositor-tests --ignored --exact stock_compositor_queries_use_the_verified_live_socket --nocapture", timeout=30)
-    machine.succeed(f"{environment} ${tests}/bin/prek-compositor-tests --ignored --skip logind_session_agent_fixture --test-threads=1 --nocapture", timeout=30)
+    machine.succeed(f"{environment} ${tests}/bin/prek-compositor-tests --ignored --skip logind_session_agent_fixture --skip broker_observer_source_fixture --skip broker_cli_session_fixture --test-threads=1 --nocapture", timeout=30)
     machine.succeed("test -z \"$(ls -A /run/prek/devices)\"")
+    machine.succeed("systemd-run --unit prek-broker-source --property=Type=exec --setenv=PREK_COMPOSITOR_VM=1 --setenv=PREK_ISOLATED_ROUTING=1 ${tests}/bin/prek-compositor-tests --ignored --exact broker_observer_source_fixture")
+    machine.wait_until_succeeds("test -s /run/prek-control/source", timeout=5)
+    source = machine.succeed("cat /run/prek-control/source").strip()
+    broker = "${package}/bin/prek broker --config ${brokerConfig} --runtime-dir /run/prek-control --compositor-executable ${pkgs.hyprland}/bin/.Hyprland-wrapped --logind-library ${pkgs.systemd}/lib/libsystemd.so.0"
+    machine.succeed(f"systemd-run --unit prek-broker --property=Type=exec {broker}")
+    machine.wait_until_succeeds("test -s /run/user/1000/prek-broker-ready", timeout=10)
+    parent = int(machine.succeed("systemctl show -p MainPID --value prek-broker").strip())
+    worker = int(machine.succeed(f"cat /proc/{parent}/task/{parent}/children").strip())
+    machine.succeed(f"! readlink /proc/{parent}/fd/* | grep -E '/dev/input|/dev/uinput'")
+    machine.succeed(f"readlink /proc/{worker}/fd/* | grep -Fx {source}")
+    machine.fail(broker)
+    # A shared UID outside this compositor's PAM session is still unauthorized.
+    machine.fail(f"${pkgs.util-linux}/bin/runuser -u alice -- ${package}/bin/prek status --socket /run/prek-control/control.sock --instance {instance} --json")
+    # Let actual heartbeat/lease renewal run beyond its one-second expiry.
+    machine.sleep(2)
+    machine.succeed("systemctl is-active prek-broker")
+    machine.succeed("systemctl kill --kill-whom=main --signal=SIGTERM prek-broker")
+    machine.wait_until_succeeds(f"test ! -e /proc/{worker}", timeout=3)
+    machine.wait_until_succeeds("test -s /run/user/1000/prek-broker-agent-stopped", timeout=3)
+    machine.wait_until_succeeds("test ! -e /run/prek-control/control.sock", timeout=3)
+    machine.succeed("test \"$(systemctl show -p Result --value prek-broker)\" = success")
+    machine.succeed("systemctl stop prek-broker-source")
+    machine.wait_until_succeeds(f"test ! -e {source}")
   '';
 }

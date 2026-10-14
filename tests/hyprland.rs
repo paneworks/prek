@@ -436,3 +436,105 @@ fn stock_session_registration_checks_membership_and_revokes_dead_agents() {
     fs::remove_file(socket).unwrap();
     fs::remove_file(outside_path).unwrap();
 }
+
+#[test]
+#[ignore = "synthetic idle source owned only by the disposable VM"]
+fn broker_observer_source_fixture() {
+    use evdev::{AttributeSet, KeyCode, uinput::VirtualDevice};
+    use std::os::unix::fs::OpenOptionsExt;
+    kernel_fixture::authorized();
+    assert_eq!(std::env::var("PREK_COMPOSITOR_VM").as_deref(), Ok("1"));
+    let keys = AttributeSet::from_iter([KeyCode::KEY_A]);
+    let mut source = VirtualDevice::builder()
+        .unwrap()
+        .name("Prek broker fixture")
+        .with_keys(&keys)
+        .unwrap()
+        .build()
+        .unwrap();
+    let node = source
+        .enumerate_dev_nodes_blocking()
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
+    let mut witness = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open("/run/prek-control/source")
+        .unwrap();
+    writeln!(witness, "{}", node.display()).unwrap();
+    witness.sync_all().unwrap();
+    loop {
+        thread::sleep(Duration::from_secs(60));
+    }
+}
+
+#[test]
+#[ignore = "CLI agent launched inside the actual compositor login session"]
+fn broker_cli_session_fixture() {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::process::{Command, Stdio};
+    assert_eq!(std::env::var("PREK_BROKER_CLI_FIXTURE").as_deref(), Ok("1"));
+    let binary = std::env::var_os("PREK_BROKER_APP").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !Path::new("/run/prek-control/control.sock").exists() {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(25));
+    }
+    let witness = "/run/user/1000/prek-broker-agent.jsonl";
+    let output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(witness)
+        .unwrap();
+    let mut agent = Command::new(&binary)
+        .args([
+            "session",
+            "--socket",
+            "/run/prek-control/control.sock",
+            "--json",
+        ])
+        .stdout(Stdio::from(output))
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if fs::read_to_string(witness)
+            .unwrap()
+            .contains("\"registered\":true")
+        {
+            break;
+        }
+        assert!(
+            agent.try_wait().unwrap().is_none(),
+            "session command failed before registration"
+        );
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(25));
+    }
+    let inspected = Command::new(&binary)
+        .args([
+            "status",
+            "--socket",
+            "/run/prek-control/control.sock",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        inspected.status.success(),
+        "status: {}",
+        String::from_utf8_lossy(&inspected.stderr)
+    );
+    let status: serde_json::Value = serde_json::from_slice(&inspected.stdout).unwrap();
+    assert_eq!(status["mode"], "observe");
+    assert_eq!(status["state"], "unknown");
+    fs::write("/run/user/1000/prek-broker-ready", agent.id().to_string()).unwrap();
+    // The VM stops the broker while this real CLI connection remains active.
+    // A disconnected broker must not leave an agent acting on stale authority.
+    assert!(!agent.wait().unwrap().success());
+    fs::write("/run/user/1000/prek-broker-agent-stopped", "stopped").unwrap();
+}

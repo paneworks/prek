@@ -563,6 +563,17 @@ impl Supervisor {
     pub fn heartbeats(&self) -> u64 {
         self.sequence
     }
+    /// Next lifecycle deadline for a control-service poll loop. Input work
+    /// still belongs exclusively to the supervised worker.
+    pub fn deadline(&self) -> io::Result<Duration> {
+        let time = now()?;
+        Ok(match self.phase {
+            Phase::Active => self.closed.unwrap_or(self.last + STALL_TIMEOUT),
+            Phase::Requested(deadline) | Phase::Terminating { deadline, .. } => deadline,
+            Phase::Exited(_) => time,
+            _ => time + Duration::from_millis(25),
+        })
+    }
 
     fn signal(&mut self, signal: i32) -> io::Result<()> {
         // Child remains owned/unreaped until its report is cached, preventing
@@ -728,6 +739,12 @@ impl Drop for Supervisor {
             let _ = self.child.kill();
             let _ = self.child.wait();
         }
+    }
+}
+
+impl AsFd for Supervisor {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.link.as_fd()
     }
 }
 

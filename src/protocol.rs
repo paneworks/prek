@@ -1,0 +1,280 @@
+//! Versioned local control messages. Raw input is never a protocol payload.
+//! Transport authentication and active-seat registration are separate checks;
+//! decoding a packet does not authorize its requested operation.
+
+use crate::{
+    context::{Snapshot, State},
+    rules::Event,
+};
+use serde::{Deserialize, Serialize};
+use std::{collections::BTreeSet, io, time::Duration};
+
+pub const VERSION: u32 = 1;
+pub const MAX_PACKET: usize = 64 * 1024;
+pub const MAX_QUEUED_PACKETS: usize = 128;
+pub const MAX_QUEUED_BYTES: usize = 512 * 1024;
+pub const MAX_PACKET_AGE: Duration = Duration::from_secs(1);
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct Epoch(pub [u64; 2]);
+
+/// Every post-registration request is fenced against broker restarts,
+/// configuration replacement and session/ownership changes.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Fence {
+    pub broker: Epoch,
+    pub configuration: u64,
+    pub session: u64,
+}
+impl Fence {
+    pub fn validate(self) -> io::Result<()> {
+        if self.broker.0 == [0, 0] || self.configuration == 0 || self.session == 0 {
+            Err(invalid("invalid broker/configuration/session fence"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Capability {
+    Context,
+    Observations,
+    HyprlandActions,
+    MorfActions,
+    Commands,
+    SyntheticInput,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode {
+    Observe,
+    Route,
+}
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    #[default]
+    Agent,
+    Inspect,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Completion {
+    Applied,
+    Cancelled,
+    Unavailable,
+    Uncertain,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Request {
+    Register {
+        instance: String,
+        #[serde(default)]
+        role: Role,
+        capabilities: BTreeSet<Capability>,
+    },
+    Heartbeat {
+        fence: Fence,
+    },
+    Context {
+        fence: Fence,
+        snapshot: Box<Snapshot>,
+    },
+    /// Inhibits desktop work; never serves as a lock/unlock acknowledgement.
+    LockRequested {
+        fence: Fence,
+    },
+    Complete {
+        fence: Fence,
+        id: u64,
+        ordinal: u64,
+        result: Completion,
+    },
+    Status {
+        fence: Fence,
+    },
+    Disconnect {
+        fence: Fence,
+    },
+}
+impl Request {
+    pub fn fence(&self) -> Option<Fence> {
+        match self {
+            Self::Register { .. } => None,
+            Self::Heartbeat { fence }
+            | Self::Context { fence, .. }
+            | Self::LockRequested { fence }
+            | Self::Complete { fence, .. }
+            | Self::Status { fence }
+            | Self::Disconnect { fence } => Some(*fence),
+        }
+    }
+    pub fn validate(&self) -> io::Result<()> {
+        if let Some(fence) = self.fence() {
+            fence.validate()?;
+        }
+        match self {
+            Self::Register { instance, .. }
+                if instance.is_empty()
+                    || instance.len() > 160
+                    || matches!(instance.as_str(), "." | "..")
+                    || !instance.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')
+                    }) =>
+            {
+                return Err(invalid("invalid compositor instance"));
+            }
+            Self::Context { fence, snapshot } => {
+                if snapshot.generation != fence.session {
+                    return Err(invalid("context generation differs from its fence"));
+                }
+                snapshot.validate().map_err(io::Error::other)?;
+            }
+            Self::Complete { id, ordinal, .. } if *id == 0 || *ordinal == 0 => {
+                return Err(invalid("invalid action completion identity"));
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Reply {
+    Welcome {
+        fence: Fence,
+        seat: String,
+        session: String,
+        mode: Mode,
+        capabilities: BTreeSet<Capability>,
+    },
+    Status {
+        fence: Fence,
+        state: State,
+        revision: u64,
+        pending: usize,
+    },
+    Accepted {
+        fence: Fence,
+        revision: u64,
+    },
+    Observation {
+        fence: Fence,
+        event: Box<Event>,
+    },
+    /// Only the routing/action service may construct dispatches after checking
+    /// ownership, current registration, frozen target and negotiated capability.
+    Dispatch {
+        fence: Fence,
+        event: Box<Event>,
+    },
+    Revoked {
+        fence: Fence,
+        reason: String,
+    },
+    Rejected {
+        reason: String,
+    },
+}
+impl Reply {
+    pub fn fence(&self) -> Option<Fence> {
+        match self {
+            Self::Rejected { .. } => None,
+            Self::Welcome { fence, .. }
+            | Self::Status { fence, .. }
+            | Self::Accepted { fence, .. }
+            | Self::Observation { fence, .. }
+            | Self::Dispatch { fence, .. }
+            | Self::Revoked { fence, .. } => Some(*fence),
+        }
+    }
+    pub fn validate(&self) -> io::Result<()> {
+        if let Some(fence) = self.fence() {
+            fence.validate()?;
+        }
+        let text = |value: &str| {
+            !value.is_empty() && value.len() <= 1024 && !value.chars().any(char::is_control)
+        };
+        match self {
+            Self::Welcome { seat, session, .. } if !text(seat) || !text(session) => {
+                return Err(invalid("invalid session description"));
+            }
+            Self::Revoked { reason, .. } | Self::Rejected { reason } if !text(reason) => {
+                return Err(invalid("invalid protocol rejection"));
+            }
+            Self::Observation { fence, event } | Self::Dispatch { fence, event } => {
+                if let Event::Matched {
+                    version,
+                    config_generation,
+                    session_generation,
+                    ..
+                } = event.as_ref()
+                    && (*version != VERSION
+                        || *config_generation != fence.configuration
+                        || *session_generation != fence.session)
+                {
+                    return Err(invalid("event generation differs from its fence"));
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Packet<T> {
+    pub version: u32,
+    pub sequence: u64,
+    pub at: Duration,
+    pub message: T,
+}
+impl<T> Packet<T> {
+    pub fn validate_header(&self, next: u64, now: Duration) -> io::Result<()> {
+        if self.version != VERSION || self.sequence != next || next == 0 {
+            return Err(invalid("unsupported protocol version or reordered packet"));
+        }
+        if self.at > now || now - self.at >= MAX_PACKET_AGE {
+            return Err(invalid("protocol packet is stale or from the future"));
+        }
+        Ok(())
+    }
+}
+pub fn encode<T: Serialize>(packet: &Packet<T>) -> io::Result<Vec<u8>> {
+    // Streaming into a bounded writer avoids allocating an unbounded serialized
+    // reply before discovering that it exceeds the transport limit.
+    struct Buffer(Vec<u8>);
+    impl io::Write for Buffer {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.0.len() + bytes.len() > MAX_PACKET {
+                return Err(invalid("protocol packet exceeds size limit"));
+            }
+            self.0.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut buffer = Buffer(Vec::new());
+    serde_json::to_writer(&mut buffer, packet).map_err(io::Error::other)?;
+    Ok(buffer.0)
+}
+pub fn decode<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> io::Result<Packet<T>> {
+    if bytes.is_empty() || bytes.len() > MAX_PACKET {
+        return Err(invalid("protocol packet exceeds size limit"));
+    }
+    serde_json::from_slice(bytes).map_err(io::Error::other)
+}
+pub(crate) fn invalid(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
