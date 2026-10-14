@@ -202,12 +202,12 @@ impl Runtime {
                     })
                     .map_err(error)?
             };
-            let (logs_before, bytes_before) = {
+            let (logs_before, bytes_before, proposal_before) = {
                 let mut host = self.host.borrow_mut();
                 host.task = Some(id);
                 host.sleep = None;
                 host.task_clock = Some((now, Instant::now()));
-                (host.logs.len(), host.bytes)
+                (host.logs.len(), host.bytes, host.rules.pending_id())
             };
             let outcome = self.drive_task(&executor, &entry);
             let mut host = self.host.borrow_mut();
@@ -230,6 +230,9 @@ impl Runtime {
             if cancelled {
                 host.logs.truncate(logs_before);
                 host.bytes = bytes_before;
+                if host.rules.pending_id() != proposal_before {
+                    host.rules.discard("Lua task cancelled");
+                }
             }
         }
         self.sweep_tasks()

@@ -28,6 +28,7 @@ pub enum EventKind {
     Recovery,
     SessionChanged,
     ContextChanged,
+    RulesChanged,
 }
 impl EventKind {
     pub fn name(self) -> &'static str {
@@ -44,6 +45,7 @@ impl EventKind {
             Self::Recovery => "recovery",
             Self::SessionChanged => "session_changed",
             Self::ContextChanged => "context_changed",
+            Self::RulesChanged => "rules_changed",
         }
     }
 }
@@ -200,6 +202,7 @@ pub(super) struct Host {
     pub(super) task: Option<u64>,
     pub(super) sleep: Option<Duration>,
     pub(super) task_clock: Option<(Duration, Instant)>,
+    pub(super) rules: super::rule_api::State,
     #[cfg(target_os = "linux")]
     pub(super) context: Option<crate::context_transfer::View>,
     #[cfg(target_os = "linux")]
@@ -297,6 +300,7 @@ impl Runtime {
             Err(reason) => {
                 self.failed = true;
                 host.logs.clear();
+                host.rules.discard("Lua callback failed");
                 Err(reason)
             }
         }

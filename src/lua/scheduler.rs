@@ -171,6 +171,7 @@ impl Runtime {
             Err(reason) => {
                 self.failed = true;
                 host.logs.clear();
+                host.rules.discard("Lua scheduler callback failed");
                 Err(reason)
             }
         }

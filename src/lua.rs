@@ -12,6 +12,7 @@ mod context;
 mod export;
 mod handlers;
 mod modules;
+mod rule_api;
 mod runtime;
 mod scheduler;
 #[cfg(target_os = "linux")]
@@ -21,6 +22,7 @@ mod tasks;
 pub use export::export_config;
 pub use handlers::{ActionResult, HandlerRegistration};
 pub use modules::{Module, Sources};
+pub use rule_api::{RuleProposal, RuleReceipt};
 pub use runtime::{Definition, EventKind, LogRecord, MAX_SNAPSHOT_BYTES, Registration, Runtime};
 pub use scheduler::TimerRegistration;
 pub use tasks::TaskRegistration;
@@ -49,6 +51,69 @@ pub fn api() -> serde_json::Value {
         serde_json::json!({"name":"Task.status", "receiver":"Task", "signature":"task:status() -> TaskState", "description":"Inspect pending, running, sleeping, completed or cancelled state in the owning generation."}),
         serde_json::json!({"name":"actions.define", "signature":"actions.define(name, {requires = capabilities}, callback) -> Action", "description":"Register an approved generation-scoped named handler; resolve a bounded typed effect plan in the unprivileged session after a broker execution grant."}),
     ];
+    for (name, signature, description) in [
+        (
+            "list",
+            "rules.list() -> Rule[]",
+            "Return owned copies of the current acknowledged rules.",
+        ),
+        (
+            "get",
+            "rules.get(id) -> Rule | nil",
+            "Query one current acknowledged rule by stable ID; returned edits do not change active rules.",
+        ),
+        (
+            "revision",
+            "rules.revision() -> string",
+            "Return the exact decimal runtime revision without Lua numeric precision loss.",
+        ),
+        (
+            "transaction",
+            "rules.transaction() -> RuleTransaction",
+            "Create a private revision-scoped builder; requires explicit authorized host transport and is unavailable in current broker sessions.",
+        ),
+    ] {
+        symbols.push(serde_json::json!({"name":format!("rules.{name}"),"signature":signature,"phase":"runtime_callback","description":description}));
+    }
+    for (name, signature, description) in [
+        (
+            "enable",
+            "transaction:enable(id) -> nil",
+            "Stage enabling an existing rule.",
+        ),
+        (
+            "disable",
+            "transaction:disable(id) -> nil",
+            "Stage disabling an existing rule.",
+        ),
+        (
+            "replace",
+            "transaction:replace(rule) -> nil",
+            "Stage replacing or adding a fully typed rule; named handlers must match the approved source registrations.",
+        ),
+        (
+            "remove",
+            "transaction:remove(id) -> nil",
+            "Stage removing an existing rule.",
+        ),
+        (
+            "commit",
+            "transaction:commit() -> nil",
+            "Validate the complete batch and submit one proposal; active queries change only after an accepted host receipt.",
+        ),
+        (
+            "cancel",
+            "transaction:cancel() -> nil",
+            "Idempotently abandon an open builder; submitted proposals await the host receipt.",
+        ),
+        (
+            "status",
+            "transaction:status() -> RuleTransactionStatus",
+            "Return an owned state/revision/error copy; revisions are exact decimal strings.",
+        ),
+    ] {
+        symbols.push(serde_json::json!({"name":format!("RuleTransaction.{name}"),"receiver":"RuleTransaction","signature":signature,"phase":"runtime_callback","description":description}));
+    }
     #[cfg(target_os = "linux")]
     for (name, result, description) in [
         (
@@ -112,7 +177,8 @@ pub fn api() -> serde_json::Value {
         "instructions":INSTRUCTIONS,"time_ms":TIME.as_millis(),"value_depth":64},
         "runtime_limits":{"subscriptions":256,"timers":256,"tasks":tasks::MAX_TASKS,"tasks_per_wake":tasks::TASKS_PER_WAKE,"handlers":256,"action_effects":32,"action_bytes":32768,"timers_per_wake":32,"callback_instructions":100000,"callback_time_ms":20,"event_bytes":65536,"log_bytes":16384,"logs_per_event":32},
         "modules":{"root":"entry_parent/modules","path":"<identifier>/.../<identifier>.lua","count":modules::MAX_MODULES,"import_depth":modules::MAX_IMPORT_DEPTH,"source_set_bytes":MAX_CONFIG_BYTES,"owner":"entry_file_uid","group_other_writes":false,"symlinks":false,"runtime":"approved sources only; no filesystem reads"},
-        "event_kinds":["matched","begin","update","end","cancel","skipped","ready","reload","stop","recovery","session_changed","context_changed"],
+        "event_kinds":["matched","begin","update","end","cancel","skipped","ready","reload","stop","recovery","session_changed","context_changed","rules_changed"],
+        "rule_transactions":{"builders":64,"operations":64,"transaction_bytes":32768,"pending_proposals":1,"receipt_time_ms":250,"revision_type":"decimal_string","transport":"explicit authorized host opt-in","production_broker":"unavailable"},
         "context_limits":{"snapshot_bytes":4194304,"chunk_bytes":32768,"transfer_time_ms":1000,"freshness_ms":250,"refresh_ms":100,"queued_snapshots":2,"read_only":true},
         "runtime_requires":{"uid":"unprivileged active session","capabilities":["context","observations","lua_events"],"thread":"owning Luna arena","generation":"current broker/configuration/session fence"},
         "action_requires":{"agent_flags":["lua","commands"],"capabilities":["context","observations","lua_events","lua_actions","commands"],"implemented_effects":["commands","observations"],"grant_time_ms":250},
@@ -191,7 +257,7 @@ end
 local allowed_events = {
     matched=true, begin=true, update=true, ["end"]=true, cancel=true,
     skipped=true, ready=true, reload=true, stop=true, recovery=true,
-    session_changed=true, context_changed=true,
+    session_changed=true, context_changed=true, rules_changed=true,
 }
 function api.events.on(kind, callback)
     assert(allowed_events[kind], "unsupported event subscription")
@@ -436,6 +502,7 @@ fn instantiate(
             let module_loaders = Table::new(&ctx);
             ctx.globals().set(ctx, "__prek_modules", module_loaders)?;
             let actions: Table = module.get(ctx, "actions")?;
+            rule_api::register(&ctx, module.get(ctx, "rules")?, host.clone())?;
             actions.set(ctx, "__guard", handlers::guard(&ctx, host.clone()))?;
             let scheduler: Table = module.get(ctx, "scheduler")?;
             scheduler.set(ctx, "__duration", scheduler::duration(&ctx, host.clone()))?;
@@ -516,7 +583,7 @@ fn instantiate(
         })
         .map_err(error)?;
     host.borrow_mut().configuring = false;
-    Ok(Runtime {
+    let mut runtime = Runtime {
         lua,
         registry,
         timers,
@@ -526,7 +593,14 @@ fn instantiate(
         host,
         config,
         failed: false,
-    })
+    };
+    let handlers = runtime.handler_registrations()?;
+    runtime
+        .host
+        .borrow_mut()
+        .rules
+        .initialize(runtime.config.clone(), handlers);
+    Ok(runtime)
 }
 
 #[cfg(test)]
@@ -590,12 +664,22 @@ mod tests {
                 source.push_str("local task=p.scheduler.spawn(function()end); assert(type(task.cancel)=='function' and type(task.status)=='function'); task:cancel();\n");
                 continue;
             }
+            if symbol["receiver"] == "RuleTransaction" {
+                let method = symbol["name"].as_str().unwrap().split('.').nth(1).unwrap();
+                source.push_str(&format!("p.events.on('ready',function()local tx=p.rules.transaction();assert(type(tx.{method})=='function');tx:cancel()end);\n"));
+                continue;
+            }
             source.push_str(&format!(
                 "assert(type(p.{}) == 'function');\n",
                 symbol["name"].as_str().unwrap()
             ));
         }
         source.push_str("return {version=1}");
-        Definition::compile(&source, "api-parity.lua").unwrap();
+        let definition = Definition::compile(&source, "api-parity.lua").unwrap();
+        let mut runtime = definition.instantiate().unwrap();
+        runtime.enable_rule_transactions();
+        runtime
+            .dispatch(EventKind::Ready, &serde_json::json!({}))
+            .unwrap();
     }
 }

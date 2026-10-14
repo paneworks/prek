@@ -41,7 +41,8 @@
     "stop",
     "recovery",
     "session_changed",
-    "context_changed"
+    "context_changed",
+    "rules_changed"
   ],
   "limits": {
     "instructions": 1000000,
@@ -62,6 +63,16 @@
     "symlinks": false
   },
   "phase": "configuration_and_session_actions",
+  "rule_transactions": {
+    "builders": 64,
+    "operations": 64,
+    "pending_proposals": 1,
+    "production_broker": "unavailable",
+    "receipt_time_ms": 250,
+    "revision_type": "decimal_string",
+    "transaction_bytes": 32768,
+    "transport": "explicit authorized host opt-in"
+  },
   "runtime_api": "partial",
   "runtime_limits": {
     "action_bytes": 32768,
@@ -184,6 +195,79 @@
       "description": "Register an approved generation-scoped named handler; resolve a bounded typed effect plan in the unprivileged session after a broker execution grant.",
       "name": "actions.define",
       "signature": "actions.define(name, {requires = capabilities}, callback) -> Action"
+    },
+    {
+      "description": "Return owned copies of the current acknowledged rules.",
+      "name": "rules.list",
+      "phase": "runtime_callback",
+      "signature": "rules.list() -> Rule[]"
+    },
+    {
+      "description": "Query one current acknowledged rule by stable ID; returned edits do not change active rules.",
+      "name": "rules.get",
+      "phase": "runtime_callback",
+      "signature": "rules.get(id) -> Rule | nil"
+    },
+    {
+      "description": "Return the exact decimal runtime revision without Lua numeric precision loss.",
+      "name": "rules.revision",
+      "phase": "runtime_callback",
+      "signature": "rules.revision() -> string"
+    },
+    {
+      "description": "Create a private revision-scoped builder; requires explicit authorized host transport and is unavailable in current broker sessions.",
+      "name": "rules.transaction",
+      "phase": "runtime_callback",
+      "signature": "rules.transaction() -> RuleTransaction"
+    },
+    {
+      "description": "Stage enabling an existing rule.",
+      "name": "RuleTransaction.enable",
+      "phase": "runtime_callback",
+      "receiver": "RuleTransaction",
+      "signature": "transaction:enable(id) -> nil"
+    },
+    {
+      "description": "Stage disabling an existing rule.",
+      "name": "RuleTransaction.disable",
+      "phase": "runtime_callback",
+      "receiver": "RuleTransaction",
+      "signature": "transaction:disable(id) -> nil"
+    },
+    {
+      "description": "Stage replacing or adding a fully typed rule; named handlers must match the approved source registrations.",
+      "name": "RuleTransaction.replace",
+      "phase": "runtime_callback",
+      "receiver": "RuleTransaction",
+      "signature": "transaction:replace(rule) -> nil"
+    },
+    {
+      "description": "Stage removing an existing rule.",
+      "name": "RuleTransaction.remove",
+      "phase": "runtime_callback",
+      "receiver": "RuleTransaction",
+      "signature": "transaction:remove(id) -> nil"
+    },
+    {
+      "description": "Validate the complete batch and submit one proposal; active queries change only after an accepted host receipt.",
+      "name": "RuleTransaction.commit",
+      "phase": "runtime_callback",
+      "receiver": "RuleTransaction",
+      "signature": "transaction:commit() -> nil"
+    },
+    {
+      "description": "Idempotently abandon an open builder; submitted proposals await the host receipt.",
+      "name": "RuleTransaction.cancel",
+      "phase": "runtime_callback",
+      "receiver": "RuleTransaction",
+      "signature": "transaction:cancel() -> nil"
+    },
+    {
+      "description": "Return an owned state/revision/error copy; revisions are exact decimal strings.",
+      "name": "RuleTransaction.status",
+      "phase": "runtime_callback",
+      "receiver": "RuleTransaction",
+      "signature": "transaction:status() -> RuleTransactionStatus"
     },
     {
       "description": "Return an owned copy of the complete fresh broker snapshot, including outputs, windows, regions and keyboard geometry; nil when unavailable or expired.",

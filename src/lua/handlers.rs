@@ -154,6 +154,7 @@ impl Runtime {
             Err(reason) => {
                 self.failed = true;
                 host.logs.clear();
+                host.rules.discard("Lua action callback failed");
                 Err(reason)
             }
         }

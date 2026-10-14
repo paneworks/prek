@@ -61,6 +61,13 @@ impl PendingEvents {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Work {
+    RulesEnable {
+        fence: Fence,
+    },
+    RuleReceipt {
+        fence: Fence,
+        receipt: super::RuleReceipt,
+    },
     Context {
         fence: Fence,
         offset: usize,
@@ -91,6 +98,18 @@ enum Work {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Message {
+    RulesEnabled {
+        fence: Fence,
+    },
+    RuleProposal {
+        fence: Fence,
+        proposal: super::RuleProposal,
+    },
+    RulesApplied {
+        fence: Fence,
+        id: u64,
+        logs: Vec<LogRecord>,
+    },
     ContextLogs {
         fence: Fence,
         logs: Vec<LogRecord>,
@@ -124,6 +143,12 @@ struct Notice {
     payload: serde_json::Value,
     bytes: usize,
 }
+struct RulePending {
+    id: u64,
+    revision: u64,
+    expires: Duration,
+    sent: bool,
+}
 pub struct Session {
     supervisor: Supervisor,
     channel: Channel,
@@ -147,6 +172,13 @@ pub struct Session {
     notices: VecDeque<Notice>,
     bytes: usize,
     expires: Duration,
+    rule_mutations: bool,
+    rules_ready: bool,
+    rules_handshake: Option<Duration>,
+    rule_pending: Option<RulePending>,
+    rule_receipt: Option<super::RuleReceipt>,
+    rule_proposals: VecDeque<super::RuleProposal>,
+    stopping: bool,
 }
 impl Session {
     pub fn spawn(
@@ -154,6 +186,25 @@ impl Session {
         fence: Fence,
         seat: &str,
         definition: Definition,
+    ) -> io::Result<Self> {
+        Self::spawn_transport(executable, fence, seat, definition, false)
+    }
+    /// The embedding must already own a live authorized rule transport. This
+    /// explicit opt-in is never inferred from the Lua source or its callbacks.
+    pub fn spawn_with_rule_transactions(
+        executable: &Path,
+        fence: Fence,
+        seat: &str,
+        definition: Definition,
+    ) -> io::Result<Self> {
+        Self::spawn_transport(executable, fence, seat, definition, true)
+    }
+    fn spawn_transport(
+        executable: &Path,
+        fence: Fence,
+        seat: &str,
+        definition: Definition,
+        rule_mutations: bool,
     ) -> io::Result<Self> {
         if unsafe { libc::geteuid() } == 0 {
             return Err(io::Error::new(
@@ -203,6 +254,13 @@ impl Session {
             notices: VecDeque::new(),
             bytes: 0,
             expires: monotonic()? + source_transfer::TIMEOUT,
+            rule_mutations,
+            rules_ready: !rule_mutations,
+            rules_handshake: None,
+            rule_pending: None,
+            rule_receipt: None,
+            rule_proposals: VecDeque::new(),
+            stopping: false,
         };
         session.notify(
             EventKind::Ready,
@@ -263,12 +321,47 @@ impl Session {
                 self.expires
             })
             .min(self.context_pending.unwrap_or(Duration::MAX))
+            .min(self.rules_handshake.unwrap_or(Duration::MAX))
+            .min(
+                self.rule_pending
+                    .as_ref()
+                    .map_or(Duration::MAX, |pending| pending.expires),
+            )
             .min(self.context_started.map_or(Duration::MAX, |started| {
                 started + crate::context_transfer::TIMEOUT
             })))
     }
     pub fn action_ready(&self) -> bool {
         self.ready && self.initialized
+    }
+    pub fn take_rule_proposals(&mut self) -> Vec<super::RuleProposal> {
+        self.rule_proposals.drain(..).collect()
+    }
+    pub fn acknowledge_rules(
+        &mut self,
+        fence: Fence,
+        receipt: super::RuleReceipt,
+    ) -> io::Result<()> {
+        let pending = self
+            .rule_pending
+            .as_ref()
+            .ok_or_else(|| protocol::invalid("no pending Lua rule proposal"))?;
+        if fence != self.fence
+            || pending.id != receipt.id
+            || pending.sent
+            || !self.rule_proposals.is_empty()
+            || self.rule_receipt.is_some()
+            || monotonic()? >= pending.expires
+            || receipt
+                .error
+                .as_ref()
+                .is_some_and(|error| error.len() > 512 || error.chars().any(char::is_control))
+            || receipt.error.is_none() && receipt.revision != pending.revision
+        {
+            return Err(protocol::invalid("invalid or stale Lua rule receipt"));
+        }
+        self.rule_receipt = Some(receipt);
+        Ok(())
     }
     pub fn request_action(
         &mut self,
@@ -335,8 +428,18 @@ impl Session {
             && self.actions.is_empty()
             && self.context_source.is_empty()
             && self.context_pending.is_none()
+            && self.rules_ready
+            && self.rule_pending.is_none()
+            && self.rule_proposals.is_empty()
     }
     pub fn stop(&mut self) -> io::Result<()> {
+        self.stopping = true;
+        self.rule_mutations = false;
+        self.rules_ready = true;
+        self.rules_handshake = None;
+        self.rule_proposals.clear();
+        self.rule_pending = None;
+        self.rule_receipt = None;
         self.context_source.clear();
         self.context_next = None;
         self.context_offset = 0;
@@ -363,10 +466,17 @@ impl Session {
     }
     fn wants_write(&self) -> bool {
         self.offset < self.source.len()
+            || self.ready && !self.rules_ready && self.rules_handshake.is_none()
+            || self.rule_receipt.is_some()
+                && self.pending.is_none()
+                && self.context_pending.is_none()
             || self.ready
+                && self.rules_ready
                 && self.context_pending.is_none()
                 && self.context_offset < self.context_source.len()
             || self.ready
+                && self.rules_ready
+                && self.rule_pending.is_none()
                 && self.pending.is_none()
                 && (!self.notices.is_empty() || !self.actions.is_empty())
     }
@@ -381,6 +491,11 @@ impl Session {
         if !self.ready && now >= self.expires
             || self.pending.is_some_and(|(_, expiry)| now >= expiry)
             || self.context_pending.is_some_and(|expiry| now >= expiry)
+            || self.rules_handshake.is_some_and(|expiry| now >= expiry)
+            || self
+                .rule_pending
+                .as_ref()
+                .is_some_and(|pending| now >= pending.expires)
             || self.context_started.is_some_and(|started| {
                 now.saturating_sub(started) >= crate::context_transfer::TIMEOUT
             })
@@ -396,6 +511,57 @@ impl Session {
                 break;
             };
             match packet.message {
+                Message::RulesEnabled { .. }
+                | Message::RuleProposal { .. }
+                | Message::RulesApplied { .. }
+                    if self.stopping => {}
+                Message::RulesEnabled { fence }
+                    if fence == self.fence
+                        && self.rule_mutations
+                        && self.rules_handshake.is_some() =>
+                {
+                    self.rules_handshake = None;
+                    self.rules_ready = true;
+                }
+                Message::RuleProposal { fence, proposal }
+                    if fence == self.fence
+                        && self.rule_mutations
+                        && self.rules_ready
+                        && self.initialized =>
+                {
+                    proposal.transaction.validate().map_err(io::Error::other)?;
+                    if proposal.id == 0
+                        || self.rule_pending.is_some()
+                        || !self.rule_proposals.is_empty()
+                    {
+                        return Err(protocol::invalid("invalid or duplicate Lua rule proposal"));
+                    }
+                    let revision = proposal
+                        .transaction
+                        .revision
+                        .checked_add(1)
+                        .ok_or_else(|| protocol::invalid("Lua rule revision exhausted"))?;
+                    self.rule_pending = Some(RulePending {
+                        id: proposal.id,
+                        revision,
+                        expires: now + RESPONSE_TIMEOUT,
+                        sent: false,
+                    });
+                    self.rule_proposals.push_back(proposal);
+                }
+                Message::RulesApplied {
+                    fence,
+                    id,
+                    logs: batch,
+                } if fence == self.fence
+                    && self
+                        .rule_pending
+                        .as_ref()
+                        .is_some_and(|pending| pending.id == id && pending.sent) =>
+                {
+                    self.rule_pending = None;
+                    logs.extend(batch);
+                }
                 Message::ContextLogs { fence, logs: batch }
                     if fence == self.fence && self.ready && self.context_pending.is_some() =>
                 {
@@ -472,7 +638,31 @@ impl Session {
             )? {
                 self.offset = end;
             }
+        } else if self.ready && !self.rules_ready {
+            if self.rules_handshake.is_none()
+                && self
+                    .channel
+                    .send(&Work::RulesEnable { fence: self.fence }, now)?
+            {
+                self.rules_handshake = Some(now + RESPONSE_TIMEOUT);
+            }
+        } else if self.pending.is_none()
+            && self.context_pending.is_none()
+            && self.rule_receipt.is_some()
+        {
+            let receipt = self.rule_receipt.as_ref().unwrap();
+            if self.channel.send(
+                &Work::RuleReceipt {
+                    fence: self.fence,
+                    receipt: receipt.clone(),
+                },
+                now,
+            )? {
+                self.rule_receipt = None;
+                self.rule_pending.as_mut().unwrap().sent = true;
+            }
         } else if self.ready
+            && self.rules_ready
             && self.context_pending.is_none()
             && self.context_offset < self.context_source.len()
         {
@@ -497,6 +687,7 @@ impl Session {
                 }
             }
         } else if self.context_pending.is_none()
+            && self.rule_pending.is_none()
             && self.action_ready()
             && self.pending.is_none()
             && !self.actions.is_empty()
@@ -529,6 +720,8 @@ impl Session {
         } else if self.ready
             && self.context_pending.is_none()
             && self.pending.is_none()
+            && self.rules_ready
+            && self.rule_pending.is_none()
             && let Some(notice) = self.notices.front()
         {
             let event = notice.event;
@@ -567,10 +760,21 @@ pub fn worker() -> io::Result<()> {
     let mut sequence = 0;
     let mut outgoing = None;
     let mut timers_enabled = false;
+    let mut rules_enabled = false;
     let mut context_assembly: Option<crate::context_transfer::Assembly> = None;
     loop {
         health.progress()?;
         let now = monotonic()?;
+        if outgoing.is_none()
+            && let Some(proposal) = runtime
+                .as_mut()
+                .and_then(super::Runtime::take_rule_proposal)
+        {
+            outgoing = Some(Message::RuleProposal {
+                fence: fence.unwrap(),
+                proposal,
+            });
+        }
         if context_assembly
             .as_ref()
             .is_some_and(|assembly| now >= assembly.deadline())
@@ -584,6 +788,40 @@ pub fn worker() -> io::Result<()> {
             && let Some(packet) = channel.receive::<Work>()?
         {
             match packet.message {
+                Work::RulesEnable { fence: incoming }
+                    if fence == Some(incoming)
+                        && runtime.is_some()
+                        && !rules_enabled
+                        && !timers_enabled =>
+                {
+                    runtime.as_mut().unwrap().enable_rule_transactions();
+                    rules_enabled = true;
+                    outgoing = Some(Message::RulesEnabled { fence: incoming });
+                }
+                Work::RuleReceipt {
+                    fence: incoming,
+                    receipt,
+                } if fence == Some(incoming) && rules_enabled && runtime.is_some() => {
+                    crate::lua_compiler::runtime_cpu_budget()?;
+                    let id = receipt.id;
+                    let payload = serde_json::json!({"revision":receipt.revision.to_string(),"accepted":receipt.error.is_none(),"error":receipt.error});
+                    let runtime = runtime.as_mut().unwrap();
+                    runtime
+                        .acknowledge_rules(receipt)
+                        .map_err(io::Error::other)?;
+                    runtime.set_clock(monotonic()?).map_err(io::Error::other)?;
+                    outgoing = Some(match runtime.dispatch(EventKind::RulesChanged, &payload) {
+                        Ok(logs) => Message::RulesApplied {
+                            fence: incoming,
+                            id,
+                            logs,
+                        },
+                        Err(error) => Message::Failed {
+                            fence: incoming,
+                            reason: error.0.chars().take(512).collect(),
+                        },
+                    });
+                }
                 Work::Context {
                     fence: incoming,
                     offset,
@@ -690,17 +928,27 @@ pub fn worker() -> io::Result<()> {
                     } else {
                         let runtime = runtime.as_mut().unwrap();
                         runtime.set_clock(now).map_err(io::Error::other)?;
+                        let rule_checkpoint = runtime.rule_proposal_checkpoint();
                         match runtime.resolve_action(
                             action,
                             &serde_json::json!({"fence":incoming,"event":event}),
                         ) {
-                            Ok(result) => Message::Resolved {
-                                fence: incoming,
-                                sequence,
-                                id: *id,
-                                ordinal: *ordinal,
-                                result: (monotonic()? < expires).then_some(result),
-                            },
+                            Ok(result) => {
+                                let fresh = monotonic()? < expires;
+                                if !fresh {
+                                    runtime.discard_rule_proposal_since(
+                                        rule_checkpoint,
+                                        "Lua action authorization expired",
+                                    );
+                                }
+                                Message::Resolved {
+                                    fence: incoming,
+                                    sequence,
+                                    id: *id,
+                                    ordinal: *ordinal,
+                                    result: fresh.then_some(result),
+                                }
+                            }
                             Err(error) => Message::Failed {
                                 fence: incoming,
                                 reason: error.0.chars().take(512).collect(),
@@ -721,6 +969,8 @@ pub fn worker() -> io::Result<()> {
                     }
                     if event == EventKind::Stop {
                         timers_enabled = false;
+                        rules_enabled = false;
+                        runtime.as_mut().unwrap().disable_rule_transactions();
                         context_assembly = None;
                     }
                     runtime
@@ -778,6 +1028,18 @@ pub fn worker() -> io::Result<()> {
                     reason: error.0.chars().take(512).collect(),
                 }),
             };
+        }
+        // A successful callback can submit without logs. Make its proposal
+        // writable now instead of waiting for an unrelated heartbeat or timer.
+        if outgoing.is_none()
+            && let Some(proposal) = runtime
+                .as_mut()
+                .and_then(super::Runtime::take_rule_proposal)
+        {
+            outgoing = Some(Message::RuleProposal {
+                fence: fence.unwrap(),
+                proposal,
+            });
         }
         let until = health.deadline()?.min(
             assembly

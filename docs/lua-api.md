@@ -5,11 +5,51 @@ Prek embeds [onix-os/luna](https://github.com/onix-os/luna), pinned to version
 also accepted. Configuration evaluation declares actions and does not execute
 them. Live production routing remains disabled.
 
-This reference covers configuration, read-only session context, event subscriptions, timers, tasks and named
+This reference covers configuration, rule queries and host transaction bindings, read-only session context, event subscriptions, timers, tasks and named
 action handlers producing command/event plans. Custom recognizers,
 live adapter bindings and the remaining operational APIs remain required
 work in `PLAN.md`. Discovery labels the runtime API partial.
 Run `prek api --json` for the installed manifest or inspect `prek.api` in Lua.
+
+`rules.list()`, `rules.get(id)` and `rules.revision()` are available inside runtime
+callbacks. Queries return owned copies of the current acknowledged rule view;
+editing those tables has no effect. A missing ID returns nil. Revisions are
+decimal strings, preserving all 64 bits without Lua numeric rounding.
+
+`rules.transaction()` requires an explicitly enabled, authorized hosting transport.
+**Mutation is currently unavailable in production broker sessions.** The host
+bindings and supervised helper transport work; broker permission negotiation,
+action retirement and production routing integration remain required.
+
+An enabled host provides a generation-scoped `RuleTransaction` with
+`:enable(id)`, `:disable(id)`, `:replace(rule)` (also adds a new ID), `:remove(id)`,
+`:commit()`, `:cancel()` and `:status()`. Edit methods return nil. Each batch
+contains 1–64 operations and at most 32 KiB of encoded changes. Commit validates
+the complete resulting configuration and approved named-handler references before
+submitting. It cannot change system policy, selectors, layers or mode. At most
+64 open builders and one pending proposal are permitted per helper generation.
+An old builder retains its original revision and fails after another batch is accepted.
+
+Status returns an owned `{state, revision, error}` table. States are `open`,
+`cancelled`, `pending`, `accepted` and `rejected`; absent revision/error fields
+read as nil. Commit does not update queries. Acceptance updates them and invokes
+`rules_changed` with `{accepted, revision, error}`; rejection preserves the view
+when the reported revision still matches. A mismatched revision makes that view
+unavailable instead of inventing its contents. Cancel abandons an open builder
+idempotently; a submitted proposal awaits its receipt. Callback failure or task
+self-cancellation discards its new unsent proposal. Stopping retires pending work.
+The supervised host transport requires receipts within 250 ms and checks the exact
+broker/configuration/session fence, private proposal ID and accepted revision.
+
+```lua
+local p = require("prek")
+p.events.on("ready", function()
+    local rule = p.rules.get("my-rule")
+    if rule then
+        p.log.info("rule-state", {enabled = rule.enabled, revision = p.rules.revision()})
+    end
+end)
+```
 
 Lua modules live in `modules/` beside the entry configuration. For example,
 `require("phone.bindings")` loads `modules/phone/bindings.lua`. Names use ASCII
