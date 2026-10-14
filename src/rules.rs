@@ -415,6 +415,9 @@ impl Engine {
     pub fn authority_mut(&mut self) -> &mut Authority {
         &mut self.authority
     }
+    pub(crate) fn authority(&self) -> &Authority {
+        &self.authority
+    }
     pub fn generation(&self) -> u64 {
         self.generation
     }

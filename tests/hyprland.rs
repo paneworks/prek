@@ -21,6 +21,9 @@ struct Server {
 }
 impl Server {
     fn new(reply: &'static str, delay: Duration) -> Self {
+        Self::with_reply(move |_| reply.into(), delay)
+    }
+    fn with_reply(reply: impl Fn(&[u8]) -> String + Send + 'static, delay: Duration) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let directory = std::env::temp_dir().join(format!(
             "prek-ipc-{}-{}",
@@ -55,7 +58,7 @@ impl Server {
                         let _ = stream.write_all(b"{\"version\":\"0.55.4\"}");
                     } else {
                         thread::sleep(delay);
-                        let _ = stream.write_all(reply.as_bytes());
+                        let _ = stream.write_all(reply(&bytes[..length]).as_bytes());
                     }
                 } else {
                     thread::sleep(Duration::from_millis(1));
@@ -146,6 +149,106 @@ fn stalled_or_malformed_compositor_replies_fail_within_the_budget() {
     drop(server);
     let server = Server::new("not JSON", Duration::ZERO);
     assert!(server.client().inventory().is_err());
+}
+
+#[test]
+fn witnessed_compositor_lock_latches_desktop_inhibition() {
+    let server = Server::new("{\"locked\":true}", Duration::ZERO);
+    let client = server.client();
+    let mut sampler = prek::hyprland::ContextSampler::default();
+    assert!(
+        sampler
+            .sample(&client, 1, prek::context::SessionKind::User)
+            .is_err()
+    );
+    assert!(sampler.inhibited());
+    drop(server);
+    let server = Server::new("{\"locked\":false}", Duration::ZERO);
+    assert!(
+        sampler
+            .sample(&server.client(), 2, prek::context::SessionKind::User)
+            .is_err()
+    );
+    assert!(sampler.inhibited());
+}
+
+#[test]
+fn context_queries_share_one_deadline() {
+    let server = Server::new("{\"locked\":false}", Duration::from_millis(80));
+    let client = server.client();
+    let mut sampler = prek::hyprland::ContextSampler::default();
+    let started = Instant::now();
+    assert_eq!(
+        sampler
+            .sample(&client, 1, prek::context::SessionKind::User)
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::TimedOut
+    );
+    assert!(started.elapsed() < Duration::from_millis(400));
+    assert!(!sampler.inhibited());
+}
+
+#[test]
+fn context_sampling_fences_output_reappearance_and_geometry_changes() {
+    let topology = Arc::new(AtomicU64::new(1));
+    let changing = Arc::clone(&topology);
+    let server = Server::with_reply(
+        move |request| match request {
+            b"j/locked" => "{\"locked\":false}".into(),
+            b"j/clients" => "[]".into(),
+            b"j/layers" | b"j/activewindow" => "{}".into(),
+            b"j/monitors" => {
+                let phase = changing.load(Ordering::Relaxed);
+                if phase == 0 {
+                    return "[]".into();
+                }
+                serde_json::json!([{"id": 1, "name": "panel", "disabled": false,
+                "width": 1080, "height": 1920, "scale": if phase == 3 { 3.0 } else { 2.0 },
+                "x": 0, "y": 0, "transform": 0, "activeWorkspace": {"id": 1},
+                "dpmsStatus": true}])
+                .to_string()
+            }
+            _ => panic!("unexpected query"),
+        },
+        Duration::ZERO,
+    );
+    let client = server.client();
+    let mut sampler = prek::hyprland::ContextSampler::default();
+    let first = sampler
+        .sample(&client, 7, prek::context::SessionKind::User)
+        .unwrap();
+    assert_eq!(first.state, prek::context::State::Desktop);
+    assert_eq!(first.outputs[0].geometry_generation, 2);
+    let same = sampler
+        .sample(&client, 7, prek::context::SessionKind::User)
+        .unwrap();
+    assert_eq!(same.outputs[0].geometry_generation, 2);
+    assert!(same.revision > first.revision);
+    topology.store(0, Ordering::Relaxed);
+    assert!(
+        sampler
+            .sample(&client, 7, prek::context::SessionKind::User)
+            .unwrap()
+            .outputs
+            .is_empty()
+    );
+    topology.store(1, Ordering::Relaxed);
+    assert_eq!(
+        sampler
+            .sample(&client, 7, prek::context::SessionKind::User)
+            .unwrap()
+            .outputs[0]
+            .geometry_generation,
+        3
+    );
+    topology.store(3, Ordering::Relaxed);
+    let changed = sampler
+        .sample(&client, 8, prek::context::SessionKind::Greeter)
+        .unwrap();
+    assert_eq!(changed.state, prek::context::State::Greeter);
+    assert_eq!(changed.generation, 8);
+    assert_eq!(changed.outputs[0].geometry_generation, 4);
 }
 
 #[test]

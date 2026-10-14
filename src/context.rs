@@ -47,7 +47,8 @@ pub enum SessionKind {
 }
 /// Trusted authority input. PID/start identity and seat/session ownership must
 /// come from peer/process/logind verification, never a client's claimed fields.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Binding {
     pub seat: String,
     pub session: String,
@@ -330,6 +331,16 @@ impl Default for Authority {
 impl Authority {
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+    /// Private worker bootstrap only: this installs a broker-verified binding
+    /// on a freshly reconciled engine, never over an existing authority.
+    pub(crate) fn adopt(&mut self, binding: Binding, generation: u64) -> Result<(), Rejection> {
+        if self.binding.is_some() || self.snapshot.is_some() || generation == 0 {
+            return Err(Rejection::StaleGeneration);
+        }
+        self.bind(binding, true, false)?;
+        self.generation = generation;
+        Ok(())
     }
     /// A trusted worker can fence context-free observations without inventing
     /// desktop, lock or provider authority from session membership.

@@ -282,6 +282,7 @@ impl Broker {
             .map(|bound| Subscription {
                 seat: bound.seat.clone(),
                 fence: bound.fence,
+                context: None,
             })
             .collect()
     }

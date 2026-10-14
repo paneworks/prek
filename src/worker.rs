@@ -23,6 +23,26 @@ use std::{
 pub struct Subscription {
     pub seat: String,
     pub fence: Fence,
+    #[serde(default)]
+    pub context: Option<Box<ProvidedContext>>,
+}
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProvidedContext {
+    pub binding: crate::context::Binding,
+    pub snapshot: crate::context::Snapshot,
+}
+impl Subscription {
+    fn same_registration(&self, other: &Self) -> bool {
+        self.seat == other.seat && self.fence == other.fence
+    }
+    fn identity(&self) -> Self {
+        Self {
+            seat: self.seat.clone(),
+            fence: self.fence,
+            context: None,
+        }
+    }
 }
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -113,6 +133,7 @@ impl Registry {
         }
         let mut seats = BTreeSet::new();
         let mut epoch = None;
+        let mut authorities = BTreeMap::new();
         for subscription in &update.seats {
             subscription.fence.validate()?;
             if !self
@@ -129,19 +150,89 @@ impl Registry {
                 ));
             }
             epoch = Some(subscription.fence.broker);
+            let existing = self
+                .observers
+                .get(&subscription.seat)
+                .filter(|observer| observer.subscription.same_registration(subscription));
+            if let Some(observer) = existing {
+                match (&observer.subscription.context, &subscription.context) {
+                    (None, None) => {}
+                    (Some(old), Some(new)) if old.binding == new.binding => {
+                        if new.snapshot.revision < old.snapshot.revision
+                            || (new.snapshot.revision == old.snapshot.revision && new != old)
+                        {
+                            return Err(protocol::invalid(
+                                "provided context revision regressed or changed",
+                            ));
+                        }
+                    }
+                    _ => {
+                        return Err(protocol::invalid(
+                            "context transition needs a fresh registration fence",
+                        ));
+                    }
+                }
+            }
+            if let Some(context) = &subscription.context {
+                if context.binding.seat != subscription.seat
+                    || context.snapshot.generation != subscription.fence.session
+                {
+                    return Err(protocol::invalid(
+                        "provided context differs from registration",
+                    ));
+                }
+                let mut authority = existing
+                    .map_or_else(crate::context::Authority::default, |observer| {
+                        observer.engine.authority().clone()
+                    });
+                if existing.is_none() {
+                    authority
+                        .adopt(context.binding.clone(), subscription.fence.session)
+                        .map_err(io::Error::other)?;
+                }
+                if authority.generation() != subscription.fence.session {
+                    return Err(protocol::invalid("provided context authority was revoked"));
+                }
+                if existing.is_none_or(|observer| {
+                    observer
+                        .subscription
+                        .context
+                        .as_ref()
+                        .is_none_or(|old| old.snapshot.revision < context.snapshot.revision)
+                }) {
+                    authority
+                        .update(context.snapshot.clone(), now)
+                        .map_err(io::Error::other)?;
+                } else {
+                    authority.tick(now);
+                    if authority.generation() != subscription.fence.session {
+                        return Err(protocol::invalid("provided context snapshot expired"));
+                    }
+                }
+                authorities.insert(subscription.seat.clone(), authority);
+            }
         }
         // Discard unsent outcomes as soon as their registration is replaced.
         let removed: Vec<_> = self
             .observers
             .values()
-            .filter(|observer| !update.seats.contains(&observer.subscription))
+            .filter(|observer| {
+                !update
+                    .seats
+                    .iter()
+                    .any(|subscription| subscription.same_registration(&observer.subscription))
+            })
             .map(|observer| observer.subscription.clone())
             .collect();
         for subscription in removed {
             self.remove(&subscription);
         }
-        self.reports
-            .retain(|(report, _)| update.seats.contains(report.subscription()));
+        self.reports.retain(|(report, _)| {
+            update
+                .seats
+                .iter()
+                .any(|subscription| subscription.same_registration(report.subscription()))
+        });
         self.bytes = self.reports.iter().map(|(_, bytes)| bytes).sum();
         self.blocked.retain(|seat, fence| {
             update
@@ -155,14 +246,21 @@ impl Registry {
             }
             if let Some(observer) = self.observers.get_mut(&subscription.seat) {
                 observer.expires = now + protocol::MAX_PACKET_AGE;
+                if let Some(authority) = authorities.remove(&subscription.seat) {
+                    *observer.engine.authority_mut() = authority;
+                }
+                observer.subscription = subscription;
                 continue;
             }
-            let engine = self.baseline.fork_observer(
+            let mut engine = self.baseline.fork_observer(
                 self.config.clone(),
                 &subscription.seat,
                 subscription.fence.session,
                 now,
             )?;
+            if let Some(authority) = authorities.remove(&subscription.seat) {
+                *engine.authority_mut() = authority;
+            }
             self.observers.insert(
                 subscription.seat.clone(),
                 Observer {
@@ -172,7 +270,12 @@ impl Registry {
                     engine,
                 },
             );
-            self.queue(Report::Ready { subscription }, now)?;
+            self.queue(
+                Report::Ready {
+                    subscription: subscription.identity(),
+                },
+                now,
+            )?;
         }
         self.revision = update.revision;
         Ok(())
@@ -181,12 +284,12 @@ impl Registry {
         if self
             .observers
             .get(&subscription.seat)
-            .is_some_and(|observer| &observer.subscription == subscription)
+            .is_some_and(|observer| observer.subscription.same_registration(subscription))
         {
             self.observers.remove(&subscription.seat);
         }
         self.reports
-            .retain(|(report, _)| report.subscription() != subscription);
+            .retain(|(report, _)| !report.subscription().same_registration(subscription));
         self.bytes = self.reports.iter().map(|(_, bytes)| bytes).sum();
     }
     fn end(&mut self, subscription: Subscription, reason: &str, now: Duration) -> io::Result<()> {
@@ -195,7 +298,7 @@ impl Registry {
             .insert(subscription.seat.clone(), subscription.fence);
         self.queue(
             Report::Ended {
-                subscription,
+                subscription: subscription.identity(),
                 reason: reason.into(),
             },
             now,
@@ -243,7 +346,7 @@ impl Registry {
             self.reports.retain(|(old, _)| {
                 !matches!(old,
                 Report::Observation { subscription: old_subscription, event: old_event }
-                if old_subscription == subscription && event.supersedes_progress(old_event))
+                if old_subscription.same_registration(subscription) && event.supersedes_progress(old_event))
             });
             self.bytes = self.reports.iter().map(|(_, bytes)| bytes).sum();
         }
@@ -325,7 +428,7 @@ impl Registry {
             observer.engine.push(record)?;
             for event in observer.engine.take_events() {
                 reports.push(Report::Observation {
-                    subscription: observer.subscription.clone(),
+                    subscription: observer.subscription.identity(),
                     event: Box::new(event),
                 });
             }
@@ -334,7 +437,11 @@ impl Registry {
             if self
                 .observers
                 .get(&report.subscription().seat)
-                .is_some_and(|observer| &observer.subscription == report.subscription())
+                .is_some_and(|observer| {
+                    observer
+                        .subscription
+                        .same_registration(report.subscription())
+                })
             {
                 self.queue(report, now)?;
             }
@@ -576,7 +683,31 @@ mod tests {
                 configuration: 1,
                 session,
             },
+            context: None,
         }
+    }
+    fn with_context(mut subscription: Subscription, revision: u64, at: u64) -> Subscription {
+        subscription.context = Some(Box::new(ProvidedContext {
+            binding: crate::context::Binding {
+                seat: subscription.seat.clone(),
+                session: "verified-session".into(),
+                uid: 1000,
+                compositor_pid: 42,
+                compositor_start: 123,
+                kind: crate::context::SessionKind::User,
+            },
+            snapshot: crate::context::Snapshot {
+                generation: subscription.fence.session,
+                revision,
+                captured_at: ms(at),
+                state: crate::context::State::Desktop,
+                outputs: vec![],
+                windows: vec![],
+                regions: vec![],
+                secure_overlay: false,
+            },
+        }));
+        subscription
     }
     fn registry(config: Config) -> Registry {
         let mut registry = Registry::new(config).unwrap();
@@ -746,6 +877,150 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, Event::Skipped { .. }))
         );
+    }
+    #[test]
+    fn verified_context_refresh_preserves_candidates_without_leaking_provider_payloads() {
+        let mut config = config();
+        config.rules[0].contexts = vec![Context::Desktop];
+        config.rules[0].trigger = Trigger::ButtonHold {
+            key: Key(30),
+            after: Millis(200),
+            repeat: None,
+        };
+        let mut registry = registry(config);
+        update(
+            &mut registry,
+            1,
+            vec![with_context(subscription("seat0", 7), 1, 0)],
+            0,
+        );
+        key(&mut registry, source(1, "seat0"), 10, 1, true, 10);
+        update(
+            &mut registry,
+            2,
+            vec![with_context(subscription("seat0", 7), 2, 100)],
+            100,
+        );
+        tick(&mut registry, 210);
+        assert!(matches!(
+            outcomes(&registry)[0],
+            Event::Matched {
+                session_generation: 7,
+                ..
+            }
+        ));
+        assert!(
+            registry
+                .reports
+                .iter()
+                .all(|(report, _)| report.subscription().context.is_none())
+        );
+        assert_eq!(registry.reports.len(), 2);
+    }
+    #[test]
+    fn context_activation_loss_and_binding_replacement_need_a_new_fence() {
+        let mut registry = registry(config());
+        update(&mut registry, 1, vec![subscription("seat0", 1)], 0);
+        assert!(
+            registry
+                .update(
+                    Subscriptions {
+                        revision: 2,
+                        seats: vec![with_context(subscription("seat0", 1), 1, 10)]
+                    },
+                    ms(10)
+                )
+                .is_err()
+        );
+        assert_eq!(registry.revision, 1);
+        update(
+            &mut registry,
+            2,
+            vec![with_context(subscription("seat0", 2), 1, 10)],
+            10,
+        );
+        assert!(
+            registry
+                .update(
+                    Subscriptions {
+                        revision: 3,
+                        seats: vec![subscription("seat0", 2)]
+                    },
+                    ms(20)
+                )
+                .is_err()
+        );
+        let mut replacement = with_context(subscription("seat0", 2), 2, 20);
+        replacement
+            .context
+            .as_mut()
+            .unwrap()
+            .binding
+            .compositor_start += 1;
+        assert!(
+            registry
+                .update(
+                    Subscriptions {
+                        revision: 3,
+                        seats: vec![replacement]
+                    },
+                    ms(20)
+                )
+                .is_err()
+        );
+        assert_eq!(registry.revision, 2);
+        assert_eq!(registry.observers["seat0"].subscription.fence.session, 2);
+    }
+    #[test]
+    fn invalid_context_batch_is_rejected_before_any_registration_changes() {
+        let mut registry = registry(config());
+        update(
+            &mut registry,
+            1,
+            vec![with_context(subscription("seat0", 7), 1, 0)],
+            0,
+        );
+        let mut invalid = with_context(subscription("seat1", 8), 1, 10);
+        invalid.context.as_mut().unwrap().snapshot.generation = 7;
+        assert!(
+            registry
+                .update(
+                    Subscriptions {
+                        revision: 2,
+                        seats: vec![with_context(subscription("seat0", 9), 1, 10), invalid,]
+                    },
+                    ms(10)
+                )
+                .is_err()
+        );
+        assert_eq!(registry.revision, 1);
+        assert_eq!(registry.observers.len(), 1);
+        assert_eq!(registry.observers["seat0"].subscription.fence.session, 7);
+    }
+    #[test]
+    fn old_or_expired_context_cannot_renew_authority() {
+        let mut registry = registry(config());
+        update(
+            &mut registry,
+            1,
+            vec![with_context(subscription("seat0", 7), 2, 0)],
+            0,
+        );
+        for (revision, at) in [(1, 10), (2, 300)] {
+            assert!(
+                registry
+                    .update(
+                        Subscriptions {
+                            revision: 2,
+                            seats: vec![with_context(subscription("seat0", 7), revision, 0)]
+                        },
+                        ms(at)
+                    )
+                    .is_err()
+            );
+        }
+        assert_eq!(registry.revision, 1);
+        assert_eq!(registry.observers["seat0"].expires, ms(1000));
     }
     #[test]
     fn queue_overflow_revokes_observation_and_keeps_input_state_current() {

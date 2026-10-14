@@ -21,6 +21,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod context;
+pub use context::ContextSampler;
+
 const MAX_REPLY: usize = 2 * 1024 * 1024;
 const REQUEST_TIME: Duration = Duration::from_millis(200);
 
@@ -277,13 +280,15 @@ impl Client {
     }
 
     fn query(&self, kind: &str) -> io::Result<Value> {
+        self.query_until(kind, Instant::now() + REQUEST_TIME)
+    }
+    fn query_until(&self, kind: &str, until: Instant) -> io::Result<Value> {
         if !matches!(
             kind,
-            "version" | "devices" | "monitors" | "clients" | "activewindow"
+            "version" | "devices" | "monitors" | "clients" | "activewindow" | "layers" | "locked"
         ) {
             return Err(invalid("unsupported compositor query"));
         }
-        let until = Instant::now() + REQUEST_TIME;
         let mut stream = connect(&self.socket_path(), until)?;
         self.verify(&stream)?;
         let request = format!("j/{kind}");
