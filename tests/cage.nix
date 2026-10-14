@@ -198,12 +198,29 @@ pkgs.testers.runNixOSTest {
     start = len(receipts())
     command("two-down")
     time.sleep(0.14)
-    command("two-move")
+    command("two-far-move")
     command("two-up")
     wait_for(lambda: any(row.get("rule") == "cage-down" for row in dispatches()))
     time.sleep(0.35)
     assert touch_rows(start) == []
     assert len([row for row in dispatches() if row.get("rule") == "cage-down"]) == 1
+
+    # Reuse the consumed gesture's unchanged slot-1 coordinates. evdev can
+    # omit both the cursor selection and positions; virtual state must agree.
+    start = len(receipts())
+    command("tail-down")
+    wait_for(lambda: any(row["event"] == "touch_down" for row in touch_rows(start)))
+    down = next(row for row in touch_rows(start) if row["event"] == "touch_down")
+    assert abs(down["contacts"][0]["x"] - 1500 / 4095 * size["width"]) < 2
+    assert abs(down["contacts"][0]["y"] - 3000 / 4095 * size["height"]) < 2
+    command("head-down")
+    wait_for(lambda: len(receipts()[-1]["contacts"]) == 2)
+    contacts = receipts()[-1]["contacts"]
+    assert len({contact["id"] for contact in contacts}) == 2
+    for actual, x in zip(sorted(contact["x"] for contact in contacts), [1000, 1500]):
+        assert abs(actual - x / 4095 * size["width"]) < 2
+    command("two-up")
+    wait_for(neutral)
 
     # Recovery while a forwarded modifier/contact is held sends neutral input,
     # retires virtual output before releasing originals, then removes sources.

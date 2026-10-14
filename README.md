@@ -37,6 +37,13 @@ rule remains, and forwarded input cannot be promoted by later fingers. Swipes
 claim on coherent motion before final travel succeeds; failure or extra fingers
 after claim drain without replay or a trailing click.
 
+Persistent touch coordinates and the selected slot can change during consumed
+input. Before forwarding an ordinary delta frame, the router restores the
+cursor and missing coordinates needed by that frame. Explicit raw values take
+precedence. Repairs add no contacts, keys or SYN frames, preserve the original
+timestamp/sequence and count toward frame/storage limits. Buffered repairs keep
+the state of each original frame rather than using a later gesture's position.
+
 Dispatch requests retain gesture/configuration/session identity and frozen
 targets, and are checked again when dequeued. Queues and deadlines are bounded;
 stalled output or dispatch consumers require transport recovery. The default
@@ -44,7 +51,7 @@ decision delay remains 300 ms; explicit configurations may increase it to five
 seconds and callers can inspect the scheduled delivery offset. The isolated VM
 proves configured consumption and unmatched tap delivery against actual evdev
 receivers. Context in those tests is a model fixture. Live broker context/action
-bridges, pre-grab handoff and real application interpretation remain required
+bridges, pre-grab handoff and remaining application behaviors are required
 before the CLI can enable routing.
 
 The Hyprland client verifies the IPC socket's owner, compositor process identity

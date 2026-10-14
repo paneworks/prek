@@ -395,9 +395,10 @@ fn touch(input: &mut Input, command: &str) {
             ]);
         }
     } else if command.ends_with("move") {
-        events.push((EV_ABS, 1, 2200));
+        let y = if command.contains("far") { 3000 } else { 2200 };
+        events.push((EV_ABS, 1, y));
         for slot in 0..fingers {
-            events.extend([(EV_ABS, 47, slot), (EV_ABS, 54, 2200)]);
+            events.extend([(EV_ABS, 47, slot), (EV_ABS, 54, y)]);
         }
     } else if command.ends_with("up") {
         for slot in 0..fingers {
@@ -497,6 +498,21 @@ fn cage_controlled_input_fixture() {
                 "shift-up" => keyboard.emit(&[(EV_KEY, 42, 0)]),
                 "meta-down" => keyboard.emit(&[(EV_KEY, 125, 1)]),
                 "meta-up" => keyboard.emit(&[(EV_KEY, 125, 0)]),
+                "tail-down" => touchscreen.emit(&[
+                    (EV_KEY, 0x14a, 1),
+                    (EV_ABS, 0, 1500),
+                    (EV_ABS, 1, 3000),
+                    (EV_ABS, 47, 1),
+                    (EV_ABS, 57, 11),
+                    (EV_ABS, 53, 1500),
+                    (EV_ABS, 54, 3000),
+                ]),
+                "head-down" => touchscreen.emit(&[
+                    (EV_ABS, 47, 0),
+                    (EV_ABS, 57, 10),
+                    (EV_ABS, 53, 1000),
+                    (EV_ABS, 54, 3000),
+                ]),
                 command if command.starts_with("one-") || command.starts_with("two-") => {
                     touch(&mut touchscreen, command)
                 }

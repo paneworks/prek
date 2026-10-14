@@ -187,6 +187,7 @@ struct Group {
     first: Duration,
     ownership: Ownership,
     pending: Vec<Frame>,
+    preview: Option<crate::input::AbsoluteState>,
 }
 
 /// All descriptor lifetime operations remain the backend's responsibility.
@@ -206,6 +207,8 @@ pub struct Router {
     limits: Limits,
     physical: State,
     delivered: State,
+    physical_absolute: crate::input::AbsoluteState,
+    planned_absolute: crate::input::AbsoluteState,
     group: Option<Group>,
     queue: VecDeque<Scheduled>,
     offset: Duration,
@@ -244,6 +247,8 @@ impl Router {
             limits,
             physical: State::default(),
             delivered: State::default(),
+            physical_absolute: crate::input::AbsoluteState::default(),
+            planned_absolute: crate::input::AbsoluteState::default(),
             group: None,
             queue: VecDeque::new(),
             offset: Duration::ZERO,
@@ -300,6 +305,8 @@ impl Router {
             .map_err(|_| Fault::InvalidFrame)?;
         self.physical.slot = state.selected_slot();
         self.delivered.slot = state.selected_slot();
+        self.physical_absolute = state.clone();
+        self.planned_absolute = state.clone();
         Ok(())
     }
 
@@ -348,6 +355,9 @@ impl Router {
             return self.fail(Fault::Overflow);
         };
         self.next_ticket = ticket;
+        for event in &frame.events {
+            self.planned_absolute.update(*event);
+        }
         self.queue.push_back(Scheduled { ticket, due, frame });
         Ok(())
     }
@@ -375,6 +385,7 @@ impl Router {
         }
         self.offset = self.offset.max(delay);
         group.ownership = Ownership::Forwarded;
+        group.preview = None;
         let pending = std::mem::take(&mut group.pending);
         for frame in pending {
             self.schedule(frame)?;
@@ -500,15 +511,46 @@ impl Router {
                 first: frame.at,
                 ownership,
                 pending: Vec::new(),
+                preview: (ownership == Ownership::Pending).then(|| self.planned_absolute.clone()),
             });
         } else if candidate.is_some() {
             return Err(Fault::InvalidCandidate);
         }
+        let mut frame = frame;
+        let ownership = self.ownership();
+        let repairs = if !matches!(ownership, Some(Ownership::Claimed | Ownership::Draining)) {
+            let preview = if ownership == Some(Ownership::Pending) {
+                self.group.as_ref().unwrap().preview.as_ref().unwrap()
+            } else {
+                &self.planned_absolute
+            };
+            let repairs = self.physical_absolute.restore_for(preview, &frame);
+            if frame.events.len().saturating_add(repairs.len()) > 4096 {
+                return self.fail(Fault::Overflow);
+            }
+            repairs
+        } else {
+            Vec::new()
+        };
+        // Track the physical delta, not the inserted virtual-state repair.
+        for event in &frame.events {
+            self.physical_absolute.update(*event);
+        }
+        let insert_at = frame
+            .events
+            .iter()
+            .position(|event| event.kind == EV_ABS)
+            .unwrap_or(frame.events.len() - 1);
+        frame.events.splice(insert_at..insert_at, repairs);
         self.physical = physical;
         self.last_sequence = Some(frame.sequence);
         match self.ownership() {
             Some(Ownership::Pending) => {
                 self.capacity(frame.events.len())?;
+                let preview = self.group.as_mut().unwrap().preview.as_mut().unwrap();
+                for event in &frame.events {
+                    preview.update(*event);
+                }
                 self.group.as_mut().unwrap().pending.push(frame);
             }
             Some(Ownership::Claimed | Ownership::Draining) => {}
@@ -577,6 +619,7 @@ impl Router {
             return Err(Fault::TooLate);
         }
         group.pending.clear();
+        group.preview = None;
         group.ownership = Ownership::Claimed;
         if self.physical.neutral() {
             self.group = None;
@@ -809,6 +852,192 @@ mod tests {
         router.push(up(4, 290, 1), None, ms(290)).unwrap();
         assert_eq!(deliver(&mut router, 390).unwrap().sequence, 3);
         assert_eq!(deliver(&mut router, 410).unwrap().sequence, 4);
+    }
+
+    #[test]
+    fn consumed_axis_and_cursor_updates_do_not_corrupt_a_delta_only_contact() {
+        use crate::input::{AbsoluteSlot, AbsoluteState, Normalizer};
+        let device = crate::transport::tests::touch();
+        let initial = AbsoluteState {
+            values: BTreeMap::from([(ABS_MT_SLOT, 0)]),
+            slots: BTreeMap::from([
+                (
+                    0,
+                    AbsoluteSlot {
+                        values: BTreeMap::from([(ABS_MT_POSITION_X, 10), (ABS_MT_POSITION_Y, 20)]),
+                    },
+                ),
+                (
+                    1,
+                    AbsoluteSlot {
+                        values: BTreeMap::from([(ABS_MT_POSITION_X, 30), (ABS_MT_POSITION_Y, 40)]),
+                    },
+                ),
+            ]),
+        };
+        let mut router = router_for(device.clone(), Limits::default());
+        router.seed_absolute(&initial).unwrap();
+        let mut application = Normalizer::new(&device);
+        application.seed_absolute(&device, initial).unwrap();
+        router
+            .push(
+                down(1, 0, 1, 10),
+                Some(Candidate {
+                    policy: Policy::Reserve,
+                    ..candidate(1)
+                }),
+                ms(0),
+            )
+            .unwrap();
+        router.push(up(2, 5, 1), None, ms(5)).unwrap();
+        assert!(deliver(&mut router, 5).is_none());
+        // The physical source still selects slot 1 and keeps (100, 200).
+        // Linux may emit only a new tracking ID at that same position.
+        router
+            .push(
+                frame(3, 10, &[(EV_ABS, ABS_MT_TRACKING_ID, 11)]),
+                None,
+                ms(10),
+            )
+            .unwrap();
+        let received = deliver(&mut router, 10).unwrap();
+        let first = application.process(received).unwrap();
+        assert_eq!(first.contacts.len(), 1);
+        assert_eq!(first.contacts[0].id.slot, 1);
+        assert_eq!((first.contacts[0].x, first.contacts[0].y), (100, 200));
+        router
+            .push(
+                frame(
+                    4,
+                    20,
+                    &[(EV_ABS, ABS_MT_SLOT, 0), (EV_ABS, ABS_MT_TRACKING_ID, 12)],
+                ),
+                None,
+                ms(20),
+            )
+            .unwrap();
+        let second = application
+            .process(deliver(&mut router, 20).unwrap())
+            .unwrap();
+        assert_eq!(second.contacts.len(), 2);
+        assert_eq!(
+            second
+                .contacts
+                .iter()
+                .map(|contact| contact.id.slot)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([0, 1])
+        );
+    }
+
+    #[test]
+    fn buffered_repairs_keep_each_frames_coordinates_and_timestamp() {
+        use crate::input::{AbsoluteSlot, AbsoluteState, Normalizer};
+        let device = crate::transport::tests::touch();
+        let initial = AbsoluteState {
+            values: BTreeMap::from([(ABS_MT_SLOT, 0)]),
+            slots: BTreeMap::from([
+                (
+                    0,
+                    AbsoluteSlot {
+                        values: BTreeMap::from([(ABS_MT_POSITION_X, 10), (ABS_MT_POSITION_Y, 20)]),
+                    },
+                ),
+                (
+                    1,
+                    AbsoluteSlot {
+                        values: BTreeMap::from([(ABS_MT_POSITION_X, 30), (ABS_MT_POSITION_Y, 40)]),
+                    },
+                ),
+            ]),
+        };
+        let mut router = router_for(device.clone(), Limits::default());
+        router.seed_absolute(&initial).unwrap();
+        let mut application = Normalizer::new(&device);
+        application.seed_absolute(&device, initial).unwrap();
+        router
+            .push(
+                down(1, 0, 1, 10),
+                Some(Candidate {
+                    policy: Policy::Reserve,
+                    ..candidate(1)
+                }),
+                ms(0),
+            )
+            .unwrap();
+        router.push(up(2, 5, 1), None, ms(5)).unwrap();
+        router
+            .push(
+                frame(3, 10, &[(EV_ABS, ABS_MT_TRACKING_ID, 11)]),
+                Some(candidate(2)),
+                ms(10),
+            )
+            .unwrap();
+        router
+            .push(
+                frame(
+                    4,
+                    20,
+                    &[
+                        (EV_ABS, ABS_MT_SLOT, 0),
+                        (EV_ABS, ABS_MT_TRACKING_ID, 12),
+                        (EV_ABS, ABS_MT_POSITION_X, 777),
+                    ],
+                ),
+                None,
+                ms(20),
+            )
+            .unwrap();
+        router.cancel(2, 1, ms(40)).unwrap();
+        let first = deliver(&mut router, 40).unwrap();
+        assert_eq!((first.sequence, first.at), (3, ms(10)));
+        let first = application.process(first).unwrap();
+        assert_eq!(
+            (
+                first.contacts[0].id.slot,
+                first.contacts[0].x,
+                first.contacts[0].y
+            ),
+            (1, 100, 200)
+        );
+        let second = deliver(&mut router, 50).unwrap();
+        assert_eq!((second.sequence, second.at), (4, ms(20)));
+        let second = application.process(second).unwrap();
+        assert_eq!(second.contacts.len(), 2);
+        let head = second
+            .contacts
+            .iter()
+            .find(|contact| contact.id.slot == 0)
+            .unwrap();
+        assert_eq!((head.x, head.y), (777, 20));
+    }
+
+    #[test]
+    fn repair_events_count_toward_the_output_storage_limit() {
+        let mut router = router(Limits {
+            events: 3,
+            ..Limits::default()
+        });
+        router
+            .push(
+                down(1, 0, 1, 10),
+                Some(Candidate {
+                    policy: Policy::Reserve,
+                    ..candidate(1)
+                }),
+                ms(0),
+            )
+            .unwrap();
+        router.push(up(2, 5, 1), None, ms(5)).unwrap();
+        assert_eq!(
+            router.push(
+                frame(3, 10, &[(EV_ABS, ABS_MT_TRACKING_ID, 11)]),
+                None,
+                ms(10)
+            ),
+            Err(Fault::Overflow)
+        );
+        assert!(router.recover().unwrap().destroy_virtual_and_release_grab);
     }
 
     #[test]

@@ -86,6 +86,91 @@ impl AbsoluteState {
         }
     }
 
+    /// Repair persistent values needed by an ordinary delta frame. Values
+    /// explicitly supplied by that frame win. Unused inactive slots remain
+    /// private until an ordinary frame actually addresses them.
+    pub(crate) fn restore_for(&self, output: &Self, frame: &Frame) -> Vec<RawEvent> {
+        let mut cursor = self.selected_slot();
+        let mut used = BTreeSet::new();
+        let mut globals = BTreeSet::new();
+        let mut written = BTreeSet::new();
+        let mut first_mt = None;
+        let mut has_absolute = false;
+        for event in &frame.events {
+            if event.kind != EV_ABS {
+                continue;
+            }
+            has_absolute = true;
+            if event.code == ABS_MT_SLOT {
+                first_mt.get_or_insert(event.code);
+                cursor = event.value as u16;
+            } else if (0x30..=0x3d).contains(&event.code) {
+                first_mt.get_or_insert(event.code);
+                used.insert(cursor);
+                if per_slot(event.code) {
+                    written.insert((cursor, event.code));
+                }
+            } else {
+                globals.insert(event.code);
+            }
+        }
+        let mut events = Vec::new();
+        if has_absolute {
+            for (&code, &value) in &self.values {
+                if code != ABS_MT_SLOT
+                    && !globals.contains(&code)
+                    && output.values.get(&code) != Some(&value)
+                {
+                    events.push(RawEvent {
+                        kind: EV_ABS,
+                        code,
+                        value,
+                    });
+                }
+            }
+        }
+        let mut cursor = output.selected_slot();
+        for slot in used {
+            let Some(state) = self.slots.get(&slot) else {
+                continue;
+            };
+            for (&code, &value) in &state.values {
+                if written.contains(&(slot, code))
+                    || output
+                        .slots
+                        .get(&slot)
+                        .and_then(|state| state.values.get(&code))
+                        == Some(&value)
+                {
+                    continue;
+                }
+                if cursor != slot {
+                    events.push(RawEvent {
+                        kind: EV_ABS,
+                        code: ABS_MT_SLOT,
+                        value: i32::from(slot),
+                    });
+                    cursor = slot;
+                }
+                events.push(RawEvent {
+                    kind: EV_ABS,
+                    code,
+                    value,
+                });
+            }
+        }
+        // An explicit selector in the raw frame supplies its own cursor. An
+        // implicit MT update needs the original cursor before it is processed.
+        if first_mt.is_some_and(|code| code != ABS_MT_SLOT) && cursor != self.selected_slot() {
+            events.push(RawEvent {
+                kind: EV_ABS,
+                code: ABS_MT_SLOT,
+                value: i32::from(self.selected_slot()),
+            });
+        }
+        events
+    }
+
     /// Leave every contact released and restore the selected slot after
     /// visiting the stored coordinate slots. This emits no tracking IDs.
     pub(crate) fn initialization(&self, source: Source, at: Duration) -> Frame {
