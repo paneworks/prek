@@ -61,6 +61,10 @@ impl Runtime {
             return Err(error("Lua scheduler clock moved backwards"));
         }
         self.host.borrow_mut().now = Some(now);
+        #[cfg(target_os = "linux")]
+        {
+            self.host.borrow_mut().context_clock = Some(Instant::now());
+        }
         self.lua
             .try_enter(|ctx| {
                 let timers = ctx.fetch(&self.timers);

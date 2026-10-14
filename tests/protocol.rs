@@ -28,6 +28,81 @@ fn request() -> Request {
         },
     }
 }
+#[test]
+fn context_protocol_bounds_chunk_size_offsets_and_total_bytes() {
+    use prek::{
+        context_transfer::{CHUNK_BYTES, MAX_BYTES},
+        protocol::Reply,
+    };
+    let fence = request().fence().unwrap();
+    assert!(
+        Request::ContextRead {
+            fence,
+            offset: CHUNK_BYTES
+        }
+        .validate()
+        .is_ok()
+    );
+    assert!(
+        Request::ContextRead { fence, offset: 1 }
+            .validate()
+            .is_err()
+    );
+    assert!(
+        Request::ContextRead {
+            fence,
+            offset: MAX_BYTES
+        }
+        .validate()
+        .is_err()
+    );
+    let valid = Reply::ContextData {
+        fence,
+        offset: CHUNK_BYTES,
+        bytes: CHUNK_BYTES + 1,
+        data: vec![0],
+    };
+    valid.validate().unwrap();
+    let packet = Packet {
+        version: protocol::VERSION,
+        sequence: 1,
+        at: Duration::ZERO,
+        message: valid,
+    };
+    let encoded = protocol::encode(&packet).unwrap();
+    let decoded: Packet<Reply> = protocol::decode(&encoded).unwrap();
+    decoded.message.validate().unwrap();
+    for (offset, bytes, data) in [
+        (0, 0, vec![]),
+        (1, 2, vec![0]),
+        (0, MAX_BYTES + 1, vec![0; CHUNK_BYTES]),
+        (0, CHUNK_BYTES + 1, vec![0; CHUNK_BYTES - 1]),
+        (CHUNK_BYTES, CHUNK_BYTES, vec![0]),
+    ] {
+        assert!(
+            Reply::ContextData {
+                fence,
+                offset,
+                bytes,
+                data
+            }
+            .validate()
+            .is_err()
+        );
+    }
+    let first = Packet {
+        version: protocol::VERSION,
+        sequence: 1,
+        at: Duration::ZERO,
+        message: Reply::ContextData {
+            fence,
+            offset: 0,
+            bytes: MAX_BYTES,
+            data: vec![0; CHUNK_BYTES],
+        },
+    };
+    assert!(protocol::encode(&first).unwrap().len() < protocol::MAX_PACKET);
+}
 struct Directory(PathBuf);
 impl Directory {
     fn new() -> Self {

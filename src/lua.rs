@@ -7,6 +7,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(target_os = "linux")]
+mod context;
 mod export;
 mod handlers;
 mod modules;
@@ -47,6 +49,37 @@ pub fn api() -> serde_json::Value {
         serde_json::json!({"name":"Task.status", "receiver":"Task", "signature":"task:status() -> TaskState", "description":"Inspect pending, running, sleeping, completed or cancelled state in the owning generation."}),
         serde_json::json!({"name":"actions.define", "signature":"actions.define(name, {requires = capabilities}, callback) -> Action", "description":"Register an approved generation-scoped named handler; resolve a bounded typed effect plan in the unprivileged session after a broker execution grant."}),
     ];
+    #[cfg(target_os = "linux")]
+    for (name, result, description) in [
+        (
+            "snapshot",
+            "Snapshot | nil",
+            "Return an owned copy of the complete fresh broker snapshot, including outputs, windows, regions and keyboard geometry; nil when unavailable or expired.",
+        ),
+        (
+            "binding",
+            "Binding | nil",
+            "Return an owned copy of the verified session/compositor binding for a fresh snapshot; conveys no authority.",
+        ),
+        (
+            "state",
+            "State",
+            "Return the broker's fresh session state, or unknown after the view expires.",
+        ),
+        (
+            "fence",
+            "Fence | nil",
+            "Return the current broker/configuration/session fence while the context view is fresh.",
+        ),
+        (
+            "error",
+            "string | nil",
+            "Return the bounded broker context diagnostic while the context view is fresh.",
+        ),
+    ] {
+        symbols.push(serde_json::json!({"name":format!("context.{name}"),
+            "signature":format!("context.{name}() -> {result}"),"phase":"runtime","description":description}));
+    }
     for kind in [
         "key",
         "button_taps",
@@ -79,7 +112,8 @@ pub fn api() -> serde_json::Value {
         "instructions":INSTRUCTIONS,"time_ms":TIME.as_millis(),"value_depth":64},
         "runtime_limits":{"subscriptions":256,"timers":256,"tasks":tasks::MAX_TASKS,"tasks_per_wake":tasks::TASKS_PER_WAKE,"handlers":256,"action_effects":32,"action_bytes":32768,"timers_per_wake":32,"callback_instructions":100000,"callback_time_ms":20,"event_bytes":65536,"log_bytes":16384,"logs_per_event":32},
         "modules":{"root":"entry_parent/modules","path":"<identifier>/.../<identifier>.lua","count":modules::MAX_MODULES,"import_depth":modules::MAX_IMPORT_DEPTH,"source_set_bytes":MAX_CONFIG_BYTES,"owner":"entry_file_uid","group_other_writes":false,"symlinks":false,"runtime":"approved sources only; no filesystem reads"},
-        "event_kinds":["matched","begin","update","end","cancel","skipped","ready","reload","stop","recovery","session_changed"],
+        "event_kinds":["matched","begin","update","end","cancel","skipped","ready","reload","stop","recovery","session_changed","context_changed"],
+        "context_limits":{"snapshot_bytes":4194304,"chunk_bytes":32768,"transfer_time_ms":1000,"freshness_ms":250,"refresh_ms":100,"queued_snapshots":2,"read_only":true},
         "runtime_requires":{"uid":"unprivileged active session","capabilities":["context","observations","lua_events"],"thread":"owning Luna arena","generation":"current broker/configuration/session fence"},
         "action_requires":{"agent_flags":["lua","commands"],"capabilities":["context","observations","lua_events","lua_actions","commands"],"implemented_effects":["commands","observations"],"grant_time_ms":250},
         "runtime_api":"partial"})
@@ -89,6 +123,7 @@ const INSTRUCTIONS: i32 = 1_000_000;
 const SLICE: i32 = 2048;
 const TIME: Duration = Duration::from_millis(250);
 const BOOTSTRAP: &str = r#"
+local assert, type, pairs, ipairs = assert, type, pairs, ipairs
 local api = __prek
 __prek = nil
 local registrations = __prek_registry
@@ -156,7 +191,7 @@ end
 local allowed_events = {
     matched=true, begin=true, update=true, ["end"]=true, cancel=true,
     skipped=true, ready=true, reload=true, stop=true, recovery=true,
-    session_changed=true,
+    session_changed=true, context_changed=true,
 }
 function api.events.on(kind, callback)
     assert(allowed_events[kind], "unsupported event subscription")
@@ -345,6 +380,7 @@ fn instantiate(
                 "events",
                 "log",
                 "scheduler",
+                "context",
             ] {
                 module.set(ctx, namespace, Table::new(&ctx))?;
             }
@@ -407,6 +443,13 @@ fn instantiate(
             scheduler.set(ctx, "sleep", tasks::sleep(&ctx, host.clone()))?;
             let log: Table = module.get(ctx, "log")?;
             log.set(ctx, "info", runtime::logger(&ctx, host.clone()))?;
+            #[cfg(target_os = "linux")]
+            {
+                let context: Table = module.get(ctx, "context")?;
+                for field in ["snapshot", "binding", "state", "fence", "error"] {
+                    context.set(ctx, field, self::context::getter(&ctx, host.clone(), field))?;
+                }
+            }
             Ok((
                 ctx.stash(registry),
                 ctx.stash(timers),

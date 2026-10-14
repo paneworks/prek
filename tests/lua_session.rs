@@ -24,6 +24,120 @@ fn drain(session: &mut Session) -> Result<Vec<LogRecord>, std::io::Error> {
         std::thread::sleep(Duration::from_millis(1));
     }
 }
+fn context_view(at: Duration, windows: usize) -> prek::context_transfer::View {
+    // SAFETY: read-only current process credential query.
+    let uid = unsafe { nix::libc::geteuid() };
+    let rect = serde_json::json!({"origin":{"x":0.1,"y":10.0},"size":{"x":100.0,"y":120.0}});
+    let windows: Vec<_> = (0..windows).map(|i| serde_json::json!({
+        "id":format!("window-{i}"),"output":"fixture-output","workspace":3,
+        "rect":rect,"content":rect,"mapped":true,"visible":true,"focused":i==0,"z_order":null
+    })).collect();
+    serde_json::from_value(serde_json::json!({
+        "fence":fence(1),"sampled_at":at,"state":"desktop","error":null,
+        "context":{"binding":{"seat":"seat0","session":"fixture","uid":uid,
+            "compositor_pid":123,"compositor_start":456,"kind":"user"},
+            "snapshot":{"generation":1,"revision":7,"captured_at":at,"state":"desktop",
+                "secure_overlay":false,"regions":[],"windows":windows,"outputs":[{
+                    "geometry":{"name":"fixture-output","pixel_width":1000.0,"pixel_height":800.0,
+                        "scale":1.0,"origin":{"x":0.0,"y":0.0},"transform":"normal"},
+                    "geometry_generation":2,"active_workspace":3,"screen":"on","keyboard":null
+                }]}}
+    }))
+    .unwrap()
+}
+
+#[test]
+fn real_helper_receives_owned_context_and_expires_original_timestamps() {
+    let definition = Definition::compile(
+        r#"
+local p=require('prek')
+p.events.on('context_changed',function(event)
+  if event.available then
+    local snapshot=p.context.snapshot(); local binding=p.context.binding()
+    assert(snapshot.windows[1].rect.origin.x==0.1 and snapshot.outputs[1].active_workspace==3)
+    snapshot.windows[1].id='forged'; binding.uid=0
+    assert(p.context.snapshot().windows[1].id=='window-0' and p.context.binding().uid~=0)
+    p.log.info('context',{state=p.context.state(),revision=event.revision})
+  else
+    assert(p.context.snapshot()==nil and p.context.state()=='unknown')
+    p.log.info('expired-context')
+  end
+end)
+return {version=1}
+"#,
+        "context.lua",
+    )
+    .unwrap();
+    let mut session = Session::spawn(
+        Path::new(env!("CARGO_BIN_EXE_prek")),
+        fence(1),
+        "seat0",
+        definition,
+    )
+    .unwrap();
+    drain(&mut session).unwrap();
+    let mut view = context_view(monotonic().unwrap(), 1);
+    let mut wrong = view.clone();
+    wrong.fence.configuration = 2;
+    assert!(session.update_context(wrong).is_err());
+    let mut wrong = view.clone();
+    wrong.context.as_mut().unwrap().binding.seat = "seat1".into();
+    assert!(session.update_context(wrong).is_err());
+    let mut wrong = view.clone();
+    wrong.context.as_mut().unwrap().binding.uid += 1;
+    assert!(session.update_context(wrong).is_err());
+    session.update_context(view.clone()).unwrap();
+    assert!(!session.finished());
+    let logs = drain(&mut session).unwrap();
+    assert_eq!(
+        logs[0].fields,
+        serde_json::json!({"state":"desktop","revision":7})
+    );
+    view.sampled_at = Duration::ZERO;
+    view.context.as_mut().unwrap().snapshot.captured_at = Duration::ZERO;
+    session.update_context(view).unwrap();
+    assert_eq!(drain(&mut session).unwrap()[0].message, "expired-context");
+    session.stop().unwrap();
+    drain(&mut session).unwrap();
+}
+
+#[test]
+fn real_helper_assembles_multiple_context_chunks_and_replaces_unsent_updates() {
+    let definition = Definition::compile(
+        r#"
+local p=require('prek')
+p.events.on('context_changed',function(event)
+  p.log.info('context-revision',{revision=event.revision})
+end)
+return {version=1}
+"#,
+        "context.lua",
+    )
+    .unwrap();
+    let mut session = Session::spawn(
+        Path::new(env!("CARGO_BIN_EXE_prek")),
+        fence(1),
+        "seat0",
+        definition,
+    )
+    .unwrap();
+    drain(&mut session).unwrap();
+    let mut view = context_view(monotonic().unwrap(), 512);
+    assert!(view.encode().unwrap().len() > prek::context_transfer::CHUNK_BYTES);
+    session.update_context(view.clone()).unwrap();
+    session.step(monotonic().unwrap()).unwrap(); // First chunk freezes this upload.
+    view.context.as_mut().unwrap().snapshot.revision = 8;
+    session.update_context(view.clone()).unwrap();
+    view.context.as_mut().unwrap().snapshot.revision = 9;
+    session.update_context(view).unwrap();
+    let logs = drain(&mut session).unwrap();
+    assert_eq!(
+        logs.iter()
+            .map(|log| log.fields["revision"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![7, 9]
+    );
+}
 #[test]
 fn real_supervised_vm_preserves_closures_and_runs_stop_callbacks() {
     let definition = Definition::compile(

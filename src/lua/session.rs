@@ -61,6 +61,13 @@ impl PendingEvents {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Work {
+    Context {
+        fence: Fence,
+        offset: usize,
+        bytes: usize,
+        #[serde(with = "super::source_transfer::chunk_bytes")]
+        data: Vec<u8>,
+    },
     Action {
         fence: Fence,
         sequence: u64,
@@ -84,6 +91,10 @@ enum Work {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Message {
+    ContextLogs {
+        fence: Fence,
+        logs: Vec<LogRecord>,
+    },
     Resolved {
         fence: Fence,
         sequence: u64,
@@ -118,6 +129,12 @@ pub struct Session {
     channel: Channel,
     fence: Fence,
     source: Vec<u8>,
+    seat: String,
+    context_source: Vec<u8>,
+    context_offset: usize,
+    context_next: Option<Vec<u8>>,
+    context_pending: Option<Duration>,
+    context_started: Option<Duration>,
     offset: usize,
     ready: bool,
     sequence: u64,
@@ -168,6 +185,12 @@ impl Session {
             channel,
             fence,
             source,
+            seat: seat.into(),
+            context_source: Vec::new(),
+            context_offset: 0,
+            context_next: None,
+            context_pending: None,
+            context_started: None,
             offset: 0,
             ready: false,
             sequence: 0,
@@ -231,11 +254,18 @@ impl Session {
         Ok(())
     }
     pub fn deadline(&self) -> io::Result<Duration> {
-        Ok(self.supervisor.deadline()?.min(if self.ready {
-            self.pending.map_or(Duration::MAX, |(_, deadline)| deadline)
-        } else {
-            self.expires
-        }))
+        Ok(self
+            .supervisor
+            .deadline()?
+            .min(if self.ready {
+                self.pending.map_or(Duration::MAX, |(_, deadline)| deadline)
+            } else {
+                self.expires
+            })
+            .min(self.context_pending.unwrap_or(Duration::MAX))
+            .min(self.context_started.map_or(Duration::MAX, |started| {
+                started + crate::context_transfer::TIMEOUT
+            })))
     }
     pub fn action_ready(&self) -> bool {
         self.ready && self.initialized
@@ -260,6 +290,27 @@ impl Session {
     pub fn take_actions(&mut self) -> Vec<(u64, u64, Option<super::ActionResult>)> {
         self.resolved.drain(..).collect()
     }
+    pub fn update_context(&mut self, view: crate::context_transfer::View) -> io::Result<()> {
+        // SAFETY: read-only query of this unprivileged session process.
+        let uid = unsafe { libc::geteuid() };
+        if view.fence != self.fence
+            || view.context.as_ref().is_some_and(|context| {
+                context.binding.seat != self.seat || context.binding.uid != uid
+            })
+        {
+            return Err(protocol::invalid(
+                "Lua context belongs to another session owner/fence",
+            ));
+        }
+        let data = view.encode()?;
+        if self.context_offset > 0 || self.context_pending.is_some() {
+            self.context_next = Some(data);
+        } else {
+            self.context_source = data;
+            self.context_offset = 0;
+        }
+        Ok(())
+    }
     /// Avoid invoking a callback that has not yet been sent to the helper.
     /// In-flight callbacks remain bounded and their caller discards the result.
     pub fn cancel_action(&mut self, id: u64, ordinal: u64) -> io::Result<()> {
@@ -278,9 +329,18 @@ impl Session {
         Ok(())
     }
     pub fn finished(&self) -> bool {
-        self.ready && self.pending.is_none() && self.notices.is_empty() && self.actions.is_empty()
+        self.ready
+            && self.pending.is_none()
+            && self.notices.is_empty()
+            && self.actions.is_empty()
+            && self.context_source.is_empty()
+            && self.context_pending.is_none()
     }
     pub fn stop(&mut self) -> io::Result<()> {
+        self.context_source.clear();
+        self.context_next = None;
+        self.context_offset = 0;
+        self.context_started = None;
         self.notices.clear();
         self.actions.clear();
         self.resolved.clear();
@@ -304,6 +364,9 @@ impl Session {
     fn wants_write(&self) -> bool {
         self.offset < self.source.len()
             || self.ready
+                && self.context_pending.is_none()
+                && self.context_offset < self.context_source.len()
+            || self.ready
                 && self.pending.is_none()
                 && (!self.notices.is_empty() || !self.actions.is_empty())
     }
@@ -317,6 +380,10 @@ impl Session {
         }
         if !self.ready && now >= self.expires
             || self.pending.is_some_and(|(_, expiry)| now >= expiry)
+            || self.context_pending.is_some_and(|expiry| now >= expiry)
+            || self.context_started.is_some_and(|started| {
+                now.saturating_sub(started) >= crate::context_transfer::TIMEOUT
+            })
         {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -329,6 +396,14 @@ impl Session {
                 break;
             };
             match packet.message {
+                Message::ContextLogs { fence, logs: batch }
+                    if fence == self.fence && self.ready && self.context_pending.is_some() =>
+                {
+                    self.context_pending = None;
+                    self.context_source = self.context_next.take().unwrap_or_default();
+                    self.context_offset = 0;
+                    logs.extend(batch);
+                }
                 Message::Ready { fence }
                     if fence == self.fence && !self.ready && self.offset == self.source.len() =>
                 {
@@ -397,7 +472,35 @@ impl Session {
             )? {
                 self.offset = end;
             }
-        } else if self.action_ready() && self.pending.is_none() && !self.actions.is_empty() {
+        } else if self.ready
+            && self.context_pending.is_none()
+            && self.context_offset < self.context_source.len()
+        {
+            let end = (self.context_offset + crate::context_transfer::CHUNK_BYTES)
+                .min(self.context_source.len());
+            if self.channel.send(
+                &Work::Context {
+                    fence: self.fence,
+                    offset: self.context_offset,
+                    bytes: self.context_source.len(),
+                    data: self.context_source[self.context_offset..end].to_vec(),
+                },
+                now,
+            )? {
+                self.context_started.get_or_insert(now);
+                self.context_offset = end;
+                if end == self.context_source.len() {
+                    self.context_source.clear();
+                    self.context_offset = 0;
+                    self.context_started = None;
+                    self.context_pending = Some(now + RESPONSE_TIMEOUT);
+                }
+            }
+        } else if self.context_pending.is_none()
+            && self.action_ready()
+            && self.pending.is_none()
+            && !self.actions.is_empty()
+        {
             let (event, expires, _) = self.actions.front().unwrap();
             let crate::rules::Event::Matched { id, ordinal, .. } = event.as_ref() else {
                 return Err(protocol::invalid(
@@ -424,6 +527,7 @@ impl Session {
                 self.pending_action = Some(identity);
             }
         } else if self.ready
+            && self.context_pending.is_none()
             && self.pending.is_none()
             && let Some(notice) = self.notices.front()
         {
@@ -458,18 +562,63 @@ pub fn worker() -> io::Result<()> {
         .take_control()
         .ok_or_else(|| protocol::invalid("Lua worker requires private supervision"))?;
     let mut assembly = None::<source_transfer::Assembly>;
-    let mut runtime = None;
+    let mut runtime = None::<super::Runtime>;
     let mut fence = None;
     let mut sequence = 0;
     let mut outgoing = None;
     let mut timers_enabled = false;
+    let mut context_assembly: Option<crate::context_transfer::Assembly> = None;
     loop {
         health.progress()?;
         let now = monotonic()?;
+        if context_assembly
+            .as_ref()
+            .is_some_and(|assembly| now >= assembly.deadline())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Lua context transfer timed out",
+            ));
+        }
         if outgoing.is_none()
             && let Some(packet) = channel.receive::<Work>()?
         {
             match packet.message {
+                Work::Context {
+                    fence: incoming,
+                    offset,
+                    bytes,
+                    data,
+                } if fence == Some(incoming) && runtime.is_some() => {
+                    let now = monotonic()?;
+                    if offset == 0 {
+                        context_assembly =
+                            Some(crate::context_transfer::Assembly::new(incoming, now)?);
+                    }
+                    let assembly = context_assembly
+                        .as_mut()
+                        .ok_or_else(|| protocol::invalid("Lua context has no initial chunk"))?;
+                    if let Some(view) = assembly.push(incoming, offset, bytes, &data, now)? {
+                        crate::lua_compiler::runtime_cpu_budget()?;
+                        let state = view.state;
+                        let available = view.context.as_ref().is_some_and(|context| {
+                            now.saturating_sub(view.sampled_at) < crate::context_transfer::FRESHNESS
+                                && now.saturating_sub(context.snapshot.captured_at)
+                                    < crate::context_transfer::FRESHNESS
+                        });
+                        let revision = view
+                            .context
+                            .as_ref()
+                            .map_or(0, |context| context.snapshot.revision);
+                        let runtime = runtime.as_mut().unwrap();
+                        runtime.set_context(view, now).map_err(io::Error::other)?;
+                        outgoing = Some(match runtime.dispatch(EventKind::ContextChanged, &serde_json::json!({"fence":incoming,"state":state,"available":available,"revision":revision})) {
+                            Ok(logs) => Message::ContextLogs { fence: incoming, logs },
+                            Err(error) => Message::Failed { fence:incoming, reason:error.0.chars().take(512).collect() },
+                        });
+                        context_assembly = None;
+                    }
+                }
                 Work::Source {
                     fence: incoming,
                     offset,
@@ -572,14 +721,13 @@ pub fn worker() -> io::Result<()> {
                     }
                     if event == EventKind::Stop {
                         timers_enabled = false;
+                        context_assembly = None;
                     }
-                    if timers_enabled {
-                        runtime
-                            .as_mut()
-                            .unwrap()
-                            .set_clock(monotonic()?)
-                            .map_err(io::Error::other)?;
-                    }
+                    runtime
+                        .as_mut()
+                        .unwrap()
+                        .set_clock(monotonic()?)
+                        .map_err(io::Error::other)?;
                     outgoing = Some(match runtime.as_mut().unwrap().dispatch(event, &payload) {
                         Ok(logs) => Message::Logs {
                             fence: incoming,
@@ -635,6 +783,11 @@ pub fn worker() -> io::Result<()> {
             assembly
                 .as_ref()
                 .map_or(Duration::MAX, source_transfer::Assembly::deadline),
+        );
+        let until = until.min(
+            context_assembly
+                .as_ref()
+                .map_or(Duration::MAX, crate::context_transfer::Assembly::deadline),
         );
         let until = if timers_enabled
             && outgoing.is_none()

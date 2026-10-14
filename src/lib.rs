@@ -17,6 +17,8 @@ pub mod config;
 #[cfg(target_os = "linux")]
 pub mod configuration;
 pub mod context;
+#[cfg(target_os = "linux")]
+pub mod context_transfer;
 pub mod diagnostics;
 pub mod gestures;
 #[cfg(target_os = "linux")]

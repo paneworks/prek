@@ -5,7 +5,7 @@ Prek embeds [onix-os/luna](https://github.com/onix-os/luna), pinned to version
 also accepted. Configuration evaluation declares actions and does not execute
 them. Live production routing remains disabled.
 
-This reference covers configuration, session event subscriptions, timers, tasks and named
+This reference covers configuration, read-only session context, event subscriptions, timers, tasks and named
 action handlers producing command/event plans. Custom recognizers,
 live adapter bindings and the remaining operational APIs remain required
 work in `PLAN.md`. Discovery labels the runtime API partial.
@@ -120,7 +120,8 @@ subscription added by a callback starts with the next event. At most 256
 subscriptions can be registered over one VM's lifetime, including disposed ones.
 
 Supported kinds are `matched` (all matching phases), `begin`, `update`, `end`,
-`cancel`, `skipped`, `ready`, `reload`, `session_changed`, `recovery` and `stop`.
+`cancel`, `skipped`, `ready`, `reload`, `session_changed`, `context_changed`,
+`recovery` and `stop`.
 Rule callbacks receive `{fence, event}`; `event` is the existing typed rule
 outcome, including its source, monotonic time and applicable gesture identity,
 ordinal, stage, action declaration and frozen target. No raw input is supplied.
@@ -135,6 +136,83 @@ work and logs, then instantiate the approved source for the new fence. Closure
 state and subscriptions restart. Failed configuration reloads retain the current
 source generation. Input events arriving during source loading are queued with
 byte/count bounds. Progress may be coalesced; overflow retires the Lua component.
+
+## Runtime context
+
+The `context` namespace reads the broker-verified session snapshot. Queries
+are available in runtime callbacks and tasks; configuration evaluation rejects
+them. Each result is a new owned Lua value. Editing or retaining a result does
+not change broker state, a later query, or an action grant.
+
+| Function | Result |
+| --- | --- |
+| `context.snapshot()` | Complete fresh `Snapshot`, or `nil` when absent/expired. |
+| `context.binding()` | Verified `Binding` for that snapshot, or `nil`. |
+| `context.state()` | Fresh broker state, or `"unknown"` when the view expires. |
+| `context.fence()` | Fresh `{broker, configuration, session}` fence, or `nil`. |
+| `context.error()` | Fresh broker diagnostic of at most 512 bytes, or `nil`. |
+
+`State` is one of `console`, `desktop`, `locking`, `locked`, `greeter`,
+`inactive`, or `unknown`. A fresh state can be available without geometry.
+The agent requests a new view 100 ms after completing the previous transfer.
+Both the view's original sample time and the snapshot's capture time must be
+less than 250 ms old when queried. Receiving an old snapshot does not extend
+its lifetime. All times use the system monotonic clock and appear as
+`{secs, nanos}`. Lua-held copies are historical data after this freshness
+window; use a new query before making a decision.
+
+| Type | Fields |
+| --- | --- |
+| `Snapshot` | `generation`, `revision`, `captured_at`, `state`, `outputs`, `windows`, `regions`, `secure_overlay`. `generation` matches the session fence. |
+| `Binding` | `seat`, `session`, `uid`, `compositor_pid`, `compositor_start`, `kind` (`user` or `greeter`). Identity comes from broker process/logind verification. |
+| `OutputState` | `geometry`, `geometry_generation`, `active_workspace` (integer or `nil`), `screen` (`on` or `off`), `keyboard` (`Keyboard` or `nil`). |
+| `Output` | `name`, `pixel_width`, `pixel_height`, `scale`, `origin`, `transform`. Pixel dimensions and scale define logical dimensions; origins use logical desktop coordinates. |
+| `Window` | `id`, `output`, `workspace`, `rect`, `content`, `mapped`, `visible`, `focused`, `z_order` (integer or `nil`). Mapped and visible are distinct; absent stacking order conveys no order. |
+| `Region` | `id`, `scope` (or `nil` for a local widget/overlay), `output`, `rect`, `interactive`. |
+| `Keyboard` | `rect`, `layout`. |
+| `Rect` | `origin={x,y}`, `size={x,y}` in logical desktop coordinates. |
+
+Arrays have ordinary one-based Lua indices. Optional fields are `nil`; getters
+do not invent workspaces, regions, keyboard bounds, visibility or stacking order
+when a provider cannot supply them. Snapshots are transferred whole, with up to
+256 outputs, 4096 windows and 4096 regions. The serialized view is limited to
+4 MiB; oversized or invalid transfers fail rather than truncate geometry.
+Queries and notifications share the callback memory, fuel, elapsed-time and
+logging budgets. Copying a large snapshot can exhaust those budgets.
+
+`events.on("context_changed", callback)` receives
+`{fence, state, available, revision}` after the owning helper installs a view.
+`available` describes fresh snapshot availability and `revision` is zero when
+no snapshot exists. Notifications can repeat for refreshed captures of the same
+revision. Initial loading and generation replacement are asynchronous; a
+`ready` callback can observe `nil` until the first context notification.
+
+```lua
+local p = require("prek")
+p.events.on("context_changed", function(event)
+    local snapshot = p.context.snapshot()
+    if snapshot then
+        p.log.info("desktop geometry", {
+            revision = snapshot.revision,
+            outputs = #snapshot.outputs,
+            windows = #snapshot.windows,
+        })
+    end
+end)
+return p.config.preset("minimal")
+```
+
+Each transfer uses 32 KiB chunks with a one-second deadline and the current
+broker/configuration/session fence. Agent-to-helper updates retain at most two
+bounded serialized views: the active upload and the latest pending update.
+Partial uploads finish before replacement; unsent intermediate updates coalesce.
+The helper acknowledges each completed view within the existing 250 ms response
+deadline. Stop cancels unsent uploads. Reload/session transitions clear cached
+views and retire the old helper. The broker rechecks authority and lock state
+before delivering geometry. Context queries expose no setter, input stream,
+unlock operation or effect capability; effects still require broker grants.
+
+## Callback limits
 
 Callbacks are observational: action constructors still produce declarations and
 these subscriptions cannot execute commands, claim input or call adapters.

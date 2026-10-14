@@ -163,6 +163,7 @@ struct Bound {
     native: Option<crate::morf::Client>,
     actions: ActionLedger,
     available_actions: BTreeSet<Capability>,
+    context_export: Option<crate::context_transfer::Export>,
 }
 
 #[derive(Default)]
@@ -587,6 +588,7 @@ impl Broker {
                         return false;
                     }
                     bound.fence.configuration = self.configuration;
+                    bound.context_export = None;
                     bound.observing = false;
                     bound.actions = ActionLedger::default();
                     let fence = bound.fence;
@@ -1191,6 +1193,7 @@ impl Broker {
                         context,
                         compositor,
                         native: None,
+                        context_export: None,
                         actions: ActionLedger::default(),
                         available_actions: capabilities
                             .iter()
@@ -1219,7 +1222,7 @@ impl Broker {
                     // An in-flight status read may precede a transition notice.
                     // Discard it without acting on stale authority or closing
                     // the agent before that notice can reach it.
-                    let old_status = matches!(&request, Request::Status { fence } | Request::LuaSource { fence, .. }
+                    let old_status = matches!(&request, Request::Status { fence } | Request::LuaSource { fence, .. } | Request::ContextRead { fence, .. }
                         if now < bound.previous.expires && bound.previous.fences.contains(fence));
                     if !current && !old_heartbeat && !old_status {
                         return Err(protocol::invalid(
@@ -1235,6 +1238,7 @@ impl Broker {
                     let fence = bound.fence;
                     match request {
                         Request::LuaSource { .. } if !current => {}
+                        Request::ContextRead { .. } if !current => {}
                         Request::LuaSource { offset, .. }
                             if bound.role == Role::Agent
                                 && bound.capabilities.contains(&Capability::LuaEvents) =>
@@ -1245,6 +1249,57 @@ impl Broker {
                                 offset,
                             )?;
                             connection.push(reply)?;
+                        }
+                        Request::ContextRead { offset, .. }
+                            if bound.role == Role::Agent
+                                && bound.capabilities.contains(&Capability::Context) =>
+                        {
+                            let guarded = if offset == 0 {
+                                bound.context.fresh(now)
+                            } else {
+                                bound
+                                    .context_export
+                                    .as_ref()
+                                    .is_some_and(|export| export.contains_context)
+                            };
+                            if guarded && !self.guard_observation(connection, now)? {
+                                return Ok(());
+                            }
+                            let now = monotonic()?;
+                            if offset == 0 {
+                                let bound = connection.bound.as_mut().unwrap();
+                                let context = bound
+                                    .context
+                                    .fresh(now)
+                                    .then(|| bound.context.value.clone())
+                                    .flatten();
+                                let view = crate::context_transfer::View {
+                                    fence: bound.fence,
+                                    sampled_at: now,
+                                    state: bound.context.state(now),
+                                    context,
+                                    error: bound.context.error.as_ref().map(|error| {
+                                        error
+                                            .chars()
+                                            .filter(|character| !character.is_control())
+                                            .take(128)
+                                            .collect()
+                                    }),
+                                };
+                                bound.context_export =
+                                    Some(crate::context_transfer::Export::new(&view, now)?);
+                            }
+                            let bound = connection.bound.as_mut().unwrap();
+                            let export = bound.context_export.as_ref().ok_or_else(|| {
+                                protocol::invalid("context transfer has no initial request")
+                            })?;
+                            let (bytes, data) = export.chunk(bound.fence, offset, now)?;
+                            connection.push(Reply::ContextData {
+                                fence,
+                                offset,
+                                bytes,
+                                data,
+                            })?;
                         }
                         Request::Heartbeat { .. } => {
                             bound.renewed = now;
@@ -1374,10 +1429,20 @@ impl Broker {
         if registered {
             self.refresh_context(connection, monotonic()?)?;
         }
-        if matches!(
-            connection.outgoing.front(),
-            Some(Reply::Observation { .. } | Reply::Dispatch { .. } | Reply::Execute { .. })
-        ) {
+        let context_delivery =
+            matches!(connection.outgoing.front(), Some(Reply::ContextData { .. }))
+                && connection.bound.as_ref().is_some_and(|bound| {
+                    bound
+                        .context_export
+                        .as_ref()
+                        .is_some_and(|export| export.contains_context)
+                });
+        if context_delivery
+            || matches!(
+                connection.outgoing.front(),
+                Some(Reply::Observation { .. } | Reply::Dispatch { .. } | Reply::Execute { .. })
+            )
+        {
             self.guard_observation(connection, monotonic()?)?;
         }
         connection.flush(monotonic()?)
@@ -1434,6 +1499,7 @@ impl Broker {
         }
         bound.observing = false;
         bound.actions = ActionLedger::default();
+        bound.context_export = None;
         let fence = bound.fence;
         let state = bound.context.state;
         connection.outgoing.clear();

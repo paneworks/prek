@@ -1202,6 +1202,9 @@ fn run_session(
     let mut lua_seat = String::new();
     let mut lua_pending = prek::lua::session::PendingEvents::default();
     let mut lua_lifecycle = None;
+    let mut context_download: Option<prek::context_transfer::Assembly> = None;
+    let mut context_view: Option<prek::context_transfer::View> = None;
+    let mut next_context = started;
     loop {
         let now = monotonic()?;
         if signals.requested() || stop_at.is_some_and(|deadline| now >= deadline) {
@@ -1326,6 +1329,54 @@ fn run_session(
                         let _ = channel.send(&Request::Disconnect { fence: observed }, now);
                         return Ok(());
                     }
+                    if lua
+                        && (lua_runtime.is_some() || lua_download.is_some())
+                        && context_download.is_none()
+                    {
+                        context_download =
+                            Some(prek::context_transfer::Assembly::new(observed, now)?);
+                        if !channel.send(
+                            &Request::ContextRead {
+                                fence: observed,
+                                offset: 0,
+                            },
+                            now,
+                        )? {
+                            return Err(io::ErrorKind::WouldBlock.into());
+                        }
+                    }
+                }
+                Reply::ContextData {
+                    fence: incoming,
+                    offset,
+                    bytes,
+                    data,
+                } if lua && Some(incoming) == fence => {
+                    let now = monotonic()?;
+                    let download = context_download
+                        .as_mut()
+                        .ok_or_else(|| io::Error::other("unsolicited broker context"))?;
+                    match download.push(incoming, offset, bytes, &data, now)? {
+                        Some(view) => {
+                            if let Some(runtime) = lua_runtime.as_mut() {
+                                runtime.update_context(view.clone())?;
+                            }
+                            context_view = Some(view);
+                            context_download = None;
+                            next_context = now + Duration::from_millis(100);
+                        }
+                        None => {
+                            if !channel.send(
+                                &Request::ContextRead {
+                                    fence: incoming,
+                                    offset: download.offset(),
+                                },
+                                now,
+                            )? {
+                                return Err(io::ErrorKind::WouldBlock.into());
+                            }
+                        }
+                    }
                 }
                 Reply::Accepted {
                     fence: accepted, ..
@@ -1341,6 +1392,9 @@ fn run_session(
                         executor.transition(next_fence)?;
                     }
                     fence = Some(next_fence);
+                    context_download = None;
+                    context_view = None;
+                    next_context = now;
                     if lua {
                         lua_runtime = None;
                         lua_pending = Default::default();
@@ -1395,6 +1449,9 @@ fn run_session(
                         executor.transition(next_fence)?;
                     }
                     fence = Some(next_fence);
+                    context_download = None;
+                    context_view = None;
+                    next_context = now;
                     if lua {
                         lua_runtime = None;
                         lua_pending = Default::default();
@@ -1559,6 +1616,12 @@ fn run_session(
                                 }
                             }
                             if let Some(runtime) = lua_runtime.as_mut()
+                                && let Some(view) =
+                                    context_view.as_ref().filter(|view| view.fence == incoming)
+                            {
+                                runtime.update_context(view.clone())?;
+                            }
+                            if let Some(runtime) = lua_runtime.as_mut()
                                 && let Err(error) =
                                     std::mem::take(&mut lua_pending).drain_into(runtime)
                             {
@@ -1690,6 +1753,26 @@ fn run_session(
             eprintln!("Lua source transfer timed out");
             lua_download = None;
         }
+        if context_download
+            .as_ref()
+            .is_some_and(|download| now >= download.deadline())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "broker context transfer timed out",
+            ));
+        }
+        let context_active = lua && (lua_runtime.is_some() || lua_download.is_some());
+        if context_active
+            && context_download.is_none()
+            && now >= next_context
+            && let Some(fence) = fence
+        {
+            context_download = Some(prek::context_transfer::Assembly::new(fence, now)?);
+            if !channel.send(&Request::ContextRead { fence, offset: 0 }, now)? {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+        }
         if now.saturating_sub(last_reply) >= Duration::from_secs(1) {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -1705,6 +1788,18 @@ fn run_session(
             next = now + Duration::from_millis(250);
         }
         let until = next.min(last_reply + Duration::from_secs(1));
+        let until = if context_active && fence.is_some() {
+            until.min(
+                context_download
+                    .as_ref()
+                    .map_or(next_context, |download| download.deadline()),
+            )
+        } else {
+            until
+        };
+        let until = context_download
+            .as_ref()
+            .map_or(until, |download| until.min(download.deadline()));
         let until = stop_at.map_or(until, |stop| until.min(stop));
         let until = lua_download
             .as_ref()

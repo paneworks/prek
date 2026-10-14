@@ -262,6 +262,14 @@ for the complete module policy.
 completion/cancellation state, and completed tasks free capacity without
 reusing identities. Generation replacement retires their coroutine state.
 
+Runtime callbacks and tasks can query `context.snapshot()`, `binding()`,
+`state()`, `fence()` and `error()` for broker-verified session identity and full
+output/window/region/keyboard geometry. Results are owned copies, expire from
+their original monotonic timestamps, and cannot set authority. The agent
+refreshes snapshots every 100 ms; `context_changed` notifies the owning Lua VM.
+See [the context reference](docs/lua-api.md#runtime-context) and
+[example](examples/lua/context/config.lua).
+
 Presets are `minimal`, `desktop`, and `phone`; each round-trips through `check`.
 Explicit TOML input/output remains supported with schema version 1; no removal
 date is scheduled. `migrate --config FILE.toml --output FILE.lua` validates the

@@ -18,6 +18,15 @@
     ]
   },
   "api_version": 1,
+  "context_limits": {
+    "chunk_bytes": 32768,
+    "freshness_ms": 250,
+    "queued_snapshots": 2,
+    "read_only": true,
+    "refresh_ms": 100,
+    "snapshot_bytes": 4194304,
+    "transfer_time_ms": 1000
+  },
   "engine": "onix-os/luna",
   "engine_version": "0.5.1",
   "event_kinds": [
@@ -31,7 +40,8 @@
     "reload",
     "stop",
     "recovery",
-    "session_changed"
+    "session_changed",
+    "context_changed"
   ],
   "limits": {
     "instructions": 1000000,
@@ -174,6 +184,36 @@
       "description": "Register an approved generation-scoped named handler; resolve a bounded typed effect plan in the unprivileged session after a broker execution grant.",
       "name": "actions.define",
       "signature": "actions.define(name, {requires = capabilities}, callback) -> Action"
+    },
+    {
+      "description": "Return an owned copy of the complete fresh broker snapshot, including outputs, windows, regions and keyboard geometry; nil when unavailable or expired.",
+      "name": "context.snapshot",
+      "phase": "runtime",
+      "signature": "context.snapshot() -> Snapshot | nil"
+    },
+    {
+      "description": "Return an owned copy of the verified session/compositor binding for a fresh snapshot; conveys no authority.",
+      "name": "context.binding",
+      "phase": "runtime",
+      "signature": "context.binding() -> Binding | nil"
+    },
+    {
+      "description": "Return the broker's fresh session state, or unknown after the view expires.",
+      "name": "context.state",
+      "phase": "runtime",
+      "signature": "context.state() -> State"
+    },
+    {
+      "description": "Return the current broker/configuration/session fence while the context view is fresh.",
+      "name": "context.fence",
+      "phase": "runtime",
+      "signature": "context.fence() -> Fence | nil"
+    },
+    {
+      "description": "Return the bounded broker context diagnostic while the context view is fresh.",
+      "name": "context.error",
+      "phase": "runtime",
+      "signature": "context.error() -> string | nil"
     },
     {
       "description": "Construct a typed trigger with the documented schema fields.",

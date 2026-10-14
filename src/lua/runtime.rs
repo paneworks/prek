@@ -27,6 +27,7 @@ pub enum EventKind {
     Stop,
     Recovery,
     SessionChanged,
+    ContextChanged,
 }
 impl EventKind {
     pub fn name(self) -> &'static str {
@@ -42,6 +43,7 @@ impl EventKind {
             Self::Stop => "stop",
             Self::Recovery => "recovery",
             Self::SessionChanged => "session_changed",
+            Self::ContextChanged => "context_changed",
         }
     }
 }
@@ -198,6 +200,10 @@ pub(super) struct Host {
     pub(super) task: Option<u64>,
     pub(super) sleep: Option<Duration>,
     pub(super) task_clock: Option<(Duration, Instant)>,
+    #[cfg(target_os = "linux")]
+    pub(super) context: Option<crate::context_transfer::View>,
+    #[cfg(target_os = "linux")]
+    pub(super) context_clock: Option<Instant>,
 }
 pub(super) fn logger<'gc>(ctx: &Context<'gc>, host: Rc<RefCell<Host>>) -> Callback<'gc> {
     Callback::from_fn(ctx, move |ctx, _, mut stack| {
@@ -383,6 +389,22 @@ pub(super) fn bounded_json(value: &impl Serialize, maximum: usize) -> io::Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn runtime_registration_limits_survive_replaced_lua_globals() {
+        for registration in [
+            "p.events.on('matched',function()end)",
+            "p.scheduler.after('1s',function()end)",
+        ] {
+            let source = format!(
+                "local p=require('prek'); p.events.on('ready',function()assert=function()end;type=function()return 'function'end; for i=1,257 do {registration} end end);return {{version=1}}"
+            );
+            let mut runtime = Runtime::load(&source, "runtime-quota.lua").unwrap();
+            let error = runtime
+                .dispatch(EventKind::Ready, &serde_json::Value::Null)
+                .expect_err("mutable Lua globals must not disable a host registration quota");
+            assert!(error.to_string().contains("limit exceeded"), "{error}");
+        }
+    }
     #[test]
     fn subscriptions_keep_closures_and_dispose_before_later_callbacks() {
         let mut runtime = Runtime::load(

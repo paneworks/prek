@@ -120,6 +120,10 @@ pub enum Request {
         fence: Fence,
         offset: usize,
     },
+    ContextRead {
+        fence: Fence,
+        offset: usize,
+    },
     Context {
         fence: Fence,
         snapshot: Box<Snapshot>,
@@ -158,6 +162,7 @@ impl Request {
             Self::Register { .. } | Self::Reload { .. } => None,
             Self::Heartbeat { fence }
             | Self::LuaSource { fence, .. }
+            | Self::ContextRead { fence, .. }
             | Self::Context { fence, .. }
             | Self::LockRequested { fence }
             | Self::Authorize { fence, .. }
@@ -172,6 +177,12 @@ impl Request {
             fence.validate()?;
         }
         match self {
+            Self::ContextRead { offset, .. }
+                if *offset >= crate::context_transfer::MAX_BYTES
+                    || !offset.is_multiple_of(crate::context_transfer::CHUNK_BYTES) =>
+            {
+                return Err(invalid("invalid context request offset"));
+            }
             Self::LuaSource { offset, .. }
                 if *offset > crate::lua::MAX_SNAPSHOT_BYTES
                     || *offset % crate::lua::source_transfer::CHUNK_BYTES != 0 =>
@@ -208,6 +219,13 @@ impl Request {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Reply {
+    ContextData {
+        fence: Fence,
+        offset: usize,
+        bytes: usize,
+        #[serde(with = "crate::lua::source_transfer::chunk_bytes")]
+        data: Vec<u8>,
+    },
     Welcome {
         fence: Fence,
         seat: String,
@@ -296,6 +314,7 @@ impl Reply {
             | Self::SessionChanged { fence, .. }
             | Self::Observation { fence, .. }
             | Self::LuaSource { fence, .. }
+            | Self::ContextData { fence, .. }
             | Self::Dispatch { fence, .. }
             | Self::Execute { fence, .. }
             | Self::ActionCancelled { fence, .. }
@@ -310,6 +329,19 @@ impl Reply {
             !value.is_empty() && value.len() <= 1024 && !value.chars().any(char::is_control)
         };
         match self {
+            Self::ContextData {
+                offset,
+                bytes,
+                data,
+                ..
+            } if *bytes == 0
+                || *bytes > crate::context_transfer::MAX_BYTES
+                || *offset >= *bytes
+                || !offset.is_multiple_of(crate::context_transfer::CHUNK_BYTES)
+                || data.len() != crate::context_transfer::CHUNK_BYTES.min(bytes - offset) =>
+            {
+                return Err(invalid("invalid context snapshot chunk"));
+            }
             Self::LuaSource {
                 offset,
                 bytes,
