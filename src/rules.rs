@@ -330,6 +330,7 @@ impl Worker {
 pub struct Engine {
     config: Config,
     generation: u64,
+    rule_revision: u64,
     next_id: u64,
     replay: Replay,
     devices: BTreeMap<u64, DeviceState>,
@@ -372,6 +373,7 @@ impl Engine {
         Ok(Self {
             config,
             generation: 1,
+            rule_revision: 1,
             next_id: 0,
             replay: Replay::default(),
             devices: BTreeMap::new(),
@@ -426,6 +428,9 @@ impl Engine {
     }
     pub fn config(&self) -> &Config {
         &self.config
+    }
+    pub fn rule_revision(&self) -> u64 {
+        self.rule_revision
     }
     pub(crate) fn enable_routing(&mut self) {
         self.routing = true;
@@ -831,6 +836,14 @@ impl Engine {
             .generation
             .checked_add(1)
             .ok_or_else(|| invalid("configuration generation exhausted"))?;
+        self.prepare_generation(config, generation, at)
+    }
+    fn prepare_generation(
+        &self,
+        config: Config,
+        generation: u64,
+        at: Duration,
+    ) -> io::Result<Self> {
         let mut next = Self::new(config)?;
         next.push(Record::Header {
             version: crate::replay::FORMAT_VERSION,
@@ -868,14 +881,35 @@ impl Engine {
     /// Compile before replacing; reconcile held state rather than inventing
     /// presses. Failed reload leaves the previous engine/configuration intact.
     pub fn reload(&mut self, config: Config, at: Duration) -> io::Result<()> {
-        let mut next = self.prepare_replacement(config, at)?;
-        self.cancel_all(at, "configuration replaced");
+        let next = self.prepare_replacement(config, at)?;
+        self.commit_replacement(next, at, "configuration replaced");
+        Ok(())
+    }
+    /// Validated runtime edits do not replace the approved source/file fence.
+    /// The caller must cancel queued grants/outcomes before activating them.
+    pub fn transact_rules(
+        &mut self,
+        transaction: &crate::rule_transactions::Transaction,
+        at: Duration,
+    ) -> io::Result<u64> {
+        let config = transaction
+            .prepare(&self.config, self.rule_revision)
+            .map_err(invalid)?;
+        let mut next = self.prepare_generation(config, self.generation, at)?;
+        next.rule_revision = self
+            .rule_revision
+            .checked_add(1)
+            .ok_or_else(|| invalid("runtime rule revision exhausted"))?;
+        self.commit_replacement(next, at, "runtime rules changed");
+        Ok(self.rule_revision)
+    }
+    fn commit_replacement(&mut self, mut next: Self, at: Duration, reason: &str) {
+        self.cancel_all(at, reason);
         for sequence in &mut self.sequences {
-            sequence.cancel_all(at, "configuration replaced", &mut self.events);
+            sequence.cancel_all(at, reason, &mut self.events);
         }
         next.events = std::mem::take(&mut self.events);
         *self = next;
-        Ok(())
     }
     fn advance(&mut self, at: Duration) -> io::Result<()> {
         if self.last_at.is_some_and(|last| at < last) {
@@ -3035,6 +3069,101 @@ mod tests {
         key(&mut engine, 1, 2100, 2, 115, false);
         key(&mut engine, 1, 2200, 3, 115, true);
         tick(&mut engine, 3200);
+        assert_eq!(matches(&engine.events).len(), 1);
+    }
+    #[test]
+    fn runtime_rules_keep_file_generation_ids_and_neutral_input_boundaries() {
+        use crate::rule_transactions::{Change, Transaction};
+        let mut engine = engine(config(hold(600)));
+        let rule = engine.config.rules[0].id.clone();
+        key(&mut engine, 1, 0, 1, 115, true);
+        tick(&mut engine, 600);
+        let first = engine
+            .take_events()
+            .into_iter()
+            .find_map(|event| match event {
+                Event::Matched { id, .. } => Some(id),
+                _ => None,
+            })
+            .unwrap();
+        let disable = Transaction {
+            revision: 1,
+            changes: vec![Change::Enabled {
+                id: rule.clone(),
+                enabled: false,
+            }],
+        };
+        assert_eq!(engine.transact_rules(&disable, ms(650)).unwrap(), 2);
+        assert_eq!(engine.generation(), 1);
+        assert!(!engine.config.rules[0].enabled);
+        let cancelled = engine.take_events();
+        assert!(
+            cancelled
+                .iter()
+                .any(|event| matches!(event,Event::Cancelled {id,..} if *id==first))
+        );
+        let enable = Transaction {
+            revision: 2,
+            changes: vec![Change::Enabled {
+                id: rule,
+                enabled: true,
+            }],
+        };
+        assert_eq!(engine.transact_rules(&enable, ms(700)).unwrap(), 3);
+        engine.take_events();
+        tick(&mut engine, 1400);
+        assert!(
+            matches(&engine.events).is_empty(),
+            "held key invented a fresh hold"
+        );
+        key(&mut engine, 1, 1500, 2, 115, false);
+        key(&mut engine, 1, 1600, 3, 115, true);
+        tick(&mut engine, 2200);
+        let next = engine
+            .take_events()
+            .into_iter()
+            .find_map(|event| match event {
+                Event::Matched {
+                    id,
+                    config_generation,
+                    ..
+                } => {
+                    assert_eq!(config_generation, 1);
+                    Some(id)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            next > first,
+            "runtime changes reused a retired gesture identity"
+        );
+        assert!(engine.transact_rules(&disable, ms(2201)).is_err());
+        assert_eq!(engine.rule_revision(), 3);
+        engine.reload(config(hold(600)), ms(2300)).unwrap();
+        assert_eq!(engine.generation(), 2);
+        assert_eq!(engine.rule_revision(), 1);
+    }
+    #[test]
+    fn invalid_runtime_rules_keep_the_pending_recognizer_and_current_config() {
+        use crate::rule_transactions::{Change, Transaction};
+        let mut engine = engine(config(hold(600)));
+        key(&mut engine, 1, 0, 1, 115, true);
+        let old = engine.config.clone();
+        let mut invalid = old.rules[0].clone();
+        invalid.action = Action::Event {
+            name: String::new(),
+        };
+        let transaction = Transaction {
+            revision: 1,
+            changes: vec![Change::Replace {
+                rule: Box::new(invalid),
+            }],
+        };
+        assert!(engine.transact_rules(&transaction, ms(100)).is_err());
+        assert_eq!(engine.config, old);
+        assert_eq!(engine.rule_revision(), 1);
+        tick(&mut engine, 600);
         assert_eq!(matches(&engine.events).len(), 1);
     }
     #[test]

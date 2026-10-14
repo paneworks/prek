@@ -85,6 +85,13 @@ pub enum Report {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Message {
+    RulesChanged {
+        seat: String,
+        fence: Fence,
+        id: u64,
+        revision: u64,
+        error: Option<String>,
+    },
     Configuration {
         generation: u64,
         error: Option<String>,
@@ -509,6 +516,44 @@ impl Registry {
         }
         Ok(())
     }
+    fn transact_rules(
+        &mut self,
+        seat: &str,
+        fence: Fence,
+        transaction: &crate::rule_transactions::Transaction,
+        now: Duration,
+    ) -> io::Result<u64> {
+        fence.validate()?;
+        let observer = self
+            .observers
+            .get_mut(seat)
+            .filter(|observer| observer.subscription.fence == fence && now < observer.expires)
+            .ok_or_else(|| {
+                protocol::invalid("runtime rules require the current owning seat registration")
+            })?;
+        let revision = observer.engine.transact_rules(transaction, now)?;
+        let subscription = observer.subscription.identity();
+        let events = observer.engine.take_events();
+        // Discard outcomes prepared by retired rules before publishing their
+        // cancellation and the new revision. Other seats remain untouched.
+        self.reports.retain(|(report, _)| {
+            !report.subscription().same_registration(&subscription)
+                || !matches!(report, Report::Observation { .. } | Report::Dispatch { .. })
+        });
+        self.bytes = self.reports.iter().map(|(_, bytes)| *bytes).sum();
+        for event in events {
+            if matches!(event, Event::Cancelled { .. }) {
+                self.queue(
+                    Report::Observation {
+                        subscription: subscription.clone(),
+                        event: Box::new(event),
+                    },
+                    now,
+                )?;
+            }
+        }
+        Ok(revision)
+    }
     fn deadline(&self) -> Option<Duration> {
         self.observers
             .values()
@@ -626,6 +671,41 @@ impl Stream {
                 break;
             };
             match packet.message {
+                Command::Rules {
+                    seat,
+                    fence,
+                    id,
+                    transaction,
+                } => {
+                    if self.control.len() >= crate::protocol::MAX_QUEUED_PACKETS || id == 0 {
+                        return Err(protocol::invalid(
+                            "invalid runtime rule request/response count",
+                        ));
+                    }
+                    let result = self
+                        .registry
+                        .transact_rules(&seat, fence, &transaction, now);
+                    let revision = result.as_ref().copied().unwrap_or_else(|_| {
+                        self.registry
+                            .observers
+                            .get(&seat)
+                            .map_or(0, |observer| observer.engine.rule_revision())
+                    });
+                    self.control.push_back(Message::RulesChanged {
+                        seat,
+                        fence,
+                        id,
+                        revision,
+                        error: result.err().map(|error| {
+                            error
+                                .to_string()
+                                .chars()
+                                .filter(|character| !character.is_control())
+                                .take(128)
+                                .collect()
+                        }),
+                    });
+                }
                 Command::Subscriptions { update } => {
                     let contexts: Vec<_> = update
                         .seats
@@ -655,14 +735,19 @@ impl Stream {
                 }
                 command => {
                     if let Some(installation) = self.assembly.accept(command, now)? {
-                        let result = installation.config.and_then(|config| {
-                            self.registry.install(config, installation.generation, now)
-                        });
-                        if !self.control.is_empty() {
+                        if self.control.len() >= crate::protocol::MAX_QUEUED_PACKETS
+                            || self
+                                .control
+                                .iter()
+                                .any(|message| matches!(message, Message::Configuration { .. }))
+                        {
                             return Err(protocol::invalid(
                                 "configuration acknowledgements are not drained",
                             ));
                         }
+                        let result = installation.config.and_then(|config| {
+                            self.registry.install(config, installation.generation, now)
+                        });
                         self.control.push_back(Message::Configuration {
                             generation: installation.generation,
                             error: result.err().map(|error| {
@@ -916,6 +1001,121 @@ mod tests {
         assert_eq!(invalidated[0].0.fence.session, 7);
         assert_eq!(*invalidated[0].1, source(1, "seat0"));
     }
+    #[test]
+    fn private_rule_command_returns_correlated_receipts_and_retains_last_good_revision() {
+        use crate::rule_transactions::{Change, Transaction};
+        let (mut parent, child) = Channel::pair().unwrap();
+        let mut stream = Stream::new(config(), child).unwrap();
+        stream.flush().unwrap();
+        assert!(matches!(
+            parent.receive::<Message>().unwrap().unwrap().message,
+            Message::Configuration {
+                generation: 1,
+                error: None
+            }
+        ));
+        let owner = subscription("seat0", 1);
+        assert!(
+            parent
+                .send(
+                    &Command::Subscriptions {
+                        update: Subscriptions {
+                            revision: 1,
+                            seats: vec![owner.clone()]
+                        }
+                    },
+                    crate::ipc::monotonic().unwrap()
+                )
+                .unwrap()
+        );
+        stream.service().unwrap();
+        stream.flush().unwrap();
+        while parent.receive::<Message>().unwrap().is_some() {}
+        let id = stream.config().rules[0].id.clone();
+        for (request, revision, enabled, expected, error) in [
+            (1, 1, false, 2, false),
+            (2, 1, true, 2, true),
+            (3, 2, true, 3, false),
+        ] {
+            let transaction = Transaction {
+                revision,
+                changes: vec![Change::Enabled {
+                    id: id.clone(),
+                    enabled,
+                }],
+            };
+            assert!(
+                parent
+                    .send(
+                        &Command::Rules {
+                            seat: "seat0".into(),
+                            fence: owner.fence,
+                            id: request,
+                            transaction
+                        },
+                        crate::ipc::monotonic().unwrap()
+                    )
+                    .unwrap()
+            );
+            stream.service().unwrap();
+            stream.flush().unwrap();
+            let response = parent.receive::<Message>().unwrap().unwrap().message;
+            assert!(
+                matches!(response,Message::RulesChanged {seat,fence,id,revision,error:reason}
+                if seat=="seat0" && fence==owner.fence && id==request && revision==expected
+                    && reason.is_some()==error)
+            );
+        }
+        assert_eq!(stream.registry.observers["seat0"].engine.rule_revision(), 3);
+        assert!(stream.registry.observers["seat0"].engine.config().rules[0].enabled);
+        let transaction = Transaction {
+            revision: 3,
+            changes: vec![Change::Enabled { id, enabled: false }],
+        };
+        assert!(
+            parent
+                .send(
+                    &Command::Rules {
+                        seat: "seat0".into(),
+                        fence: owner.fence,
+                        id: 4,
+                        transaction
+                    },
+                    crate::ipc::monotonic().unwrap()
+                )
+                .unwrap()
+        );
+        stream.service().unwrap();
+        assert_eq!(stream.control.len(), 1);
+        let mut replacement =
+            crate::configuration::Transfer::new(toml::to_string(&config()).unwrap(), 2).unwrap();
+        while !replacement
+            .send(&mut parent, crate::ipc::monotonic().unwrap())
+            .unwrap()
+        {
+            stream.service().unwrap();
+        }
+        stream.service().unwrap();
+        assert_eq!(stream.control.len(), 2);
+        stream.flush().unwrap();
+        assert!(matches!(
+            parent.receive::<Message>().unwrap().unwrap().message,
+            Message::RulesChanged {
+                id: 4,
+                revision: 4,
+                error: None,
+                ..
+            }
+        ));
+        stream.flush().unwrap();
+        assert!(matches!(
+            parent.receive::<Message>().unwrap().unwrap().message,
+            Message::Configuration {
+                generation: 2,
+                error: None
+            }
+        ));
+    }
 
     #[test]
     fn only_subscribed_seat_receives_fenced_outcomes() {
@@ -938,6 +1138,82 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert!(json["message"].get("frame").is_none());
         assert_eq!(json["message"]["event"]["session_generation"], 7);
+    }
+    #[test]
+    fn runtime_rule_transaction_is_atomic_fenced_and_isolated_to_its_observer() {
+        use crate::rule_transactions::{Change, Transaction};
+        let mut registry = registry(config());
+        let left = subscription("seat0", 1);
+        let right = subscription("seat1", 2);
+        update(&mut registry, 1, vec![left.clone(), right.clone()], 0);
+        registry.reports.clear();
+        registry.bytes = 0;
+        key(&mut registry, source(1, "seat0"), 0, 1, true, 0);
+        key(&mut registry, source(2, "seat1"), 0, 1, true, 0);
+        tick(&mut registry, 600);
+        let rule = registry.config.rules[0].id.clone();
+        let transaction = Transaction {
+            revision: 1,
+            changes: vec![Change::Enabled {
+                id: rule,
+                enabled: false,
+            }],
+        };
+        let wrong = Fence {
+            session: 9,
+            ..left.fence
+        };
+        assert!(
+            registry
+                .transact_rules("seat0", wrong, &transaction, ms(620))
+                .is_err()
+        );
+        assert!(
+            registry
+                .transact_rules("missing", left.fence, &transaction, ms(620))
+                .is_err()
+        );
+        let before = registry.reports.len();
+        let invalid = Transaction {
+            revision: 1,
+            changes: vec![
+                transaction.changes[0].clone(),
+                Change::Remove {
+                    id: "missing".into(),
+                },
+            ],
+        };
+        assert!(
+            registry
+                .transact_rules("seat0", left.fence, &invalid, ms(620))
+                .is_err()
+        );
+        assert_eq!(registry.reports.len(), before);
+        assert_eq!(
+            registry
+                .transact_rules("seat0", left.fence, &transaction, ms(650))
+                .unwrap(),
+            2
+        );
+        assert!(!registry.observers["seat0"].engine.config().rules[0].enabled);
+        assert!(registry.observers["seat1"].engine.config().rules[0].enabled);
+        assert!(registry.config.rules[0].enabled);
+        assert_eq!(registry.observers["seat0"].engine.generation(), 1);
+        assert_eq!(registry.observers["seat1"].engine.rule_revision(), 1);
+        assert!(!registry.reports.iter().any(|(report, _)| matches!(report,
+            Report::Observation {subscription,event} if subscription.seat=="seat0"
+                && matches!(event.as_ref(),Event::Matched {..}))));
+        assert!(registry.reports.iter().any(|(report, _)| matches!(report,
+            Report::Observation {subscription,event} if subscription.seat=="seat1"
+                && matches!(event.as_ref(),Event::Matched {..}))));
+        update(&mut registry, 2, vec![left.clone(), right], 700);
+        assert_eq!(registry.observers["seat0"].engine.rule_revision(), 2);
+        assert!(!registry.observers["seat0"].engine.config().rules[0].enabled);
+        assert!(
+            registry
+                .transact_rules("seat0", left.fence, &transaction, ms(710))
+                .is_err()
+        );
     }
     #[test]
     fn renewal_preserves_candidates_and_replacement_discards_held_input_and_unsent_work() {

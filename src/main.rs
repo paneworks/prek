@@ -940,6 +940,9 @@ fn run_broker(
             }
             match control.receive::<prek::worker::Message>() {
                 Ok(Some(packet)) => match packet.message {
+                    prek::worker::Message::RulesChanged { .. } => {
+                        return Err(io::Error::other("unsolicited runtime rule receipt"));
+                    }
                     prek::worker::Message::Outcome { report } => {
                         broker.report(report, monotonic()?)?
                     }

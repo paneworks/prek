@@ -96,6 +96,9 @@ impl Outbox {
                 Message::Outcome { report } => report.subscription().seat == seat,
                 Message::Transport { subscription, .. } => subscription.seat == seat,
                 Message::Configuration { .. } => false,
+                Message::RulesChanged {
+                    seat: changed_seat, ..
+                } => changed_seat == seat,
             };
             if discard {
                 self.bytes -= bytes;

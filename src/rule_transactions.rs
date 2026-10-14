@@ -1,0 +1,213 @@
+//! Atomic runtime rule edits. Policy, selectors, layers and engine mode remain
+//! owned by the approved configuration; caller authorization is separate.
+use crate::config::{Config, ConfigError, Rule};
+use serde::{Deserialize, Serialize};
+
+pub const MAX_OPERATIONS: usize = 64;
+pub const MAX_BYTES: usize = 32 * 1024;
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Change {
+    Enabled { id: String, enabled: bool },
+    Replace { rule: Box<Rule> },
+    Remove { id: String },
+}
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Transaction {
+    pub revision: u64,
+    pub changes: Vec<Change>,
+}
+impl Transaction {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.revision == 0 || self.changes.is_empty() || self.changes.len() > MAX_OPERATIONS {
+            return Err(ConfigError(
+                "invalid rule transaction revision/operation count".into(),
+            ));
+        }
+        for change in &self.changes {
+            let id = match change {
+                Change::Enabled { id, .. } | Change::Remove { id } => id,
+                Change::Replace { rule } => &rule.id,
+            };
+            if id.is_empty() || id.len() > 256 || id.chars().any(char::is_control) {
+                return Err(ConfigError("invalid runtime rule identity".into()));
+            }
+        }
+        // Use the same bounded writer for local and wire-originated requests.
+        struct Buffer(usize);
+        impl std::io::Write for Buffer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0 = self
+                    .0
+                    .checked_add(bytes.len())
+                    .filter(|size| *size <= MAX_BYTES)
+                    .ok_or_else(|| std::io::Error::other("rule transaction exceeds byte limit"))?;
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        serde_json::to_writer(Buffer(0), self).map_err(|error| ConfigError(error.to_string()))
+    }
+    pub fn prepare(&self, current: &Config, revision: u64) -> Result<Config, ConfigError> {
+        self.validate()?;
+        if self.revision != revision || revision == u64::MAX {
+            return Err(ConfigError(
+                "stale or exhausted runtime rule revision".into(),
+            ));
+        }
+        let mut next = current.clone();
+        for change in &self.changes {
+            match change {
+                Change::Enabled { id, enabled } => {
+                    let rule = next
+                        .rules
+                        .iter_mut()
+                        .find(|rule| &rule.id == id)
+                        .ok_or_else(|| ConfigError(format!("unknown runtime rule {id}")))?;
+                    rule.enabled = *enabled;
+                }
+                Change::Replace { rule } => {
+                    if let Some(position) = next.rules.iter().position(|old| old.id == rule.id) {
+                        next.rules[position] = rule.as_ref().clone();
+                    } else {
+                        next.rules.push(rule.as_ref().clone());
+                    }
+                }
+                Change::Remove { id } => {
+                    let position = next
+                        .rules
+                        .iter()
+                        .position(|rule| &rule.id == id)
+                        .ok_or_else(|| ConfigError(format!("unknown runtime rule {id}")))?;
+                    next.rules.remove(position);
+                }
+            }
+        }
+        // Includes ID/reference/unit/priority/conflict and policy validation.
+        next.validate()?;
+        Ok(next)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn config() -> Config {
+        Config::parse_named("version=1\n[[rules]]\nid='a'\ndelivery='reserve'\n[rules.trigger]\nkind='key'\nkey='KEY_A'\n[rules.action]\nkind='event'\nname='a'","rules.toml").unwrap()
+    }
+    #[test]
+    fn complete_transaction_validates_before_any_current_rule_is_changed() {
+        let current = config();
+        let valid = Transaction {
+            revision: 1,
+            changes: vec![Change::Enabled {
+                id: "a".into(),
+                enabled: false,
+            }],
+        };
+        let next = valid.prepare(&current, 1).unwrap();
+        assert!(!next.rules[0].enabled && current.rules[0].enabled);
+        assert_eq!(next.policy, current.policy);
+        assert_eq!(next.devices, current.devices);
+        assert_eq!(next.mode, current.mode);
+        assert_eq!(next.layers, current.layers);
+        let invalid = Transaction {
+            revision: 1,
+            changes: vec![
+                valid.changes[0].clone(),
+                Change::Remove {
+                    id: "missing".into(),
+                },
+            ],
+        };
+        assert!(invalid.prepare(&current, 1).is_err());
+        assert!(current.rules[0].enabled);
+        assert!(valid.prepare(&current, 2).is_err());
+        assert!(
+            Transaction {
+                revision: u64::MAX,
+                ..valid.clone()
+            }
+            .prepare(&current, u64::MAX)
+            .is_err()
+        );
+    }
+    #[test]
+    fn replacements_additions_removals_and_conflicts_use_full_schema_validation() {
+        let current = config();
+        let mut changed = current.rules[0].clone();
+        changed.priority = 20;
+        let replace = Transaction {
+            revision: 1,
+            changes: vec![Change::Replace {
+                rule: Box::new(changed.clone()),
+            }],
+        };
+        assert_eq!(replace.prepare(&current, 1).unwrap().rules[0].priority, 20);
+        changed.id = "b".into();
+        changed.priority = 1;
+        let add = Transaction {
+            revision: 1,
+            changes: vec![Change::Replace {
+                rule: Box::new(changed.clone()),
+            }],
+        };
+        assert_eq!(add.prepare(&current, 1).unwrap().rules.len(), 2);
+        changed.priority = current.rules[0].priority;
+        let conflict = Transaction {
+            revision: 1,
+            changes: vec![Change::Replace {
+                rule: Box::new(changed),
+            }],
+        };
+        assert!(conflict.prepare(&current, 1).is_err());
+        let remove = Transaction {
+            revision: 1,
+            changes: vec![Change::Remove { id: "a".into() }],
+        };
+        assert!(remove.prepare(&current, 1).unwrap().rules.is_empty());
+    }
+    #[test]
+    fn serialized_changes_reject_unknown_privilege_fields_and_resource_overflows() {
+        assert!(
+            serde_json::from_str::<Transaction>(r#"{"revision":1,"changes":[],"policy":{}}"#)
+                .is_err()
+        );
+        assert!(serde_json::from_str::<Transaction>(r#"{"revision":1,"changes":[{"operation":"enabled","id":"a","enabled":false,"seat":"other"}]}"#).is_err());
+        let change = Change::Enabled {
+            id: "a".into(),
+            enabled: false,
+        };
+        assert!(
+            Transaction {
+                revision: 0,
+                changes: vec![change.clone()]
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            Transaction {
+                revision: 1,
+                changes: vec![change; MAX_OPERATIONS + 1]
+            }
+            .validate()
+            .is_err()
+        );
+        let mut rule = config().rules.remove(0);
+        rule.action = crate::config::Action::Command {
+            argv: vec!["x".repeat(4096); 16],
+        };
+        let oversized = Transaction {
+            revision: 1,
+            changes: vec![Change::Replace {
+                rule: Box::new(rule),
+            }],
+        };
+        assert!(oversized.validate().unwrap_err().0.contains("byte limit"));
+    }
+}

@@ -44,6 +44,7 @@ pub mod replay;
 pub mod route_worker;
 pub mod router;
 pub mod routing;
+pub mod rule_transactions;
 pub mod rules;
 #[cfg(target_os = "linux")]
 pub mod service;

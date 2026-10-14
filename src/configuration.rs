@@ -15,6 +15,12 @@ pub const INSTALL_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
+    Rules {
+        seat: String,
+        fence: crate::protocol::Fence,
+        id: u64,
+        transaction: crate::rule_transactions::Transaction,
+    },
     Subscriptions {
         update: Subscriptions,
     },
