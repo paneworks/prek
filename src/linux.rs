@@ -370,6 +370,9 @@ pub trait InputSink {
     fn push(&mut self, record: Record) -> io::Result<()>;
     fn deadline(&self) -> Option<Duration>;
     fn flush(&mut self) -> io::Result<()>;
+    fn finished(&self) -> bool {
+        false
+    }
 }
 struct WatchSink<'a, 'b, W: Write> {
     replay: Replay,
@@ -468,6 +471,9 @@ fn observe_loop(
         .transpose()?;
     let mut pending = Vec::<Frame>::new();
     loop {
+        if sink.finished() {
+            return Ok(());
+        }
         if let Some(health) = health.as_mut() {
             match health.progress() {
                 Ok(()) => {}
@@ -544,6 +550,10 @@ fn observe_loop(
         for frame in pending.drain(..future) {
             let record = Record::Frame { frame };
             sink.push(record)?;
+            if sink.finished() {
+                sink.flush()?;
+                return Ok(());
+            }
         }
         for index in failed.into_iter().rev() {
             let reader = readers.remove(index);

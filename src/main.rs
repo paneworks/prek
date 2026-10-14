@@ -25,6 +25,29 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Deliberately learn one shape without grabbing input or binding an action.
+    LearnShape {
+        name: String,
+        #[arg(long)]
+        device: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        /// Capture relative movement while holding the selected mouse button.
+        #[arg(long, conflicts_with = "fingers")]
+        mouse: bool,
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..=64))]
+        fingers: u16,
+        #[arg(long, default_value = "BTN_LEFT")]
+        button: String,
+        /// Maximum time to wait for a valid stroke; captures have their own bound.
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=3600))]
+        duration: u64,
+        /// Learn offline from the named source in a bounded recording.
+        #[arg(long)]
+        from_recording: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Supervise configured observation and authenticated session control.
     /// Input routing and desktop actions remain unavailable.
     Broker {
@@ -173,6 +196,88 @@ fn main() -> ExitCode {
 fn run(command: Command) -> io::Result<()> {
     let mut output = io::stdout().lock();
     match command {
+        Command::LearnShape {
+            name,
+            device,
+            output: path,
+            mouse,
+            fingers,
+            button,
+            duration,
+            from_recording,
+            json,
+        } => {
+            match std::fs::symlink_metadata(&path) {
+                Ok(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "shape output already exists",
+                    ));
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+            let button = prek::config::Key::parse(&button).map_err(io::Error::other)?;
+            let mut learner = prek::learner::Learner::new(
+                name.clone(),
+                device.to_string_lossy().into_owned(),
+                if mouse { None } else { Some(fingers) },
+                button,
+            )?;
+            if let Some(recording) = from_recording {
+                prek::replay::visit(&mut BufReader::new(File::open(recording)?), |record| {
+                    if !learner.finished()
+                        && !matches!(
+                            record,
+                            prek::replay::Record::Expected { .. }
+                                | prek::replay::Record::ExpectedRules { .. }
+                        )
+                    {
+                        learner.push(record)?;
+                        learner.take_events();
+                    }
+                    Ok(())
+                })?;
+            } else {
+                let signals = prek::supervisor::TerminationSignals::install()?;
+                eprintln!(
+                    "Armed {name:?} on {}. Draw and release; Ctrl-C cancels. Input remains forwarded normally.",
+                    device.display()
+                );
+                let mut sink = LearnSink {
+                    learner: &mut learner,
+                    signals: &signals,
+                    next_tick: linux::monotonic()? + Duration::from_millis(250),
+                };
+                linux::observe(&[device], Some(Duration::from_secs(duration)), &mut sink)?;
+                if signals.requested() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        "shape capture cancelled",
+                    ));
+                }
+            }
+            let exported = learner.export()?;
+            let stroke = learner.stroke().unwrap();
+            let text = toml::to_string_pretty(&exported).map_err(io::Error::other)?;
+            write_config(&path, &text, false)?;
+            if json {
+                serde_json::to_writer(
+                    &mut output,
+                    &serde_json::json!({"version":1,"name":name,"samples":stroke.points().len(),"space":stroke.space,"duration":stroke.finished-stroke.started,"output":path,"enabled_rules":0}),
+                )?;
+                writeln!(output)
+            } else {
+                writeln!(
+                    output,
+                    "Saved {name:?}: {} samples in {:?}, {:?}, {}. No action is bound.",
+                    stroke.points().len(),
+                    stroke.finished - stroke.started,
+                    stroke.space,
+                    path.display()
+                )
+            }
+        }
         Command::Broker {
             config,
             mode,
@@ -730,6 +835,54 @@ struct RuleSink<'a, W: Write> {
     engine: prek::rules::Engine,
     output: &'a mut W,
     json: bool,
+}
+
+#[cfg(target_os = "linux")]
+struct LearnSink<'a> {
+    learner: &'a mut prek::learner::Learner,
+    signals: &'a prek::supervisor::TerminationSignals,
+    next_tick: Duration,
+}
+#[cfg(target_os = "linux")]
+impl linux::InputSink for LearnSink<'_> {
+    fn push(&mut self, record: prek::replay::Record) -> io::Result<()> {
+        if self.finished() {
+            return Ok(());
+        }
+        let ready = matches!(record, prek::replay::Record::Device { .. });
+        if let prek::replay::Record::Tick { at } = &record {
+            self.next_tick = *at + Duration::from_millis(250);
+        }
+        self.learner.push(record)?;
+        if ready {
+            eprintln!("Shape reader ready; draw a fresh stroke and release.");
+        }
+        // Feedback contains only outcomes, never intermediate trajectories.
+        for event in self.learner.take_events() {
+            if let prek::rules::Event::Cancelled { reason, .. } = event
+                && !self.learner.finished()
+            {
+                eprintln!("Capture rejected: {reason}. Try a fresh stroke.");
+            }
+        }
+        Ok(())
+    }
+    fn deadline(&self) -> Option<Duration> {
+        Some(
+            self.learner
+                .deadline()
+                .into_iter()
+                .chain([self.next_tick])
+                .min()
+                .unwrap(),
+        )
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+    fn finished(&self) -> bool {
+        self.learner.finished() || self.signals.requested()
+    }
 }
 #[cfg(target_os = "linux")]
 impl<W: Write> linux::InputSink for RuleSink<'_, W> {

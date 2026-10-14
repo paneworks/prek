@@ -172,6 +172,74 @@ fn t33_configured_mouse_shape_cli_replay_checks_a_hand_written_outcome() {
     let events: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
     assert_eq!(events.as_array().unwrap().len(), 1);
     assert_eq!(events[0]["evidence"]["shape"]["name"], "v");
+    let learned = directory.0.join("learned.toml");
+    let result = run(&[
+        "learn-shape",
+        "my-v",
+        "--device",
+        "fixture",
+        "--mouse",
+        "--from-recording",
+        path.to_str().unwrap(),
+        "--output",
+        learned.to_str().unwrap(),
+        "--json",
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let summary: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(summary["space"], "relative");
+    assert_eq!(summary["enabled_rules"], 0);
+    let exported = Config::parse(&fs::read_to_string(&learned).unwrap()).unwrap();
+    assert!(exported.rules.is_empty() && exported.devices.is_empty());
+    assert_eq!(exported.shapes[0].name, "my-v");
+    assert_eq!(exported.shapes[0].points.len(), 64);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&learned).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    let original = fs::read(&learned).unwrap();
+    let failed = run(&[
+        "learn-shape",
+        "my-v",
+        "--device",
+        "fixture",
+        "--mouse",
+        "--from-recording",
+        path.to_str().unwrap(),
+        "--output",
+        learned.to_str().unwrap(),
+    ]);
+    assert!(!failed.status.success());
+    assert_eq!(fs::read(&learned).unwrap(), original);
+
+    // Reuse the exported points in an actual configured replay, without enabling
+    // any rule in the template artifact itself.
+    let mut config = config.clone();
+    config.shapes = exported.shapes;
+    config.rules[0].trigger = Trigger::Shape {
+        name: "my-v".into(),
+        fingers: None,
+        button: None,
+    };
+    fs::write(&config_path, toml::to_string_pretty(&config).unwrap()).unwrap();
+    let result = run(&[
+        "replay",
+        path.to_str().unwrap(),
+        "--config",
+        config_path.to_str().unwrap(),
+        "--json",
+    ]);
+    assert!(result.status.success());
+    let events: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(events[0]["evidence"]["shape"]["name"], "my-v");
 }
 struct Directory(PathBuf);
 impl Directory {

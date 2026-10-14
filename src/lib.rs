@@ -23,6 +23,7 @@ pub mod ipc;
 #[cfg(target_os = "linux")]
 pub mod kernel;
 pub mod keys;
+pub mod learner;
 pub mod paths;
 pub mod protocol;
 pub mod replay;

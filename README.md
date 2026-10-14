@@ -56,6 +56,7 @@ cargo run --locked -- doctor --config prek.toml --json
 cargo run --locked -- run --config prek.toml --mode observe --duration 10 --json
 cargo run --locked -- session --json
 cargo run --locked -- status --json
+cargo run --locked -- learn-shape my-v --device /dev/input/by-id/YOUR-MOUSE --mouse --output my-v.toml
 cargo run --locked --example main
 ```
 
@@ -163,7 +164,20 @@ for the rest of that capture. Unarmed or already-held sequences wait for neutral
 samples, five seconds, 20 mm length, 12 mm extent, normalized fallbacks of
 0.1/0.04 and mouse limits of 20/12 counts. The engine also caps retained shape
 samples at 65,536 across all rules/sources. Capture failure or low/ambiguous
-confidence produces cancellation and no match. `learn-shape` remains pending.
+confidence produces cancellation and no match.
+
+`learn-shape NAME --device PATH --output TEMPLATE.toml` explicitly arms one
+read-only touch capture. Use `--fingers 2` for a fixed two-contact centroid, or
+`--mouse` with optional `--button BTN_RIGHT` for relative mouse capture. Draw
+after the reader reports ready, then release. Capture uses the same size,
+identity and timeout checks as configured shapes. Rejected strokes can be retried
+within `--duration` (30 seconds by default); Ctrl-C cancels without saving.
+The first valid stroke is saved privately as a standalone schema-1 template
+file with 64 resampled points and no enabled rules. Existing output files are
+preserved. `--json` reports units, sample count, duration and destination.
+`--from-recording RECORDING.jsonl` learns deterministically from the explicitly
+named source without opening input. Copy the resulting template into the desired
+configuration and choose a binding explicitly.
 
 The phone preset describes the intended Morf/Hyprland gesture bindings and
 ownership policies. It does not enable a service or install those bindings yet.
@@ -284,6 +298,9 @@ synthetic idle source, including single-owner enforcement, descriptor isolation,
 lease renewal, graceful shutdown and agent exit on broker loss.
 `tests/protocol.rs` covers schema/size/order/time bounds, nonblocking backpressure,
 descriptor rejection/cleanup, endpoint lifetimes and inherited-socket misuse.
+The isolated routing VM also exercises live `learn-shape` on a synthetic mouse,
+checks the saved private template and verifies idle Ctrl-C cancellation without
+an output file. Offline learning tests reuse the exported template in replay.
 Configured shape tests cover touch/mouse V, circle/zigzag, fixed multi-finger
 centroids, arming changes, release-frame motion, confidence/size/resource limits
 and mapping/contact replacement. CLI shape replay checks a hand-written expected

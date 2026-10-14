@@ -316,10 +316,24 @@ fn gate(touch: bool, failure: &str, index: usize) {
     }
     let deadline = Instant::now() + Duration::from_secs(2);
     gone(&prepared.output, deadline);
-    assert_eq!(
-        output.get_key_state().unwrap_err().raw_os_error(),
-        Some(libc::ENODEV)
-    );
+    // Unlinking the event node can precede completion of handler teardown.
+    // Require the retained descriptor to become unusable within the same
+    // recovery deadline; a missing pathname alone proves too little.
+    loop {
+        match output.get_key_state() {
+            Err(error) => {
+                assert_eq!(error.raw_os_error(), Some(libc::ENODEV));
+                break;
+            }
+            Ok(_) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "removed device still accepts state queries"
+                );
+                thread::sleep(Duration::from_millis(2));
+            }
+        }
+    }
     let status = parent.0.wait().unwrap();
     if failure == "parent" {
         assert!(!status.success());

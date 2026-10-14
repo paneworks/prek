@@ -8,7 +8,7 @@ use crate::{
     gestures::{Mapping, Phase, Space, TouchEvent, TouchGesture, TouchRecognizer, TouchSettings},
     input::{Change, Contact, Device, KeyState, NormalizedFrame, Source},
     keys::{Chord, Hold, KeyObservation, Keys, Repeat},
-    paths::{CaptureIdentity, MatchOutcome, Matcher, PathCapture, ShapeMatch},
+    paths::{CaptureIdentity, MatchOutcome, Matcher, PathCapture, ShapeMatch, Stroke},
     replay::{Observation, Record, Replay},
 };
 use serde::{Deserialize, Serialize};
@@ -277,6 +277,8 @@ pub struct Engine {
     events: Vec<Event>,
     expected: Option<Vec<Event>>,
     last_at: Option<Duration>,
+    capture_rule: Option<String>,
+    captured: Vec<Stroke>,
 }
 impl Engine {
     pub fn new(config: Config) -> io::Result<Self> {
@@ -308,7 +310,32 @@ impl Engine {
             events: Vec::new(),
             expected: None,
             last_at: None,
+            capture_rule: None,
+            captured: Vec::new(),
         })
+    }
+    /// Explicit diagnostic capture only. Ordinary engines never retain or
+    /// expose trajectories. The capture rule must be the sole enabled,
+    /// context-free observational shape rule; it cannot execute an action.
+    pub fn new_capture(config: Config, rule: &str) -> io::Result<Self> {
+        let enabled: Vec<_> = config.rules.iter().filter(|rule| rule.enabled).collect();
+        if config.mode != crate::config::Mode::Observe
+            || enabled.len() != 1
+            || enabled[0].id != rule
+            || !context_free(enabled[0])
+            || enabled[0].delivery != crate::config::Delivery::Observe
+            || !matches!(enabled[0].trigger, Trigger::Shape { .. })
+        {
+            return Err(invalid(
+                "capture requires one observational, context-free shape rule",
+            ));
+        }
+        let mut engine = Self::new(config)?;
+        engine.capture_rule = Some(rule.into());
+        Ok(engine)
+    }
+    pub fn take_strokes(&mut self) -> Vec<Stroke> {
+        std::mem::take(&mut self.captured)
     }
     /// Trusted registration layer only. IPC must verify peer/logind binding
     /// before calling this model; a caller-supplied session name is insufficient.
@@ -705,6 +732,9 @@ impl Engine {
                             authority: &self.authority,
                             keys: &self.conditions,
                             generation: self.generation,
+                            captured: (self.capture_rule.as_deref()
+                                == Some(worker.rule.id.as_str()))
+                            .then_some(&mut self.captured),
                         },
                         &mut self.next_id,
                         &mut self.events,
@@ -1080,12 +1110,13 @@ struct ShapeContext<'a> {
     authority: &'a Authority,
     keys: &'a Keys,
     generation: u64,
+    captured: Option<&'a mut Vec<Stroke>>,
 }
 fn shape_frame(
     worker: &mut Worker,
     state: &DeviceState,
     frame: &NormalizedFrame,
-    context: ShapeContext<'_>,
+    mut context: ShapeContext<'_>,
     next_id: &mut u64,
     events: &mut Vec<Event>,
 ) -> io::Result<()> {
@@ -1308,39 +1339,56 @@ fn shape_frame(
                 .ok_or(crate::paths::CaptureError::TooSmall)
                 .and_then(|path| path.finish(at))
             {
-                Ok(stroke) => match matcher.classify(&stroke) {
-                    MatchOutcome::Matched { shape } if matches!(&worker.rule.trigger, Trigger::Shape { name, .. } if *name == shape.name) => {
-                        report_signals(
+                Ok(stroke) => {
+                    if let Some(captured) = context.captured.as_mut() {
+                        if captured.len() >= 16
+                            || captured
+                                .iter()
+                                .map(|stroke| stroke.points().len())
+                                .sum::<usize>()
+                                + stroke.points().len()
+                                > 65_536
+                        {
+                            return Err(invalid(
+                                "diagnostic stroke queue is full; drain before continuing",
+                            ));
+                        }
+                        captured.push(stroke.clone());
+                    }
+                    match matcher.classify(&stroke) {
+                        MatchOutcome::Matched { shape } if matches!(&worker.rule.trigger, Trigger::Shape { name, .. } if *name == shape.name) => {
+                            report_signals(
+                                worker,
+                                vec![Signal::Shape {
+                                    source: source.clone(),
+                                    space: stroke.space,
+                                    fingers,
+                                    shape,
+                                }],
+                                context.generation,
+                                at,
+                                events,
+                            )
+                        }
+                        MatchOutcome::Matched { .. } => cancel_candidate(
                             worker,
-                            vec![Signal::Shape {
-                                source: source.clone(),
-                                space: stroke.space,
-                                fingers,
-                                shape,
-                            }],
-                            context.generation,
+                            source,
                             at,
+                            "path matched a different template",
                             events,
-                        )
+                        ),
+                        MatchOutcome::Ambiguous { .. } => {
+                            cancel_candidate(worker, source, at, "ambiguous shape", events)
+                        }
+                        MatchOutcome::Rejected { .. } => cancel_candidate(
+                            worker,
+                            source,
+                            at,
+                            "shape confidence below threshold",
+                            events,
+                        ),
                     }
-                    MatchOutcome::Matched { .. } => cancel_candidate(
-                        worker,
-                        source,
-                        at,
-                        "path matched a different template",
-                        events,
-                    ),
-                    MatchOutcome::Ambiguous { .. } => {
-                        cancel_candidate(worker, source, at, "ambiguous shape", events)
-                    }
-                    MatchOutcome::Rejected { .. } => cancel_candidate(
-                        worker,
-                        source,
-                        at,
-                        "shape confidence below threshold",
-                        events,
-                    ),
-                },
+                }
                 Err(reason) => cancel_candidate(worker, source, at, &reason.to_string(), events),
             }
             worker.candidates.remove(source);
@@ -2655,6 +2703,10 @@ mod tests {
         shape_touch(&mut engine, 50, 2, &[(0, 500, 900)], false, false);
         shape_touch(&mut engine, 80, 3, &[(0, 900, 100)], false, true);
         assert_eq!(matches(&engine.events).len(), 1);
+        assert!(
+            engine.take_strokes().is_empty(),
+            "ordinary engines never expose captured paths"
+        );
         assert!(
             matches!(&matches(&engine.events)[0], Event::Matched { evidence: Evidence::Shape { space: Space::Millimetres, fingers: Some(1), shape }, stage: Stage::Discrete, .. } if shape.name == "v" && shape.confidence >= 0.94)
         );

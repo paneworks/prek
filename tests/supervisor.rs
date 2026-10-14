@@ -39,6 +39,10 @@ fn worker_fixture() {
         observer_fixture();
         return;
     }
+    if case == "learn-fixture" {
+        learn_fixture();
+        return;
+    }
     if case == "signal-supervisor" {
         let signals = TerminationSignals::install().unwrap();
         assert!(
@@ -185,6 +189,67 @@ fn observer_fixture() {
     // including on its console, while testing idle health and shutdown.
     loop {
         thread::sleep(Duration::from_secs(60));
+    }
+}
+
+fn learn_fixture() {
+    use evdev::{
+        AttributeSet, EventType, InputEvent, KeyCode, RelativeAxisCode, uinput::VirtualDevice,
+    };
+    use std::io::Write;
+    assert_eq!(std::env::var("PREK_ISOLATED_ROUTING").as_deref(), Ok("1"));
+    assert_eq!(unsafe { libc::geteuid() }, 0);
+    let mut source = VirtualDevice::builder()
+        .unwrap()
+        .name("Prek learn fixture")
+        .with_keys(&AttributeSet::from_iter([KeyCode::BTN_LEFT]))
+        .unwrap()
+        .with_relative_axes(&AttributeSet::from_iter([
+            RelativeAxisCode::REL_X,
+            RelativeAxisCode::REL_Y,
+        ]))
+        .unwrap()
+        .build()
+        .unwrap();
+    let node = source
+        .enumerate_dev_nodes_blocking()
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
+    let path = std::env::var_os("PREK_PROCESS_WITNESS").unwrap();
+    let mut witness = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .unwrap();
+    writeln!(witness, "{}", node.display()).unwrap();
+    witness.sync_all().unwrap();
+    let mut emitted = false;
+    loop {
+        if !emitted && std::path::Path::new("/run/prek-learn-fixture/start").exists() {
+            source
+                .emit(&[InputEvent::new(EventType::KEY.0, KeyCode::BTN_LEFT.0, 1)])
+                .unwrap();
+            thread::sleep(Duration::from_millis(40));
+            source
+                .emit(&[
+                    InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_X.0, 50),
+                    InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_Y.0, 100),
+                ])
+                .unwrap();
+            thread::sleep(Duration::from_millis(40));
+            source
+                .emit(&[
+                    InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_X.0, 50),
+                    InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_Y.0, -100),
+                    InputEvent::new(EventType::KEY.0, KeyCode::BTN_LEFT.0, 0),
+                ])
+                .unwrap();
+            emitted = true;
+        }
+        thread::sleep(Duration::from_millis(25));
     }
 }
 
