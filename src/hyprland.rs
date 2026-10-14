@@ -327,6 +327,15 @@ impl Client {
     pub fn version(&self) -> &Version {
         &self.version
     }
+    /// Recheck the retained socket, peer, process birth and executable without
+    /// reading desktop state. Registration uses this around logind inspection.
+    pub fn check_binding(&self) -> io::Result<()> {
+        let stream = connect(&self.socket_path(), Instant::now() + REQUEST_TIME)?;
+        self.verify(&stream)
+    }
+    pub fn uid(&self) -> u32 {
+        self.uid
+    }
     pub fn consumer(&self) -> Consumer {
         Consumer::Hyprland {
             pid: self.pid,

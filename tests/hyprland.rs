@@ -251,3 +251,188 @@ fn stock_compositor_accepts_virtual_keyboard_and_verifies_its_keymap() {
         thread::sleep(Duration::from_millis(25));
     }
 }
+
+#[test]
+#[ignore = "fixture launched only by the compositor/session VM harness"]
+fn logind_session_agent_fixture() {
+    use std::os::unix::net::UnixStream;
+    assert_eq!(
+        std::env::var("PREK_SESSION_AGENT_FIXTURE").as_deref(),
+        Ok("1")
+    );
+    let socket = std::env::var_os("PREK_AGENT_SOCKET").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut stream = loop {
+        if let Ok(stream) = UnixStream::connect(&socket) {
+            break stream;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "session test broker did not start"
+        );
+        thread::sleep(Duration::from_millis(25));
+    };
+    stream.write_all(b"ready").unwrap();
+    let mut response = [0; 1];
+    let received = stream.read(&mut response).unwrap();
+    if received == 1 && response == *b"D" {
+        stream.shutdown(std::net::Shutdown::Both).unwrap();
+        // Keep the process alive so registration must detect socket loss.
+        thread::sleep(Duration::from_secs(5));
+    } else {
+        assert_eq!(received, 0);
+    }
+}
+
+#[test]
+#[ignore = "requires actual logind and the disposable stock-compositor VM"]
+fn stock_session_registration_checks_membership_and_revokes_dead_agents() {
+    use prek::session::{Logind, Peer};
+    use std::{
+        os::unix::{net::UnixStream, process::CommandExt},
+        process::Command,
+    };
+    assert_eq!(std::env::var("PREK_COMPOSITOR_VM").as_deref(), Ok("1"));
+    let socket = Path::new("/run/prek-session/agent.sock");
+    let listener = UnixListener::bind(socket).unwrap();
+    fs::set_permissions(socket, fs::Permissions::from_mode(0o666)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let accept = |listener: &UnixListener| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(1)))
+                        .unwrap();
+                    let mut greeting = [0; 5];
+                    stream.read_exact(&mut greeting).unwrap();
+                    assert_eq!(&greeting, b"ready");
+                    break stream;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline);
+                    thread::sleep(Duration::from_millis(25));
+                }
+                Err(error) => panic!("agent socket: {error}"),
+            }
+        }
+    };
+    let agent = accept(&listener);
+    let client = Client::open(
+        &PathBuf::from(std::env::var_os("PREK_HYPR_RUNTIME").unwrap()),
+        &std::env::var("PREK_HYPR_INSTANCE").unwrap(),
+        std::env::var("PREK_HYPR_UID").unwrap().parse().unwrap(),
+        &PathBuf::from(std::env::var_os("PREK_HYPR_EXE").unwrap()),
+    )
+    .unwrap();
+    let logind = Logind::open(&PathBuf::from(
+        std::env::var_os("PREK_LOGIND_LIBRARY").unwrap(),
+    ))
+    .unwrap();
+    let peer = Peer::from_socket(&agent).unwrap();
+    let agent_pid = peer.pid();
+    let mut registration = logind.register(peer, &client).unwrap();
+    let binding = registration.binding().unwrap();
+    assert_eq!(binding.uid, 1000);
+    assert_eq!(binding.seat, "seat0");
+    assert!(!binding.session.is_empty());
+    registration.check(&logind, &client).unwrap();
+
+    // Same UID, separate service cgroup: UID ownership alone must not authorize
+    // a process outside the compositor's login session.
+    let outside_path = Path::new("/run/prek-session/outside.sock");
+    let outside_listener = UnixListener::bind(outside_path).unwrap();
+    fs::set_permissions(outside_path, fs::Permissions::from_mode(0o666)).unwrap();
+    outside_listener.set_nonblocking(true).unwrap();
+    let mut outsider = Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "logind_session_agent_fixture"])
+        .env("PREK_SESSION_AGENT_FIXTURE", "1")
+        .env("PREK_AGENT_SOCKET", outside_path)
+        .uid(1000)
+        .gid(100)
+        .spawn()
+        .unwrap();
+    let outside = accept(&outside_listener);
+    let peer = Peer::from_socket(&outside).unwrap();
+    assert_eq!(peer.uid(), 1000);
+    assert!(logind.register(peer, &client).is_err());
+    drop(outside);
+    assert!(outsider.wait().unwrap().success());
+    let (local, _other) = UnixStream::pair().unwrap();
+    assert!(
+        logind
+            .register(Peer::from_socket(&local).unwrap(), &client)
+            .is_err()
+    );
+
+    thread::sleep(Duration::from_millis(260));
+    assert!(registration.binding().is_err());
+    registration.check(&logind, &client).unwrap();
+    assert!(registration.binding().is_ok());
+    assert_eq!(
+        unsafe { nix::libc::kill(agent_pid as i32, nix::libc::SIGTERM) },
+        0
+    );
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if registration.check(&logind, &client).is_err() {
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(registration.binding().is_err());
+    assert!(registration.check(&logind, &client).is_err());
+    drop(agent);
+
+    // Keep another live agent/compositor pair while the real active VT changes.
+    // Losing activity revokes the old proof even after returning to this seat.
+    let seat_path = Path::new("/run/prek-session/seat.sock");
+    let seat_listener = UnixListener::bind(seat_path).unwrap();
+    fs::set_permissions(seat_path, fs::Permissions::from_mode(0o666)).unwrap();
+    seat_listener.set_nonblocking(true).unwrap();
+    let mut seat_agent = accept(&seat_listener);
+    let seat_agent_pid = Peer::from_socket(&seat_agent).unwrap().pid();
+    let mut seat_registration = logind
+        .register(Peer::from_socket(&seat_agent).unwrap(), &client)
+        .unwrap();
+    let chvt = std::env::var_os("PREK_TEST_CHVT").unwrap();
+    assert!(Command::new(&chvt).arg("2").status().unwrap().success());
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if seat_registration.check(&logind, &client).is_err() {
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(seat_registration.binding().is_err());
+    client.check_binding().unwrap();
+    assert!(Command::new(&chvt).arg("1").status().unwrap().success());
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut refreshed = loop {
+        if let Ok(registration) = logind.register(Peer::from_socket(&seat_agent).unwrap(), &client)
+        {
+            break registration;
+        }
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert!(seat_registration.check(&logind, &client).is_err());
+    seat_agent.write_all(b"D").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if refreshed.check(&logind, &client).is_err() {
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(unsafe { nix::libc::kill(seat_agent_pid as i32, 0) }, 0);
+    assert!(refreshed.binding().is_err());
+    drop(seat_agent);
+    fs::remove_file(seat_path).unwrap();
+    fs::remove_file(socket).unwrap();
+    fs::remove_file(outside_path).unwrap();
+}

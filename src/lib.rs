@@ -26,6 +26,8 @@ pub mod replay;
 pub mod router;
 pub mod rules;
 #[cfg(target_os = "linux")]
+pub mod session;
+#[cfg(target_os = "linux")]
 pub mod supervisor;
 pub mod transport;
 

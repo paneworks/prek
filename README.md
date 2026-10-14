@@ -32,8 +32,16 @@ The Hyprland client verifies the IPC socket's owner, compositor process identity
 and executable before querying bounded device inventories. It supports the
 verified 0.54/0.55 schemas and checks virtual-device acceptance and reported
 keyboard settings. The kernel backend also verifies processed udev metadata
-and the resulting evdev capabilities. Active logind session/seat authorization,
-settings absent from stock IPC and complete readiness handoff remain pending.
+and the resulting evdev capabilities. Settings absent from stock IPC and
+complete readiness handoff remain pending.
+
+The session library obtains agent credentials from an established local socket
+and verifies that agent and compositor belong to the same active local logind
+session and seat. Checks retain kernel process handles and expire after 250 ms.
+Process exit, socket disconnect, compositor replacement or session deactivation
+revokes registration; returning to the seat requires a new registration.
+This proves session membership, while lock-provider acknowledgements and the
+broker/session protocol are still required before desktop actions can run.
 
 ## Commands
 
@@ -138,8 +146,9 @@ against it. A focus change cannot redirect a swipe. Session/lock changes, stale
 snapshots, target removal, relevant geometry changes and overlays cancel it.
 Compositor visibility is distinct from a mapped window on another workspace.
 The model requires 250 ms snapshot freshness and a one-second provider lease.
-Its binding input must come from a trusted registration layer; this model alone
-does not authenticate clients or inspect logind. Those service components remain
+The Linux session library supplies verified socket/process/logind membership
+for agents launched inside the compositor's session. Service integration,
+delegation for shared user services and real lock-provider registration remain
 pending. The lockscreen/greeter UI and authentication remain Morf's responsibility.
 
 ## Recording and replay
@@ -180,6 +189,7 @@ commands. Raw recordings are an explicit diagnostic operation, not service logs.
 - `router` owns sequences and schedules bounded, ordered raw-frame delivery.
 - `kernel` owns Linux virtual-device creation, metadata and nonblocking writes.
 - `hyprland` verifies compositor IPC identity and virtual-device inventory evidence.
+- `session` verifies agent/compositor membership in logind's active seat/session.
 - `supervisor` bounds worker lifetime and handles foreground/service termination.
 - `diagnostics` checks device selection/capacity and reports missing consumers.
 - `replay` connects frame normalization with button/touch recognition.
@@ -210,6 +220,8 @@ the host or start input routing. ARM kernel execution remains a separate gate.
 Hyprland in a separate disposable VM. It checks virtual keyboard acceptance,
 processed metadata, keymap verification and removal. Ordinary IPC tests cover
 endpoint replacement, executable/permission checks, malformed replies and timeouts.
+The VM also checks actual logind registration, rejection of another process with
+the same UID outside the session, agent death, disconnect and active VT changes.
 
 Shape matching preserves path order and aspect ratio;
 rotation/reflection invariance must be enabled explicitly. Too-small, unmatched

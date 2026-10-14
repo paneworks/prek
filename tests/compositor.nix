@@ -21,6 +21,8 @@ let
     postInstall = "";
   });
   compositorConfig = pkgs.writeText "prek-hyprland-test.conf" ''
+    exec-once = env PREK_SESSION_AGENT_FIXTURE=1 PREK_AGENT_SOCKET=/run/prek-session/agent.sock ${tests}/bin/prek-compositor-tests --ignored --exact logind_session_agent_fixture --nocapture
+    exec-once = env PREK_SESSION_AGENT_FIXTURE=1 PREK_AGENT_SOCKET=/run/prek-session/seat.sock ${tests}/bin/prek-compositor-tests --ignored --exact logind_session_agent_fixture --nocapture
     monitor = , preferred, auto, 1
     input {
       kb_layout = us
@@ -45,7 +47,10 @@ pkgs.testers.runNixOSTest {
     hardware.graphics.enable = true;
     boot.kernelModules = [ "uinput" ];
     services.udev.packages = [ package ];
-    systemd.tmpfiles.rules = [ "d /run/prek/devices 0700 root root -" ];
+    systemd.tmpfiles.rules = [
+      "d /run/prek/devices 0700 root root -"
+      "d /run/prek-session 0755 root root -"
+    ];
     environment.systemPackages = [ package tests ];
     programs.bash.loginShellInit = ''
       if [ "$(tty)" = /dev/tty1 ]; then
@@ -62,11 +67,11 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_unit("multi-user.target")
     machine.wait_until_succeeds("test -n \"$(find /run/user/1000/hypr -name .socket.sock 2>/dev/null)\"", timeout=60)
     instance = machine.succeed("basename $(dirname $(find /run/user/1000/hypr -name .socket.sock))").strip()
-    # The endpoint appears before rendering/backend initialization completes.
-    # Wait for a real request, rather than treating socket creation as readiness.
-    machine.wait_until_succeeds(f"XDG_RUNTIME_DIR=/run/user/1000 ${pkgs.hyprland}/bin/hyprctl -i {instance} -j version", timeout=30)
-    environment = f"PREK_COMPOSITOR_VM=1 PREK_ISOLATED_ROUTING=1 PREK_HYPR_RUNTIME=/run/user/1000 PREK_HYPR_INSTANCE={instance} PREK_HYPR_EXE=${pkgs.hyprland}/bin/.Hyprland-wrapped PREK_HYPR_UID=1000"
-    machine.succeed(f"{environment} ${tests}/bin/prek-compositor-tests --ignored --test-threads=1 --nocapture", timeout=30)
+    environment = f"PREK_COMPOSITOR_VM=1 PREK_ISOLATED_ROUTING=1 PREK_TEST_CHVT=${pkgs.kbd}/bin/chvt PREK_LOGIND_LIBRARY=${pkgs.systemd}/lib/libsystemd.so.0 PREK_HYPR_RUNTIME=/run/user/1000 PREK_HYPR_INSTANCE={instance} PREK_HYPR_EXE=${pkgs.hyprland}/bin/.Hyprland-wrapped PREK_HYPR_UID=1000"
+    # Socket creation alone does not establish a responsive backend. Require
+    # a successful query using the client's real 200 ms budget.
+    machine.wait_until_succeeds(f"{environment} ${tests}/bin/prek-compositor-tests --ignored --exact stock_compositor_queries_use_the_verified_live_socket --nocapture", timeout=30)
+    machine.succeed(f"{environment} ${tests}/bin/prek-compositor-tests --ignored --skip logind_session_agent_fixture --test-threads=1 --nocapture", timeout=30)
     machine.succeed("test -z \"$(ls -A /run/prek/devices)\"")
   '';
 }
