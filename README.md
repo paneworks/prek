@@ -350,6 +350,11 @@ prek replay rule-fixture.jsonl --config prek.toml --check --json
 The JSONL format is versioned and bounded. It records device metadata, initial
 state, complete frames and timer ticks. A test fixture may additionally contain
 output mappings, reconciliation snapshots and a final expected-outcomes record.
+Linux registration also records persistent absolute-axis state, including the
+selected multi-touch slot and coordinates of inactive slots. The `absolute`
+record seeds those values before the source's first frame after registration or
+reconciliation. It creates no contacts or presses. This preserves coordinates
+when the kernel omits unchanged values; existing recordings remain readable.
 Generic fixtures use `expected`; configured fixtures use `expected_rules`. The
 decoder limits each line to 4 MiB, total input to 64 MiB and records to 100,000.
 Configured replay additionally bounds its retained observation queue; live
@@ -414,6 +419,15 @@ synthetic idle source, including single-owner enforcement, descriptor isolation,
 lease renewal, graceful shutdown and agent exit on broker loss. Live desktop-only
 rules use actual compositor snapshots; an acknowledged Wayland session lock
 inhibits observations and a bare unlock leaves provider inhibition in place.
+`nix build .#checks.x86_64-linux.cage` runs the instrumented Wayland application
+in a disposable Cage VM. Owned uinput sources exercise Lua-configured reserved
+keys and buffered touch gestures through the routing library and kernel output.
+The receiver displays and records text, modifiers, pressed keys, contacts,
+coordinates and touch frames. Assertions check consumption, ordinary delivery
+and cleanup with a modifier/contact held. Context is a model fixture; production
+broker routing, remapping/repeats, handoff races and phone parity need their own
+remaining gates. The VM captures receipts and screenshots for diagnosis.
+
 `tests/protocol.rs` covers schema/size/order/time bounds, nonblocking backpressure,
 descriptor rejection/cleanup, endpoint lifetimes and inherited-socket misuse.
 The isolated routing VM also exercises live `learn-shape` on a synthetic mouse,

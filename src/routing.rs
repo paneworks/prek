@@ -133,6 +133,17 @@ impl Routing {
         mapping: Option<crate::gestures::Mapping>,
         at: Duration,
     ) -> io::Result<()> {
+        self.attach_with_state(device, ready, mapping, None, at)
+    }
+
+    pub fn attach_with_state(
+        &mut self,
+        device: Device,
+        ready: &Ready,
+        mapping: Option<crate::gestures::Mapping>,
+        absolute: Option<crate::input::AbsoluteState>,
+        at: Duration,
+    ) -> io::Result<()> {
         if self
             .routes
             .keys()
@@ -166,13 +177,23 @@ impl Routing {
             offset: self.engine.config().timing.decision_window.duration(),
             ..Limits::default()
         };
-        let router =
+        let mut router =
             Router::new(device.clone(), ready, authorization, limits, at).map_err(fault)?;
+        if let Some(state) = &absolute {
+            state.validate(&device.axes).map_err(io::Error::other)?;
+            router.seed_absolute(state).map_err(fault)?;
+        }
         self.engine.push(Record::Device {
             device: device.clone(),
             keys: BTreeSet::new(),
             contacts: Vec::new(),
         })?;
+        if let Some(state) = absolute {
+            self.engine.push(Record::Absolute {
+                source: device.source.clone(),
+                state,
+            })?;
+        }
         if let Some(mapping) = mapping {
             self.engine.push(Record::Mapping {
                 source: device.source.clone(),

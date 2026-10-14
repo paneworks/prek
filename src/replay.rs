@@ -36,6 +36,12 @@ pub enum Record {
     Frame {
         frame: Frame,
     },
+    /// Persistent coordinates/cursor before the first frame following
+    /// registration or reconciliation; this introduces no presses or contacts.
+    Absolute {
+        source: Source,
+        state: crate::input::AbsoluteState,
+    },
     Tick {
         at: Duration,
     },
@@ -101,6 +107,13 @@ impl Default for Replay {
 }
 
 impl Replay {
+    pub(crate) fn absolute_state(&self, source: &Source) -> Option<&crate::input::AbsoluteState> {
+        self.devices
+            .get(&source.device)
+            .filter(|(device, _)| device.source == *source)
+            .map(|(_, normalizer)| normalizer.absolute_state())
+    }
+
     pub fn new(timing: Timing) -> Result<Self, &'static str> {
         Ok(Self {
             devices: BTreeMap::new(),
@@ -133,6 +146,11 @@ impl Replay {
             return Err(invalid("expected outcomes must be the final record"));
         }
         match record {
+            Record::Absolute { source, state } => {
+                self.validate_source(&source)?;
+                let (device, normalizer) = self.devices.get_mut(&source.device).unwrap();
+                normalizer.seed_absolute(device, state).map_err(invalid)?;
+            }
             Record::Header { .. } => return Err(invalid("duplicate recording header")),
             Record::ExpectedRules { .. } => {
                 return Err(invalid("rule expectations require replay --config"));

@@ -875,6 +875,23 @@ impl Virtual {
         Ok(nodes)
     }
 
+    /// Initialize persistent coordinates on a pristine virtual device without
+    /// introducing a contact or key. Flush this before consumer readiness.
+    pub fn initialize_absolute(
+        &mut self,
+        state: &crate::input::AbsoluteState,
+        at: std::time::Duration,
+    ) -> io::Result<()> {
+        if self.sequence.is_some() || self.pending.is_some() {
+            return Err(invalid(
+                "absolute initialization requires a pristine virtual device",
+            ));
+        }
+        state.validate(&self.descriptor().axes).map_err(invalid)?;
+        let frame = state.initialization(self.descriptor().source.clone(), at);
+        self.enqueue(&frame)
+    }
+
     /// One in-flight frame maximum. Acknowledgement to Router is allowed only
     /// after flush completes; no appended/duplicated SYN_REPORT is generated.
     pub fn enqueue(&mut self, frame: &Frame) -> io::Result<()> {

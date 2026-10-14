@@ -221,6 +221,51 @@ pub fn describe(path: &Path, raw: &RawDevice, generation: u64) -> io::Result<Dev
     })
 }
 
+/// Query persistent values, including every inactive Type B slot. The caller
+/// owns this descriptor and must arrange its input handoff/reconciliation.
+pub fn absolute_state(raw: &RawDevice, device: &Device) -> io::Result<input::AbsoluteState> {
+    let mut state = input::AbsoluteState::default();
+    if device.axes.is_empty() {
+        return Ok(state);
+    }
+    let values = raw.get_abs_state()?;
+    for &code in device.axes.keys() {
+        if code > 0x3f {
+            return Err(io::Error::other("unsupported absolute axis"));
+        }
+        if code == input::ABS_MT_TRACKING_ID {
+            continue;
+        }
+        if input::per_slot(code) {
+            let capacity = device
+                .touch_capacity()
+                .ok_or_else(|| io::Error::other("invalid multi-touch capacity"))?;
+            if device.axes[&input::ABS_MT_SLOT].minimum != 0 {
+                return Err(io::Error::other(
+                    "kernel multi-touch snapshots require zero-based slots",
+                ));
+            }
+            let mut slots = vec![0; capacity + 1];
+            slots[0] = i32::from(code);
+            // SAFETY: owned evdev fd; the bounded i32 buffer encodes its axis
+            // followed by exactly the supported number of kernel slot values.
+            unsafe { get_mt_slots(raw.as_raw_fd(), &mut slots) }.map_err(io::Error::from)?;
+            for (slot, &value) in slots[1..].iter().enumerate() {
+                state
+                    .slots
+                    .entry(slot as u16)
+                    .or_default()
+                    .values
+                    .insert(code, value);
+            }
+        } else {
+            state.values.insert(code, values[usize::from(code)].value);
+        }
+    }
+    state.validate(&device.axes).map_err(io::Error::other)?;
+    Ok(state)
+}
+
 pub(crate) fn initial_contacts(raw: &RawDevice, device: &Device) -> io::Result<Vec<Contact>> {
     let Some(capacity) = device.touch_capacity() else {
         return Ok(Vec::new());
@@ -505,6 +550,10 @@ fn observe_loop(
             reader.device.name
         );
         sink.push(record)?;
+        sink.push(Record::Absolute {
+            source: reader.device.source.clone(),
+            state: absolute_state(&reader.raw, &reader.device)?,
+        })?;
         readers.push(reader);
     }
     if readers.is_empty() && sink.device_policy().is_none() {
@@ -792,6 +841,10 @@ fn refresh_readers(
         }
         sink.push(record)?;
         generations.insert(reader.device.source.device, generation);
+        sink.push(Record::Absolute {
+            source: reader.device.source.clone(),
+            state: absolute_state(&reader.raw, &reader.device)?,
+        })?;
         eprintln!(
             "Observing {} ({:?}); input still reaches applications.",
             reader.device.path, reader.device.name

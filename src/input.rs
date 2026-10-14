@@ -4,6 +4,9 @@
 //! recognition. A contact identity is never just its reusable Linux slot.
 
 use serde::{Deserialize, Serialize};
+mod absolute;
+pub(crate) use absolute::per_slot;
+pub use absolute::{AbsoluteSlot, AbsoluteState};
 use std::{
     collections::{BTreeMap, BTreeSet},
     time::Duration,
@@ -242,6 +245,8 @@ pub struct Normalizer {
     slot_range: Option<(u16, u16)>,
     next_contact: u64,
     synchronized: bool,
+    absolute: AbsoluteState,
+    axes: BTreeMap<u16, Axis>,
 }
 
 impl Normalizer {
@@ -251,6 +256,10 @@ impl Normalizer {
             let maximum = u16::try_from(axis.maximum).ok()?;
             (maximum >= minimum && maximum - minimum < 256).then_some((minimum, maximum))
         });
+        let mut absolute = AbsoluteState::default();
+        if let Some((minimum, _)) = slot_range {
+            absolute.values.insert(ABS_MT_SLOT, i32::from(minimum));
+        }
         Self {
             source: device.source.clone(),
             last_at: None,
@@ -262,6 +271,8 @@ impl Normalizer {
             slot_range,
             next_contact: 0,
             synchronized: true,
+            absolute,
+            axes: device.axes.clone(),
         }
     }
 
@@ -306,6 +317,24 @@ impl Normalizer {
         self.clear();
         self.keys = keys;
         self.slots = slots;
+        for (&number, slot) in &self.slots {
+            for (code, value) in [
+                (ABS_MT_POSITION_X, slot.x),
+                (ABS_MT_POSITION_Y, slot.y),
+                (ABS_MT_PRESSURE, slot.pressure),
+            ] {
+                if self.axes.contains_key(&code)
+                    && let Some(value) = value
+                {
+                    self.absolute
+                        .slots
+                        .entry(number)
+                        .or_default()
+                        .values
+                        .insert(code, value);
+                }
+            }
+        }
         self.next_contact = next_contact;
         self.synchronized = true;
         Ok(())
@@ -314,6 +343,36 @@ impl Normalizer {
     pub fn cancel(&mut self) {
         self.clear();
         self.synchronized = false;
+    }
+
+    pub fn seed_absolute(
+        &mut self,
+        device: &Device,
+        state: AbsoluteState,
+    ) -> Result<(), &'static str> {
+        if device.source != self.source || self.last_sequence.is_some() || !self.synchronized {
+            return Err("absolute state requires a freshly registered or reconciled source");
+        }
+        state.validate(&device.axes)?;
+        for (&number, coordinates) in &state.slots {
+            let slot = self.slots.entry(number).or_default();
+            if let Some(&value) = coordinates.values.get(&ABS_MT_POSITION_X) {
+                slot.x = Some(value);
+            }
+            if let Some(&value) = coordinates.values.get(&ABS_MT_POSITION_Y) {
+                slot.y = Some(value);
+            }
+            if let Some(&value) = coordinates.values.get(&ABS_MT_PRESSURE) {
+                slot.pressure = Some(value);
+            }
+        }
+        self.active_slot = state.selected_slot();
+        self.absolute = state;
+        Ok(())
+    }
+
+    pub fn absolute_state(&self) -> &AbsoluteState {
+        &self.absolute
     }
 
     pub fn process(&mut self, frame: Frame) -> FrameResult {
@@ -394,6 +453,9 @@ impl Normalizer {
                     }
                 }
                 EV_ABS => {
+                    if event.code > 0x3f {
+                        return self.reject(CancelReason::InvalidFrame);
+                    }
                     changes.push(Change::Absolute {
                         code: event.code,
                         value: event.value,
@@ -482,6 +544,11 @@ impl Normalizer {
                 });
             }
         }
+        for event in &frame.events {
+            if self.axes.contains_key(&event.code) {
+                self.absolute.update(*event);
+            }
+        }
         let contacts: Vec<_> = self
             .slots
             .values()
@@ -527,6 +594,12 @@ impl Normalizer {
         self.last_at = None;
         self.last_sequence = None;
         self.active_slot = self.slot_range.map_or(0, |(minimum, _)| minimum);
+        self.absolute = AbsoluteState::default();
+        if self.slot_range.is_some() {
+            self.absolute
+                .values
+                .insert(ABS_MT_SLOT, i32::from(self.active_slot));
+        }
     }
 }
 

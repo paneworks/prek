@@ -538,6 +538,12 @@ impl Engine {
                 keys: state.keys.clone(),
                 contacts: state.contacts.clone(),
             })?;
+            if let Some(absolute) = self.replay.absolute_state(&state.device.source) {
+                next.push(Record::Absolute {
+                    source: state.device.source.clone(),
+                    state: absolute.clone(),
+                })?;
+            }
             if let Some(mapping) = &state.mapping {
                 next.push(Record::Mapping {
                     source: state.device.source.clone(),
@@ -835,6 +841,12 @@ impl Engine {
                 keys: state.keys.clone(),
                 contacts: state.contacts.clone(),
             })?;
+            if let Some(absolute) = self.replay.absolute_state(&state.device.source) {
+                next.push(Record::Absolute {
+                    source: state.device.source.clone(),
+                    state: absolute.clone(),
+                })?;
+            }
             if let Some(mapping) = &state.mapping {
                 next.push(Record::Mapping {
                     source: state.device.source.clone(),

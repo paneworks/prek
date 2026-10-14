@@ -17,7 +17,10 @@
             src = pkgs.lib.fileset.toSource {
               root = ./.;
               fileset = pkgs.lib.fileset.unions [
-                ./Cargo.toml ./Cargo.lock ./src ./examples ./tests ./docs ./udev ./README.md ./LICENSE
+                ./Cargo.toml ./Cargo.lock ./src ./examples ./docs ./udev ./README.md ./LICENSE
+                # VM controllers and the standalone C receiver are separate
+                # derivations; changing them must not recompile Rust packages.
+                (pkgs.lib.fileset.fileFilter (file: file.hasExt "rs") ./tests)
               ];
             };
             cargoLock.lockFile = ./Cargo.lock;
@@ -49,6 +52,10 @@
       });
 
       checks = forSystems (system: {
+        cage = import ./tests/cage.nix {
+          pkgs = nixpkgs.legacyPackages.${system};
+          package = self.packages.${system}.default;
+        };
         lua = import ./tests/compositor.nix {
           pkgs = nixpkgs.legacyPackages.${system};
           package = self.packages.${system}.default;

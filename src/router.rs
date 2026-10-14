@@ -287,6 +287,22 @@ impl Router {
             .min()
     }
 
+    pub fn seed_absolute(&mut self, state: &crate::input::AbsoluteState) -> Result<(), Fault> {
+        if self.last_sequence.is_some()
+            || self.group.is_some()
+            || !self.queue.is_empty()
+            || self.stopped
+        {
+            return Err(Fault::Stopped);
+        }
+        state
+            .validate(&self.device.axes)
+            .map_err(|_| Fault::InvalidFrame)?;
+        self.physical.slot = state.selected_slot();
+        self.delivered.slot = state.selected_slot();
+        Ok(())
+    }
+
     fn fail<T>(&mut self, fault: Fault) -> Result<T, Fault> {
         self.stopped = true;
         Err(fault)

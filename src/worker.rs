@@ -419,7 +419,8 @@ impl Registry {
         let source = match &record {
             Record::Device { device, .. } => Some(&device.source),
             Record::Frame { frame } => Some(&frame.source),
-            Record::Mapping { source, .. }
+            Record::Absolute { source, .. }
+            | Record::Mapping { source, .. }
             | Record::Reconcile { source, .. }
             | Record::Remove { source, .. } => Some(source),
             Record::Tick { .. } => None,
