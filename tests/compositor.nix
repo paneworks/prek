@@ -44,8 +44,11 @@ let
   '';
   brokerConfig = pkgs.writeText "prek-broker-fixture" (if lua then ''
     local prek = require("prek")
+    local marker = prek.actions.define("snapshot-only", {requires={"observations"}}, function()
+      error("unused named handler ran")
+    end)
     prek.events.on("ready", function(event)
-      prek.log.info("lua-ready", {generation=event.fence.configuration})
+      prek.log.info("lua-ready", {generation=event.fence.configuration, handler=marker.handler})
     end)
     prek.events.on("matched", function(event)
       if event.fence.configuration == 2 then while true do end end
@@ -159,7 +162,8 @@ pkgs.testers.runNixOSTest {
     ${pkgs.lib.optionalString lua ''
     machine.wait_until_succeeds("grep -q lua-match /run/user/1000/prek-broker-agent.jsonl", timeout=3)
     lua_logs = [__import__("json").loads(line) for line in machine.succeed("cat /run/user/1000/prek-broker-agent.jsonl").splitlines() if '"kind":"lua_log"' in line]
-    assert any(row["record"]["message"] == "lua-ready" for row in lua_logs), lua_logs
+    ready = [row for row in lua_logs if row["record"]["message"] == "lua-ready"]
+    assert ready and all(row["record"]["fields"]["handler"] == "snapshot-only" for row in ready), lua_logs
     machine.wait_until_succeeds("grep -q lua-timer /run/user/1000/prek-broker-agent.jsonl", timeout=3)
     timers = [__import__("json").loads(line) for line in machine.succeed("cat /run/user/1000/prek-broker-agent.jsonl").splitlines() if '"message":"lua-timer"' in line]
     assert timers and all(row["record"]["fields"]["generation"] == row["fence"]["configuration"] == 1 for row in timers), timers

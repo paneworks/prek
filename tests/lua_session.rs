@@ -64,6 +64,148 @@ return {version=1}
     session.stop().unwrap();
     assert_eq!(drain(&mut session).unwrap()[0].message, "stopped");
 }
+
+#[test]
+fn named_handler_executes_exact_argv_only_after_a_current_model_grant() {
+    use prek::{
+        actions::Executor,
+        config::Action,
+        input::Source,
+        ipc::Channel,
+        protocol::{Capability, Completion, Mode, Request},
+        rules::{Event, Evidence, Stage},
+    };
+    use std::{collections::BTreeSet, fs};
+    let path = std::env::temp_dir().join(format!(
+        "prek-lua-action-{}-$(literal);'quoted'",
+        std::process::id()
+    ));
+    let _ = fs::remove_file(&path);
+    let definition=Definition::compile(r#"
+local p=require('prek')
+local action=p.actions.define('touch',{requires={'commands'}},function(event)
+ p.log.info('named-action',{rule=event.event.rule})
+ return p.actions.command{argv={'touch','--',event.event.output}}
+end)
+return p.config.new{rules={p.rules.define{id='touch-rule',trigger=p.triggers.key{key='KEY_A'},action=action}}}
+"#,"named-process.lua").unwrap();
+    let action = definition.validate().unwrap().rules[0].action.clone();
+    assert!(matches!(action, Action::Lua { .. }));
+    let mut session = Session::spawn(
+        Path::new(env!("CARGO_BIN_EXE_prek")),
+        fence(1),
+        "seat0",
+        definition,
+    )
+    .unwrap();
+    drain(&mut session).unwrap();
+    assert!(session.action_ready());
+    let mut executor = Executor::new(
+        fence(1),
+        "seat0".into(),
+        Mode::Route,
+        BTreeSet::from([Capability::Commands, Capability::LuaActions]),
+    )
+    .unwrap();
+    executor.lua_ready(true);
+    let (mut agent_channel, mut model_broker) = Channel::pair().unwrap();
+    let event = Box::new(Event::Matched {
+        version: 1,
+        rule: "touch-rule".into(),
+        id: 1,
+        ordinal: 1,
+        source: Source {
+            device: 1,
+            generation: 1,
+            seat: "seat0".into(),
+        },
+        at: monotonic().unwrap(),
+        config_generation: 1,
+        session_generation: 1,
+        stage: Stage::Discrete,
+        action,
+        evidence: Evidence::Key { down: true },
+        window: None,
+        output: Some(path.to_str().unwrap().into()),
+        workspace: None,
+    });
+    executor
+        .offer(fence(1), event.clone(), monotonic().unwrap())
+        .unwrap();
+    executor
+        .execute_ready_with_lua(monotonic().unwrap(), Some(&mut session))
+        .unwrap();
+    assert!(
+        !path.exists(),
+        "an offered action is not an execution grant"
+    );
+    executor
+        .grant(
+            fence(1),
+            1,
+            1,
+            monotonic().unwrap() + Duration::from_millis(250),
+            monotonic().unwrap(),
+        )
+        .unwrap();
+    assert!(
+        executor
+            .offer(fence(1), event, monotonic().unwrap())
+            .is_err()
+    );
+    executor
+        .execute_ready_with_lua(monotonic().unwrap(), Some(&mut session))
+        .unwrap();
+    // Progress coalescing must retain the byte charge for the queued action.
+    // Otherwise sending it can underflow the shared queue counter.
+    for _ in 0..2 {
+        session
+            .notify(
+                EventKind::Update,
+                serde_json::json!({
+                    "fence": fence(1), "event": {"id": 1, "stage": "update", "source": "fixture"}
+                }),
+            )
+            .unwrap();
+    }
+    let end = monotonic().unwrap() + Duration::from_secs(3);
+    let mut logs = Vec::new();
+    let mut completions = Vec::new();
+    while completions.is_empty() {
+        session.step(monotonic().unwrap()).unwrap();
+        for (id, ordinal, result) in session.take_actions() {
+            logs.extend(
+                executor
+                    .resolve_action(id, ordinal, result, monotonic().unwrap())
+                    .unwrap(),
+            );
+        }
+        executor
+            .execute_ready_with_lua(monotonic().unwrap(), Some(&mut session))
+            .unwrap();
+        executor.reap().unwrap();
+        executor.flush(&mut agent_channel).unwrap();
+        while let Some(packet) = model_broker.receive::<Request>().unwrap() {
+            if let Request::Complete {
+                fence,
+                id,
+                ordinal,
+                result,
+            } = packet.message
+            {
+                completions.push((fence, id, ordinal, result));
+            }
+        }
+        assert!(monotonic().unwrap() < end, "named command never executed");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].message, "named-action");
+    assert!(path.exists());
+    assert_eq!(completions, vec![(fence(1), 1, 1, Completion::Applied)]);
+    assert!(drain(&mut session).unwrap().is_empty());
+    fs::remove_file(&path).unwrap();
+}
 #[test]
 fn callback_failure_does_not_poison_a_replacement_generation() {
     let binary = Path::new(env!("CARGO_BIN_EXE_prek"));

@@ -387,13 +387,103 @@ impl Trigger {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Action {
-    Event { name: String },
-    Keys { keys: Vec<Key> },
-    Remap { key: Key },
-    Command { argv: Vec<String> },
-    Morf { action: MorfAction },
-    Hyprland { action: WindowAction },
-    Power { action: PowerAction },
+    Lua {
+        handler: String,
+        requires: BTreeSet<EffectKind>,
+    },
+    Event {
+        name: String,
+    },
+    Keys {
+        keys: Vec<Key>,
+    },
+    Remap {
+        key: Key,
+    },
+    Command {
+        #[serde(deserialize_with = "bounded_argv")]
+        argv: Vec<String>,
+    },
+    Morf {
+        action: MorfAction,
+    },
+    Hyprland {
+        action: WindowAction,
+    },
+    Power {
+        action: PowerAction,
+    },
+}
+fn bounded_argv<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+    struct Argument(String);
+    impl<'de> Deserialize<'de> for Argument {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct Text;
+            impl<'de> serde::de::Visitor<'de> for Text {
+                type Value = Argument;
+                fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    formatter.write_str("an argument of at most 4096 bytes without NUL")
+                }
+                fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Argument, E> {
+                    if value.len() > 4096 || value.contains('\0') {
+                        return Err(E::custom("command argument exceeds bounds"));
+                    }
+                    Ok(Argument(value.into()))
+                }
+                fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Argument, E> {
+                    if value.len() > 4096 || value.contains('\0') {
+                        return Err(E::custom("command argument exceeds bounds"));
+                    }
+                    Ok(Argument(value))
+                }
+            }
+            deserializer.deserialize_string(Text)
+        }
+    }
+    struct Arguments;
+    impl<'de> serde::de::Visitor<'de> for Arguments {
+        type Value = Vec<String>;
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("at most 256 command arguments")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut sequence: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut result = Vec::new();
+            while let Some(argument) = sequence.next_element::<Argument>()? {
+                if result.len() == 256 {
+                    return Err(serde::de::Error::custom("command argv exceeds 256 entries"));
+                }
+                result.push(argument.0);
+            }
+            Ok(result)
+        }
+    }
+    deserializer.deserialize_seq(Arguments)
+}
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectKind {
+    Observations,
+    Commands,
+    SyntheticInput,
+    HyprlandActions,
+    MorfActions,
+    PowerActions,
+}
+impl Action {
+    pub fn effect_kind(&self) -> Option<EffectKind> {
+        Some(match self {
+            Self::Lua { .. } => return None,
+            Self::Event { .. } => EffectKind::Observations,
+            Self::Command { .. } => EffectKind::Commands,
+            Self::Keys { .. } | Self::Remap { .. } => EffectKind::SyntheticInput,
+            Self::Hyprland { .. } => EffectKind::HyprlandActions,
+            Self::Morf { .. } => EffectKind::MorfActions,
+            Self::Power { .. } => EffectKind::PowerActions,
+        })
+    }
 }
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1245,6 +1335,11 @@ fn validate_distance(distance: Distance) -> Result<(), String> {
 }
 pub(crate) fn validate_action(action: &Action) -> Result<(), String> {
     match action {
+        Action::Lua { handler, requires }
+            if !valid_handler_name(handler) || requires.is_empty() =>
+        {
+            Err("Lua action requires a valid name and explicit effect capabilities".into())
+        }
         Action::Command { argv }
             if argv.is_empty()
                 || argv.len() > 256
@@ -1263,6 +1358,13 @@ pub(crate) fn validate_action(action: &Action) -> Result<(), String> {
         }
         _ => Ok(()),
     }
+}
+pub(crate) fn valid_handler_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':'))
 }
 fn overlaps(a: &Rule, b: &Rule) -> bool {
     let intersects = |a: &Vec<String>, b: &Vec<String>| {

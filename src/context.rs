@@ -598,6 +598,7 @@ impl Authority {
             && matches!(
                 rule.action,
                 Action::Hyprland { .. }
+                    | Action::Lua { .. }
                     | Action::Command { .. }
                     | Action::Keys { .. }
                     | Action::Remap { .. }

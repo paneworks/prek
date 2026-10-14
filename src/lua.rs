@@ -7,11 +7,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod handlers;
 mod runtime;
 mod scheduler;
 #[cfg(target_os = "linux")]
 pub mod session;
 pub mod source_transfer;
+pub use handlers::{ActionResult, HandlerRegistration};
 pub use runtime::{Definition, EventKind, LogRecord, MAX_SNAPSHOT_BYTES, Registration, Runtime};
 pub use scheduler::TimerRegistration;
 
@@ -32,6 +34,7 @@ pub fn api() -> serde_json::Value {
         serde_json::json!({"name":"scheduler.every", "signature":"scheduler.every(period, callback) -> Timer", "description":"Schedule periodic callbacks; preserve phase and skip missed ticks instead of catching up in a burst."}),
         serde_json::json!({"name":"scheduler.defer", "signature":"scheduler.defer(callback) -> Timer", "description":"Schedule a callback on a later runtime wake using a one-millisecond delay."}),
         serde_json::json!({"name":"Timer.cancel", "receiver":"Timer", "signature":"timer:cancel() -> nil", "description":"Idempotently cancel this generation-scoped timer before its next invocation."}),
+        serde_json::json!({"name":"actions.define", "signature":"actions.define(name, {requires = capabilities}, callback) -> Action", "description":"Register an approved generation-scoped named handler; resolve a bounded typed effect plan in the unprivileged session after a broker execution grant."}),
     ];
     for kind in [
         "key",
@@ -60,12 +63,13 @@ pub fn api() -> serde_json::Value {
             "description":"Declare an action; configuration evaluation does not execute it."}));
     }
     serde_json::json!({"api_version":API_VERSION,"schema_version":crate::config::SCHEMA_VERSION,
-        "engine":"onix-os/luna", "engine_version":"0.5.1", "phase":"configuration_and_session_events",
+        "engine":"onix-os/luna", "engine_version":"0.5.1", "phase":"configuration_and_session_actions",
         "symbols":symbols, "limits":{"source_bytes":MAX_CONFIG_BYTES,"memory_bytes":MEMORY,
         "instructions":INSTRUCTIONS,"time_ms":TIME.as_millis(),"value_depth":64},
-        "runtime_limits":{"subscriptions":256,"timers":256,"timers_per_wake":32,"callback_instructions":100000,"callback_time_ms":20,"event_bytes":65536,"log_bytes":16384,"logs_per_event":32},
+        "runtime_limits":{"subscriptions":256,"timers":256,"handlers":256,"action_effects":32,"action_bytes":32768,"timers_per_wake":32,"callback_instructions":100000,"callback_time_ms":20,"event_bytes":65536,"log_bytes":16384,"logs_per_event":32},
         "event_kinds":["matched","begin","update","end","cancel","skipped","ready","reload","stop","recovery","session_changed"],
         "runtime_requires":{"uid":"unprivileged active session","capabilities":["context","observations","lua_events"],"thread":"owning Luna arena","generation":"current broker/configuration/session fence"},
+        "action_requires":{"agent_flags":["lua","commands"],"capabilities":["context","observations","lua_events","lua_actions","commands"],"implemented_effects":["commands","observations"],"grant_time_ms":250},
         "runtime_api":"partial"})
 }
 const MEMORY: usize = 32 * 1024 * 1024;
@@ -79,6 +83,24 @@ local registrations = __prek_registry
 __prek_registry = nil
 local timers = __prek_timers
 __prek_timers = nil
+local handlers = __prek_handlers
+__prek_handlers = nil
+local handler_guard = api.actions.__guard
+api.actions.__guard = nil
+function api.actions.define(name, options, callback)
+    handler_guard()
+    assert(type(name)=="string" and #name>0 and #name<=128, "invalid Lua action name")
+    assert(type(options)=="table" and type(options.requires)=="table", "Lua actions require explicit capabilities")
+    for key in pairs(options) do assert(key=="requires", "unknown Lua action option") end
+    assert(type(callback)=="function", "Lua action expects a callback")
+    assert(#handlers<256, "Lua action handler limit exceeded")
+    for _, handler in ipairs(handlers) do assert(handler.name~=name, "duplicate Lua action name") end
+    local requires = {}
+    for index, value in ipairs(options.requires) do requires[index] = value end
+    local entry = {id=#handlers+1, name=name, requires=requires, callback=callback}
+    handlers[entry.id]=entry
+    return {kind="lua",handler=name,requires=options.requires}
+end
 local timer_duration = api.scheduler.__duration
 api.scheduler.__duration = nil
 local function schedule(delay, callback, periodic)
@@ -224,7 +246,10 @@ fn start(lua: &mut Lua, name: &str, source: &str) -> Result<StashedExecutor, Con
 /// loop; the returned model owns no arena values, callbacks or descriptors.
 pub fn compile(source: &str, name: &str) -> Result<Config, ConfigError> {
     let mut runtime = Runtime::load(source, name)?;
-    if !runtime.registrations()?.is_empty() || !runtime.timer_registrations()?.is_empty() {
+    if !runtime.registrations()?.is_empty()
+        || !runtime.timer_registrations()?.is_empty()
+        || !runtime.handler_registrations()?.is_empty()
+    {
         return Err(error(
             "Lua subscriptions require the runtime snapshot loader",
         ));
@@ -242,8 +267,11 @@ fn instantiate(
     }
     let mut lua = Lua::core();
     lua.set_memory_limit(Some(MEMORY));
-    let host = std::rc::Rc::new(std::cell::RefCell::new(runtime::Host::default()));
-    let (registry, timers) = lua
+    let host = std::rc::Rc::new(std::cell::RefCell::new(runtime::Host {
+        configuring: true,
+        ..Default::default()
+    }));
+    let (registry, timers, handlers) = lua
         .try_enter(|ctx| {
             ctx.set_max_call_depth(256);
             let module = Table::new(&ctx);
@@ -288,11 +316,15 @@ fn instantiate(
             ctx.globals().set(ctx, "__prek_registry", registry)?;
             let timers = Table::new(&ctx);
             ctx.globals().set(ctx, "__prek_timers", timers)?;
+            let handlers = Table::new(&ctx);
+            ctx.globals().set(ctx, "__prek_handlers", handlers)?;
+            let actions: Table = module.get(ctx, "actions")?;
+            actions.set(ctx, "__guard", handlers::guard(&ctx, host.clone()))?;
             let scheduler: Table = module.get(ctx, "scheduler")?;
             scheduler.set(ctx, "__duration", scheduler::duration(&ctx, host.clone()))?;
             let log: Table = module.get(ctx, "log")?;
             log.set(ctx, "info", runtime::logger(&ctx, host.clone()))?;
-            Ok((ctx.stash(registry), ctx.stash(timers)))
+            Ok((ctx.stash(registry), ctx.stash(timers), ctx.stash(handlers)))
         })
         .map_err(error)?;
     let bootstrap = start(&mut lua, "prek configuration API", BOOTSTRAP)?;
@@ -337,10 +369,12 @@ fn instantiate(
             Ok(config)
         })
         .map_err(error)?;
+    host.borrow_mut().configuring = false;
     Ok(Runtime {
         lua,
         registry,
         timers,
+        handlers,
         host,
         config,
         failed: false,

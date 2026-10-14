@@ -44,6 +44,7 @@ pub enum Capability {
     Context,
     Observations,
     LuaEvents,
+    LuaActions,
     HyprlandActions,
     MorfActions,
     PowerActions,
@@ -55,6 +56,33 @@ pub enum Capability {
 pub enum Mode {
     Observe,
     Route,
+}
+pub fn effect_capability(kind: crate::config::EffectKind) -> Capability {
+    use crate::config::EffectKind;
+    match kind {
+        EffectKind::Observations => Capability::Observations,
+        EffectKind::Commands => Capability::Commands,
+        EffectKind::SyntheticInput => Capability::SyntheticInput,
+        EffectKind::HyprlandActions => Capability::HyprlandActions,
+        EffectKind::MorfActions => Capability::MorfActions,
+        EffectKind::PowerActions => Capability::PowerActions,
+    }
+}
+pub fn action_capabilities(action: &crate::config::Action) -> BTreeSet<Capability> {
+    if let crate::config::Action::Lua { requires, .. } = action {
+        requires
+            .iter()
+            .copied()
+            .map(effect_capability)
+            .chain([Capability::LuaActions])
+            .collect()
+    } else {
+        action
+            .effect_kind()
+            .map(effect_capability)
+            .into_iter()
+            .collect()
+    }
 }
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]

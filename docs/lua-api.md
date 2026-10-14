@@ -5,8 +5,9 @@ Prek embeds [onix-os/luna](https://github.com/onix-os/luna), pinned to version
 also accepted. Configuration evaluation declares actions and does not execute
 them. Live production routing remains disabled.
 
-This reference covers configuration, session event subscriptions and timers. Named action
-handlers, custom recognizers, coroutine tasks and live adapter bindings remain required
+This reference covers configuration, session event subscriptions, timers and named
+action handlers producing command/event plans. Custom recognizers, coroutine tasks,
+live adapter bindings and the remaining operational APIs remain required
 work in `PLAN.md`. Discovery labels the runtime API partial.
 Run `prek api --json` for the installed manifest or inspect `prek.api` in Lua.
 
@@ -179,6 +180,60 @@ representation in the Rust model. Constructors never create a physical owner.
 
 ## Action constructors
 
+`actions.define(name, {requires = capabilities}, callback) -> Action` registers
+a named handler during configuration evaluation and returns a `lua` action
+declaration for a rule. Names contain 1–128 ASCII letters/digits, `_`, `-`, `.`
+or `:`. Names are unique; a generation may register at most 256 handlers. The
+only option is `requires`, a nonempty capability array. Accepted names are
+`commands`, `observations`, `synthetic_input`, `hyprland_actions`, `morf_actions`
+and `power_actions`. Handler names, capabilities, exact source and model travel
+in the broker-approved snapshot and must agree on runtime reconstruction.
+
+Named handlers run in the supervised unprivileged Lua process after an offered
+action receives a fresh broker grant. Use `prek session --lua --commands` to opt
+in. The broker and agent require active desktop context, current fences, source
+and gesture identity, configured authority and declared effect capabilities.
+Production routing remains disabled while its separate handoff gates are pending.
+
+The callback receives `{fence, event}`. `event` is the approved match: `id`,
+`ordinal`, `rule`, `source`, `at`, `stage`, configuration/session generations,
+evidence and nullable frozen `window`, `output`, `workspace`. It returns nil/no
+values, one action constructor result, or a dense array of at most 32 actions.
+Returning another named action, undeclared effects, malformed values, yielding,
+errors or budget exhaustion discards the entire result/log batch and retires
+this Lua component. Existing source/runtime fuel, memory and 20 ms callback
+limits apply; the plan is bounded to 32 KiB. Registration during callbacks is
+rejected. Source-time registration performs no effect.
+
+The current session executor performs `commands` and `observations` effects.
+Command arguments are exact argv entries without implicit shell expansion.
+Commands in a plan spawn in order and run concurrently, under the existing
+eight-child/session bound. The broker receives one completion for the whole
+plan after its children finish. Failure or grant expiry after an earlier effect
+is uncertain and is not retried. Event actions produce `lua_event` receipts carrying their fence and
+gesture/ordinal. Other effect families require their own available adapters.
+
+Pending results and later effects are canceled on generation change. Already
+spawned commands continue to be reaped; their retired-generation completions
+are discarded. A result arriving after grant expiry is discarded and completes
+as canceled, while the session remains live. Nil means the handler completed without additional effects.
+Logs remain available inside named callbacks. Event/timer subscriptions cannot
+execute actions merely by returning an action table.
+
+```lua
+local p = require("prek")
+local report = p.actions.define("report", {requires={"commands"}}, function(event)
+    p.log.info("invoked", {rule=event.event.rule, ordinal=event.event.ordinal})
+    return p.actions.command {argv={"printf", "%s\\n", event.event.rule}}
+end)
+return p.config.new {
+    rules = {p.rules.define {
+        id="report-a", contexts={"desktop"},
+        trigger=p.triggers.key {key="KEY_A"}, action=report,
+    }},
+}
+```
+
 | Constructor | Fields |
 |---|---|
 | `actions.event` | `name` |
@@ -192,7 +247,8 @@ representation in the Rust model. Constructors never create a physical owner.
 Declaring an action does not establish availability, authorize a target or run
 it. Observation and replay execute no live effect. Actions require the applicable
 session capability, context and ownership checks in routing mode. Functions in
-the configuration result are rejected until runtime handler registration exists.
+the configuration result are rejected. Named callbacks use their private
+approved registry; callable pointers are never serialized into configuration.
 
 ## Limits, libraries and errors
 

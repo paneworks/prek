@@ -64,6 +64,8 @@ pub struct Definition {
     pub registrations: Vec<Registration>,
     #[serde(default)]
     pub timers: Vec<super::TimerRegistration>,
+    #[serde(default)]
+    pub handlers: Vec<super::HandlerRegistration>,
 }
 impl Definition {
     pub fn compile(source: &str, name: &str) -> Result<Self, ConfigError> {
@@ -75,16 +77,20 @@ impl Definition {
             model: toml::to_string(&runtime.config).map_err(error)?,
             registrations: runtime.registrations()?,
             timers: runtime.timer_registrations()?,
+            handlers: runtime.handler_registrations()?,
         };
         // The VM already decoded and validated this Config. Re-parsing its
         // newly serialized TOML here adds no validation and wastes the child
         // process budget, particularly under emulation. Consumers validate it.
         definition.validate_metadata()?;
+        definition.validate_handlers(&runtime.config)?;
         Ok(definition)
     }
     pub fn validate(&self) -> Result<Config, ConfigError> {
         self.validate_metadata()?;
-        Config::parse(&self.model)
+        let config = Config::parse(&self.model)?;
+        self.validate_handlers(&config)?;
+        Ok(config)
     }
     fn validate_metadata(&self) -> Result<(), ConfigError> {
         if self.model.len() > MAX_CONFIG_BYTES {
@@ -98,6 +104,7 @@ impl Definition {
             || self.model.len() > MAX_CONFIG_BYTES
             || self.registrations.len() > MAX_SUBSCRIPTIONS
             || self.timers.len() > MAX_SUBSCRIPTIONS
+            || self.handlers.len() > MAX_SUBSCRIPTIONS
             || self.timers.iter().enumerate().any(|(index, timer)| {
                 usize::from(timer.id) != index + 1 || !(1..=3_600_000).contains(&timer.delay_ms)
             })
@@ -123,6 +130,7 @@ impl Definition {
         if runtime.config != expected
             || runtime.registrations()? != self.registrations
             || runtime.timer_registrations()? != self.timers
+            || runtime.handler_registrations()? != self.handlers
         {
             return Err(error(
                 "Lua source differs from its approved model or registrations",
@@ -159,6 +167,7 @@ pub struct LogRecord {
 }
 #[derive(Default)]
 pub(super) struct Host {
+    pub(super) configuring: bool,
     pub(super) running: bool,
     pub(super) logs: Vec<LogRecord>,
     pub(super) bytes: usize,
@@ -202,6 +211,7 @@ pub struct Runtime {
     pub(super) lua: Lua,
     pub(super) registry: StashedTable,
     pub(super) timers: StashedTable,
+    pub(super) handlers: StashedTable,
     pub(super) host: Rc<RefCell<Host>>,
     pub config: Config,
     pub(super) failed: bool,

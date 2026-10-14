@@ -600,7 +600,7 @@ impl Broker {
                     .capabilities
                     .iter()
                     .filter(|capability| {
-                        **capability != Capability::Commands
+                        !matches!(**capability, Capability::Commands | Capability::LuaActions)
                             || bound.available_actions.contains(capability)
                                 && bound.actions.pending.len() < crate::actions::MAX_RUNNING
                     })
@@ -728,6 +728,7 @@ impl Broker {
             }
             Report::Dispatch { event, .. } if bound.observing => {
                 if !bound.available_actions.contains(&Capability::Commands)
+                    && !bound.available_actions.contains(&Capability::LuaActions)
                     || bound.actions.pending.len() >= crate::actions::MAX_RUNNING
                 {
                     self.advance_session(&mut connection, now)?;
@@ -764,8 +765,17 @@ impl Broker {
                     .value
                     .as_ref()
                     .ok_or_else(|| protocol::invalid("action lacks compositor context"))?;
-                if !bound.capabilities.contains(&Capability::Commands)
-                    || !matches!(action, crate::config::Action::Command { .. })
+                if !protocol::action_capabilities(action).is_subset(&bound.capabilities)
+                    || protocol::action_capabilities(action)
+                        .iter()
+                        .any(|capability| {
+                            matches!(capability, Capability::Commands | Capability::LuaActions)
+                                && !bound.available_actions.contains(capability)
+                        })
+                    || !matches!(
+                        action,
+                        crate::config::Action::Command { .. } | crate::config::Action::Lua { .. }
+                    )
                     || source.seat != bound.seat
                     || source.generation == 0
                     || *at > now
@@ -989,7 +999,11 @@ impl Broker {
                     let commands = self.routing.as_ref().is_some_and(|config| {
                         config.rules.iter().any(|rule| {
                             rule.enabled
-                                && matches!(rule.action, crate::config::Action::Command { .. })
+                                && matches!(
+                                    rule.action,
+                                    crate::config::Action::Command { .. }
+                                        | crate::config::Action::Lua { .. }
+                                )
                         })
                     });
                     if capabilities.iter().any(|capability| {
@@ -998,6 +1012,11 @@ impl Broker {
                                 && self.lua_source.is_some()
                                 && capabilities.contains(&Capability::Observations)
                                 && capabilities.contains(&Capability::Context)
+                            || *capability == Capability::LuaActions
+                                && self.routing.is_some()
+                                && self.lua_source.is_some()
+                                && capabilities.contains(&Capability::LuaEvents)
+                                && capabilities.contains(&Capability::Commands)
                             || *capability == Capability::Commands
                                 && commands
                                 && capabilities.contains(&Capability::Context))
@@ -1187,8 +1206,10 @@ impl Broker {
                         }
                         Request::Availability { capabilities, .. } => {
                             if capabilities.iter().any(|capability| {
-                                *capability != Capability::Commands
-                                    || !bound.capabilities.contains(capability)
+                                !matches!(
+                                    *capability,
+                                    Capability::Commands | Capability::LuaActions
+                                ) || !bound.capabilities.contains(capability)
                             }) {
                                 return Err(protocol::invalid(
                                     "action availability exceeds negotiated capabilities",

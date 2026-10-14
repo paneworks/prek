@@ -259,8 +259,10 @@ impl Job {
             }
             let config = definition.validate().map_err(io::Error::other)?;
             let text = definition.model.clone();
-            let runtime = (!definition.registrations.is_empty() || !definition.timers.is_empty())
-                .then_some(definition);
+            let runtime = (!definition.registrations.is_empty()
+                || !definition.timers.is_empty()
+                || !definition.handlers.is_empty())
+            .then_some(definition);
             return Ok(Some(Compiled {
                 text,
                 config,

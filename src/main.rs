@@ -1091,6 +1091,9 @@ fn run_session(
     }
     if lua {
         requested.insert(Capability::LuaEvents);
+        if commands {
+            requested.insert(Capability::LuaActions);
+        }
     }
     let registration = Request::Register {
         instance,
@@ -1529,13 +1532,28 @@ fn run_session(
         if let Some(executor) = executor.as_mut() {
             executor.reap()?;
             if drained {
-                executor.execute_ready(monotonic()?)?;
+                executor.lua_ready(
+                    lua_runtime
+                        .as_ref()
+                        .is_some_and(|runtime| runtime.action_ready()),
+                );
+                executor.execute_ready_with_lua(monotonic()?, lua_runtime.as_mut())?;
             }
             executor.flush(&mut channel)?;
         }
         if drained && let Some(runtime) = lua_runtime.as_mut() {
             match runtime.step(monotonic()?) {
-                Ok(logs) => {
+                Ok(mut logs) => {
+                    if let Some(executor) = executor.as_mut() {
+                        for (id, ordinal, result) in runtime.take_actions() {
+                            logs.extend(executor.resolve_action(
+                                id,
+                                ordinal,
+                                result,
+                                monotonic()?,
+                            )?);
+                        }
+                    }
                     for record in logs {
                         if json {
                             serde_json::to_writer(
@@ -1552,6 +1570,25 @@ fn run_session(
                 Err(error) => {
                     eprintln!("Lua runtime unavailable: {error}");
                     lua_runtime = None;
+                    if let Some(executor) = executor.as_mut() {
+                        executor.cancel_lua()?;
+                    }
+                }
+            }
+        }
+        if let Some(executor) = executor.as_mut() {
+            for (event_fence, id, ordinal, name) in executor.take_events() {
+                if Some(event_fence) != fence {
+                    continue;
+                }
+                if json {
+                    serde_json::to_writer(
+                        &mut *output,
+                        &serde_json::json!({"version":1,"kind":"lua_event","fence":event_fence,"id":id,"ordinal":ordinal,"name":name}),
+                    )?;
+                    writeln!(output)?;
+                } else {
+                    writeln!(output, "Lua event: {name}")?;
                 }
             }
         }

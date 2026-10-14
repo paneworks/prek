@@ -24,6 +24,8 @@ const MAX_GESTURES: usize = 4096;
 struct Pending {
     event: Box<Event>,
     expires: Option<Duration>,
+    resolving: bool,
+    resolved: Option<Vec<Action>>,
 }
 
 struct Running {
@@ -32,6 +34,21 @@ struct Running {
     ordinal: u64,
     child: Child,
     pidfd: Option<OwnedFd>,
+}
+type ExecutionKey = ([u64; 2], u64, u64, u64, u64);
+struct ExecutionGroup {
+    remaining: usize,
+    result: Completion,
+    multiple_effects: bool,
+}
+fn execution_key(fence: Fence, id: u64, ordinal: u64) -> ExecutionKey {
+    (
+        fence.broker.0,
+        fence.configuration,
+        fence.session,
+        id,
+        ordinal,
+    )
 }
 pub struct Executor {
     fence: Fence,
@@ -43,6 +60,9 @@ pub struct Executor {
     running: Vec<Running>,
     outgoing: VecDeque<Request>,
     reported_available: Option<bool>,
+    lua_ready: bool,
+    groups: BTreeMap<ExecutionKey, ExecutionGroup>,
+    emitted: VecDeque<(Fence, u64, u64, String)>,
 }
 impl Executor {
     pub fn new(
@@ -69,6 +89,9 @@ impl Executor {
             running: Vec::new(),
             outgoing: VecDeque::new(),
             reported_available: None,
+            lua_ready: false,
+            groups: BTreeMap::new(),
+            emitted: VecDeque::new(),
         })
     }
     pub fn transition(&mut self, fence: Fence) -> io::Result<()> {
@@ -85,6 +108,8 @@ impl Executor {
         self.seen.clear();
         self.outgoing.clear();
         self.reported_available = None;
+        self.lua_ready = false;
+        self.emitted.clear();
         // Already dispatched commands cannot be undone. Keep reaping them,
         // counting them against the bound, and discard their old completions.
         Ok(())
@@ -124,7 +149,8 @@ impl Executor {
         if fence != self.fence
             || self.mode != Mode::Route
             || !self.capabilities.contains(&Capability::Commands)
-            || !matches!(action, Action::Command { .. })
+            || !matches!(action, Action::Command { .. } | Action::Lua { .. })
+            || !protocol::action_capabilities(action).is_subset(&self.capabilities)
             || source.seat != self.seat
             || *id == 0
             || *ordinal == 0
@@ -153,6 +179,8 @@ impl Executor {
             Pending {
                 event,
                 expires: None,
+                resolving: false,
+                resolved: None,
             },
         );
         Ok(())
@@ -182,56 +210,217 @@ impl Executor {
     /// Call after draining current broker messages, so a queued generation
     /// change invalidates earlier grants before any subprocess can start.
     pub fn execute_ready(&mut self, now: Duration) -> io::Result<()> {
+        self.execute_ready_with_lua(now, None)
+    }
+    pub fn lua_ready(&mut self, ready: bool) {
+        if self.lua_ready != ready {
+            self.lua_ready = ready;
+            self.reported_available = None;
+        }
+    }
+    pub fn resolve_action(
+        &mut self,
+        id: u64,
+        ordinal: u64,
+        result: Option<crate::lua::ActionResult>,
+        now: Duration,
+    ) -> io::Result<Vec<crate::lua::LogRecord>> {
+        let pending = self
+            .pending
+            .get_mut(&(id, ordinal))
+            .ok_or_else(|| protocol::invalid("Lua result has no offered action"))?;
+        if !pending.resolving {
+            return Err(protocol::invalid(
+                "unexpected or duplicate Lua action result",
+            ));
+        }
+        let Some(result) = result.filter(|_| pending.expires.is_some_and(|expiry| now < expiry))
+        else {
+            self.pending.remove(&(id, ordinal));
+            self.complete(id, ordinal, Completion::Cancelled)?;
+            return Ok(Vec::new());
+        };
+        if result.actions.len() > 32 {
+            return Err(protocol::invalid("Lua plan exceeds effect limit"));
+        }
+        let Event::Matched {
+            action: Action::Lua { requires, .. },
+            ..
+        } = pending.event.as_ref()
+        else {
+            return Err(protocol::invalid("Lua result has no named action"));
+        };
+        for action in &result.actions {
+            crate::config::validate_action(action).map_err(|error| protocol::invalid(&error))?;
+            if !action
+                .effect_kind()
+                .is_some_and(|kind| requires.contains(&kind))
+                || !protocol::action_capabilities(action).is_subset(&self.capabilities)
+            {
+                return Err(protocol::invalid(
+                    "Lua action result exceeds its execution grant",
+                ));
+            }
+        }
+        pending.resolving = false;
+        pending.resolved = Some(result.actions);
+        Ok(result.logs)
+    }
+    pub fn take_events(&mut self) -> Vec<(Fence, u64, u64, String)> {
+        self.emitted.drain(..).collect()
+    }
+    pub fn cancel_lua(&mut self) -> io::Result<()> {
+        self.lua_ready(false);
+        let pending = self
+            .pending
+            .iter()
+            .filter(|(_, pending)| {
+                matches!(
+                    pending.event.as_ref(),
+                    Event::Matched {
+                        action: Action::Lua { .. },
+                        ..
+                    }
+                )
+            })
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        for (id, ordinal) in pending {
+            self.pending.remove(&(id, ordinal));
+            self.complete(id, ordinal, Completion::Unavailable)?;
+        }
+        Ok(())
+    }
+    pub fn execute_ready_with_lua(
+        &mut self,
+        now: Duration,
+        mut lua: Option<&mut crate::lua::session::Session>,
+    ) -> io::Result<()> {
         let ready: Vec<_> = self
             .pending
             .iter()
             .filter_map(|(identity, pending)| pending.expires.map(|_| *identity))
             .collect();
         for (id, ordinal) in ready {
-            let pending = self.pending.remove(&(id, ordinal)).unwrap();
+            let mut pending = self.pending.remove(&(id, ordinal)).unwrap();
             if now.max(monotonic()?) >= pending.expires.unwrap() {
+                // The helper still owns one response for this identity. Keep
+                // its bounded entry until that response (or VM failure) arrives;
+                // resolve_action will discard its effects and acknowledge once.
+                if pending.resolving {
+                    self.pending.insert((id, ordinal), pending);
+                    continue;
+                }
                 self.complete(id, ordinal, Completion::Cancelled)?;
                 continue;
             }
-            let Event::Matched {
-                stage,
-                action: Action::Command { argv },
-                ..
-            } = *pending.event
-            else {
+            let Event::Matched { stage, action, .. } = pending.event.as_ref() else {
                 unreachable!("offers were validated");
             };
-            if !matches!(stage, Stage::Discrete | Stage::Begin) {
+            if matches!(action, Action::Lua { .. }) && pending.resolved.is_none() {
+                if pending.resolving {
+                    self.pending.insert((id, ordinal), pending);
+                    continue;
+                }
+                if let Some(lua) = lua.as_deref_mut().filter(|lua| lua.action_ready()) {
+                    lua.request_action(pending.event.clone(), pending.expires.unwrap())?;
+                    pending.resolving = true;
+                    self.pending.insert((id, ordinal), pending);
+                } else {
+                    self.complete(id, ordinal, Completion::Unavailable)?;
+                }
+                continue;
+            }
+            if matches!(action, Action::Command { .. })
+                && !matches!(stage, Stage::Discrete | Stage::Begin)
+            {
                 self.complete(id, ordinal, Completion::Cancelled)?;
                 continue;
             }
-            if self.running.len() >= MAX_RUNNING {
+            let actions = pending
+                .resolved
+                .take()
+                .unwrap_or_else(|| vec![action.clone()]);
+            let commands = actions
+                .iter()
+                .filter(|action| matches!(action, Action::Command { .. }))
+                .count();
+            if self.running.len() + commands > MAX_RUNNING
+                || self.emitted.len() + actions.len() > MAX_PENDING
+                || actions
+                    .iter()
+                    .any(|action| !matches!(action, Action::Command { .. } | Action::Event { .. }))
+            {
                 self.complete(id, ordinal, Completion::Unavailable)?;
                 continue;
             }
-            // Exact configured argv, without implicit shell interpretation.
-            // Command output cannot stall the agent or become its JSON stream.
-            match Command::new(&argv[0])
-                .args(&argv[1..])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-            {
-                Ok(child) => {
-                    // SAFETY: read-only handle for the owned live child. On old
-                    // kernels a bounded polling fallback still reaps children.
-                    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, child.id(), 0) };
-                    let pidfd = (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd as i32) });
-                    self.running.push(Running {
-                        fence: self.fence,
-                        id,
-                        ordinal,
-                        child,
-                        pidfd,
-                    });
+            let mut count = 0;
+            let mut applied = false;
+            let mut emitted_event = false;
+            let mut result = Completion::Applied;
+            for action in actions {
+                if monotonic()? >= pending.expires.unwrap() {
+                    result = if !applied {
+                        Completion::Cancelled
+                    } else {
+                        Completion::Uncertain
+                    };
+                    break;
                 }
-                Err(_) => self.complete(id, ordinal, Completion::Unavailable)?,
+                if let Action::Event { name } = action {
+                    self.emitted.push_back((self.fence, id, ordinal, name));
+                    applied = true;
+                    emitted_event = true;
+                    continue;
+                }
+                let Action::Command { argv } = action else {
+                    unreachable!()
+                };
+                // Exact configured argv, without implicit shell interpretation.
+                // Command output cannot stall the agent or become its JSON stream.
+                match Command::new(&argv[0])
+                    .args(&argv[1..])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                {
+                    Ok(child) => {
+                        // SAFETY: read-only handle for the owned live child. On old
+                        // kernels a bounded polling fallback still reaps children.
+                        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, child.id(), 0) };
+                        let pidfd = (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd as i32) });
+                        self.running.push(Running {
+                            fence: self.fence,
+                            id,
+                            ordinal,
+                            child,
+                            pidfd,
+                        });
+                        count += 1;
+                        applied = true;
+                    }
+                    Err(_) => {
+                        result = if !applied {
+                            Completion::Unavailable
+                        } else {
+                            Completion::Uncertain
+                        };
+                        break;
+                    }
+                }
+            }
+            if count == 0 {
+                self.complete(id, ordinal, result)?;
+            } else {
+                self.groups.insert(
+                    execution_key(self.fence, id, ordinal),
+                    ExecutionGroup {
+                        remaining: count,
+                        result,
+                        multiple_effects: count > 1 || emitted_event,
+                    },
+                );
             }
         }
         Ok(())
@@ -241,15 +430,28 @@ impl Executor {
             if let Some(status) = self.running[index].child.try_wait()? {
                 let running = self.running.remove(index);
                 if running.fence == self.fence {
-                    self.complete(
-                        running.id,
-                        running.ordinal,
-                        if status.success() {
-                            Completion::Applied
+                    let group = self
+                        .groups
+                        .get_mut(&execution_key(running.fence, running.id, running.ordinal))
+                        .ok_or_else(|| protocol::invalid("missing action execution group"))?;
+                    group.remaining -= 1;
+                    if !status.success() && group.result == Completion::Applied {
+                        group.result = if group.multiple_effects {
+                            Completion::Uncertain
                         } else {
                             Completion::Unavailable
-                        },
-                    )?;
+                        };
+                    }
+                    if group.remaining != 0 {
+                        continue;
+                    }
+                    let result = group.result;
+                    self.groups
+                        .remove(&execution_key(running.fence, running.id, running.ordinal));
+                    self.complete(running.id, running.ordinal, result)?;
+                } else {
+                    self.groups
+                        .remove(&execution_key(running.fence, running.id, running.ordinal));
                 }
             }
         }
@@ -261,7 +463,13 @@ impl Executor {
             self.queue(Request::Availability {
                 fence: self.fence,
                 capabilities: if available {
-                    BTreeSet::from([Capability::Commands])
+                    [Capability::Commands, Capability::LuaActions]
+                        .into_iter()
+                        .filter(|capability| {
+                            self.capabilities.contains(capability)
+                                && (*capability != Capability::LuaActions || self.lua_ready)
+                        })
+                        .collect()
                 } else {
                     BTreeSet::new()
                 },
@@ -367,6 +575,261 @@ mod tests {
             assert!(Instant::now() < deadline, "command did not finish");
             thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    #[test]
+    fn a_named_multi_command_plan_has_one_completion_and_no_duplicate_execution() {
+        let first = path();
+        let second = path();
+        let command1 = event(1, &first);
+        let command2 = event(2, &second);
+        let Event::Matched {
+            action: effect1, ..
+        } = command1.as_ref()
+        else {
+            unreachable!()
+        };
+        let Event::Matched {
+            action: effect2, ..
+        } = command2.as_ref()
+        else {
+            unreachable!()
+        };
+        let mut named = command1.clone();
+        let Event::Matched { action, .. } = named.as_mut() else {
+            unreachable!()
+        };
+        *action = Action::Lua {
+            handler: "two".into(),
+            requires: BTreeSet::from([crate::config::EffectKind::Commands]),
+        };
+        let mut executor = executor(Mode::Route);
+        executor.capabilities.insert(Capability::LuaActions);
+        executor
+            .offer(fence(), named.clone(), monotonic().unwrap())
+            .unwrap();
+        executor
+            .grant(
+                fence(),
+                1,
+                1,
+                monotonic().unwrap() + Duration::from_millis(250),
+                monotonic().unwrap(),
+            )
+            .unwrap();
+        executor.pending.get_mut(&(1, 1)).unwrap().resolving = true;
+        executor
+            .resolve_action(
+                1,
+                1,
+                Some(crate::lua::ActionResult {
+                    actions: vec![effect1.clone(), effect2.clone()],
+                    logs: vec![],
+                }),
+                monotonic().unwrap(),
+            )
+            .unwrap();
+        executor.execute_ready(monotonic().unwrap()).unwrap();
+        finish(&mut executor);
+        assert!(first.exists() && second.exists());
+        assert_eq!(
+            executor
+                .outgoing
+                .iter()
+                .filter(|request| matches!(
+                    request,
+                    Request::Complete {
+                        id: 1,
+                        ordinal: 1,
+                        result: Completion::Applied,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert!(
+            executor
+                .offer(fence(), named, monotonic().unwrap())
+                .is_err()
+        );
+        std::fs::remove_file(first).unwrap();
+        std::fs::remove_file(second).unwrap();
+    }
+
+    #[test]
+    fn an_event_followed_by_a_failed_command_reports_partial_execution() {
+        use crate::config::EffectKind;
+        let mut named = event(1, &path());
+        let Event::Matched { action, .. } = named.as_mut() else {
+            unreachable!()
+        };
+        *action = Action::Lua {
+            handler: "partial".into(),
+            requires: BTreeSet::from([EffectKind::Observations, EffectKind::Commands]),
+        };
+        let mut executor = executor(Mode::Route);
+        executor
+            .capabilities
+            .extend([Capability::LuaActions, Capability::Observations]);
+        executor
+            .offer(fence(), named, monotonic().unwrap())
+            .unwrap();
+        let now = monotonic().unwrap();
+        executor
+            .grant(fence(), 1, 1, now + Duration::from_millis(250), now)
+            .unwrap();
+        executor.pending.get_mut(&(1, 1)).unwrap().resolving = true;
+        executor
+            .resolve_action(
+                1,
+                1,
+                Some(crate::lua::ActionResult {
+                    actions: vec![
+                        Action::Event {
+                            name: "already-emitted".into(),
+                        },
+                        Action::Command {
+                            argv: vec![path().to_str().unwrap().into()],
+                        },
+                    ],
+                    logs: vec![],
+                }),
+                monotonic().unwrap(),
+            )
+            .unwrap();
+        executor.execute_ready(monotonic().unwrap()).unwrap();
+        // QEMU may surface a failed exec as a child exit instead of spawn's
+        // error return. Both outcomes must preserve the earlier event effect.
+        finish(&mut executor);
+        assert_eq!(
+            executor.take_events(),
+            vec![(fence(), 1, 1, "already-emitted".into())]
+        );
+        assert!(executor.running.is_empty());
+        assert!(executor.outgoing.iter().any(|request| matches!(
+            request,
+            Request::Complete {
+                id: 1,
+                ordinal: 1,
+                result: Completion::Uncertain,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn expiry_during_resolution_discards_the_late_plan_and_completes_once() {
+        let output = path();
+        let mut named = event(1, &output);
+        let Event::Matched { action, .. } = named.as_mut() else {
+            unreachable!()
+        };
+        let effect = action.clone();
+        *action = Action::Lua {
+            handler: "late".into(),
+            requires: BTreeSet::from([crate::config::EffectKind::Commands]),
+        };
+        let mut executor = executor(Mode::Route);
+        executor.capabilities.insert(Capability::LuaActions);
+        executor
+            .offer(fence(), named, monotonic().unwrap())
+            .unwrap();
+        let now = monotonic().unwrap();
+        executor
+            .grant(fence(), 1, 1, now + Duration::from_millis(250), now)
+            .unwrap();
+        executor.pending.get_mut(&(1, 1)).unwrap().resolving = true;
+        let expired = now + Duration::from_millis(251);
+        executor.execute_ready(expired).unwrap();
+        assert!(executor.pending.contains_key(&(1, 1)));
+        assert!(
+            executor
+                .resolve_action(
+                    1,
+                    1,
+                    Some(crate::lua::ActionResult {
+                        actions: vec![effect],
+                        logs: vec![],
+                    }),
+                    expired
+                )
+                .unwrap()
+                .is_empty()
+        );
+        executor.execute_ready(expired).unwrap();
+        assert!(!output.exists());
+        assert!(executor.pending.is_empty() && executor.running.is_empty());
+        assert_eq!(
+            executor
+                .outgoing
+                .iter()
+                .filter(|request| matches!(
+                    request,
+                    Request::Complete {
+                        id: 1,
+                        ordinal: 1,
+                        result: Completion::Cancelled,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_resolved_named_plan_is_discarded_on_generation_change() {
+        let output = path();
+        let mut named = event(1, &output);
+        let Event::Matched { action, .. } = named.as_mut() else {
+            unreachable!()
+        };
+        let effect = action.clone();
+        *action = Action::Lua {
+            handler: "retired".into(),
+            requires: BTreeSet::from([crate::config::EffectKind::Commands]),
+        };
+        let mut executor = executor(Mode::Route);
+        executor.capabilities.insert(Capability::LuaActions);
+        executor
+            .offer(fence(), named, monotonic().unwrap())
+            .unwrap();
+        executor
+            .grant(
+                fence(),
+                1,
+                1,
+                monotonic().unwrap() + Duration::from_millis(250),
+                monotonic().unwrap(),
+            )
+            .unwrap();
+        executor.pending.get_mut(&(1, 1)).unwrap().resolving = true;
+        executor
+            .resolve_action(
+                1,
+                1,
+                Some(crate::lua::ActionResult {
+                    actions: vec![effect],
+                    logs: vec![],
+                }),
+                monotonic().unwrap(),
+            )
+            .unwrap();
+        executor
+            .transition(Fence {
+                configuration: 2,
+                ..fence()
+            })
+            .unwrap();
+        executor.execute_ready(monotonic().unwrap()).unwrap();
+        assert!(!output.exists());
+        assert!(executor.pending.is_empty() && executor.running.is_empty());
+        assert!(
+            executor
+                .resolve_action(1, 1, None, monotonic().unwrap())
+                .is_err()
+        );
     }
 
     #[test]

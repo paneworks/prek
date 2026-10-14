@@ -61,6 +61,12 @@ impl PendingEvents {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Work {
+    Action {
+        fence: Fence,
+        sequence: u64,
+        event: Box<crate::rules::Event>,
+        expires: Duration,
+    },
     Source {
         fence: Fence,
         offset: usize,
@@ -78,6 +84,13 @@ enum Work {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Message {
+    Resolved {
+        fence: Fence,
+        sequence: u64,
+        id: u64,
+        ordinal: u64,
+        result: Option<super::ActionResult>,
+    },
     Ready {
         fence: Fence,
     },
@@ -109,6 +122,11 @@ pub struct Session {
     ready: bool,
     sequence: u64,
     pending: Option<(u64, Duration)>,
+    pending_event: Option<EventKind>,
+    pending_action: Option<(u64, u64)>,
+    initialized: bool,
+    actions: VecDeque<(Box<crate::rules::Event>, Duration, usize)>,
+    resolved: VecDeque<(u64, u64, Option<super::ActionResult>)>,
     notices: VecDeque<Notice>,
     bytes: usize,
     expires: Duration,
@@ -154,6 +172,11 @@ impl Session {
             ready: false,
             sequence: 0,
             pending: None,
+            pending_event: None,
+            pending_action: None,
+            initialized: false,
+            actions: VecDeque::new(),
+            resolved: VecDeque::new(),
             notices: VecDeque::new(),
             bytes: 0,
             expires: monotonic()? + source_transfer::TIMEOUT,
@@ -189,9 +212,14 @@ impl Session {
                     && old.payload["event"]["id"] == payload["event"]["id"]
                     && old.payload["event"]["source"] == payload["event"]["source"])
             });
-            self.bytes = self.notices.iter().map(|entry| entry.bytes).sum();
+            self.bytes = self.notices.iter().map(|entry| entry.bytes).sum::<usize>()
+                + self
+                    .actions
+                    .iter()
+                    .map(|(_, _, bytes)| *bytes)
+                    .sum::<usize>();
         }
-        if self.notices.len() >= MAX_PENDING || self.bytes + size > MAX_BYTES {
+        if self.notices.len() + self.actions.len() >= MAX_PENDING || self.bytes + size > MAX_BYTES {
             return Err(protocol::invalid("Lua event queue exceeds limit"));
         }
         self.bytes += size;
@@ -209,11 +237,36 @@ impl Session {
             self.expires
         }))
     }
+    pub fn action_ready(&self) -> bool {
+        self.ready && self.initialized
+    }
+    pub fn request_action(
+        &mut self,
+        event: Box<crate::rules::Event>,
+        expires: Duration,
+    ) -> io::Result<()> {
+        if !self.action_ready() {
+            return Err(protocol::invalid("Lua action VM is not ready"));
+        }
+        let bytes = super::runtime::bounded_json(&event, 48 * 1024)?.len();
+        if self.notices.len() + self.actions.len() >= MAX_PENDING || self.bytes + bytes > MAX_BYTES
+        {
+            return Err(protocol::invalid("Lua action queue exceeds limit"));
+        }
+        self.bytes += bytes;
+        self.actions.push_back((event, expires, bytes));
+        Ok(())
+    }
+    pub fn take_actions(&mut self) -> Vec<(u64, u64, Option<super::ActionResult>)> {
+        self.resolved.drain(..).collect()
+    }
     pub fn finished(&self) -> bool {
-        self.ready && self.pending.is_none() && self.notices.is_empty()
+        self.ready && self.pending.is_none() && self.notices.is_empty() && self.actions.is_empty()
     }
     pub fn stop(&mut self) -> io::Result<()> {
         self.notices.clear();
+        self.actions.clear();
+        self.resolved.clear();
         self.bytes = 0;
         self.notify(EventKind::Stop, serde_json::json!({"fence":self.fence}))
     }
@@ -233,7 +286,9 @@ impl Session {
     }
     fn wants_write(&self) -> bool {
         self.offset < self.source.len()
-            || self.ready && self.pending.is_none() && !self.notices.is_empty()
+            || self.ready
+                && self.pending.is_none()
+                && (!self.notices.is_empty() || !self.actions.is_empty())
     }
     pub fn step(&mut self, now: Duration) -> io::Result<Vec<LogRecord>> {
         if let Some(report) = self.supervisor.check()? {
@@ -274,8 +329,34 @@ impl Session {
                         .pending
                         .is_some_and(|(expected, _)| sequence == expected) =>
                 {
+                    if self.pending_action.is_some() {
+                        return Err(protocol::invalid("Lua action returned an event response"));
+                    }
+                    if self.pending_event.take() == Some(EventKind::Ready) {
+                        self.initialized = true;
+                    }
                     self.pending = None;
                     logs.extend(batch);
+                }
+                Message::Resolved {
+                    fence,
+                    sequence,
+                    id,
+                    ordinal,
+                    result,
+                } if fence == self.fence
+                    && self.ready
+                    && self
+                        .pending
+                        .is_some_and(|(expected, _)| sequence == expected)
+                    && self.pending_action == Some((id, ordinal)) =>
+                {
+                    self.pending = None;
+                    self.pending_action = None;
+                    if self.resolved.len() >= MAX_PENDING {
+                        return Err(protocol::invalid("Lua action result queue overflow"));
+                    }
+                    self.resolved.push_back((id, ordinal, result));
                 }
                 Message::Failed { fence, reason } if fence == self.fence => {
                     return Err(io::Error::other(reason));
@@ -299,10 +380,37 @@ impl Session {
             )? {
                 self.offset = end;
             }
+        } else if self.action_ready() && self.pending.is_none() && !self.actions.is_empty() {
+            let (event, expires, _) = self.actions.front().unwrap();
+            let crate::rules::Event::Matched { id, ordinal, .. } = event.as_ref() else {
+                return Err(protocol::invalid(
+                    "Lua action work requires a matched event",
+                ));
+            };
+            let identity = (*id, *ordinal);
+            let sequence = self
+                .sequence
+                .checked_add(1)
+                .ok_or_else(|| protocol::invalid("Lua sequence exhausted"))?;
+            if self.channel.send(
+                &Work::Action {
+                    fence: self.fence,
+                    sequence,
+                    event: event.clone(),
+                    expires: *expires,
+                },
+                now,
+            )? {
+                self.bytes -= self.actions.pop_front().unwrap().2;
+                self.sequence = sequence;
+                self.pending = Some((sequence, now + RESPONSE_TIMEOUT));
+                self.pending_action = Some(identity);
+            }
         } else if self.ready
             && self.pending.is_none()
             && let Some(notice) = self.notices.front()
         {
+            let event = notice.event;
             let sequence = self
                 .sequence
                 .checked_add(1)
@@ -319,6 +427,7 @@ impl Session {
                 self.bytes -= self.notices.pop_front().unwrap().bytes;
                 self.sequence = sequence;
                 self.pending = Some((sequence, now + RESPONSE_TIMEOUT));
+                self.pending_event = Some(event);
             }
         }
         Ok(logs)
@@ -378,6 +487,60 @@ pub fn worker() -> io::Result<()> {
                             }
                         }
                     }
+                }
+                Work::Action {
+                    fence: incoming,
+                    sequence: next,
+                    event,
+                    expires,
+                } if fence == Some(incoming) && runtime.is_some() && next == sequence + 1 => {
+                    crate::lua_compiler::runtime_cpu_budget()?;
+                    sequence = next;
+                    let crate::rules::Event::Matched {
+                        id,
+                        ordinal,
+                        action,
+                        config_generation,
+                        session_generation,
+                        ..
+                    } = event.as_ref()
+                    else {
+                        return Err(protocol::invalid("invalid Lua action event"));
+                    };
+                    if *config_generation != incoming.configuration
+                        || *session_generation != incoming.session
+                    {
+                        return Err(protocol::invalid("Lua action event generation mismatch"));
+                    }
+                    let now = monotonic()?;
+                    outgoing = Some(if now >= expires {
+                        Message::Resolved {
+                            fence: incoming,
+                            sequence,
+                            id: *id,
+                            ordinal: *ordinal,
+                            result: None,
+                        }
+                    } else {
+                        let runtime = runtime.as_mut().unwrap();
+                        runtime.set_clock(now).map_err(io::Error::other)?;
+                        match runtime.resolve_action(
+                            action,
+                            &serde_json::json!({"fence":incoming,"event":event}),
+                        ) {
+                            Ok(result) => Message::Resolved {
+                                fence: incoming,
+                                sequence,
+                                id: *id,
+                                ordinal: *ordinal,
+                                result: (monotonic()? < expires).then_some(result),
+                            },
+                            Err(error) => Message::Failed {
+                                fence: incoming,
+                                reason: error.0.chars().take(512).collect(),
+                            },
+                        }
+                    });
                 }
                 Work::Event {
                     fence: incoming,

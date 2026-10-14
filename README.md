@@ -236,9 +236,13 @@ pending. Offline replay supports reconciliation and mapping-generation changes.
 Prek now embeds onix-os/luna for Lua configuration. `init --output config.lua`
 writes a Lua preset; `.lua` files work with `check`, `doctor`, `replay`, `run`
 and the protected broker configuration. `prek api --json` describes implemented
-configuration bindings; the [Lua reference](docs/lua-api.md) documents fields,
-constructors, libraries and limits. Runtime Lua callbacks, custom recognizers
-and live Lua adapter APIs remain required work. Production routing remains disabled.
+configuration and runtime bindings; the [Lua reference](docs/lua-api.md) documents
+fields, constructors, libraries and limits. Supervised session callbacks and timers
+are implemented. Named action handlers return bounded command/event plans under
+fresh broker grants; `session --lua --commands` opts into that executor. Custom
+recognizers, coroutine tasks and live adapter APIs remain required work.
+Production routing remains disabled; named-effect execution currently has model
+grant and helper-process coverage, without authenticated production routing proof.
 
 `init` also writes schema version 1 as legacy TOML. Presets are `minimal`, `desktop`, and
 `phone`; each round-trips through `check`. Existing files are preserved unless

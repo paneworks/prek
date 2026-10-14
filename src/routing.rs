@@ -4,7 +4,7 @@
 //! may be attached here.
 
 use crate::{
-    config::{Action, Config, Delivery, Trigger},
+    config::{Config, Delivery, Trigger},
     context::Authority,
     input::{Device, Source},
     protocol::Capability,
@@ -53,16 +53,6 @@ pub struct Routing {
 }
 fn fault(error: Fault) -> io::Error {
     io::Error::other(format!("routing: {error:?}"))
-}
-fn capability(action: &Action) -> Capability {
-    match action {
-        Action::Event { .. } => Capability::Observations,
-        Action::Morf { .. } => Capability::MorfActions,
-        Action::Hyprland { .. } => Capability::HyprlandActions,
-        Action::Command { .. } => Capability::Commands,
-        Action::Keys { .. } | Action::Remap { .. } => Capability::SyntheticInput,
-        Action::Power { .. } => Capability::PowerActions,
-    }
 }
 impl Routing {
     pub(crate) fn configuration_generation(&mut self, generation: u64) -> io::Result<()> {
@@ -219,7 +209,8 @@ impl Routing {
     fn available(&self, intent: &RouteIntent, at: Duration) -> bool {
         self.capability_generation == self.authority_generation
             && at < self.capability_expires
-            && self.capabilities.contains(&capability(&intent.rule.action))
+            && crate::protocol::action_capabilities(&intent.rule.action)
+                .is_subset(&self.capabilities)
             && self.engine.validate_route(intent, at).is_ok()
     }
     fn viable(&self, intent: &RouteIntent, at: Duration, first: Duration, finished: bool) -> bool {
@@ -652,6 +643,7 @@ impl Routing {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Action;
     use crate::{
         config::{Context, Direction, Distance, Screen, Selector},
         context::{Binding, OutputState, SessionKind, Snapshot, State},
