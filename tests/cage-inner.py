@@ -55,6 +55,25 @@ def main():
                         if path.is_socket() and path not in (parent, upstream)]
             wait_for(lambda: len(sockets()) == 1, hyprland)
             nested = sockets()[0]
+            def instances():
+                return [path.parent.name for path in (runtime / "hypr").glob("*/.socket2.sock")]
+            wait_for(lambda:len(instances())==1,hyprland)
+            control_env=dict(env,HYPRLAND_INSTANCE_SIGNATURE=instances()[0])
+            hyprctl=str(Path(args.hyprland).parent / "hyprctl")
+            def monitors():
+                result=subprocess.run([hyprctl,"-j","monitors"],env=control_env,
+                    capture_output=True,text=True,timeout=3)
+                if result.returncode:return None
+                return json.loads(result.stdout)
+            wait_for(lambda:monitors() is not None,hyprland)
+            if not monitors():
+                backend="wayland" if os.environ.get("PREK_CAGE_VISIBLE")=="1" else "headless"
+                command=[hyprctl,"output","create",backend]
+                if backend=="headless":command.append("PREK-HEADLESS")
+                subprocess.run(command,env=control_env,check=True,stdout=hypr_log,stderr=hypr_log,timeout=3)
+            # As in Mold, the nested compositor gets an explicit output rather
+            # than relying on Hyprland's unreported fallback monitor (-1).
+            wait_for(lambda:bool(monitors()),hyprland)
             report = output / "nested.json"
             temporary = output / "nested.json.new"
             temporary.write_text(json.dumps({"socket":str(nested), "hyprland_pid":hyprland.pid}))

@@ -1,6 +1,7 @@
-{ pkgs }:
+{ pkgs, package }:
 let
   receiver = import ./wayland-receiver.nix { inherit pkgs; };
+  runtime = import ./cage-runtime.nix { inherit package; };
   keyboard = pkgs.stdenv.mkDerivation {
     pname = "prek-wayland-keyboard";
     version = "1";
@@ -28,5 +29,6 @@ pkgs.writeShellScriptBin "prek-cage-host-test" ''
     --hyprland ${pkgs.hyprland}/bin/Hyprland \
     --inner ${./cage-inner.py} --proxy ${./support/wlproxy.py} \
     --receiver ${receiver}/bin/prek-wayland-receiver \
-    --keyboard ${keyboard}/bin/prek-wayland-keyboard "$@"
+    --keyboard ${keyboard}/bin/prek-wayland-keyboard \
+    --prek-fixture ${runtime}/bin/prek-local-cage-tests --prek-app ${package}/bin/prek "$@"
 ''

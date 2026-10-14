@@ -460,7 +460,14 @@ remain under `target/cage-host/run-*`. No host evdev devices are opened.
 `RENDER_NODE` selects the rendering device, defaulting to `/dev/dri/renderD128`.
 The compatibility proxy is adapted from Mold's sandbox at commit `36261df7`.
 
-This local check currently proves keyboard delivery. Touch, Prek consumption,
+The same run now queries that owned Hyprland through Prek's verified IPC client,
+transfers complete geometry to its real supervised Luna helper, and routes
+synthetic A/B frames through the Lua-configured routing library. The app must
+receive only B from that phase; A must produce its semantic callback without
+appearing in the receiver. These source/readiness/session authorities are model
+fixtures. They do not establish production kernel takeover or logind registration.
+
+This local check currently proves keyboard delivery and model-routed consumption. Touch,
 remapping/repeats, broker/lock integration and handoff races retain their own
 required acceptance gates. The old NixOS/QEMU test drivers are retired; ARM
 builds and execution follow the native-CI and phone cross-build paths below.

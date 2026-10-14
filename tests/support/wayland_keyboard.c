@@ -33,7 +33,7 @@ static const struct wl_registry_listener registry_listener = {
     .global = global, .global_remove = removed,
 };
 int main(int argc, char **argv) {
-    if (argc != 2 || argv[1][0] != '/') {
+    if ((argc != 2 && argc != 3) || argv[1][0] != '/') {
         fprintf(stderr, "supply the absolute owned Cage socket path\n");
         return 2;
     }
@@ -72,6 +72,28 @@ int main(int argc, char **argv) {
     if (getchar() != '\n') {
         fprintf(stderr, "keyboard test requires a start acknowledgement\n"); return 1;
     }
+    if (argc == 3) {
+        FILE *input = fopen(argv[2], "r");
+        struct xkb_state *state = xkb_state_new(keymap);
+        if (!input || !state) { perror("routed keys"); return 1; }
+        unsigned code, value, count = 0;
+        int fields;
+        while ((fields = fscanf(input, "%u %u", &code, &value)) == 2) {
+            if (code >= 768 || value > 1 || ++count > 64) {
+                fprintf(stderr, "invalid routed key\n"); return 1;
+            }
+            zwp_virtual_keyboard_v1_key(keyboard, count, code, value);
+            xkb_state_update_key(state, code + 8,
+                value ? XKB_KEY_DOWN : XKB_KEY_UP);
+            zwp_virtual_keyboard_v1_modifiers(keyboard,
+                xkb_state_serialize_mods(state, XKB_STATE_MODS_DEPRESSED),
+                xkb_state_serialize_mods(state, XKB_STATE_MODS_LATCHED),
+                xkb_state_serialize_mods(state, XKB_STATE_MODS_LOCKED),
+                xkb_state_serialize_layout(state, XKB_STATE_LAYOUT_EFFECTIVE));
+        }
+        if (fields != EOF || ferror(input)) return 1;
+        fclose(input); xkb_state_unref(state);
+    } else {
     zwp_virtual_keyboard_v1_key(keyboard, 1, 48, WL_KEYBOARD_KEY_STATE_PRESSED);
     zwp_virtual_keyboard_v1_key(keyboard, 2, 48, WL_KEYBOARD_KEY_STATE_RELEASED);
     zwp_virtual_keyboard_v1_key(keyboard, 3, 42, WL_KEYBOARD_KEY_STATE_PRESSED);
@@ -82,6 +104,7 @@ int main(int argc, char **argv) {
     zwp_virtual_keyboard_v1_key(keyboard, 5, 30, WL_KEYBOARD_KEY_STATE_RELEASED);
     zwp_virtual_keyboard_v1_key(keyboard, 6, 42, WL_KEYBOARD_KEY_STATE_RELEASED);
     zwp_virtual_keyboard_v1_modifiers(keyboard, 0, 0, 0, 0);
+    }
     if (wl_display_roundtrip(display) < 0) return 1;
     zwp_virtual_keyboard_v1_destroy(keyboard);
     int result = wl_display_roundtrip(display);
