@@ -229,7 +229,8 @@ static void size(void *data,struct xdg_toplevel *toplevel,int32_t width,int32_t 
 static void closed(void *data,struct xdg_toplevel *toplevel) {((struct app *)data)->running=false;}
 static const struct xdg_toplevel_listener toplevel_listener={.configure=size,.close=closed};
 int main(int argc,char **argv) {
-    if(argc!=2 || !getenv("PREK_CAGE_VM") || strcmp(getenv("PREK_CAGE_VM"),"1")){fprintf(stderr,"use only an explicitly isolated Cage VM and supply a receipt path\n");return 2;}
+    const char *vm=getenv("PREK_CAGE_VM"), *host=getenv("PREK_CAGE_HOST");
+    if(argc!=2 || !((vm && !strcmp(vm,"1")) || (host && !strcmp(host,"1")))){fprintf(stderr,"use an explicitly owned Cage test session and supply a receipt path\n");return 2;}
     int fd=open(argv[1],O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);if(fd<0){perror("receipt file");return 1;}
     struct app app={.running=true,.width=600,.height=800};app.log=fdopen(fd,"w");if(!app.log)abort();
     app.xkb=xkb_context_new(XKB_CONTEXT_NO_FLAGS);app.display=wl_display_connect(NULL);if(!app.xkb || !app.display)abort();

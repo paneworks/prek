@@ -465,6 +465,14 @@ and cleanup with a modifier/contact held. Context is a model fixture; production
 broker routing, remapping/repeats, handoff races and phone parity need their own
 remaining gates. The VM captures receipts and screenshots for diagnosis.
 
+`nix run .#cage-test` runs a short keyboard smoke test directly in your Wayland
+session. It starts nested Cage with a private socket and the same receiver,
+injects B and Shift+A through Cage's virtual keyboard protocol, checks the six
+ordered key events, text and modifier cleanup, then stops its processes. Logs
+and receipts are saved under `target/cage-host/run-*`. It opens no host evdev
+devices. This local check covers Cage keyboard delivery; the VM check above
+covers Prek routing and touchscreen gestures.
+
 `tests/protocol.rs` covers schema/size/order/time bounds, nonblocking backpressure,
 descriptor rejection/cleanup, endpoint lifetimes and inherited-socket misuse.
 The isolated routing VM also exercises live `learn-shape` on a synthetic mouse,

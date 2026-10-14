@@ -11,6 +11,7 @@
       packages = forSystems (system:
         let pkgs = nixpkgs.legacyPackages.${system};
         in {
+          cage-test = import ./tests/cage-host.nix { inherit pkgs; };
           default = pkgs.rustPlatform.buildRustPackage {
             pname = "prek";
             version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
@@ -50,6 +51,10 @@
         default = {
           type = "app";
           program = "${self.packages.${system}.default}/bin/prek";
+        };
+        cage-test = {
+          type = "app";
+          program = "${self.packages.${system}.cage-test}/bin/prek-cage-host-test";
         };
       });
 
