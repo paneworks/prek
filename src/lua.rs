@@ -15,11 +15,13 @@ mod scheduler;
 #[cfg(target_os = "linux")]
 pub mod session;
 pub mod source_transfer;
+mod tasks;
 pub use export::export_config;
 pub use handlers::{ActionResult, HandlerRegistration};
 pub use modules::{Module, Sources};
 pub use runtime::{Definition, EventKind, LogRecord, MAX_SNAPSHOT_BYTES, Registration, Runtime};
 pub use scheduler::TimerRegistration;
+pub use tasks::TaskRegistration;
 
 pub const API_VERSION: u32 = 1;
 /// Implemented configuration exports. Runtime families remain explicit work
@@ -39,6 +41,10 @@ pub fn api() -> serde_json::Value {
         serde_json::json!({"name":"scheduler.every", "signature":"scheduler.every(period, callback) -> Timer", "description":"Schedule periodic callbacks; preserve phase and skip missed ticks instead of catching up in a burst."}),
         serde_json::json!({"name":"scheduler.defer", "signature":"scheduler.defer(callback) -> Timer", "description":"Schedule a callback on a later runtime wake using a one-millisecond delay."}),
         serde_json::json!({"name":"Timer.cancel", "receiver":"Timer", "signature":"timer:cancel() -> nil", "description":"Idempotently cancel this generation-scoped timer before its next invocation."}),
+        serde_json::json!({"name":"scheduler.spawn", "signature":"scheduler.spawn(callback) -> Task", "description":"Start a bounded generation-scoped coroutine on a later scheduler wake; never execute it during configuration evaluation."}),
+        serde_json::json!({"name":"scheduler.sleep", "signature":"scheduler.sleep(duration) -> TaskWake", "description":"Suspend the current scheduler task for a unit-qualified monotonic delay and return its next wake context."}),
+        serde_json::json!({"name":"Task.cancel", "receiver":"Task", "signature":"task:cancel() -> nil", "description":"Cancel future resumes and release retained coroutine state at the next scheduler boundary."}),
+        serde_json::json!({"name":"Task.status", "receiver":"Task", "signature":"task:status() -> TaskState", "description":"Inspect pending, running, sleeping, completed or cancelled state in the owning generation."}),
         serde_json::json!({"name":"actions.define", "signature":"actions.define(name, {requires = capabilities}, callback) -> Action", "description":"Register an approved generation-scoped named handler; resolve a bounded typed effect plan in the unprivileged session after a broker execution grant."}),
     ];
     for kind in [
@@ -71,7 +77,7 @@ pub fn api() -> serde_json::Value {
         "engine":"onix-os/luna", "engine_version":"0.5.1", "phase":"configuration_and_session_actions",
         "symbols":symbols, "limits":{"source_bytes":MAX_CONFIG_BYTES,"memory_bytes":MEMORY,
         "instructions":INSTRUCTIONS,"time_ms":TIME.as_millis(),"value_depth":64},
-        "runtime_limits":{"subscriptions":256,"timers":256,"handlers":256,"action_effects":32,"action_bytes":32768,"timers_per_wake":32,"callback_instructions":100000,"callback_time_ms":20,"event_bytes":65536,"log_bytes":16384,"logs_per_event":32},
+        "runtime_limits":{"subscriptions":256,"timers":256,"tasks":tasks::MAX_TASKS,"tasks_per_wake":tasks::TASKS_PER_WAKE,"handlers":256,"action_effects":32,"action_bytes":32768,"timers_per_wake":32,"callback_instructions":100000,"callback_time_ms":20,"event_bytes":65536,"log_bytes":16384,"logs_per_event":32},
         "modules":{"root":"entry_parent/modules","path":"<identifier>/.../<identifier>.lua","count":modules::MAX_MODULES,"import_depth":modules::MAX_IMPORT_DEPTH,"source_set_bytes":MAX_CONFIG_BYTES,"owner":"entry_file_uid","group_other_writes":false,"symlinks":false,"runtime":"approved sources only; no filesystem reads"},
         "event_kinds":["matched","begin","update","end","cancel","skipped","ready","reload","stop","recovery","session_changed"],
         "runtime_requires":{"uid":"unprivileged active session","capabilities":["context","observations","lua_events"],"thread":"owning Luna arena","generation":"current broker/configuration/session fence"},
@@ -89,6 +95,8 @@ local registrations = __prek_registry
 __prek_registry = nil
 local timers = __prek_timers
 __prek_timers = nil
+local tasks = __prek_tasks
+__prek_tasks = nil
 local handlers = __prek_handlers
 __prek_handlers = nil
 local modules = __prek_modules
@@ -123,6 +131,28 @@ end
 function api.scheduler.after(delay, callback) return schedule(delay,callback,false) end
 function api.scheduler.every(period, callback) return schedule(period,callback,true) end
 function api.scheduler.defer(callback) return schedule("1ms",callback,false) end
+local task_defer = api.scheduler.__task_defer
+api.scheduler.__task_defer = nil
+local task_assert, task_type = assert, type
+local next_task_id = 0
+function api.scheduler.spawn(callback)
+    task_assert(task_type(callback)=="function", "scheduler.spawn expects a callback")
+    local slot
+    for index=1,64 do
+        if tasks[index]==nil or not tasks[index].active then slot=index; break end
+    end
+    task_assert(slot~=nil, "Lua active task limit exceeded")
+    task_assert(next_task_id<9007199254740991, "Lua task identity exhausted")
+    next_task_id=next_task_id+1
+    local entry={id=next_task_id, callback=callback, due=task_defer(), active=true, state="pending"}
+    tasks[slot]=entry
+    return {
+        cancel=function(self)
+            if entry.active then entry.active=false; entry.state="cancelled"; entry.callback=nil end
+        end,
+        status=function(self)return entry.state end,
+    }
+end
 local allowed_events = {
     matched=true, begin=true, update=true, ["end"]=true, cancel=true,
     skipped=true, ready=true, reload=true, stop=true, recovery=true,
@@ -273,6 +303,7 @@ pub fn compile(source: &str, name: &str) -> Result<Config, ConfigError> {
     if !runtime.registrations()?.is_empty()
         || !runtime.timer_registrations()?.is_empty()
         || !runtime.handler_registrations()?.is_empty()
+        || !runtime.task_registrations()?.is_empty()
     {
         return Err(error(
             "Lua subscriptions require the runtime snapshot loader",
@@ -294,7 +325,7 @@ fn instantiate(
         configuring: true,
         ..Default::default()
     }));
-    let (registry, timers, handlers, module_loaders) = lua
+    let (registry, timers, handlers, module_loaders, tasks) = lua
         .try_enter(|ctx| {
             ctx.set_max_call_depth(256);
             let module = Table::new(&ctx);
@@ -362,6 +393,8 @@ fn instantiate(
             ctx.globals().set(ctx, "__prek_registry", registry)?;
             let timers = Table::new(&ctx);
             ctx.globals().set(ctx, "__prek_timers", timers)?;
+            let tasks = Table::new(&ctx);
+            ctx.globals().set(ctx, "__prek_tasks", tasks)?;
             let handlers = Table::new(&ctx);
             ctx.globals().set(ctx, "__prek_handlers", handlers)?;
             let module_loaders = Table::new(&ctx);
@@ -370,6 +403,8 @@ fn instantiate(
             actions.set(ctx, "__guard", handlers::guard(&ctx, host.clone()))?;
             let scheduler: Table = module.get(ctx, "scheduler")?;
             scheduler.set(ctx, "__duration", scheduler::duration(&ctx, host.clone()))?;
+            scheduler.set(ctx, "__task_defer", tasks::defer(&ctx, host.clone()))?;
+            scheduler.set(ctx, "sleep", tasks::sleep(&ctx, host.clone()))?;
             let log: Table = module.get(ctx, "log")?;
             log.set(ctx, "info", runtime::logger(&ctx, host.clone()))?;
             Ok((
@@ -377,6 +412,7 @@ fn instantiate(
                 ctx.stash(timers),
                 ctx.stash(handlers),
                 ctx.stash(module_loaders),
+                ctx.stash(tasks),
             ))
         })
         .map_err(error)?;
@@ -442,6 +478,8 @@ fn instantiate(
         registry,
         timers,
         handlers,
+        tasks,
+        task_executors: Default::default(),
         host,
         config,
         failed: false,
@@ -503,6 +541,10 @@ mod tests {
             }
             if symbol["receiver"] == "Timer" {
                 source.push_str("local timer=p.scheduler.defer(function()end); assert(type(timer.cancel)=='function'); timer:cancel();\n");
+                continue;
+            }
+            if symbol["receiver"] == "Task" {
+                source.push_str("local task=p.scheduler.spawn(function()end); assert(type(task.cancel)=='function' and type(task.status)=='function'); task:cancel();\n");
                 continue;
             }
             source.push_str(&format!(

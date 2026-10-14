@@ -60,6 +60,10 @@ let
     end)
     local cancelled = prek.scheduler.defer(function()error("cancelled timer ran")end)
     cancelled:cancel()
+    prek.scheduler.spawn(function(wake)
+      local next = prek.scheduler.sleep("10ms")
+      prek.log.info("lua-task", {generation=next.context.fence.configuration, id=next.task.id})
+    end)
     return prek.config.new {
       policy = { allowed_devices = { "fixture" } },
       devices = { fixture = { name = "Prek broker fixture" } },
@@ -128,6 +132,7 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_unit("multi-user.target")
     ${pkgs.lib.optionalString lua ''
     machine.succeed("${package}/bin/prek check --config ${package}/share/prek/examples/lua/modular/config.lua --json")
+    machine.succeed("${package}/bin/prek check --config ${package}/share/prek/examples/lua/tasks/config.lua --json")
     ''}
     machine.wait_until_succeeds("test -n \"$(find /run/user/1000/hypr -name .socket.sock 2>/dev/null)\"", timeout=60)
     instance = machine.succeed("basename $(dirname $(find /run/user/1000/hypr -name .socket.sock))").strip()
@@ -193,6 +198,10 @@ pkgs.testers.runNixOSTest {
     timers = [__import__("json").loads(line) for line in machine.succeed("cat /run/user/1000/prek-broker-agent.jsonl").splitlines() if '"message":"lua-timer"' in line]
     assert timers and all(row["record"]["fields"]["generation"] == row["fence"]["configuration"] == 1 for row in timers), timers
     assert len({row["fence"]["session"] for row in timers}) == len(timers), timers
+    machine.wait_until_succeeds("grep -q lua-task /run/user/1000/prek-broker-agent.jsonl", timeout=3)
+    tasks = [__import__("json").loads(line) for line in machine.succeed("cat /run/user/1000/prek-broker-agent.jsonl").splitlines() if '"message":"lua-task"' in line]
+    assert tasks and all(row["record"]["fields"]["generation"] == row["fence"]["configuration"] == 1 for row in tasks), tasks
+    assert len({row["fence"]["session"] for row in tasks}) == len(tasks), tasks
     matches = [row for row in lua_logs if row["record"]["message"] == "lua-match"]
     assert len(matches) == 1 and matches[0]["record"]["fields"]["rule"] == "broker-a", matches
     assert matches[0]["record"]["fields"]["generation"] == matches[0]["fence"]["configuration"] == 1, matches

@@ -613,7 +613,7 @@ pub fn worker() -> io::Result<()> {
             && outgoing.is_none()
             && let Some(runtime) = runtime.as_mut()
             && runtime
-                .timer_deadline()
+                .scheduler_deadline()
                 .map_err(io::Error::other)?
                 .is_some_and(|due| due <= scheduler_now)
         {
@@ -642,7 +642,7 @@ pub fn worker() -> io::Result<()> {
         {
             until.min(
                 runtime
-                    .timer_deadline()
+                    .scheduler_deadline()
                     .map_err(io::Error::other)?
                     .unwrap_or(Duration::MAX),
             )

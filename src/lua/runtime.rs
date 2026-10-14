@@ -10,8 +10,8 @@ pub const MAX_SNAPSHOT_BYTES: usize = 4 * MAX_CONFIG_BYTES;
 pub const MAX_SUBSCRIPTIONS: usize = 256;
 const MAX_EVENT_BYTES: usize = 64 * 1024;
 const MAX_LOG_BYTES: usize = 16 * 1024;
-const CALLBACK_TIME: Duration = Duration::from_millis(20);
-const CALLBACK_INSTRUCTIONS: i32 = 100_000;
+pub(super) const CALLBACK_TIME: Duration = Duration::from_millis(20);
+pub(super) const CALLBACK_INSTRUCTIONS: i32 = 100_000;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -68,6 +68,8 @@ pub struct Definition {
     pub timers: Vec<super::TimerRegistration>,
     #[serde(default)]
     pub handlers: Vec<super::HandlerRegistration>,
+    #[serde(default)]
+    pub tasks: Vec<super::TaskRegistration>,
 }
 impl Definition {
     pub fn compile(source: &str, name: &str) -> Result<Self, ConfigError> {
@@ -90,6 +92,7 @@ impl Definition {
             registrations: runtime.registrations()?,
             timers: runtime.timer_registrations()?,
             handlers: runtime.handler_registrations()?,
+            tasks: runtime.task_registrations()?,
         };
         // The VM already decoded and validated this Config. Re-parsing its
         // newly serialized TOML here adds no validation and wastes the child
@@ -118,6 +121,12 @@ impl Definition {
             || self.registrations.len() > MAX_SUBSCRIPTIONS
             || self.timers.len() > MAX_SUBSCRIPTIONS
             || self.handlers.len() > MAX_SUBSCRIPTIONS
+            || self.tasks.len() > super::tasks::MAX_TASKS
+            || self
+                .tasks
+                .iter()
+                .any(|task| task.id == 0 || task.id > super::tasks::MAX_TASK_ID)
+            || self.tasks.windows(2).any(|pair| pair[0].id >= pair[1].id)
             || self.timers.iter().enumerate().any(|(index, timer)| {
                 usize::from(timer.id) != index + 1 || !(1..=3_600_000).contains(&timer.delay_ms)
             })
@@ -144,6 +153,7 @@ impl Definition {
             || runtime.registrations()? != self.registrations
             || runtime.timer_registrations()? != self.timers
             || runtime.handler_registrations()? != self.handlers
+            || runtime.task_registrations()? != self.tasks
         {
             return Err(error(
                 "Lua source differs from its approved model or registrations",
@@ -185,6 +195,9 @@ pub(super) struct Host {
     pub(super) logs: Vec<LogRecord>,
     pub(super) bytes: usize,
     pub(super) now: Option<Duration>,
+    pub(super) task: Option<u64>,
+    pub(super) sleep: Option<Duration>,
+    pub(super) task_clock: Option<(Duration, Instant)>,
 }
 pub(super) fn logger<'gc>(ctx: &Context<'gc>, host: Rc<RefCell<Host>>) -> Callback<'gc> {
     Callback::from_fn(ctx, move |ctx, _, mut stack| {
@@ -225,6 +238,8 @@ pub struct Runtime {
     pub(super) registry: StashedTable,
     pub(super) timers: StashedTable,
     pub(super) handlers: StashedTable,
+    pub(super) tasks: StashedTable,
+    pub(super) task_executors: std::collections::BTreeMap<u64, super::tasks::TaskExecution>,
     pub(super) host: Rc<RefCell<Host>>,
     pub config: Config,
     pub(super) failed: bool,

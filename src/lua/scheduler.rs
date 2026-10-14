@@ -77,7 +77,8 @@ impl Runtime {
                 }
                 Ok(())
             })
-            .map_err(error)
+            .map_err(error)?;
+        self.clock_tasks(now)
     }
     pub fn timer_deadline(&mut self) -> Result<Option<Duration>, ConfigError> {
         self.lua
@@ -155,6 +156,7 @@ impl Runtime {
                     self.invoke_executor(&executor, started)?;
                 }
             }
+            self.tick_tasks(now, context)?;
             Ok(())
         })();
         let mut host = self.host.borrow_mut();

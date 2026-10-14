@@ -282,7 +282,8 @@ impl Job {
             let text = definition.model.clone();
             let runtime = (!definition.registrations.is_empty()
                 || !definition.timers.is_empty()
-                || !definition.handlers.is_empty())
+                || !definition.handlers.is_empty()
+                || !definition.tasks.is_empty())
             .then_some(definition);
             return Ok(Some(Compiled {
                 text,

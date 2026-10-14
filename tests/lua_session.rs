@@ -358,3 +358,74 @@ fn replacing_a_vm_retires_its_pending_timer_generation() {
         std::thread::sleep(Duration::from_millis(1));
     }
 }
+
+#[test]
+fn supervised_tasks_sleep_cancel_and_keep_current_generation_context() {
+    let definition = Definition::compile(r#"
+local p=require('prek')
+local cancelled=p.scheduler.spawn(function()error('cancelled task ran')end)
+cancelled:cancel()
+local sleeper=p.scheduler.spawn(function()p.scheduler.sleep('1s');error('cancelled sleeper resumed')end)
+p.scheduler.spawn(function(wake)
+ p.log.info('task-start',{generation=wake.context.fence.configuration})
+ local next=p.scheduler.sleep('10ms')
+ p.log.info('task-resumed',{generation=next.context.fence.configuration})
+end)
+p.scheduler.after('100ms',function()sleeper:cancel();p.log.info(sleeper:status())end)
+return {version=1}
+"#, "task-process.lua").unwrap();
+    let mut session = Session::spawn(
+        Path::new(env!("CARGO_BIN_EXE_prek")),
+        fence(1),
+        "seat0",
+        definition,
+    )
+    .unwrap();
+    let end = monotonic().unwrap() + Duration::from_secs(5);
+    let mut logs = Vec::new();
+    while logs.len() < 3 {
+        logs.extend(session.step(monotonic().unwrap()).unwrap());
+        assert!(monotonic().unwrap() < end, "task helper did not settle");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        logs.iter()
+            .map(|log| log.message.as_str())
+            .collect::<Vec<_>>(),
+        vec!["task-start", "task-resumed", "cancelled"]
+    );
+    assert_eq!(logs[0].fields["generation"], 1);
+    assert_eq!(logs[1].fields["generation"], 1);
+}
+
+#[test]
+fn replacing_a_vm_retires_its_sleeping_task_generation() {
+    let binary = Path::new(env!("CARGO_BIN_EXE_prek"));
+    let old = Definition::compile("local p=require('prek');p.scheduler.spawn(function()p.log.info('old-start');p.scheduler.sleep('100ms');p.log.info('old-resumed')end);return {version=1}", "old-task.lua").unwrap();
+    let mut retired = Session::spawn(binary, fence(1), "seat0", old).unwrap();
+    let end = monotonic().unwrap() + Duration::from_secs(5);
+    loop {
+        let logs = retired.step(monotonic().unwrap()).unwrap();
+        if !logs.is_empty() {
+            assert_eq!(logs[0].message, "old-start");
+            break;
+        }
+        assert!(monotonic().unwrap() < end);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    drop(retired);
+    let new = Definition::compile("local p=require('prek');p.scheduler.spawn(function(wake)p.log.info('new-task',{generation=wake.context.fence.configuration})end);return {version=1}", "new-task.lua").unwrap();
+    let mut replacement = Session::spawn(binary, fence(2), "seat0", new).unwrap();
+    let end = monotonic().unwrap() + Duration::from_secs(5);
+    loop {
+        let logs = replacement.step(monotonic().unwrap()).unwrap();
+        if !logs.is_empty() {
+            assert_eq!(logs.len(), 1);
+            assert_eq!(logs[0].message, "new-task");
+            assert_eq!(logs[0].fields["generation"], 2);
+            break;
+        }
+        assert!(monotonic().unwrap() < end);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}

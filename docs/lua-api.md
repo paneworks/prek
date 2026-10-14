@@ -5,8 +5,8 @@ Prek embeds [onix-os/luna](https://github.com/onix-os/luna), pinned to version
 also accepted. Configuration evaluation declares actions and does not execute
 them. Live production routing remains disabled.
 
-This reference covers configuration, session event subscriptions, timers and named
-action handlers producing command/event plans. Custom recognizers, coroutine tasks,
+This reference covers configuration, session event subscriptions, timers, tasks and named
+action handlers producing command/event plans. Custom recognizers,
 live adapter bindings and the remaining operational APIs remain required
 work in `PLAN.md`. Discovery labels the runtime API partial.
 Run `prek api --json` for the installed manifest or inspect `prek.api` in Lua.
@@ -190,6 +190,52 @@ processes at most 32 due timers and shares the 20 ms dispatch and 32-record/16 K
 log bounds; remaining due timers are handled on another wake. Error, yield,
 nontermination or resource overflow retires the Lua component and discards its
 uncommitted logs. The forwarding worker remains independent.
+
+## Coroutine tasks
+
+`scheduler.spawn(callback) -> Task` registers a task during configuration or a
+runtime callback. It starts on a later scheduler wake; source evaluation never
+runs its body. At most 64 tasks are active. Completed/cancelled entries free
+capacity, and identities are never reused within the VM generation. A retained
+old handle keeps its terminal state when its capacity slot is reused.
+
+`scheduler.sleep(duration) -> TaskWake` is available only inside a scheduler
+task. It accepts the timer duration syntax and range (1 ms through 1 hour),
+yields without blocking, and resumes after a monotonic deadline measured from
+the sleep call. Both the initial callback argument and the sleep result contain
+`task.id`, `at` and `context`; the supervised session supplies its current fence
+as `context.fence`. No context survives a retired generation as execution
+authority. Plain coroutine yields, yielded data and task return values are
+rejected. Each resume has 100,000 instructions and a 20 ms wall limit; at most
+eight tasks resume per wake, ordered by deadline and identity. New tasks start
+on a subsequent wake. Tasks share the VM's memory, log and callback limits.
+
+`task:status() -> TaskState` returns `pending`, `running`, `sleeping`, `completed`
+or `cancelled`. `task:cancel() -> nil` is idempotent. Cancellation stops later
+resumes and releases the retained coroutine at the next scheduler boundary.
+A task cancelling itself finishes its current bounded slice; that slice's logs
+are discarded. Cancellation cannot roll back Lua closure changes. A completed
+task remains completed when cancelled. Errors/resource failures retire the VM
+and discard the current scheduler wake's logs; other service components remain
+supervised independently. Successful source/generation replacement retires all
+old task state, while rejected reloads preserve the active generation.
+
+The runnable task recipe is `examples/lua/tasks/config.lua`, also installed at
+`share/prek/examples/lua/tasks/config.lua`.
+
+Tasks are observational. They may emit logs and register permitted callbacks,
+timers or tasks; effects require explicit broker grants through named handlers.
+
+```lua
+local p = require("prek")
+local task = p.scheduler.spawn(function(wake)
+    p.log.info("task-start", {generation=wake.context.fence.configuration})
+    local next = p.scheduler.sleep("100ms")
+    p.log.info("task-resumed", {generation=next.context.fence.configuration})
+end)
+p.events.on("stop", function() task:cancel() end)
+return p.config.preset("minimal")
+```
 
 ## Configuration and rule constructors
 

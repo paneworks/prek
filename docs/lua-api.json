@@ -63,6 +63,8 @@
     "log_bytes": 16384,
     "logs_per_event": 32,
     "subscriptions": 256,
+    "tasks": 64,
+    "tasks_per_wake": 8,
     "timers": 256,
     "timers_per_wake": 32
   },
@@ -145,6 +147,28 @@
       "name": "Timer.cancel",
       "receiver": "Timer",
       "signature": "timer:cancel() -> nil"
+    },
+    {
+      "description": "Start a bounded generation-scoped coroutine on a later scheduler wake; never execute it during configuration evaluation.",
+      "name": "scheduler.spawn",
+      "signature": "scheduler.spawn(callback) -> Task"
+    },
+    {
+      "description": "Suspend the current scheduler task for a unit-qualified monotonic delay and return its next wake context.",
+      "name": "scheduler.sleep",
+      "signature": "scheduler.sleep(duration) -> TaskWake"
+    },
+    {
+      "description": "Cancel future resumes and release retained coroutine state at the next scheduler boundary.",
+      "name": "Task.cancel",
+      "receiver": "Task",
+      "signature": "task:cancel() -> nil"
+    },
+    {
+      "description": "Inspect pending, running, sleeping, completed or cancelled state in the owning generation.",
+      "name": "Task.status",
+      "receiver": "Task",
+      "signature": "task:status() -> TaskState"
     },
     {
       "description": "Register an approved generation-scoped named handler; resolve a bounded typed effect plan in the unprivileged session after a broker execution grant.",

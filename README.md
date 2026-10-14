@@ -242,7 +242,7 @@ configuration and runtime bindings; the [Lua reference](docs/lua-api.md) documen
 fields, constructors, libraries and limits. Supervised session callbacks and timers
 are implemented. Named action handlers return bounded command/event plans under
 fresh broker grants; `session --lua --commands` opts into that executor. Custom
-recognizers, coroutine tasks and live adapter APIs remain required work.
+recognizers and live adapter APIs remain required work.
 Production routing remains disabled; named-effect execution currently has model
 grant and helper-process coverage, without authenticated production routing proof.
 Pending effects are canceled by generation, gesture cancellation and source
@@ -257,6 +257,11 @@ approved generation and transferred with callbacks; the runtime loads those
 bytes without filesystem access. Imports are cached, and cycles, unsafe paths,
 permissions and source/count/depth limits are checked. See the Lua reference
 for the complete module policy.
+
+`scheduler.spawn` runs bounded coroutine tasks in the unprivileged session;
+`scheduler.sleep` yields until a monotonic deadline. Task handles expose
+completion/cancellation state, and completed tasks free capacity without
+reusing identities. Generation replacement retires their coroutine state.
 
 Presets are `minimal`, `desktop`, and `phone`; each round-trips through `check`.
 Explicit TOML input/output remains supported with schema version 1; no removal
