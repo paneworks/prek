@@ -260,6 +260,23 @@ impl Session {
     pub fn take_actions(&mut self) -> Vec<(u64, u64, Option<super::ActionResult>)> {
         self.resolved.drain(..).collect()
     }
+    /// Avoid invoking a callback that has not yet been sent to the helper.
+    /// In-flight callbacks remain bounded and their caller discards the result.
+    pub fn cancel_action(&mut self, id: u64, ordinal: u64) -> io::Result<()> {
+        let position = self.actions.iter().position(|(event, _, _)| {
+            matches!(event.as_ref(),
+            crate::rules::Event::Matched { id: action_id, ordinal: action_ordinal, .. }
+            if *action_id == id && *action_ordinal == ordinal)
+        });
+        if let Some(position) = position {
+            if self.resolved.len() >= MAX_PENDING {
+                return Err(protocol::invalid("Lua action result queue overflow"));
+            }
+            self.bytes -= self.actions.remove(position).unwrap().2;
+            self.resolved.push_back((id, ordinal, None));
+        }
+        Ok(())
+    }
     pub fn finished(&self) -> bool {
         self.ready && self.pending.is_none() && self.notices.is_empty() && self.actions.is_empty()
     }

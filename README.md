@@ -245,6 +245,11 @@ fresh broker grants; `session --lua --commands` opts into that executor. Custom
 recognizers, coroutine tasks and live adapter APIs remain required work.
 Production routing remains disabled; named-effect execution currently has model
 grant and helper-process coverage, without authenticated production routing proof.
+Pending effects are canceled by generation, gesture cancellation and source
+invalidation. A canceled queued Lua callback does not run; bounded in-flight
+results are discarded, while unrelated session work continues. Commands already
+started remain owned and reaped. JSON transport preserves floating-point geometry
+exactly, and execution grants retain the context snapshot's freshness deadline.
 
 Presets are `minimal`, `desktop`, and `phone`; each round-trips through `check`.
 Explicit TOML input/output remains supported with schema version 1; no removal

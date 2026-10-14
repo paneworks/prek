@@ -1587,6 +1587,19 @@ fn run_session(
                         monotonic()?,
                     )?;
                 }
+                Reply::ActionCancelled {
+                    fence: cancelled,
+                    id,
+                    ordinal,
+                } if commands && Some(cancelled) == fence => {
+                    executor
+                        .as_mut()
+                        .unwrap()
+                        .cancel_action(cancelled, id, ordinal)?;
+                    if let Some(runtime) = lua_runtime.as_mut() {
+                        runtime.cancel_action(id, ordinal)?;
+                    }
+                }
                 Reply::Rejected { reason } | Reply::Revoked { reason, .. } => {
                     return Err(io::Error::other(reason));
                 }

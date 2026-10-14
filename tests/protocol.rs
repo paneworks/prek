@@ -91,6 +91,40 @@ fn protocol_codec_checks_schema_sequence_time_and_size() {
 }
 
 #[test]
+fn frozen_geometry_survives_json_transport_without_float_changes() {
+    use prek::gestures::{Output, Point, Transform};
+    let original = Output {
+        name: "fractional".into(),
+        pixel_width: 1920.0,
+        pixel_height: 1080.0,
+        scale: 1.25,
+        origin: Point {
+            x: 0.9951847266721969,
+            y: -0.09801714032956059,
+        },
+        transform: Transform::Normal,
+    };
+    let packet = Packet {
+        version: protocol::VERSION,
+        sequence: 1,
+        at: Duration::ZERO,
+        message: original.clone(),
+    };
+    let (mut sender, mut receiver) = Channel::pair().unwrap();
+    sender.send(&original, monotonic().unwrap()).unwrap();
+    let received = receiver.receive::<Output>().unwrap().unwrap().message;
+    assert_eq!(
+        received, original,
+        "a frozen geometry must not change across IPC"
+    );
+    let decoded = protocol::decode::<Output>(&protocol::encode(&packet).unwrap())
+        .unwrap()
+        .message;
+    assert_eq!(decoded.origin.x.to_bits(), original.origin.x.to_bits());
+    assert_eq!(decoded.origin.y.to_bits(), original.origin.y.to_bits());
+}
+
+#[test]
 fn reload_request_cannot_supply_a_path_configuration_or_claimed_privilege() {
     Request::Reload {}.validate().unwrap();
     assert!(Request::Reload {}.fence().is_none());

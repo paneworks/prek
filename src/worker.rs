@@ -77,6 +77,10 @@ pub enum Report {
         subscription: Subscription,
         event: Box<Event>,
     },
+    SourceInvalidated {
+        subscription: Subscription,
+        source: crate::input::Source,
+    },
 }
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -101,6 +105,7 @@ impl Report {
             | Self::Ended { subscription, .. }
             | Self::ContextLost { subscription }
             | Self::Dispatch { subscription, .. } => subscription,
+            Self::SourceInvalidated { subscription, .. } => subscription,
         }
     }
 }
@@ -469,7 +474,19 @@ impl Registry {
                 },
                 _ => record.clone(),
             };
+            let invalidated = match &record {
+                Record::Mapping { source, .. }
+                | Record::Reconcile { source, .. }
+                | Record::Remove { source, .. } => Some(source.clone()),
+                _ => None,
+            };
             observer.engine.push(record)?;
+            if let Some(source) = invalidated {
+                reports.push(Report::SourceInvalidated {
+                    subscription: observer.subscription.identity(),
+                    source,
+                });
+            }
             for event in observer.engine.take_events() {
                 reports.push(Report::Observation {
                     subscription: observer.subscription.identity(),
@@ -863,6 +880,43 @@ mod tests {
             })
             .collect()
     }
+    #[test]
+    fn source_invalidation_is_reported_without_an_active_candidate_or_other_seat_leak() {
+        let mut registry = registry(config());
+        update(
+            &mut registry,
+            1,
+            vec![subscription("seat0", 7), subscription("seat1", 8)],
+            0,
+        );
+        registry.reports.clear();
+        registry.bytes = 0;
+        registry
+            .push(
+                Record::Remove {
+                    source: source(1, "seat0"),
+                    at: ms(10),
+                },
+                ms(10),
+            )
+            .unwrap();
+        let invalidated = registry
+            .reports
+            .iter()
+            .filter_map(|(report, _)| match report {
+                Report::SourceInvalidated {
+                    subscription,
+                    source,
+                } => Some((subscription, source)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(invalidated.len(), 1);
+        assert_eq!(invalidated[0].0.seat, "seat0");
+        assert_eq!(invalidated[0].0.fence.session, 7);
+        assert_eq!(*invalidated[0].1, source(1, "seat0"));
+    }
+
     #[test]
     fn only_subscribed_seat_receives_fenced_outcomes() {
         let mut registry = registry(config());

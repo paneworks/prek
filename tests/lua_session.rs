@@ -150,7 +150,7 @@ return p.config.new{rules={p.rules.define{id='touch-rule',trigger=p.triggers.key
         .unwrap();
     assert!(
         executor
-            .offer(fence(1), event, monotonic().unwrap())
+            .offer(fence(1), event.clone(), monotonic().unwrap())
             .is_err()
     );
     executor
@@ -168,10 +168,40 @@ return p.config.new{rules={p.rules.define{id='touch-rule',trigger=p.triggers.key
             )
             .unwrap();
     }
+    // Cancel before the queued callback starts. Its command and log must stay
+    // absent while the same supervised VM accepts a later gesture.
+    executor.cancel_action(fence(1), 1, 1).unwrap();
+    session.cancel_action(1, 1).unwrap();
+    drain(&mut session).unwrap();
+    for (id, ordinal, result) in session.take_actions() {
+        assert!(
+            executor
+                .resolve_action(id, ordinal, result, monotonic().unwrap())
+                .unwrap()
+                .is_empty()
+        );
+    }
+    assert!(!path.exists() && session.action_ready());
+    let mut later = event;
+    let Event::Matched { id, at, .. } = later.as_mut() else {
+        unreachable!()
+    };
+    *id = 2;
+    *at = monotonic().unwrap();
+    executor
+        .offer(fence(1), later, monotonic().unwrap())
+        .unwrap();
+    let now = monotonic().unwrap();
+    executor
+        .grant(fence(1), 2, 1, now + Duration::from_millis(250), now)
+        .unwrap();
+    executor
+        .execute_ready_with_lua(now, Some(&mut session))
+        .unwrap();
     let end = monotonic().unwrap() + Duration::from_secs(3);
     let mut logs = Vec::new();
     let mut completions = Vec::new();
-    while completions.is_empty() {
+    while completions.len() < 2 {
         session.step(monotonic().unwrap()).unwrap();
         for (id, ordinal, result) in session.take_actions() {
             logs.extend(
@@ -202,7 +232,13 @@ return p.config.new{rules={p.rules.define{id='touch-rule',trigger=p.triggers.key
     assert_eq!(logs.len(), 1);
     assert_eq!(logs[0].message, "named-action");
     assert!(path.exists());
-    assert_eq!(completions, vec![(fence(1), 1, 1, Completion::Applied)]);
+    assert_eq!(
+        completions,
+        vec![
+            (fence(1), 1, 1, Completion::Cancelled),
+            (fence(1), 2, 1, Completion::Applied)
+        ]
+    );
     assert!(drain(&mut session).unwrap().is_empty());
     fs::remove_file(&path).unwrap();
 }

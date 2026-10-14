@@ -241,6 +241,12 @@ Pending results and later effects are canceled on generation change. Already
 spawned commands continue to be reaped; their retired-generation completions
 are discarded. A result arriving after grant expiry is discarded and completes
 as canceled, while the session remains live. Nil means the handler completed without additional effects.
+Candidate cancellation, source removal/reconciliation and mapping changes also
+invalidate pending offers for the affected gesture/source. Unrelated work keeps
+its generation and VM. A queued callback is removed before invocation; an
+already-running callback remains bounded and its effects/logs are discarded.
+Cancellation cannot undo commands that already started. Grants expire by both
+the 250 ms execution limit and the verified context snapshot's remaining age.
 Logs remain available inside named callbacks. Event/timer subscriptions cannot
 execute actions merely by returning an action table.
 

@@ -56,6 +56,7 @@ pub struct Executor {
     mode: Mode,
     capabilities: BTreeSet<Capability>,
     seen: BTreeMap<u64, u64>,
+    cancelled: BTreeMap<u64, u64>,
     pending: BTreeMap<(u64, u64), Pending>,
     running: Vec<Running>,
     outgoing: VecDeque<Request>,
@@ -85,6 +86,7 @@ impl Executor {
             mode,
             capabilities,
             seen: BTreeMap::new(),
+            cancelled: BTreeMap::new(),
             pending: BTreeMap::new(),
             running: Vec::new(),
             outgoing: VecDeque::new(),
@@ -106,6 +108,7 @@ impl Executor {
         self.fence = fence;
         self.pending.clear();
         self.seen.clear();
+        self.cancelled.clear();
         self.outgoing.clear();
         self.reported_available = None;
         self.lua_ready = false;
@@ -193,8 +196,15 @@ impl Executor {
         expires: Duration,
         now: Duration,
     ) -> io::Result<()> {
-        if fence != self.fence || expires <= now || expires > now + crate::context::SNAPSHOT_MAX_AGE
-        {
+        if id == 0 || ordinal == 0 {
+            return Err(protocol::invalid("invalid action grant identity"));
+        }
+        if fence == self.fence && self.cancelled.get(&id).is_some_and(|last| ordinal <= *last) {
+            // Cancellation may cross an execution reply already sent by the
+            // broker. It never revives work, even if that reply has expired.
+            return Ok(());
+        }
+        if fence != self.fence || expires > now + crate::context::SNAPSHOT_MAX_AGE {
             return Err(protocol::invalid("stale action execution grant"));
         }
         let pending = self
@@ -203,6 +213,12 @@ impl Executor {
             .ok_or_else(|| protocol::invalid("execution grant has no offered action"))?;
         if pending.expires.is_some() {
             return Err(protocol::invalid("duplicate execution grant"));
+        }
+        if expires <= now {
+            self.pending.remove(&(id, ordinal));
+            self.remember_cancellation(id, ordinal);
+            self.complete(id, ordinal, Completion::Cancelled)?;
+            return Ok(());
         }
         pending.expires = Some(expires);
         Ok(())
@@ -287,9 +303,43 @@ impl Executor {
             .collect::<Vec<_>>();
         for (id, ordinal) in pending {
             self.pending.remove(&(id, ordinal));
+            self.remember_cancellation(id, ordinal);
             self.complete(id, ordinal, Completion::Unavailable)?;
         }
         Ok(())
+    }
+    pub fn cancel_action(&mut self, fence: Fence, id: u64, ordinal: u64) -> io::Result<()> {
+        if fence != self.fence || id == 0 || ordinal == 0 {
+            return Err(protocol::invalid("stale action cancellation"));
+        }
+        let Some(pending) = self.pending.get_mut(&(id, ordinal)) else {
+            // Ordered control can repeat a cancellation while an earlier
+            // acknowledgement is in flight. Already dispatched children remain
+            // owned and reaped; their effects cannot be undone.
+            return if self.seen.get(&id).is_some_and(|seen| ordinal <= *seen) {
+                Ok(())
+            } else {
+                Err(protocol::invalid("cancellation has no offered action"))
+            };
+        };
+        if pending.resolving {
+            // The helper still owns its response. Keep the identity until that
+            // response is discarded, using the existing expiry path.
+            pending.expires = Some(Duration::ZERO);
+        } else {
+            self.pending.remove(&(id, ordinal));
+            self.complete(id, ordinal, Completion::Cancelled)?;
+        }
+        self.remember_cancellation(id, ordinal);
+        Ok(())
+    }
+    fn remember_cancellation(&mut self, id: u64, ordinal: u64) {
+        // Only seen identities can be canceled, so this shares the existing
+        // per-generation gesture bound rather than growing with repeat count.
+        self.cancelled
+            .entry(id)
+            .and_modify(|last| *last = (*last).max(ordinal))
+            .or_insert(ordinal);
     }
     pub fn execute_ready_with_lua(
         &mut self,
@@ -776,6 +826,100 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn scoped_cancellation_stops_pending_effects_and_preserves_other_actions() {
+        let cancelled = path();
+        let other = path();
+        let mut executor = executor(Mode::Route);
+        executor
+            .offer(fence(), event(1, &cancelled), monotonic().unwrap())
+            .unwrap();
+        executor
+            .offer(fence(), event(2, &other), monotonic().unwrap())
+            .unwrap();
+        let now = monotonic().unwrap();
+        executor
+            .grant(fence(), 2, 1, now + Duration::from_millis(250), now)
+            .unwrap();
+        executor.cancel_action(fence(), 1, 1).unwrap();
+        executor.cancel_action(fence(), 1, 1).unwrap();
+        executor.grant(fence(), 1, 1, Duration::ZERO, now).unwrap();
+        executor.execute_ready(monotonic().unwrap()).unwrap();
+        finish(&mut executor);
+        assert!(!cancelled.exists() && other.exists());
+        assert_eq!(
+            executor
+                .outgoing
+                .iter()
+                .filter(|request| matches!(
+                    request,
+                    Request::Complete {
+                        id: 1,
+                        ordinal: 1,
+                        result: Completion::Cancelled,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        fs::remove_file(other).unwrap();
+        assert!(executor.cancel_action(fence(), 99, 1).is_err());
+        assert!(
+            executor
+                .cancel_action(
+                    Fence {
+                        session: 2,
+                        ..fence()
+                    },
+                    1,
+                    1
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn cancellation_discards_an_inflight_lua_result_without_retiring_other_work() {
+        let output = path();
+        let mut named = event(1, &output);
+        let Event::Matched { action, .. } = named.as_mut() else {
+            unreachable!()
+        };
+        let effect = action.clone();
+        *action = Action::Lua {
+            handler: "pending".into(),
+            requires: BTreeSet::from([crate::config::EffectKind::Commands]),
+        };
+        let mut executor = executor(Mode::Route);
+        executor.capabilities.insert(Capability::LuaActions);
+        let now = monotonic().unwrap();
+        executor.offer(fence(), named, now).unwrap();
+        executor
+            .grant(fence(), 1, 1, now + Duration::from_millis(250), now)
+            .unwrap();
+        executor.pending.get_mut(&(1, 1)).unwrap().resolving = true;
+        executor.cancel_action(fence(), 1, 1).unwrap();
+        executor.execute_ready(now).unwrap();
+        assert!(executor.pending.contains_key(&(1, 1)));
+        assert!(
+            executor
+                .resolve_action(
+                    1,
+                    1,
+                    Some(crate::lua::ActionResult {
+                        actions: vec![effect],
+                        logs: vec![]
+                    }),
+                    now
+                )
+                .unwrap()
+                .is_empty()
+        );
+        executor.execute_ready(now).unwrap();
+        assert!(!output.exists() && executor.pending.is_empty());
     }
 
     #[test]

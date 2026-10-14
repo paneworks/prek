@@ -509,6 +509,22 @@ impl InputSink for Stream {
             .collect();
         for name in names {
             let seat = self.seats.get_mut(&name).unwrap();
+            let invalidated = match &record {
+                Record::Remove { source, .. }
+                | Record::Reconcile { source, .. }
+                | Record::Mapping { source, .. } => Some(source.clone()),
+                _ => None,
+            };
+            if let Some(source) = invalidated {
+                let subscription = identity(&seat.subscription);
+                self.queue(Message::Outcome {
+                    report: Report::SourceInvalidated {
+                        subscription,
+                        source,
+                    },
+                })?;
+            }
+            let seat = self.seats.get_mut(&name).unwrap();
             if matches!(record, Record::Tick { .. })
                 || source.is_some_and(|source| self.grabbed.contains(source))
             {

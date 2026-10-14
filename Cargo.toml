@@ -26,7 +26,7 @@ clap = { version = "4", features = ["derive"] }
 luna = { git = "https://github.com/onix-os/luna", rev = "8b370fc7975cc9a3fbf18c07d9250d63aa2bbca6" }
 luna-util = { git = "https://github.com/onix-os/luna", rev = "8b370fc7975cc9a3fbf18c07d9250d63aa2bbca6" }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 toml = "0.8"
 
 [target.'cfg(target_os = "linux")'.dependencies]

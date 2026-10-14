@@ -171,12 +171,15 @@ struct ActionLedger {
     seen: BTreeMap<u64, u64>,
 }
 struct Offered {
+    source: crate::input::Source,
     snapshot: crate::context::Snapshot,
     output: Option<String>,
     window: Option<String>,
     deadline: Duration,
     granted: bool,
     sent: bool,
+    delivered: bool,
+    cancelled: bool,
 }
 impl ActionLedger {
     fn offer(
@@ -190,6 +193,7 @@ impl ActionLedger {
             ordinal,
             output,
             window,
+            source,
             ..
         } = event
         else {
@@ -209,12 +213,15 @@ impl ActionLedger {
         self.pending.insert(
             (*id, *ordinal),
             Offered {
+                source: source.clone(),
                 snapshot: snapshot.clone(),
                 output: output.clone(),
                 window: window.clone(),
                 deadline: now + protocol::MAX_PACKET_AGE,
                 granted: false,
                 sent: false,
+                delivered: false,
+                cancelled: false,
             },
         );
         Ok(())
@@ -244,8 +251,11 @@ impl ActionLedger {
                 .find(|window| Some(&window.id) == offer.window.as_ref())
                 .cloned()
         };
-        if offer.granted
+        if offer.cancelled
+            || offer.granted
             || now >= offer.deadline
+            || snapshot.captured_at > now
+            || now.saturating_sub(snapshot.captured_at) >= SNAPSHOT_MAX_AGE
             || snapshot.state != State::Desktop
             || snapshot.secure_overlay
             || snapshot.generation != offer.snapshot.generation
@@ -271,6 +281,40 @@ impl ActionLedger {
         self.pending.remove(&(id, ordinal));
         Ok(())
     }
+    fn complete_unexecuted(&mut self, id: u64, ordinal: u64) -> io::Result<()> {
+        if self
+            .pending
+            .get(&(id, ordinal))
+            .is_some_and(|offer| offer.delivered && !offer.sent)
+        {
+            self.pending.remove(&(id, ordinal));
+            Ok(())
+        } else {
+            self.complete(id, ordinal)
+        }
+    }
+    fn cancel(
+        &mut self,
+        source: &crate::input::Source,
+        gesture: Option<u64>,
+    ) -> Vec<((u64, u64), bool)> {
+        let mut cancelled = Vec::new();
+        for (identity, offer) in &mut self.pending {
+            if offer.source == *source
+                && gesture.is_none_or(|id| identity.0 == id)
+                && !offer.cancelled
+            {
+                offer.cancelled = true;
+                cancelled.push((*identity, offer.delivered));
+            }
+        }
+        for (identity, delivered) in &cancelled {
+            if !delivered {
+                self.pending.remove(identity);
+            }
+        }
+        cancelled
+    }
 }
 struct Connection {
     channel: Channel,
@@ -284,6 +328,9 @@ struct Connection {
 impl Connection {
     fn push(&mut self, reply: Reply) -> io::Result<()> {
         reply.validate()?;
+        if matches!(reply, Reply::ActionCancelled { .. }) && self.outgoing.contains(&reply) {
+            return Ok(());
+        }
         if let Reply::Observation { fence, event } = &reply {
             self.outgoing.retain(|old| {
                 !matches!(old,
@@ -312,6 +359,13 @@ impl Connection {
             && self.channel.send(reply, now)?
         {
             let reply = self.outgoing.pop_front().unwrap();
+            if let Reply::Dispatch { event, .. } = &reply
+                && let crate::rules::Event::Matched { id, ordinal, .. } = event.as_ref()
+                && let Some(bound) = self.bound.as_mut()
+                && let Some(offer) = bound.actions.pending.get_mut(&(*id, *ordinal))
+            {
+                offer.delivered = true;
+            }
             if let Reply::Execute { id, ordinal, .. } = &reply
                 && let Some(bound) = self.bound.as_mut()
                 && let Some(offer) = bound.actions.pending.get_mut(&(*id, *ordinal))
@@ -319,6 +373,46 @@ impl Connection {
                 offer.sent = true;
             }
             self.bytes -= reply_size(&reply)?;
+        }
+        Ok(())
+    }
+    fn cancel_actions(
+        &mut self,
+        source: &crate::input::Source,
+        gesture: Option<u64>,
+    ) -> io::Result<()> {
+        let bound = self.bound.as_mut().unwrap();
+        if source.seat != bound.seat || source.generation == 0 {
+            return Err(protocol::invalid(
+                "action cancellation belongs to another source/seat",
+            ));
+        }
+        let fence = bound.fence;
+        let cancelled = bound.actions.cancel(source, gesture);
+        let identities = cancelled
+            .iter()
+            .map(|(identity, _)| *identity)
+            .collect::<BTreeSet<_>>();
+        self.outgoing.retain(|reply| {
+            let identity = match reply {
+                Reply::Execute { id, ordinal, .. } => Some((*id, *ordinal)),
+                Reply::Dispatch { event, .. } => match event.as_ref() {
+                    crate::rules::Event::Matched { id, ordinal, .. } => Some((*id, *ordinal)),
+                    _ => None,
+                },
+                _ => None,
+            };
+            identity.is_none_or(|identity| !identities.contains(&identity))
+        });
+        self.bytes = self
+            .outgoing
+            .iter()
+            .map(reply_size)
+            .sum::<io::Result<usize>>()?;
+        for ((id, ordinal), delivered) in cancelled {
+            if delivered {
+                self.push(Reply::ActionCancelled { fence, id, ordinal })?;
+            }
         }
         Ok(())
     }
@@ -643,7 +737,11 @@ impl Broker {
                     && (bound.capabilities.contains(&Capability::Observations)
                         || self.routing.is_some()
                             && bound.capabilities.contains(&Capability::Commands))
-                    && (bound.context.fresh(now) || matches!(&report, Report::ContextLost { .. }))
+                    && (bound.context.fresh(now)
+                        || matches!(
+                            &report,
+                            Report::ContextLost { .. } | Report::SourceInvalidated { .. }
+                        ))
             })
         }) else {
             return Ok(());
@@ -673,6 +771,19 @@ impl Broker {
                 now,
             );
             return Ok(());
+        }
+        match &report {
+            Report::SourceInvalidated { source, .. } => {
+                connection.cancel_actions(source, None)?;
+                self.connections.insert(index, connection);
+                return Ok(());
+            }
+            Report::Observation { event, .. } => {
+                if let crate::rules::Event::Cancelled { source, id, .. } = event.as_ref() {
+                    connection.cancel_actions(source, Some(*id))?;
+                }
+            }
+            _ => {}
         }
         if matches!(
             &report,
@@ -1183,6 +1294,15 @@ impl Broker {
                                     "command execution was not negotiated",
                                 ));
                             }
+                            if bound
+                                .actions
+                                .pending
+                                .get(&(id, ordinal))
+                                .is_some_and(|offer| offer.cancelled)
+                            {
+                                connection.push(Reply::ActionCancelled { fence, id, ordinal })?;
+                                return connection.flush(monotonic()?);
+                            }
                             if !self.guard_observation(connection, monotonic()?)? {
                                 return Ok(());
                             }
@@ -1194,15 +1314,40 @@ impl Broker {
                             bound
                                 .actions
                                 .authorize(id, ordinal, &context.snapshot, now)?;
+                            let expires = (now + SNAPSHOT_MAX_AGE)
+                                .min(context.snapshot.captured_at + SNAPSHOT_MAX_AGE);
                             connection.push(Reply::Execute {
                                 fence,
                                 id,
                                 ordinal,
-                                expires: now + SNAPSHOT_MAX_AGE,
+                                expires,
                             })?;
                         }
-                        Request::Complete { id, ordinal, .. } => {
-                            bound.actions.complete(id, ordinal)?;
+                        Request::Complete {
+                            id,
+                            ordinal,
+                            result,
+                            ..
+                        } => {
+                            if matches!(
+                                result,
+                                crate::protocol::Completion::Cancelled
+                                    | crate::protocol::Completion::Unavailable
+                            ) {
+                                bound.actions.complete_unexecuted(id, ordinal)?;
+                            } else {
+                                bound.actions.complete(id, ordinal)?;
+                            }
+                            connection.outgoing.retain(|reply| {
+                                !matches!(reply,
+                                Reply::Execute { id: offered_id, ordinal: offered_ordinal, .. }
+                                if *offered_id == id && *offered_ordinal == ordinal)
+                            });
+                            connection.bytes = connection
+                                .outgoing
+                                .iter()
+                                .map(reply_size)
+                                .sum::<io::Result<usize>>()?;
                         }
                         Request::Availability { capabilities, .. } => {
                             if capabilities.iter().any(|capability| {
@@ -1511,6 +1656,7 @@ mod tests {
         assert!(actions.complete(1, 1).is_err());
 
         for (at, state, generation) in [
+            (250, State::Desktop, 1),
             (1000, State::Desktop, 1),
             (1, State::Locked, 1),
             (1, State::Desktop, 2),
@@ -1529,6 +1675,67 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn cancelled_offers_are_scoped_and_unsent_offers_cannot_reappear() {
+        let fence = Fence {
+            broker: Epoch([1, 2]),
+            configuration: 1,
+            session: 1,
+        };
+        let Reply::Observation { event, .. } = progress(fence, 1, Stage::Begin) else {
+            unreachable!()
+        };
+        let snapshot = crate::context::Snapshot {
+            generation: 1,
+            revision: 1,
+            captured_at: Duration::ZERO,
+            state: State::Desktop,
+            outputs: vec![],
+            windows: vec![],
+            regions: vec![],
+            secure_overlay: false,
+        };
+        let Event::Matched { source, .. } = event.as_ref() else {
+            unreachable!()
+        };
+        let source = source.clone();
+        let mut other = event.clone();
+        let Event::Matched {
+            id,
+            source: other_source,
+            ..
+        } = other.as_mut()
+        else {
+            unreachable!()
+        };
+        *id = 2;
+        other_source.device += 1;
+        let mut actions = ActionLedger::default();
+        actions.offer(&event, &snapshot, Duration::ZERO).unwrap();
+        actions.offer(&other, &snapshot, Duration::ZERO).unwrap();
+        actions.pending.get_mut(&(1, 1)).unwrap().delivered = true;
+        assert_eq!(actions.cancel(&source, Some(1)), vec![((1, 1), true)]);
+        assert!(actions.authorize(1, 1, &snapshot, Duration::ZERO).is_err());
+        assert!(
+            actions.complete(1, 1).is_err(),
+            "ungranted cancellation must not become Applied"
+        );
+        actions.complete_unexecuted(1, 1).unwrap();
+        assert!(actions.complete_unexecuted(1, 1).is_err());
+        assert!(actions.offer(&event, &snapshot, Duration::ZERO).is_err());
+        actions.authorize(2, 1, &snapshot, Duration::ZERO).unwrap();
+
+        let Event::Matched { source, .. } = other.as_ref() else {
+            unreachable!()
+        };
+        assert_eq!(actions.cancel(source, None), vec![((2, 1), false)]);
+        assert!(actions.pending.is_empty());
+        assert!(
+            actions.complete_unexecuted(2, 1).is_err(),
+            "undelivered offers have no receipt"
+        );
+    }
+
     #[test]
     fn heartbeat_grace_accepts_only_issued_fences_and_never_control_requests() {
         let fence = Fence {

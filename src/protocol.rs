@@ -269,6 +269,13 @@ pub enum Reply {
         ordinal: u64,
         expires: Duration,
     },
+    /// Invalidate one offered effect before execution, without retiring
+    /// unrelated gestures or this session's Lua VM.
+    ActionCancelled {
+        fence: Fence,
+        id: u64,
+        ordinal: u64,
+    },
     Revoked {
         fence: Fence,
         reason: String,
@@ -291,6 +298,7 @@ impl Reply {
             | Self::LuaSource { fence, .. }
             | Self::Dispatch { fence, .. }
             | Self::Execute { fence, .. }
+            | Self::ActionCancelled { fence, .. }
             | Self::Revoked { fence, .. } => Some(*fence),
         }
     }
@@ -345,6 +353,9 @@ impl Reply {
                 ..
             } if *id == 0 || *ordinal == 0 || expires.is_zero() => {
                 return Err(invalid("invalid action execution identity/deadline"));
+            }
+            Self::ActionCancelled { id, ordinal, .. } if *id == 0 || *ordinal == 0 => {
+                return Err(invalid("invalid cancelled action identity"));
             }
             Self::Observation { fence, event } | Self::Dispatch { fence, event } => {
                 if let Event::Matched {
