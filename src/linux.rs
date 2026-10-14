@@ -373,6 +373,12 @@ pub trait InputSink {
     fn finished(&self) -> bool {
         false
     }
+    fn service(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+    fn poll_sources(&self) -> Vec<PollFd<'_>> {
+        Vec::new()
+    }
 }
 struct WatchSink<'a, 'b, W: Write> {
     replay: Replay,
@@ -471,6 +477,7 @@ fn observe_loop(
         .transpose()?;
     let mut pending = Vec::<Frame>::new();
     loop {
+        sink.service()?;
         if sink.finished() {
             return Ok(());
         }
@@ -510,6 +517,7 @@ fn observe_loop(
             if let Some(health) = health.as_ref() {
                 fds.push(PollFd::new(health.as_fd(), PollFlags::POLLIN));
             }
+            fds.extend(sink.poll_sources());
             match poll(&mut fds, timeout) {
                 Ok(_) => fds
                     .iter()

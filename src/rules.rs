@@ -95,6 +95,17 @@ pub enum Event {
     },
 }
 
+impl Event {
+    pub(crate) fn supersedes_progress(&self, old: &Self) -> bool {
+        matches!((self, old), (
+            Self::Matched { id, ordinal, source, rule, config_generation, session_generation, stage: Stage::Update, .. },
+            Self::Matched { id: old_id, ordinal: old_ordinal, source: old_source, rule: old_rule,
+                config_generation: old_config, session_generation: old_session, stage: Stage::Update, .. }
+        ) if id == old_id && ordinal > old_ordinal && source == old_source && rule == old_rule
+            && config_generation == old_config && session_generation == old_session)
+    }
+}
+
 #[derive(Clone)]
 struct DeviceState {
     device: Device,
@@ -369,6 +380,51 @@ impl Engine {
     }
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+    pub(crate) fn fork_observer(
+        &self,
+        config: Config,
+        seat: &str,
+        session: u64,
+        at: Duration,
+    ) -> io::Result<Self> {
+        let mut next = Self::new(config)?;
+        next.push(Record::Header {
+            version: crate::replay::FORMAT_VERSION,
+        })?;
+        for state in self
+            .devices
+            .values()
+            .filter(|state| state.device.source.seat == seat)
+        {
+            next.push(Record::Device {
+                device: state.device.clone(),
+                keys: state.keys.clone(),
+                contacts: state.contacts.clone(),
+            })?;
+            if let Some(mapping) = &state.mapping {
+                next.push(Record::Mapping {
+                    source: state.device.source.clone(),
+                    at,
+                    mapping: mapping.clone(),
+                })?;
+            }
+        }
+        next.generation = self.generation;
+        next.authority.observation_generation(session);
+        next.last_at = Some(at);
+        Ok(next)
+    }
+    pub(crate) fn reconciliation(&self, source: &Source, at: Duration) -> Option<Record> {
+        self.devices
+            .get(&source.device)
+            .filter(|state| &state.device.source == source)
+            .map(|state| Record::Reconcile {
+                source: source.clone(),
+                at,
+                keys: state.keys.clone(),
+                contacts: state.contacts.clone(),
+            })
     }
     pub fn take_events(&mut self) -> Vec<Event> {
         std::mem::take(&mut self.events)

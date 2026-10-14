@@ -72,6 +72,65 @@ fn worker_fixture() {
         return;
     }
     let mut health = Heartbeat::connect().unwrap();
+    if case == "controlled-inherited" {
+        let mut control = health.take_control().unwrap();
+        // SAFETY: this harness starts on one exec thread, before any other
+        // threads or input access. The child writes one packet then exits.
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0);
+        if child == 0 {
+            assert!(
+                control
+                    .send(&"inherited-sender", prek::ipc::monotonic().unwrap())
+                    .unwrap()
+            );
+            unsafe { libc::_exit(0) };
+        }
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+        loop {
+            match health.progress() {
+                Ok(()) => thread::sleep(Duration::from_millis(10)),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => return,
+                Err(error) => panic!("health failed: {error}"),
+            }
+        }
+    }
+    if case == "controlled" {
+        let mut control = health.take_control().unwrap();
+        assert_ne!(
+            unsafe { libc::fcntl(control.as_fd().as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC,
+            0
+        );
+        assert_eq!(control.peer().pid, unsafe { libc::getppid() } as u32);
+        assert!(
+            control
+                .send(&"ready", prek::ipc::monotonic().unwrap())
+                .unwrap()
+        );
+        loop {
+            if let Some(packet) = control.receive::<String>().unwrap() {
+                assert_eq!(packet.message, "flood");
+                let payload = "x".repeat(32 * 1024);
+                let mut full = false;
+                for _ in 0..128 {
+                    if !control
+                        .send(&payload, prek::ipc::monotonic().unwrap())
+                        .unwrap()
+                    {
+                        full = true;
+                        break;
+                    }
+                }
+                assert!(full, "fixture must fill its observation socket");
+            }
+            match health.progress() {
+                Ok(()) => thread::sleep(Duration::from_millis(10)),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => return,
+                Err(error) => panic!("health failed while observation transport was full: {error}"),
+            }
+        }
+    }
     assert_eq!(
         Heartbeat::connect().unwrap_err().kind(),
         io::ErrorKind::AlreadyExists
@@ -276,6 +335,61 @@ fn wait_for_health(worker: &mut Supervisor) {
         assert!(Instant::now() < deadline, "worker did not become healthy");
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn observation_channel_is_bound_to_the_owned_child_and_does_not_stall_health() {
+    let (mut worker, mut control) = Supervisor::spawn_controlled(command("controlled")).unwrap();
+    assert_eq!(control.peer().pid, worker.worker_pid());
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        assert!(worker.check().unwrap().is_none());
+        if let Some(packet) = control.receive::<String>().unwrap() {
+            assert_eq!(packet.message, "ready");
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        control
+            .send(&"flood", prek::ipc::monotonic().unwrap())
+            .unwrap()
+    );
+    // Leave the observation link unread beyond the one-second health timeout.
+    let until = Instant::now() + Duration::from_millis(1250);
+    while Instant::now() < until {
+        assert!(
+            worker.check().unwrap().is_none(),
+            "observation backpressure stalled health"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(worker.heartbeats() >= 4);
+    worker.request_stop().unwrap();
+    let report = worker.wait().unwrap();
+    assert_eq!(report.reason(), Reason::Requested);
+    assert!(report.status().success());
+}
+
+fn inherited_observation_writer_cannot_impersonate_the_worker() {
+    let (mut worker, mut control) =
+        Supervisor::spawn_controlled(command("controlled-inherited")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        assert!(worker.check().unwrap().is_none());
+        match control.receive::<String>() {
+            Err(error) => {
+                assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+                break;
+            }
+            Ok(None) => {}
+            Ok(Some(_)) => panic!("inherited writer was accepted as the supervised worker"),
+        }
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(10));
+    }
+    worker.request_stop().unwrap();
+    assert!(worker.wait().unwrap().status().success());
 }
 
 fn healthy_worker_remains_live_and_acknowledges_orderly_stop() {
@@ -518,6 +632,14 @@ fn main() {
     // A separate executable gives fixtures a genuine exec-thread lifecycle;
     // no helper is installed with the application or opens any input device.
     let cases: &[(&str, fn())] = &[
+        (
+            "inherited observation sender rejected",
+            inherited_observation_writer_cannot_impersonate_the_worker,
+        ),
+        (
+            "private observation backpressure preserves health",
+            observation_channel_is_bound_to_the_owned_child_and_does_not_stall_health,
+        ),
         (
             "healthy loop and orderly stop",
             healthy_worker_remains_live_and_acknowledges_orderly_stop,

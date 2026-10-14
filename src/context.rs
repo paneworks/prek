@@ -331,6 +331,12 @@ impl Authority {
     pub fn generation(&self) -> u64 {
         self.generation
     }
+    /// A trusted worker can fence context-free observations without inventing
+    /// desktop, lock or provider authority from session membership.
+    pub(crate) fn observation_generation(&mut self, generation: u64) {
+        debug_assert!(self.binding.is_none() && generation > 0);
+        self.generation = generation;
+    }
     fn revoke(&mut self) {
         self.generation = self
             .generation

@@ -39,6 +39,10 @@ let
     allowed_devices = ["fixture"]
     [devices.fixture]
     name = "Prek broker fixture"
+    [[rules]]
+    id = "broker-a"
+    trigger = { kind = "key", key = "KEY_A" }
+    action = { kind = "event", name = "fixture_press" }
   '';
 in
 pkgs.testers.runNixOSTest {
@@ -85,9 +89,28 @@ pkgs.testers.runNixOSTest {
     machine.succeed("systemd-run --unit prek-broker-source --property=Type=exec --setenv=PREK_COMPOSITOR_VM=1 --setenv=PREK_ISOLATED_ROUTING=1 ${tests}/bin/prek-compositor-tests --ignored --exact broker_observer_source_fixture")
     machine.wait_until_succeeds("test -s /run/prek-control/source", timeout=5)
     source = machine.succeed("cat /run/prek-control/source").strip()
+    machine.succeed("printf press-initial > /run/prek-control/emit")
+    machine.wait_until_succeeds("test \"$(cat /run/prek-control/emitted)\" = press-initial", timeout=3)
     broker = "${package}/bin/prek broker --config ${brokerConfig} --runtime-dir /run/prek-control --compositor-executable ${pkgs.hyprland}/bin/.Hyprland-wrapped --logind-library ${pkgs.systemd}/lib/libsystemd.so.0"
     machine.succeed(f"systemd-run --unit prek-broker --property=Type=exec {broker}")
     machine.wait_until_succeeds("test -s /run/user/1000/prek-broker-ready", timeout=10)
+    # The worker acknowledges neutral recognition entry; an initially held key
+    # cannot become a new press when its session starts receiving observations.
+    machine.succeed("! grep -q '\"outcome\":\"matched\"' /run/user/1000/prek-broker-agent.jsonl")
+    machine.succeed("printf release-initial > /run/prek-control/emit")
+    machine.wait_until_succeeds("test \"$(cat /run/prek-control/emitted)\" = release-initial", timeout=3)
+    machine.succeed("printf press-fresh > /run/prek-control/emit")
+    machine.wait_until_succeeds("test \"$(cat /run/prek-control/emitted)\" = press-fresh", timeout=3)
+    machine.wait_until_succeeds("grep -q '\"outcome\":\"matched\"' /run/user/1000/prek-broker-agent.jsonl", timeout=3)
+    observations = [__import__("json").loads(line) for line in machine.succeed("cat /run/user/1000/prek-broker-agent.jsonl").splitlines()]
+    matched = [row for row in observations if row.get("kind") == "observation" and row["event"]["outcome"] == "matched"]
+    assert len(matched) == 1, matched
+    assert matched[0]["event"]["rule"] == "broker-a", matched
+    assert matched[0]["event"]["source"]["seat"] == "seat0", matched
+    assert matched[0]["event"]["session_generation"] == matched[0]["fence"]["session"], matched
+    assert matched[0]["event"]["config_generation"] == matched[0]["fence"]["configuration"], matched
+    assert "frame" not in matched[0] and "events" not in matched[0]["event"], matched
+    machine.succeed("printf release-fresh > /run/prek-control/emit")
     parent = int(machine.succeed("systemctl show -p MainPID --value prek-broker").strip())
     worker = int(machine.succeed(f"cat /proc/{parent}/task/{parent}/children").strip())
     machine.succeed(f"! readlink /proc/{parent}/fd/* | grep -E '/dev/input|/dev/uinput'")
@@ -103,6 +126,9 @@ pkgs.testers.runNixOSTest {
     machine.wait_until_succeeds("test -s /run/user/1000/prek-broker-agent-stopped", timeout=3)
     machine.wait_until_succeeds("test ! -e /run/prek-control/control.sock", timeout=3)
     machine.succeed("test \"$(systemctl show -p Result --value prek-broker)\" = success")
+    # A normal duration expiry also waits for the worker's successful reap,
+    # rather than reporting a data-socket EOF as a service failure.
+    machine.succeed(f"{broker} --duration 1", timeout=5)
     machine.succeed("systemctl stop prek-broker-source")
     machine.wait_until_succeeds(f"test ! -e {source}")
   '';

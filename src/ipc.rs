@@ -251,6 +251,7 @@ impl Drop for Endpoint {
     }
 }
 
+#[derive(Debug)]
 pub struct Channel {
     fd: OwnedFd,
     peer: Credentials,
@@ -275,7 +276,7 @@ impl Channel {
         }
         Self::from_fd(fd)
     }
-    fn from_fd(fd: OwnedFd) -> io::Result<Self> {
+    pub(crate) fn from_fd(fd: OwnedFd) -> io::Result<Self> {
         option(fd.as_raw_fd(), libc::SO_PASSCRED, 1)?;
         let peer = credentials(&fd)?;
         Ok(Self {
@@ -308,6 +309,14 @@ impl Channel {
     }
     pub fn peer(&self) -> Credentials {
         self.peer
+    }
+    pub(crate) fn into_fd(self) -> OwnedFd {
+        self.fd
+    }
+    /// A socketpair records its creator as SO_PEERCRED. After the supervised
+    /// fork, require every packet to come from the actual owned child instead.
+    pub(crate) fn expect_worker(&mut self, pid: u32) {
+        self.peer.pid = pid;
     }
     pub fn send<T: Serialize>(&mut self, message: &T, at: Duration) -> io::Result<bool> {
         if self.failed {

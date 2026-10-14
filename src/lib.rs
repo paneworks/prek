@@ -36,5 +36,7 @@ pub mod session;
 #[cfg(target_os = "linux")]
 pub mod supervisor;
 pub mod transport;
+#[cfg(target_os = "linux")]
+pub mod worker;
 
 pub use buttons::{Button, Buttons, Gesture, Timing};

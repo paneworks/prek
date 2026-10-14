@@ -79,6 +79,9 @@ enum Command {
         json: bool,
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..=3600))]
         duration: Option<u64>,
+        /// Receive configured rule outcomes from this session's seat.
+        #[arg(long)]
+        observations: bool,
     },
     /// Query broker status from a verified compositor login session.
     Status {
@@ -306,12 +309,21 @@ fn run(command: Command) -> io::Result<()> {
             instance,
             json,
             duration,
-        } => run_session(&socket, instance, json, duration, false, &mut output),
+            observations,
+        } => run_session(
+            &socket,
+            instance,
+            json,
+            duration,
+            false,
+            observations,
+            &mut output,
+        ),
         Command::Status {
             socket,
             instance,
             json,
-        } => run_session(&socket, instance, json, None, true, &mut output),
+        } => run_session(&socket, instance, json, None, true, false, &mut output),
         Command::UdevImport { marker } => prek::kernel::import_metadata(&marker, &mut output),
         Command::Run {
             config: path,
@@ -334,6 +346,7 @@ fn run(command: Command) -> io::Result<()> {
         } => {
             let mut health = prek::supervisor::Heartbeat::connect()?;
             health.progress()?;
+            let control = health.take_control();
             let config =
                 prek::config::Config::parse(&read_config(&path)?).map_err(io::Error::other)?;
             let engine = prek::rules::Engine::new(config.clone())?;
@@ -361,6 +374,17 @@ fn run(command: Command) -> io::Result<()> {
             eprintln!(
                 "Rule observation only: matches are reported; no actions are executed. Session-dependent rules require a verified provider and are skipped when unavailable."
             );
+            if let Some(channel) = control {
+                let mut sink = BrokerSink {
+                    stream: prek::worker::Stream::new(config, channel)?,
+                };
+                return linux::observe_supervised(
+                    &paths,
+                    duration.map(Duration::from_secs),
+                    &mut sink,
+                    &mut health,
+                );
+            }
             let mut sink = RuleSink {
                 engine,
                 output: &mut output,
@@ -599,7 +623,12 @@ fn run_broker(
     if let Some(duration) = duration {
         command.arg("--duration").arg(duration.to_string());
     }
-    let mut supervisor = Supervisor::spawn(command)?;
+    let (mut supervisor, mut control) = Supervisor::spawn_controlled(command)?;
+    broker.enable_observations();
+    let mut refresh = monotonic()?;
+    let mut revision = 0u64;
+    let mut subscriptions = None;
+    let mut control_closed = false;
     loop {
         if signals.requested() {
             supervisor.request_stop()?;
@@ -619,16 +648,58 @@ fn run_broker(
             };
         }
         broker.step(monotonic()?)?;
+        let now = monotonic()?;
+        if now >= refresh {
+            revision = revision
+                .checked_add(1)
+                .ok_or_else(|| io::Error::other("worker subscription revision exhausted"))?;
+            subscriptions = Some(prek::worker::Subscriptions {
+                revision,
+                seats: broker.subscriptions(now),
+            });
+            refresh = now + prek::service::REFRESH;
+        }
+        if !control_closed && let Some(update) = subscriptions.as_ref() {
+            match control.send(update, now) {
+                Ok(true) => subscriptions = None,
+                Ok(false) => {}
+                Err(error) if worker_link_closed(&error) => control_closed = true,
+                Err(error) => return Err(error),
+            }
+        }
+        for _ in 0..16 {
+            if control_closed {
+                break;
+            }
+            match control.receive::<prek::worker::Report>() {
+                Ok(Some(packet)) => broker.report(packet.message, monotonic()?)?,
+                Ok(None) => break,
+                Err(error) if worker_link_closed(&error) => control_closed = true,
+                Err(error) => return Err(error),
+            }
+        }
         let until = broker
             .deadline()
             .into_iter()
             .chain([supervisor.deadline()?])
+            .chain([refresh])
             .min()
             .unwrap();
         let timeout =
             PollTimeout::try_from(until.saturating_sub(monotonic()?)).map_err(io::Error::other)?;
         let mut fds = broker.poll_sources();
         fds.push(PollFd::new(supervisor.as_fd(), PollFlags::POLLIN));
+        if !control_closed {
+            fds.push(PollFd::new(
+                control.as_fd(),
+                PollFlags::POLLIN
+                    | if subscriptions.is_some() {
+                        PollFlags::POLLOUT
+                    } else {
+                        PollFlags::empty()
+                    },
+            ));
+        }
         if let Err(error) = poll(&mut fds, timeout)
             && error != nix::errno::Errno::EINTR
         {
@@ -638,12 +709,21 @@ fn run_broker(
 }
 
 #[cfg(target_os = "linux")]
+fn worker_link_closed(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset | io::ErrorKind::UnexpectedEof
+    )
+}
+
+#[cfg(target_os = "linux")]
 fn run_session(
     socket: &std::path::Path,
     instance: Option<String>,
     json: bool,
     duration: Option<u64>,
     inspect: bool,
+    observations: bool,
     output: &mut impl Write,
 ) -> io::Result<()> {
     use nix::{
@@ -652,7 +732,7 @@ fn run_session(
     };
     use prek::{
         ipc::{Channel, monotonic},
-        protocol::{Mode, Reply, Request, Role},
+        protocol::{Capability, Mode, Reply, Request, Role},
         supervisor::TerminationSignals,
     };
     use std::os::fd::AsFd;
@@ -672,7 +752,11 @@ fn run_session(
     let registration = Request::Register {
         instance,
         role: if inspect { Role::Inspect } else { Role::Agent },
-        capabilities: Default::default(),
+        capabilities: if observations {
+            std::collections::BTreeSet::from([Capability::Observations])
+        } else {
+            Default::default()
+        },
     };
     registration.validate()?;
     let mut channel = Channel::connect(socket)?;
@@ -710,7 +794,12 @@ fn run_session(
                     mode,
                     capabilities,
                 } if fence.is_none() => {
-                    if mode != Mode::Observe || !capabilities.is_empty() {
+                    let requested = if observations {
+                        std::collections::BTreeSet::from([Capability::Observations])
+                    } else {
+                        Default::default()
+                    };
+                    if mode != Mode::Observe || capabilities != requested {
                         return Err(io::Error::other(
                             "session adapter does not support these broker capabilities",
                         ));
@@ -760,6 +849,38 @@ fn run_session(
                 Reply::Accepted {
                     fence: accepted, ..
                 } if Some(accepted) == fence => {}
+                Reply::Subscribed { fence: subscribed }
+                    if observations && Some(subscribed) == fence =>
+                {
+                    if json {
+                        serde_json::to_writer(
+                            &mut *output,
+                            &serde_json::json!({"version": 1, "subscribed": true, "fence": subscribed}),
+                        )?;
+                        writeln!(output)?;
+                    } else {
+                        writeln!(output, "observing fresh input on the registered seat")?;
+                    }
+                    output.flush()?;
+                }
+                Reply::Observation {
+                    fence: observed,
+                    event,
+                } if observations && Some(observed) == fence => {
+                    if json {
+                        serde_json::to_writer(
+                            &mut *output,
+                            &Reply::Observation {
+                                fence: observed,
+                                event,
+                            },
+                        )?;
+                        writeln!(output)?;
+                    } else {
+                        writeln!(output, "{event:?}")?;
+                    }
+                    output.flush()?;
+                }
                 Reply::Rejected { reason } | Reply::Revoked { reason, .. } => {
                     return Err(io::Error::other(reason));
                 }
@@ -835,6 +956,28 @@ struct RuleSink<'a, W: Write> {
     engine: prek::rules::Engine,
     output: &'a mut W,
     json: bool,
+}
+#[cfg(target_os = "linux")]
+struct BrokerSink {
+    stream: prek::worker::Stream,
+}
+#[cfg(target_os = "linux")]
+impl linux::InputSink for BrokerSink {
+    fn push(&mut self, record: prek::replay::Record) -> io::Result<()> {
+        self.stream.push(record)
+    }
+    fn deadline(&self) -> Option<Duration> {
+        self.stream.deadline()
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.stream.service()
+    }
+    fn service(&mut self) -> io::Result<()> {
+        self.stream.service()
+    }
+    fn poll_sources(&self) -> Vec<nix::poll::PollFd<'_>> {
+        vec![self.stream.poll_source()]
+    }
 }
 
 #[cfg(target_os = "linux")]

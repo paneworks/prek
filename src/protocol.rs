@@ -166,6 +166,10 @@ pub enum Reply {
         fence: Fence,
         revision: u64,
     },
+    /// The worker has reconciled held input and activated fresh observation.
+    Subscribed {
+        fence: Fence,
+    },
     Observation {
         fence: Fence,
         event: Box<Event>,
@@ -191,6 +195,7 @@ impl Reply {
             Self::Welcome { fence, .. }
             | Self::Status { fence, .. }
             | Self::Accepted { fence, .. }
+            | Self::Subscribed { fence }
             | Self::Observation { fence, .. }
             | Self::Dispatch { fence, .. }
             | Self::Revoked { fence, .. } => Some(*fence),

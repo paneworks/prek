@@ -11,8 +11,8 @@ The library additionally provides seat-scoped chords, layers, repeatable holds,
 reference-counted logical keys, armed path capture and shape matching. These
 primitives are tested. Configured key edges, button taps/holds/repeats, chords,
 layers, wheels, touch gestures and configured shapes now run in observation and
-replay. Ordered temporal sequences now compose those recognizers. Exclusive input routing, a
-broker/session service and desktop actions are still in progress.
+replay. Ordered temporal sequences now compose those recognizers. Exclusive input
+routing, broker/session integration and desktop actions are still in progress.
 The current executable does not grab devices or execute configured actions.
 
 The library now also has virtual-device preflight and a bounded raw-frame router.
@@ -54,6 +54,7 @@ cargo run --locked -- check --config prek.toml --json
 cargo run --locked -- doctor --config prek.toml --json
 cargo run --locked -- run --config prek.toml --mode observe --duration 10 --json
 cargo run --locked -- session --json
+cargo run --locked -- session --observations --json
 cargo run --locked -- status --json
 cargo run --locked -- learn-shape my-v --device /dev/input/by-id/YOUR-MOUSE --mouse --output my-v.toml
 cargo run --locked --example main
@@ -113,6 +114,23 @@ process without session membership is refused. Both commands accept `--socket`
 for a different broker endpoint. The current status describes observation and
 registration, with context reported as unknown. It does not yet include device
 ownership/latency counters or authorize desktop actions.
+
+`session --observations` subscribes to configured outcomes from its verified seat.
+The worker acknowledges readiness with `subscribed: true` in JSON output after
+reconciling held keys and contacts. Already-held or unread input older than that
+activation cannot become a new gesture. Outcomes carry the current broker,
+configuration and session fences. Inspection clients receive status only. Session
+membership permits context-free observations; context-dependent rules still
+require a verified provider and produce skipped outcomes while it is unavailable.
+
+The private worker channel carries subscriptions and semantic outcomes, with no
+raw frames or device descriptors. Its health channel remains separate. Progress
+updates coalesce while queued, and retained data has packet and byte limits.
+For coalesced updates, use total displacement or ratios to track progress; the
+latest per-frame delta describes only that frame.
+Overflow or an expired observation lease revokes the affected stream while the
+worker continues reading input. Disconnect or registration replacement discards
+queued outcomes and requires fresh input on the next subscription.
 
 The control protocol uses versioned, bounded sequenced packets. Kernel sender
 credentials are checked on every message, transferred descriptors are closed

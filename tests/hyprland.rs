@@ -466,8 +466,19 @@ fn broker_observer_source_fixture() {
         .unwrap();
     writeln!(witness, "{}", node.display()).unwrap();
     witness.sync_all().unwrap();
+    let mut previous = String::new();
     loop {
-        thread::sleep(Duration::from_secs(60));
+        if let Ok(command) = fs::read_to_string("/run/prek-control/emit")
+            && command != previous
+        {
+            let value = i32::from(command.starts_with("press"));
+            source
+                .emit(&[evdev::InputEvent::new(1, 30, value)])
+                .unwrap();
+            fs::write("/run/prek-control/emitted", &command).unwrap();
+            previous = command;
+        }
+        thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -496,16 +507,15 @@ fn broker_cli_session_fixture() {
             "--socket",
             "/run/prek-control/control.sock",
             "--json",
+            "--observations",
         ])
         .stdout(Stdio::from(output))
         .spawn()
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        if fs::read_to_string(witness)
-            .unwrap()
-            .contains("\"registered\":true")
-        {
+        let observed = fs::read_to_string(witness).unwrap();
+        if observed.contains("\"registered\":true") && observed.contains("\"subscribed\":true") {
             break;
         }
         assert!(

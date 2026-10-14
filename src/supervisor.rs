@@ -29,6 +29,7 @@ pub const TERMINATION_GRACE: Duration = Duration::from_millis(250);
 const LINK_ENV: &str = "PREK_WORKER_LINK_FD";
 const PARENT_ENV: &str = "PREK_WORKER_PARENT";
 const EPOCH_ENV: &str = "PREK_WORKER_EPOCH_NS";
+const DATA_ENV: &str = "PREK_WORKER_DATA_FD";
 const PACKET_SIZE: usize = 20;
 static CONNECTED: AtomicBool = AtomicBool::new(false);
 static SIGNALS_INSTALLED: AtomicBool = AtomicBool::new(false);
@@ -285,6 +286,7 @@ impl AsFd for Link {
 #[derive(Debug)]
 pub struct Heartbeat {
     link: Link,
+    control: Option<crate::ipc::Channel>,
     identity: WorkerIdentity,
     sequence: u64,
     last: Option<Duration>,
@@ -367,8 +369,51 @@ impl Heartbeat {
         if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
             return Err(io::Error::last_os_error());
         }
+        let control = match std::env::var(DATA_ENV) {
+            Ok(value) => {
+                let raw: i32 = value
+                    .parse()
+                    .ok()
+                    .filter(|raw| *raw >= 3 && *raw != fd)
+                    .ok_or_else(|| invalid("invalid worker data descriptor"))?;
+                // SAFETY: the supervisor passes this distinct descriptor through
+                // exec exactly once; connect itself is already single-use.
+                let owned = unsafe { OwnedFd::from_raw_fd(raw) };
+                let mut kind = 0i32;
+                let mut length = std::mem::size_of_val(&kind) as libc::socklen_t;
+                // SAFETY: live inherited descriptor and correctly sized output.
+                if unsafe {
+                    libc::getsockopt(
+                        raw,
+                        libc::SOL_SOCKET,
+                        libc::SO_TYPE,
+                        (&mut kind as *mut i32).cast(),
+                        &mut length,
+                    )
+                } < 0
+                    || kind != libc::SOCK_SEQPACKET
+                {
+                    return Err(invalid("worker data link is not a sequenced socket"));
+                }
+                let channel = crate::ipc::Channel::from_fd(owned)?;
+                if channel.peer().pid != parent as u32
+                    || channel.peer().uid != peer.uid
+                    || channel.peer().gid != peer.gid
+                {
+                    return Err(invalid("worker data link differs from its supervisor"));
+                }
+                // SAFETY: retain this link only in the worker, never an action exec.
+                if unsafe { libc::fcntl(raw, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Some(channel)
+            }
+            Err(std::env::VarError::NotPresent) => None,
+            Err(_) => return Err(invalid("invalid worker data environment")),
+        };
         Ok(Self {
             link,
+            control,
             identity,
             sequence: 0,
             last: None,
@@ -378,6 +423,9 @@ impl Heartbeat {
 
     pub fn worker_identity(&self) -> WorkerIdentity {
         self.identity
+    }
+    pub fn take_control(&mut self) -> Option<crate::ipc::Channel> {
+        self.control.take()
     }
 
     /// Checks stop/parent loss on every call; emits at most four health packets
@@ -496,12 +544,28 @@ pub struct Supervisor {
     _parent_thread: PhantomData<Rc<()>>,
 }
 impl Supervisor {
-    pub fn spawn(mut command: Command) -> io::Result<Self> {
+    pub fn spawn(command: Command) -> io::Result<Self> {
+        Self::spawn_inner(command, None)
+    }
+    /// Device traffic and health use separate private sockets. Backpressure on
+    /// observations cannot fill the health link or delay the input loop.
+    pub fn spawn_controlled(command: Command) -> io::Result<(Self, crate::ipc::Channel)> {
+        let (mut parent, child) = crate::ipc::Channel::pair()?;
+        let supervisor = Self::spawn_inner(command, Some(child.into_fd()))?;
+        parent.expect_worker(supervisor.worker_pid());
+        Ok((supervisor, parent))
+    }
+    fn spawn_inner(mut command: Command, control: Option<OwnedFd>) -> io::Result<Self> {
         let (link, worker) = Link::pair()?;
         let last = now()?;
         // SAFETY: read-only kernel identity of the current parent process.
         let parent = unsafe { libc::getpid() };
         let fd = worker.0.as_raw_fd();
+        let data_fd = control.as_ref().map(AsRawFd::as_raw_fd);
+        command.env_remove(DATA_ENV);
+        if let Some(data_fd) = data_fd {
+            command.env(DATA_ENV, data_fd.to_string());
+        }
         command
             .env(LINK_ENV, fd.to_string())
             .env(PARENT_ENV, parent.to_string())
@@ -525,11 +589,17 @@ impl Supervisor {
                 if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
                     return Err(io::Error::last_os_error());
                 }
+                if let Some(data_fd) = data_fd
+                    && libc::fcntl(data_fd, libc::F_SETFD, 0) < 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
                 Ok(())
             });
         }
         let mut child = command.spawn()?;
         drop(worker);
+        drop(control);
         let birth = match start_ticks(child.id()) {
             Ok(birth) => birth,
             Err(error) => {

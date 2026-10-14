@@ -7,8 +7,9 @@ use crate::{
     context::State,
     hyprland::Client,
     ipc::{Channel, Endpoint},
-    protocol::{self, Epoch, Fence, Mode, Reply, Request, Role},
+    protocol::{self, Capability, Epoch, Fence, Mode, Reply, Request, Role},
     session::{Logind, Peer, Registration},
+    worker::{Report, Subscription},
 };
 use nix::{
     libc,
@@ -77,19 +78,39 @@ struct Bound {
     fence: Fence,
     renewed: Duration,
     checked: Duration,
+    capabilities: BTreeSet<Capability>,
+    observing: bool,
 }
 struct Connection {
     channel: Channel,
     opened: Duration,
     bound: Option<Bound>,
     outgoing: VecDeque<Reply>,
+    bytes: usize,
 }
 impl Connection {
     fn push(&mut self, reply: Reply) -> io::Result<()> {
         reply.validate()?;
+        if let Reply::Observation { fence, event } = &reply {
+            self.outgoing.retain(|old| {
+                !matches!(old,
+                Reply::Observation { fence: old_fence, event: old_event }
+                if old_fence == fence && event.supersedes_progress(old_event))
+            });
+            self.bytes = self
+                .outgoing
+                .iter()
+                .map(reply_size)
+                .sum::<io::Result<usize>>()?;
+        }
         if self.outgoing.len() >= 16 {
             return Err(protocol::invalid("control subscriber queue is full"));
         }
+        let bytes = reply_size(&reply)?;
+        if self.bytes + bytes > protocol::MAX_QUEUED_BYTES {
+            return Err(protocol::invalid("control subscriber byte limit exceeded"));
+        }
+        self.bytes += bytes;
         self.outgoing.push_back(reply);
         Ok(())
     }
@@ -97,10 +118,21 @@ impl Connection {
         if let Some(reply) = self.outgoing.front()
             && self.channel.send(reply, now)?
         {
-            self.outgoing.pop_front();
+            let reply = self.outgoing.pop_front().unwrap();
+            self.bytes -= reply_size(&reply)?;
         }
         Ok(())
     }
+}
+
+fn reply_size(reply: &Reply) -> io::Result<usize> {
+    Ok(protocol::encode(&protocol::Packet {
+        version: protocol::VERSION,
+        sequence: u64::MAX,
+        at: Duration::MAX,
+        message: reply,
+    })?
+    .len())
 }
 
 pub struct Broker {
@@ -112,6 +144,7 @@ pub struct Broker {
     session: u64,
     connections: Vec<Connection>,
     cursor: usize,
+    observations: bool,
 }
 impl Broker {
     /// This currently exposes authenticated status in observation mode. It does
@@ -135,6 +168,7 @@ impl Broker {
             session: 0,
             connections: Vec::new(),
             cursor: 0,
+            observations: false,
         })
     }
     pub fn clients(&self) -> usize {
@@ -150,6 +184,93 @@ impl Broker {
     }
     pub fn epoch(&self) -> Epoch {
         self.epoch
+    }
+    pub fn enable_observations(&mut self) {
+        self.observations = true;
+    }
+    pub fn subscriptions(&mut self, now: Duration) -> Vec<Subscription> {
+        self.connections.retain_mut(|connection| {
+            let Some(bound) = connection.bound.as_mut() else {
+                return true;
+            };
+            now >= bound.checked
+                && now.saturating_sub(bound.renewed) < protocol::MAX_PACKET_AGE
+                && bound
+                    .registration
+                    .check(&self.logind, &bound.client)
+                    .is_ok()
+        });
+        self.connections
+            .iter()
+            .filter_map(|connection| connection.bound.as_ref())
+            .filter(|bound| {
+                bound.role == Role::Agent && bound.capabilities.contains(&Capability::Observations)
+            })
+            .map(|bound| Subscription {
+                seat: bound.seat.clone(),
+                fence: bound.fence,
+            })
+            .collect()
+    }
+    pub fn report(&mut self, report: Report, now: Duration) -> io::Result<()> {
+        let subscription = report.subscription();
+        let Some(index) = self.connections.iter().position(|connection| {
+            connection.bound.as_ref().is_some_and(|bound| {
+                bound.fence == subscription.fence
+                    && bound.seat == subscription.seat
+                    && bound.role == Role::Agent
+                    && bound.capabilities.contains(&Capability::Observations)
+            })
+        }) else {
+            return Ok(());
+        };
+        let mut connection = self.connections.remove(index);
+        let bound = connection.bound.as_mut().unwrap();
+        if now.saturating_sub(bound.renewed) >= protocol::MAX_PACKET_AGE
+            || bound
+                .registration
+                .check(&self.logind, &bound.client)
+                .is_err()
+            || self.verify_agent(connection.channel.peer().pid).is_err()
+        {
+            return Ok(());
+        }
+        let fence = bound.fence;
+        let reply = match report {
+            Report::Ready { .. } if !bound.observing => {
+                bound.observing = true;
+                Reply::Subscribed { fence }
+            }
+            Report::Ready { .. } => {
+                self.connections.insert(index, connection);
+                return Ok(());
+            }
+            Report::Observation { event, .. } if bound.observing => {
+                let source = match event.as_ref() {
+                    crate::rules::Event::Matched { source, .. }
+                    | crate::rules::Event::Skipped { source, .. }
+                    | crate::rules::Event::Cancelled { source, .. } => source,
+                };
+                if source.seat != bound.seat {
+                    return Err(protocol::invalid(
+                        "worker observation belongs to a different seat",
+                    ));
+                }
+                Reply::Observation { fence, event }
+            }
+            Report::Ended { reason, .. } => {
+                let _ = connection
+                    .channel
+                    .send(&Reply::Revoked { fence, reason }, now);
+                return Ok(());
+            }
+            _ => return Err(protocol::invalid("worker observation preceded activation")),
+        };
+        if connection.push(reply).is_ok() {
+            self.connections.insert(index, connection);
+        }
+        // Overflow/disconnection drops only this subscriber, not the worker.
+        Ok(())
     }
     pub fn deadline(&self) -> Option<Duration> {
         self.connections
@@ -190,6 +311,7 @@ impl Broker {
                 opened: now,
                 bound: None,
                 outgoing: VecDeque::new(),
+                bytes: 0,
             });
         }
         if self.connections.is_empty() {
@@ -243,7 +365,11 @@ impl Broker {
                     role,
                     capabilities,
                 } if connection.bound.is_none() => {
-                    if !capabilities.is_empty() {
+                    if capabilities
+                        .iter()
+                        .any(|capability| *capability != Capability::Observations)
+                        || !capabilities.is_empty() && (!self.observations || role != Role::Agent)
+                    {
                         return Err(protocol::invalid(
                             "requested capabilities are not implemented by this broker",
                         ));
@@ -291,13 +417,15 @@ impl Broker {
                         fence,
                         renewed: now,
                         checked: now,
+                        capabilities: capabilities.clone(),
+                        observing: false,
                     });
                     connection.push(Reply::Welcome {
                         fence,
                         seat,
                         session,
                         mode: Mode::Observe,
-                        capabilities: BTreeSet::new(),
+                        capabilities,
                     })?;
                 }
                 request => {
@@ -356,5 +484,97 @@ impl Broker {
 impl AsFd for Broker {
     fn as_fd(&self) -> BorrowedFd<'_> {
         self.endpoint.as_fd()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        config::{Action, Direction},
+        gestures::{Phase, Point, Space, TouchGesture},
+        input::Source,
+        rules::{Event, Evidence, Stage},
+    };
+    fn progress(fence: Fence, ordinal: u64, stage: Stage) -> Reply {
+        let phase = match stage {
+            Stage::Begin => Phase::Begin,
+            Stage::End => Phase::End,
+            _ => Phase::Update,
+        };
+        Reply::Observation {
+            fence,
+            event: Box::new(Event::Matched {
+                version: 1,
+                rule: "continuous".into(),
+                id: 1,
+                ordinal,
+                source: Source {
+                    device: 1,
+                    generation: 1,
+                    seat: "seat0".into(),
+                },
+                at: Duration::from_millis(ordinal),
+                config_generation: fence.configuration,
+                session_generation: fence.session,
+                stage,
+                action: Action::Event {
+                    name: "swipe".into(),
+                },
+                evidence: Evidence::Touch {
+                    space: Space::Normalized,
+                    gesture: TouchGesture::Pan {
+                        fingers: 1,
+                        phase,
+                        direction: Direction::Right,
+                        total: Point {
+                            x: ordinal as f64,
+                            y: 0.0,
+                        },
+                        delta: Point { x: 1.0, y: 0.0 },
+                        velocity: Point { x: 1.0, y: 0.0 },
+                        centroid: Point { x: 0.5, y: 0.5 },
+                        swipe: true,
+                    },
+                },
+                window: None,
+                output: None,
+                workspace: None,
+            }),
+        }
+    }
+    #[test]
+    fn queued_progress_coalesces_and_preserves_begin_latest_update_and_end() {
+        let (channel, mut receiver) = Channel::pair().unwrap();
+        let mut connection = Connection {
+            channel,
+            opened: Duration::ZERO,
+            bound: None,
+            outgoing: VecDeque::new(),
+            bytes: 0,
+        };
+        let fence = Fence {
+            broker: Epoch([1, 2]),
+            configuration: 1,
+            session: 3,
+        };
+        connection.push(progress(fence, 1, Stage::Begin)).unwrap();
+        for ordinal in 2..=129 {
+            connection
+                .push(progress(fence, ordinal, Stage::Update))
+                .unwrap();
+        }
+        connection.push(progress(fence, 130, Stage::End)).unwrap();
+        assert_eq!(connection.outgoing.len(), 3);
+        for (sequence, ordinal) in [1, 129, 130].into_iter().enumerate() {
+            connection.flush(monotonic().unwrap()).unwrap();
+            let packet = receiver.receive::<Reply>().unwrap().unwrap();
+            assert_eq!(packet.sequence, sequence as u64 + 1);
+            assert!(
+                matches!(packet.message, Reply::Observation { event, .. } if matches!(event.as_ref(), Event::Matched { ordinal: actual, .. } if *actual == ordinal))
+            );
+        }
+        assert_eq!(connection.bytes, 0);
+        assert!(connection.outgoing.is_empty());
     }
 }
