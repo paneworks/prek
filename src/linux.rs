@@ -374,9 +374,12 @@ pub trait InputSink {
         _raw: &mut RawDevice,
         _device: &Device,
         _health: Option<&crate::supervisor::Heartbeat>,
-    ) -> io::Result<()> {
-        Ok(())
+    ) -> io::Result<ReaderDisposition> {
+        Ok(ReaderDisposition::Keep)
     }
+    /// Retire virtual output while the loop still owns every original fd.
+    /// Cleanup must be bounded and must also tolerate a failed transport.
+    fn shutdown(&mut self) {}
     fn push(&mut self, record: Record) -> io::Result<()>;
     fn deadline(&self) -> Option<Duration>;
     fn flush(&mut self) -> io::Result<()>;
@@ -391,6 +394,26 @@ pub trait InputSink {
     }
     fn device_policy(&self) -> Option<(&crate::config::Config, u64)> {
         None
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReaderDisposition {
+    Keep,
+    /// Drop this reader after reporting removal, then rediscover its next
+    /// source generation. Partial frames never cross the replacement boundary.
+    Reopen,
+}
+
+struct ReaderOwner<'a, S: InputSink> {
+    readers: Vec<Reader>,
+    sink: &'a mut S,
+}
+impl<S: InputSink> Drop for ReaderOwner<'_, S> {
+    fn drop(&mut self) {
+        // The body runs before `readers` is dropped, including on errors and
+        // unwinding. Virtual output retires before any original grab releases.
+        self.sink.shutdown();
     }
 }
 struct WatchSink<'a, 'b, W: Write> {
@@ -449,7 +472,12 @@ fn observe_loop(
     if let Some(health) = health.as_mut() {
         health.progress()?;
     }
-    let mut readers = Vec::new();
+    let mut owner = ReaderOwner {
+        readers: Vec::new(),
+        sink,
+    };
+    let ReaderOwner { readers, sink } = &mut owner;
+    let sink = &mut **sink;
     let mut identities = BTreeSet::new();
     let header = Record::Header {
         version: replay::FORMAT_VERSION,
@@ -515,7 +543,7 @@ fn observe_loop(
             let config = config.clone();
             refresh_readers(
                 &config,
-                &mut readers,
+                readers,
                 &mut generations,
                 &mut pending,
                 sink,
@@ -525,8 +553,20 @@ fn observe_loop(
             scan_at = monotonic()? + Duration::from_millis(250);
         }
         sink.flush()?;
-        for reader in &mut readers {
-            sink.reader(&mut reader.raw, &reader.device, health.as_deref())?;
+        let mut reopen = Vec::new();
+        for (index, reader) in readers.iter_mut().enumerate() {
+            if sink.reader(&mut reader.raw, &reader.device, health.as_deref())?
+                == ReaderDisposition::Reopen
+            {
+                reopen.push(index);
+            }
+        }
+        for index in reopen.into_iter().rev() {
+            let source = readers[index].device.source.clone();
+            pending.retain(|frame| frame.source != source);
+            sink.push(Record::Remove { source, at: now })?;
+            readers.remove(index);
+            scan_at = now;
         }
         if stop_at.is_some_and(|stop| now >= stop) {
             break;
@@ -605,13 +645,14 @@ fn observe_loop(
             }
         }
         for index in failed.into_iter().rev() {
-            let reader = readers.remove(index);
-            pending.retain(|frame| frame.source != reader.device.source);
+            let source = readers[index].device.source.clone();
+            pending.retain(|frame| frame.source != source);
             let record = Record::Remove {
-                source: reader.device.source,
+                source,
                 at: watermark,
             };
             sink.push(record)?;
+            readers.remove(index);
         }
         let tick = Record::Tick { at: watermark };
         sink.push(tick)?;
@@ -710,12 +751,10 @@ fn refresh_readers(
                     || current.properties != device.properties
             })
         {
-            let reader = readers.remove(index);
-            pending.retain(|frame| frame.source != reader.device.source);
-            sink.push(Record::Remove {
-                source: reader.device.source,
-                at: now,
-            })?;
+            let source = readers[index].device.source.clone();
+            pending.retain(|frame| frame.source != source);
+            sink.push(Record::Remove { source, at: now })?;
+            readers.remove(index);
         }
     }
     for entry in entries {

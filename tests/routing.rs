@@ -7,6 +7,8 @@
 
 #[path = "support/kernel.rs"]
 mod kernel_fixture;
+#[path = "support/lifecycle.rs"]
+mod lifecycle;
 use evdev::InputEvent;
 use kernel_fixture::*;
 use prek::{

@@ -9,7 +9,7 @@ use crate::{
     input::{Device, Frame, Source},
     ipc::{Channel, monotonic},
     kernel::{Flush, Registry, Virtual},
-    linux::{self, InputSink},
+    linux::{self, InputSink, ReaderDisposition},
     protocol::{self, Fence},
     replay::Record,
     routing::Routing,
@@ -31,6 +31,7 @@ struct Seat {
     subscription: Subscription,
     routing: Routing,
     expires: Duration,
+    reported: bool,
 }
 struct Output {
     fence: Fence,
@@ -53,7 +54,68 @@ pub struct Stream {
     outputs: BTreeMap<Source, Output>,
     grabbed: BTreeSet<Source>,
     assembly: Assembly,
-    messages: VecDeque<Message>,
+    messages: Outbox,
+}
+#[derive(Default)]
+struct Outbox {
+    messages: VecDeque<(Message, usize)>,
+    bytes: usize,
+}
+impl Outbox {
+    fn push(&mut self, message: Message) -> io::Result<()> {
+        let bytes = protocol::encode(&protocol::Packet {
+            version: 1,
+            sequence: u64::MAX,
+            at: Duration::MAX,
+            message: &message,
+        })?
+        .len();
+        if self.messages.len() >= protocol::MAX_QUEUED_PACKETS
+            || self.bytes + bytes > protocol::MAX_QUEUED_BYTES
+        {
+            return Err(invalid("routing outcome queue overflow"));
+        }
+        if matches!(message, Message::Configuration { .. }) {
+            if self
+                .messages
+                .iter()
+                .any(|(message, _)| matches!(message, Message::Configuration { .. }))
+            {
+                return Err(invalid("configuration acknowledgements are not drained"));
+            }
+            self.messages.push_front((message, bytes));
+        } else {
+            self.messages.push_back((message, bytes));
+        }
+        self.bytes += bytes;
+        Ok(())
+    }
+    fn discard_seat(&mut self, seat: &str) {
+        self.messages.retain(|(message, bytes)| {
+            let discard = match message {
+                Message::Outcome { report } => report.subscription().seat == seat,
+                Message::Transport { subscription, .. } => subscription.seat == seat,
+                Message::Configuration { .. } => false,
+            };
+            if discard {
+                self.bytes -= bytes;
+            }
+            !discard
+        });
+    }
+    fn flush(&mut self, channel: &mut Channel) -> io::Result<()> {
+        for _ in 0..4 {
+            let Some((message, _)) = self.messages.front() else {
+                break;
+            };
+            if !channel.send(message, monotonic()?)? {
+                break;
+            }
+            let (_, bytes) = self.messages.pop_front().unwrap();
+            self.bytes -= bytes;
+        }
+        Ok(())
+    }
 }
 fn identity(subscription: &Subscription) -> Subscription {
     Subscription {
@@ -79,6 +141,11 @@ impl Stream {
         }
         let mut baseline = Engine::new(baseline)?;
         baseline.push(Record::Header { version: 1 })?;
+        let mut messages = Outbox::default();
+        messages.push(Message::Configuration {
+            generation: 1,
+            error: None,
+        })?;
         Ok(Self {
             channel,
             registry: Registry::system()?,
@@ -90,25 +157,28 @@ impl Stream {
             outputs: BTreeMap::new(),
             grabbed: BTreeSet::new(),
             assembly: Assembly::default(),
-            messages: VecDeque::from([Message::Configuration {
-                generation: 1,
-                error: None,
-            }]),
+            messages,
         })
     }
     fn queue(&mut self, message: Message) -> io::Result<()> {
-        // Keep this transport independent of the private health channel.
-        protocol::encode(&protocol::Packet {
-            version: 1,
-            sequence: u64::MAX,
-            at: Duration::MAX,
-            message: &message,
-        })?;
-        if self.messages.len() >= protocol::MAX_QUEUED_PACKETS {
-            return Err(invalid("routing outcome queue overflow"));
+        self.messages.push(message)
+    }
+    fn retire(&mut self, recovery: crate::router::Recovery, now: Duration) {
+        if let Some(mut output) = self.outputs.remove(&recovery.source) {
+            let frame = Frame {
+                source: recovery.source,
+                at: now,
+                sequence: output.sequence.saturating_add(1),
+                events: recovery.neutral_events,
+            };
+            // Complete an already started frame before attempting neutral.
+            // All operations are nonblocking; destruction remains mandatory
+            // when a partial/faulted write prevents a complete neutral frame.
+            if matches!(output.virtual_device.flush(), Ok(Flush::Complete)) {
+                let _ = output.virtual_device.enqueue(&frame);
+                let _ = output.virtual_device.flush();
+            }
         }
-        self.messages.push_back(message);
-        Ok(())
     }
     fn teardown(&mut self, seat: &str, now: Duration) {
         if let Some(mut owner) = self.seats.remove(seat) {
@@ -122,25 +192,11 @@ impl Stream {
                 owner.routing.recover(source);
             }
             for recovery in owner.routing.take_recoveries() {
-                if let Some(mut output) = self.outputs.remove(&recovery.source) {
-                    let frame = Frame {
-                        source: recovery.source,
-                        at: now,
-                        sequence: output.sequence.saturating_add(1),
-                        events: recovery.neutral_events,
-                    };
-                    let _ = output.virtual_device.enqueue(&frame);
-                    let _ = output.virtual_device.flush();
-                    // Device destruction is mandatory even after an uncertain
-                    // neutral write. The reader releases its grab afterwards.
-                }
+                self.retire(recovery, now);
             }
         }
         self.outputs.retain(|source, _| source.seat != seat);
-        self.messages.retain(|message| {
-            !matches!(message, Message::Outcome { report }
-            if report.subscription().seat == seat)
-        });
+        self.messages.discard_seat(seat);
     }
     fn subscriptions(&mut self, update: Subscriptions, now: Duration) -> io::Result<()> {
         if update.revision <= self.revision || update.seats.len() > crate::service::MAX_CLIENTS {
@@ -224,13 +280,9 @@ impl Stream {
                         subscription: subscription.clone(),
                         routing,
                         expires: now + protocol::MAX_PACKET_AGE,
+                        reported: false,
                     },
                 );
-                self.queue(Message::Outcome {
-                    report: Report::Ready {
-                        subscription: identity(&subscription),
-                    },
-                })?;
             }
             let seat = self.seats.get_mut(&subscription.seat).unwrap();
             *seat.routing.authority_mut() = prepared.remove(&subscription.seat).unwrap();
@@ -254,7 +306,7 @@ impl Stream {
         let dispatches = seat.routing.take_dispatches(now);
         let recoveries = seat.routing.take_recoveries();
         for recovery in recoveries {
-            self.outputs.remove(&recovery.source);
+            self.retire(recovery, now);
         }
         for event in diagnostics {
             self.queue(Message::Outcome {
@@ -281,21 +333,31 @@ impl InputSink for Stream {
         raw: &mut RawDevice,
         device: &Device,
         health: Option<&Heartbeat>,
-    ) -> io::Result<()> {
+    ) -> io::Result<ReaderDisposition> {
         let now = monotonic()?;
+        if self.grabbed.contains(&device.source) && !self.outputs.contains_key(&device.source) {
+            // The old routing engine retires this source on Remove before a
+            // reopened reader can attach with a fresh connection generation.
+            return Ok(ReaderDisposition::Reopen);
+        }
         let eligible = self.seats.get(&device.source.seat).is_some_and(|seat| {
             now < seat.expires
                 && seat.routing.authority().state(now) == crate::context::State::Desktop
         });
         if !eligible {
-            self.outputs.remove(&device.source);
-            if self.grabbed.remove(&device.source) {
-                raw.ungrab()?;
+            if self.grabbed.contains(&device.source) {
+                if let Some(seat) = self.seats.get_mut(&device.source.seat) {
+                    seat.routing.recover(&device.source);
+                }
+                self.collect(&device.source.seat, now)?;
+                self.outputs.remove(&device.source);
+                return Ok(ReaderDisposition::Reopen);
             }
-            return Ok(());
+            self.outputs.remove(&device.source);
+            return Ok(ReaderDisposition::Keep);
         }
         if self.grabbed.contains(&device.source) {
-            return Ok(());
+            return Ok(ReaderDisposition::Keep);
         }
         if !self.outputs.contains_key(&device.source) {
             let health = health.ok_or_else(|| invalid("routing requires supervisor ownership"))?;
@@ -355,18 +417,18 @@ impl InputSink for Stream {
         }
         let output = self.outputs.get_mut(&device.source).unwrap();
         let Some(evidence) = output.consumer.as_ref() else {
-            return Ok(());
+            return Ok(ReaderDisposition::Keep);
         };
         if now < evidence.at || now - evidence.at > Duration::from_millis(250) {
-            return Ok(());
+            return Ok(ReaderDisposition::Keep);
         }
         if !output.virtual_device.processed_metadata()? {
-            return Ok(());
+            return Ok(ReaderDisposition::Keep);
         }
-        if raw.get_key_state()?.iter().next().is_some()
+        if (raw.supported_keys().is_some() && raw.get_key_state()?.iter().next().is_some())
             || !linux::initial_contacts(raw, device)?.is_empty()
         {
-            return Ok(());
+            return Ok(ReaderDisposition::Keep);
         }
         let gate = output.readiness.as_mut().unwrap();
         gate.metadata(output.virtual_device.descriptor(), now)
@@ -381,21 +443,27 @@ impl InputSink for Stream {
             .map_err(invalid)?;
         raw.grab()?;
         // A handoff cannot convert already held input into a new gesture.
-        if raw.get_key_state()?.iter().next().is_some()
+        if (raw.supported_keys().is_some() && raw.get_key_state()?.iter().next().is_some())
             || !linux::initial_contacts(raw, device)?.is_empty()
         {
-            raw.ungrab()?;
             self.outputs.remove(&device.source);
-            return Ok(());
+            raw.ungrab()?;
+            return Ok(ReaderDisposition::Keep);
         }
         // Discard unread pre-grab input; only fresh complete frames start the
         // virtual epoch. No output was injected during preparation.
+        let mut discarded = 0usize;
         loop {
             let fetched = raw.fetch_events().map(|events| events.count());
             match fetched {
                 Ok(count) => {
                     if count == 0 {
                         break;
+                    }
+                    discarded += count;
+                    if discarded > 65_536 {
+                        let _ = raw.ungrab();
+                        return Err(invalid("input handoff backlog exceeds bounded drain"));
                     }
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
@@ -411,7 +479,14 @@ impl InputSink for Stream {
             return Err(error);
         }
         self.grabbed.insert(device.source.clone());
-        Ok(())
+        if !seat.reported {
+            seat.reported = true;
+            let subscription = identity(&seat.subscription);
+            self.queue(Message::Outcome {
+                report: Report::Ready { subscription },
+            })?;
+        }
+        Ok(ReaderDisposition::Keep)
     }
     fn push(&mut self, record: Record) -> io::Result<()> {
         if matches!(record, Record::Header { .. }) {
@@ -449,6 +524,13 @@ impl InputSink for Stream {
     }
     fn service(&mut self) -> io::Result<()> {
         let now = monotonic()?;
+        if self
+            .assembly
+            .deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            return Err(invalid("configuration snapshot transfer expired"));
+        }
         let expired: Vec<_> = self
             .seats
             .iter()
@@ -469,7 +551,31 @@ impl InputSink for Stream {
                 break;
             };
             match packet.message {
-                Command::Subscriptions { update } => self.subscriptions(update, now)?,
+                Command::Subscriptions { update } => {
+                    let identities: Vec<_> = update.seats.iter().map(identity).collect();
+                    if let Err(error) = self.subscriptions(update, now) {
+                        if error
+                            .get_ref()
+                            .and_then(|error| error.downcast_ref::<crate::context::Rejection>())
+                            .is_some_and(|rejection| {
+                                matches!(
+                                    rejection,
+                                    crate::context::Rejection::StaleSnapshot
+                                        | crate::context::Rejection::StaleGeneration
+                                )
+                            })
+                        {
+                            for subscription in identities {
+                                self.teardown(&subscription.seat, now);
+                                self.queue(Message::Outcome {
+                                    report: Report::ContextLost { subscription },
+                                })?;
+                            }
+                        } else {
+                            return Err(error);
+                        }
+                    }
+                }
                 Command::Transport {
                     fence,
                     source,
@@ -489,8 +595,11 @@ impl InputSink for Stream {
                             {
                                 return Err(invalid("routing reload mode/generation differs"));
                             }
-                            let baseline =
-                                self.baseline.prepare_replacement(config.clone(), now)?;
+                            let mut baseline = config.clone();
+                            for rule in &mut baseline.rules {
+                                rule.enabled = false;
+                            }
+                            let baseline = self.baseline.prepare_replacement(baseline, now)?;
                             Routing::new(config.clone())?;
                             let names: Vec<_> = self.seats.keys().cloned().collect();
                             for name in names {
@@ -536,21 +645,25 @@ impl InputSink for Stream {
                 seat.routing.delivered(&source, ticket, monotonic()?)?;
             }
         }
-        for _ in 0..4 {
-            let Some(message) = self.messages.front() else {
-                break;
-            };
-            if !self.channel.send(message, monotonic()?)? {
-                break;
-            }
-            self.messages.pop_front();
-        }
-        Ok(())
+        self.messages.flush(&mut self.channel)
     }
     fn deadline(&self) -> Option<Duration> {
         self.seats
             .values()
-            .flat_map(|seat| seat.routing.deadline().into_iter().chain([seat.expires]))
+            .flat_map(|seat| {
+                seat.routing.deadline().into_iter().chain([
+                    seat.expires,
+                    seat.subscription
+                        .context
+                        .as_ref()
+                        .unwrap()
+                        .snapshot
+                        .captured_at
+                        + crate::context::SNAPSHOT_MAX_AGE
+                        + Duration::from_nanos(1),
+                ])
+            })
+            .chain(self.assembly.deadline())
             .chain(
                 self.outputs
                     .values()
@@ -560,26 +673,109 @@ impl InputSink for Stream {
             .min()
     }
     fn poll_sources(&self) -> Vec<PollFd<'_>> {
-        vec![PollFd::new(
+        let mut sources = vec![PollFd::new(
             self.channel.as_fd(),
             PollFlags::POLLIN
-                | if self.messages.is_empty() {
+                | if self.messages.messages.is_empty() {
                     PollFlags::empty()
                 } else {
                     PollFlags::POLLOUT
                 },
-        )]
+        )];
+        sources.extend(self.outputs.values().filter_map(|output| {
+            output
+                .in_flight
+                .map(|_| PollFd::new(output.virtual_device.as_fd(), PollFlags::POLLOUT))
+        }));
+        sources
     }
     fn device_policy(&self) -> Option<(&Config, u64)> {
         Some((&self.config, self.generation))
     }
-}
-impl Drop for Stream {
-    fn drop(&mut self) {
+    fn shutdown(&mut self) {
         let now = monotonic().unwrap_or(Duration::ZERO);
         let names: Vec<_> = self.seats.keys().cloned().collect();
         for name in names {
             self.teardown(&name, now);
         }
+        self.outputs.clear();
+    }
+}
+impl Drop for Stream {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ended(seat: &str, reason_bytes: usize) -> Message {
+        Message::Outcome {
+            report: Report::Ended {
+                subscription: Subscription {
+                    seat: seat.into(),
+                    fence: Fence {
+                        broker: protocol::Epoch([1, 2]),
+                        configuration: 1,
+                        session: 1,
+                    },
+                    context: None,
+                    capabilities: BTreeSet::new(),
+                    consumer: None,
+                },
+                reason: "x".repeat(reason_bytes),
+            },
+        }
+    }
+
+    #[test]
+    fn slow_private_consumers_cannot_exceed_aggregate_byte_or_packet_limits() {
+        let mut bytes = Outbox::default();
+        for _ in 0..10 {
+            bytes.push(ended("seat0", 48_000)).unwrap();
+        }
+        let before = bytes.bytes;
+        assert!(bytes.push(ended("seat0", 48_000)).is_err());
+        assert_eq!(bytes.messages.len(), 10);
+        assert_eq!(bytes.bytes, before);
+
+        let mut packets = Outbox::default();
+        for _ in 0..protocol::MAX_QUEUED_PACKETS {
+            packets.push(ended("seat0", 1)).unwrap();
+        }
+        assert!(packets.push(ended("seat0", 1)).is_err());
+        assert_eq!(packets.messages.len(), protocol::MAX_QUEUED_PACKETS);
+    }
+
+    #[test]
+    fn teardown_reclaims_queue_budget_and_configuration_acknowledgements_go_first() {
+        let mut queue = Outbox::default();
+        queue.push(ended("seat0", 48_000)).unwrap();
+        queue.push(ended("seat1", 48_000)).unwrap();
+        queue.discard_seat("seat0");
+        assert_eq!(queue.bytes, queue.messages[0].1);
+        queue
+            .push(Message::Configuration {
+                generation: 2,
+                error: None,
+            })
+            .unwrap();
+        assert!(matches!(
+            queue.messages[0].0,
+            Message::Configuration { generation: 2, .. }
+        ));
+        assert!(
+            queue
+                .push(Message::Configuration {
+                    generation: 3,
+                    error: None,
+                })
+                .is_err()
+        );
+        queue.discard_seat("seat1");
+        assert_eq!(queue.messages.len(), 1);
+        assert_eq!(queue.bytes, queue.messages[0].1);
     }
 }
