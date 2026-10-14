@@ -85,3 +85,69 @@ fn callback_failure_does_not_poison_a_replacement_generation() {
         "new generation"
     );
 }
+
+#[test]
+fn supervised_timers_run_during_idle_and_cancel_before_the_next_tick() {
+    let definition = Definition::compile(
+        r#"
+local p=require('prek')
+local periodic
+periodic=p.scheduler.every('10ms',function(event)
+ p.log.info('periodic',{generation=event.context.fence.configuration})
+ periodic:cancel()
+end)
+p.scheduler.after('20ms',function()p.log.info('after')end)
+return {version=1}
+"#,
+        "timer-process.lua",
+    )
+    .unwrap();
+    let mut session = Session::spawn(
+        Path::new(env!("CARGO_BIN_EXE_prek")),
+        fence(1),
+        "seat0",
+        definition,
+    )
+    .unwrap();
+    let end = monotonic().unwrap() + Duration::from_secs(5);
+    let mut logs = Vec::new();
+    while logs.len() < 2 {
+        logs.extend(session.step(monotonic().unwrap()).unwrap());
+        assert!(monotonic().unwrap() < end);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        logs.iter()
+            .map(|log| log.message.as_str())
+            .collect::<Vec<_>>(),
+        vec!["periodic", "after"]
+    );
+    assert_eq!(logs[0].fields["generation"], 1);
+    for _ in 0..40 {
+        assert!(session.step(monotonic().unwrap()).unwrap().is_empty());
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn replacing_a_vm_retires_its_pending_timer_generation() {
+    let binary = Path::new(env!("CARGO_BIN_EXE_prek"));
+    let old=Definition::compile("local p=require('prek');p.scheduler.after('100ms',function()p.log.info('old generation')end);return {version=1}","old-timer.lua").unwrap();
+    let mut retired = Session::spawn(binary, fence(1), "seat0", old).unwrap();
+    drain(&mut retired).unwrap();
+    drop(retired);
+    let new=Definition::compile("local p=require('prek');p.scheduler.after('100ms',function(event)p.log.info('new generation',{generation=event.context.fence.configuration})end);return {version=1}","new-timer.lua").unwrap();
+    let mut replacement = Session::spawn(binary, fence(2), "seat0", new).unwrap();
+    let end = monotonic().unwrap() + Duration::from_secs(5);
+    loop {
+        let logs = replacement.step(monotonic().unwrap()).unwrap();
+        if !logs.is_empty() {
+            assert_eq!(logs.len(), 1);
+            assert_eq!(logs[0].message, "new generation");
+            assert_eq!(logs[0].fields["generation"], 2);
+            break;
+        }
+        assert!(monotonic().unwrap() < end);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}

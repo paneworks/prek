@@ -8,10 +8,12 @@ use std::{
 };
 
 mod runtime;
+mod scheduler;
 #[cfg(target_os = "linux")]
 pub mod session;
 pub mod source_transfer;
 pub use runtime::{Definition, EventKind, LogRecord, MAX_SNAPSHOT_BYTES, Registration, Runtime};
+pub use scheduler::TimerRegistration;
 
 pub const API_VERSION: u32 = 1;
 /// Implemented configuration exports. Runtime families remain explicit work
@@ -26,6 +28,10 @@ pub fn api() -> serde_json::Value {
         serde_json::json!({"name":"events.on", "signature":"events.on(kind, callback) -> Subscription", "description":"Subscribe to approved semantic or lifecycle events in this session generation; registration has no evaluation effects."}),
         serde_json::json!({"name":"Subscription.dispose", "receiver":"Subscription", "signature":"subscription:dispose() -> nil", "description":"Idempotently disable this subscription before its next invocation."}),
         serde_json::json!({"name":"log.info", "signature":"log.info(message, fields = nil) -> nil", "description":"Append a bounded structured log in an event callback; unavailable during configuration evaluation."}),
+        serde_json::json!({"name":"scheduler.after", "signature":"scheduler.after(duration, callback) -> Timer", "description":"Schedule one callback after an explicitly unit-qualified monotonic delay in this VM generation."}),
+        serde_json::json!({"name":"scheduler.every", "signature":"scheduler.every(period, callback) -> Timer", "description":"Schedule periodic callbacks; preserve phase and skip missed ticks instead of catching up in a burst."}),
+        serde_json::json!({"name":"scheduler.defer", "signature":"scheduler.defer(callback) -> Timer", "description":"Schedule a callback on a later runtime wake using a one-millisecond delay."}),
+        serde_json::json!({"name":"Timer.cancel", "receiver":"Timer", "signature":"timer:cancel() -> nil", "description":"Idempotently cancel this generation-scoped timer before its next invocation."}),
     ];
     for kind in [
         "key",
@@ -57,7 +63,7 @@ pub fn api() -> serde_json::Value {
         "engine":"onix-os/luna", "engine_version":"0.5.1", "phase":"configuration_and_session_events",
         "symbols":symbols, "limits":{"source_bytes":MAX_CONFIG_BYTES,"memory_bytes":MEMORY,
         "instructions":INSTRUCTIONS,"time_ms":TIME.as_millis(),"value_depth":64},
-        "runtime_limits":{"subscriptions":256,"callback_instructions":100000,"callback_time_ms":20,"event_bytes":65536,"log_bytes":16384,"logs_per_event":32},
+        "runtime_limits":{"subscriptions":256,"timers":256,"timers_per_wake":32,"callback_instructions":100000,"callback_time_ms":20,"event_bytes":65536,"log_bytes":16384,"logs_per_event":32},
         "event_kinds":["matched","begin","update","end","cancel","skipped","ready","reload","stop","recovery","session_changed"],
         "runtime_requires":{"uid":"unprivileged active session","capabilities":["context","observations","lua_events"],"thread":"owning Luna arena","generation":"current broker/configuration/session fence"},
         "runtime_api":"partial"})
@@ -71,6 +77,22 @@ local api = __prek
 __prek = nil
 local registrations = __prek_registry
 __prek_registry = nil
+local timers = __prek_timers
+__prek_timers = nil
+local timer_duration = api.scheduler.__duration
+api.scheduler.__duration = nil
+local function schedule(delay, callback, periodic)
+    assert(type(callback)=="function", "scheduler expects a callback")
+    assert(#timers<256, "Lua timer limit exceeded")
+    local milliseconds, deadline = timer_duration(delay)
+    local entry = {id=#timers+1, delay_ms=milliseconds, due=deadline,
+        periodic=periodic, active=true, callback=callback}
+    timers[entry.id]=entry
+    return {cancel=function(self)entry.active=false end}
+end
+function api.scheduler.after(delay, callback) return schedule(delay,callback,false) end
+function api.scheduler.every(period, callback) return schedule(period,callback,true) end
+function api.scheduler.defer(callback) return schedule("1ms",callback,false) end
 local allowed_events = {
     matched=true, begin=true, update=true, ["end"]=true, cancel=true,
     skipped=true, ready=true, reload=true, stop=true, recovery=true,
@@ -202,7 +224,7 @@ fn start(lua: &mut Lua, name: &str, source: &str) -> Result<StashedExecutor, Con
 /// loop; the returned model owns no arena values, callbacks or descriptors.
 pub fn compile(source: &str, name: &str) -> Result<Config, ConfigError> {
     let mut runtime = Runtime::load(source, name)?;
-    if !runtime.registrations()?.is_empty() {
+    if !runtime.registrations()?.is_empty() || !runtime.timer_registrations()?.is_empty() {
         return Err(error(
             "Lua subscriptions require the runtime snapshot loader",
         ));
@@ -221,7 +243,7 @@ fn instantiate(
     let mut lua = Lua::core();
     lua.set_memory_limit(Some(MEMORY));
     let host = std::rc::Rc::new(std::cell::RefCell::new(runtime::Host::default()));
-    let registry = lua
+    let (registry, timers) = lua
         .try_enter(|ctx| {
             ctx.set_max_call_depth(256);
             let module = Table::new(&ctx);
@@ -233,7 +255,14 @@ fn instantiate(
                 luna_util::serde::to_value(ctx, &api()).map_err(io::Error::other)?,
             )?;
             for namespace in [
-                "config", "rules", "triggers", "actions", "units", "events", "log",
+                "config",
+                "rules",
+                "triggers",
+                "actions",
+                "units",
+                "events",
+                "log",
+                "scheduler",
             ] {
                 module.set(ctx, namespace, Table::new(&ctx))?;
             }
@@ -257,9 +286,13 @@ fn instantiate(
             ctx.globals().set(ctx, "__prek", module)?;
             let registry = Table::new(&ctx);
             ctx.globals().set(ctx, "__prek_registry", registry)?;
+            let timers = Table::new(&ctx);
+            ctx.globals().set(ctx, "__prek_timers", timers)?;
+            let scheduler: Table = module.get(ctx, "scheduler")?;
+            scheduler.set(ctx, "__duration", scheduler::duration(&ctx, host.clone()))?;
             let log: Table = module.get(ctx, "log")?;
             log.set(ctx, "info", runtime::logger(&ctx, host.clone()))?;
-            Ok(ctx.stash(registry))
+            Ok((ctx.stash(registry), ctx.stash(timers)))
         })
         .map_err(error)?;
     let bootstrap = start(&mut lua, "prek configuration API", BOOTSTRAP)?;
@@ -307,6 +340,7 @@ fn instantiate(
     Ok(Runtime {
         lua,
         registry,
+        timers,
         host,
         config,
         failed: false,
@@ -364,6 +398,10 @@ mod tests {
         for symbol in api()["symbols"].as_array().unwrap() {
             if symbol["receiver"] == "Subscription" {
                 source.push_str("local handle=p.events.on('ready',function()end); assert(type(handle.dispose)=='function'); handle:dispose();\n");
+                continue;
+            }
+            if symbol["receiver"] == "Timer" {
+                source.push_str("local timer=p.scheduler.defer(function()end); assert(type(timer.cancel)=='function'); timer:cancel();\n");
                 continue;
             }
             source.push_str(&format!(

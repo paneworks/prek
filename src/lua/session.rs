@@ -86,6 +86,10 @@ enum Message {
         sequence: u64,
         logs: Vec<LogRecord>,
     },
+    Timers {
+        fence: Fence,
+        logs: Vec<LogRecord>,
+    },
     Failed {
         fence: Fence,
         reason: String,
@@ -276,6 +280,9 @@ impl Session {
                 Message::Failed { fence, reason } if fence == self.fence => {
                     return Err(io::Error::other(reason));
                 }
+                Message::Timers { fence, logs: batch } if fence == self.fence && self.ready => {
+                    logs.extend(batch);
+                }
                 _ => return Err(protocol::invalid("unexpected or stale Lua worker response")),
             }
         }
@@ -329,6 +336,7 @@ pub fn worker() -> io::Result<()> {
     let mut fence = None;
     let mut sequence = 0;
     let mut outgoing = None;
+    let mut timers_enabled = false;
     loop {
         health.progress()?;
         let now = monotonic()?;
@@ -379,6 +387,19 @@ pub fn worker() -> io::Result<()> {
                 } if fence == Some(incoming) && runtime.is_some() && next == sequence + 1 => {
                     crate::lua_compiler::runtime_cpu_budget()?;
                     sequence = next;
+                    if event == EventKind::Ready {
+                        timers_enabled = true;
+                    }
+                    if event == EventKind::Stop {
+                        timers_enabled = false;
+                    }
+                    if timers_enabled {
+                        runtime
+                            .as_mut()
+                            .unwrap()
+                            .set_clock(monotonic()?)
+                            .map_err(io::Error::other)?;
+                    }
                     outgoing = Some(match runtime.as_mut().unwrap().dispatch(event, &payload) {
                         Ok(logs) => Message::Logs {
                             fence: incoming,
@@ -407,11 +428,47 @@ pub fn worker() -> io::Result<()> {
                 return Ok(());
             }
         }
+        let scheduler_now = monotonic()?;
+        if timers_enabled
+            && outgoing.is_none()
+            && let Some(runtime) = runtime.as_mut()
+            && runtime
+                .timer_deadline()
+                .map_err(io::Error::other)?
+                .is_some_and(|due| due <= scheduler_now)
+        {
+            crate::lua_compiler::runtime_cpu_budget()?;
+            let current = fence.unwrap();
+            outgoing = match runtime.tick(monotonic()?, &serde_json::json!({"fence":current})) {
+                Ok(logs) if logs.is_empty() => None,
+                Ok(logs) => Some(Message::Timers {
+                    fence: current,
+                    logs,
+                }),
+                Err(error) => Some(Message::Failed {
+                    fence: current,
+                    reason: error.0.chars().take(512).collect(),
+                }),
+            };
+        }
         let until = health.deadline()?.min(
             assembly
                 .as_ref()
                 .map_or(Duration::MAX, source_transfer::Assembly::deadline),
         );
+        let until = if timers_enabled
+            && outgoing.is_none()
+            && let Some(runtime) = runtime.as_mut()
+        {
+            until.min(
+                runtime
+                    .timer_deadline()
+                    .map_err(io::Error::other)?
+                    .unwrap_or(Duration::MAX),
+            )
+        } else {
+            until
+        };
         let mut fds = vec![
             PollFd::new(health.as_fd(), PollFlags::POLLIN),
             PollFd::new(

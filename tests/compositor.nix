@@ -51,6 +51,11 @@ let
       if event.fence.configuration == 2 then while true do end end
       prek.log.info("lua-match", {rule=event.event.rule, generation=event.fence.configuration})
     end)
+    prek.scheduler.after("10ms", function(event)
+      prek.log.info("lua-timer", {generation=event.context.fence.configuration})
+    end)
+    local cancelled = prek.scheduler.defer(function()error("cancelled timer ran")end)
+    cancelled:cancel()
     return prek.config.new {
       policy = { allowed_devices = { "fixture" } },
       devices = { fixture = { name = "Prek broker fixture" } },
@@ -155,6 +160,10 @@ pkgs.testers.runNixOSTest {
     machine.wait_until_succeeds("grep -q lua-match /run/user/1000/prek-broker-agent.jsonl", timeout=3)
     lua_logs = [__import__("json").loads(line) for line in machine.succeed("cat /run/user/1000/prek-broker-agent.jsonl").splitlines() if '"kind":"lua_log"' in line]
     assert any(row["record"]["message"] == "lua-ready" for row in lua_logs), lua_logs
+    machine.wait_until_succeeds("grep -q lua-timer /run/user/1000/prek-broker-agent.jsonl", timeout=3)
+    timers = [__import__("json").loads(line) for line in machine.succeed("cat /run/user/1000/prek-broker-agent.jsonl").splitlines() if '"message":"lua-timer"' in line]
+    assert timers and all(row["record"]["fields"]["generation"] == row["fence"]["configuration"] == 1 for row in timers), timers
+    assert len({row["fence"]["session"] for row in timers}) == len(timers), timers
     matches = [row for row in lua_logs if row["record"]["message"] == "lua-match"]
     assert len(matches) == 1 and matches[0]["record"]["fields"]["rule"] == "broker-a", matches
     assert matches[0]["record"]["fields"]["generation"] == matches[0]["fence"]["configuration"] == 1, matches

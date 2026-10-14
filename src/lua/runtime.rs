@@ -62,6 +62,8 @@ pub struct Definition {
     pub source: String,
     pub model: String,
     pub registrations: Vec<Registration>,
+    #[serde(default)]
+    pub timers: Vec<super::TimerRegistration>,
 }
 impl Definition {
     pub fn compile(source: &str, name: &str) -> Result<Self, ConfigError> {
@@ -72,6 +74,7 @@ impl Definition {
             source: source.into(),
             model: toml::to_string(&runtime.config).map_err(error)?,
             registrations: runtime.registrations()?,
+            timers: runtime.timer_registrations()?,
         };
         // The VM already decoded and validated this Config. Re-parsing its
         // newly serialized TOML here adds no validation and wastes the child
@@ -94,6 +97,10 @@ impl Definition {
             || self.source.len() > MAX_CONFIG_BYTES
             || self.model.len() > MAX_CONFIG_BYTES
             || self.registrations.len() > MAX_SUBSCRIPTIONS
+            || self.timers.len() > MAX_SUBSCRIPTIONS
+            || self.timers.iter().enumerate().any(|(index, timer)| {
+                usize::from(timer.id) != index + 1 || !(1..=3_600_000).contains(&timer.delay_ms)
+            })
             || self
                 .registrations
                 .iter()
@@ -113,7 +120,10 @@ impl Definition {
     ) -> Result<Runtime, ConfigError> {
         let expected = self.validate()?;
         let mut runtime = instantiate(&self.source, &self.name, progress)?;
-        if runtime.config != expected || runtime.registrations()? != self.registrations {
+        if runtime.config != expected
+            || runtime.registrations()? != self.registrations
+            || runtime.timer_registrations()? != self.timers
+        {
             return Err(error(
                 "Lua source differs from its approved model or registrations",
             ));
@@ -149,9 +159,10 @@ pub struct LogRecord {
 }
 #[derive(Default)]
 pub(super) struct Host {
-    running: bool,
-    logs: Vec<LogRecord>,
-    bytes: usize,
+    pub(super) running: bool,
+    pub(super) logs: Vec<LogRecord>,
+    pub(super) bytes: usize,
+    pub(super) now: Option<Duration>,
 }
 pub(super) fn logger<'gc>(ctx: &Context<'gc>, host: Rc<RefCell<Host>>) -> Callback<'gc> {
     Callback::from_fn(ctx, move |ctx, _, mut stack| {
@@ -190,6 +201,7 @@ pub(super) fn logger<'gc>(ctx: &Context<'gc>, host: Rc<RefCell<Host>>) -> Callba
 pub struct Runtime {
     pub(super) lua: Lua,
     pub(super) registry: StashedTable,
+    pub(super) timers: StashedTable,
     pub(super) host: Rc<RefCell<Host>>,
     pub config: Config,
     pub(super) failed: bool,
@@ -272,28 +284,36 @@ impl Runtime {
             let Some(executor) = executor else {
                 continue;
             };
-            drive_budget(
-                &mut self.lua,
-                &executor,
-                started,
-                CALLBACK_TIME,
-                CALLBACK_INSTRUCTIONS,
-            )?;
-            self.lua
-                .try_enter(|ctx| {
-                    let executor = ctx.fetch(&executor);
-                    let values: luna::Variadic<Vec<Value>> =
-                        executor.take_result(ctx).map_err(io::Error::other)??;
-                    if executor.mode() != luna::ExecutorMode::Stopped || !values.0.is_empty() {
-                        return Err(io::Error::other(
-                            "Lua event callbacks must return no values and cannot yield",
-                        )
-                        .into());
-                    }
-                    Ok(())
-                })
-                .map_err(error)?;
+            self.invoke_executor(&executor, started)?;
         }
+        Ok(())
+    }
+    pub(super) fn invoke_executor(
+        &mut self,
+        executor: &StashedExecutor,
+        started: Instant,
+    ) -> Result<(), ConfigError> {
+        drive_budget(
+            &mut self.lua,
+            executor,
+            started,
+            CALLBACK_TIME,
+            CALLBACK_INSTRUCTIONS,
+        )?;
+        self.lua
+            .try_enter(|ctx| {
+                let executor = ctx.fetch(executor);
+                let values: luna::Variadic<Vec<Value>> =
+                    executor.take_result(ctx).map_err(io::Error::other)??;
+                if executor.mode() != luna::ExecutorMode::Stopped || !values.0.is_empty() {
+                    return Err(io::Error::other(
+                        "Lua event callbacks must return no values and cannot yield",
+                    )
+                    .into());
+                }
+                Ok(())
+            })
+            .map_err(error)?;
         Ok(())
     }
 }

@@ -5,8 +5,8 @@ Prek embeds [onix-os/luna](https://github.com/onix-os/luna), pinned to version
 also accepted. Configuration evaluation declares actions and does not execute
 them. Live production routing remains disabled.
 
-This reference covers configuration and session event subscriptions. Named action
-handlers, custom recognizers, timers and live adapter bindings remain required
+This reference covers configuration, session event subscriptions and timers. Named action
+handlers, custom recognizers, coroutine tasks and live adapter bindings remain required
 work in `PLAN.md`. Discovery labels the runtime API partial.
 Run `prek api --json` for the installed manifest or inspect `prek.api` in Lua.
 
@@ -94,6 +94,44 @@ the agent keeps its broker lease and ordinary observations. The parent also
 bounds response time, queues and source assembly. The helper has no new
 privileges, no inherited input descriptors, and Linux data/heap/core limits.
 CPU limits are renewed per operation while preserving an inherited hard limit.
+
+## Timers
+
+`scheduler.after(duration, callback)` schedules one callback after the delay;
+`scheduler.every(period, callback)` schedules periodic callbacks;
+`scheduler.defer(callback)` schedules a callback for a later wake with a 1 ms
+delay. Durations use the existing whole-number `ms`, `s` or `m` units and must
+be between 1 ms and one hour. Each returns a `Timer`; `timer:cancel()` is
+idempotent and prevents future invocation, including another timer due at the
+same wake. Registration has no configuration-time effects.
+
+```lua
+local p = require("prek")
+local timer
+timer = p.scheduler.every("1s", function(event)
+    p.log.info("timer", {generation = event.context.fence.configuration})
+    timer:cancel()
+end)
+return p.config.preset("minimal")
+```
+
+Source-time timers become active with runtime readiness. Timers registered by
+callbacks use that callback's monotonic runtime clock. Payloads contain
+`{context = {fence}, timer = {id, periodic}, at}`, where `at` is the service's
+monotonic duration (`secs`/`nanos`). Handles and closure state belong to one VM
+generation; replacement, logout/inhibition and shutdown retire the old timers
+with that VM. Current timer callbacks have the same observational permissions
+as event subscriptions.
+
+Periodic timers preserve their initial phase and skip missed ticks. A late wake
+invokes each due timer once and schedules the next future deadline; it never
+bursts through all missed periods. Simultaneous deadlines run in timer-ID order,
+and timers created by a callback start with a later wake. At most 256 timers can
+be registered over a VM's lifetime, including canceled/completed timers. A wake
+processes at most 32 due timers and shares the 20 ms dispatch and 32-record/16 KiB
+log bounds; remaining due timers are handled on another wake. Error, yield,
+nontermination or resource overflow retires the Lua component and discards its
+uncommitted logs. The forwarding worker remains independent.
 
 ## Configuration and rule constructors
 
