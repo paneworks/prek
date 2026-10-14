@@ -8,12 +8,14 @@ use crate::input::{
     ABS_MT_POSITION_X, ABS_MT_POSITION_Y, ABS_MT_SLOT, ABS_MT_TRACKING_ID, Axis, Device, EV_ABS,
     EV_KEY, Source,
 };
+use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, time::Duration};
 
 const DEADLINE: Duration = Duration::from_secs(5);
 const FRESHNESS: Duration = Duration::from_millis(250);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct KernelIdentity {
     pub bus: u16,
     pub vendor: u16,
@@ -21,13 +23,15 @@ pub struct KernelIdentity {
     pub version: u16,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Repeat {
     pub delay_ms: u32,
     pub period_ms: u32,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Class {
     Keyboard,
     Mouse,
@@ -37,7 +41,8 @@ pub enum Class {
     Switches,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Descriptor {
     original: Device,
     isolated: bool,
@@ -46,8 +51,10 @@ pub struct Descriptor {
     pub marker: String,
     pub identity: KernelIdentity,
     pub class: Class,
+    #[serde(with = "crate::input::numeric_map")]
     pub capabilities: BTreeMap<u16, Vec<u16>>,
     pub properties: Vec<u16>,
+    #[serde(with = "crate::input::numeric_map")]
     pub axes: BTreeMap<u16, Axis>,
     pub repeat: Option<Repeat>,
     /// Pre-add registry data. Never import arbitrary original udev properties.
@@ -299,7 +306,8 @@ impl Descriptor {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Consumer {
     Hyprland {
         pid: u32,
@@ -317,7 +325,8 @@ pub enum Consumer {
     },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConsumerEvidence {
     pub consumer: Consumer,
     pub marker: String,
@@ -583,6 +592,59 @@ pub(crate) mod tests {
             settings: spec.consumer_settings.clone(),
             at: Duration::ZERO,
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn private_transport_messages_preserve_descriptor_and_consumer_evidence() {
+        let spec = descriptor();
+        let fence = crate::protocol::Fence {
+            broker: crate::protocol::Epoch([1, 2]),
+            configuration: 3,
+            session: 4,
+        };
+        let message = crate::worker::Message::Transport {
+            subscription: crate::worker::Subscription {
+                seat: spec.source.seat.clone(),
+                fence,
+                context: None,
+                capabilities: Default::default(),
+                consumer: Some(consumer()),
+            },
+            descriptor: Box::new(spec.clone()),
+        };
+        let encoded = serde_json::to_vec(&message).unwrap();
+        let crate::worker::Message::Transport { descriptor, .. } =
+            serde_json::from_slice(&encoded).unwrap()
+        else {
+            panic!("private message kind changed");
+        };
+        assert_eq!(*descriptor, spec);
+        descriptor.validate().unwrap();
+
+        let expected = evidence(&spec);
+        let command = crate::configuration::Command::Transport {
+            fence,
+            source: spec.source.clone(),
+            evidence: expected.clone(),
+        };
+        let encoded = serde_json::to_vec(&command).unwrap();
+        let crate::configuration::Command::Transport { evidence, .. } =
+            serde_json::from_slice(&encoded).unwrap()
+        else {
+            panic!("private command kind changed");
+        };
+        assert_eq!(evidence, expected);
+    }
+
+    #[test]
+    fn deserialized_descriptors_still_require_mirror_validation() {
+        let mut encoded = serde_json::to_value(descriptor()).unwrap();
+        encoded["name"] = "unverified replacement".into();
+        let changed: Descriptor = serde_json::from_value(encoded.clone()).unwrap();
+        assert!(changed.validate().is_err());
+        encoded["unrecognized_authority"] = true.into();
+        assert!(serde_json::from_value::<Descriptor>(encoded).is_err());
     }
 
     #[test]

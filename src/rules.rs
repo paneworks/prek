@@ -421,6 +421,9 @@ impl Engine {
     pub fn generation(&self) -> u64 {
         self.generation
     }
+    pub(crate) fn configuration_generation(&mut self, generation: u64) {
+        self.generation = generation;
+    }
     pub fn config(&self) -> &Config {
         &self.config
     }

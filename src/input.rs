@@ -84,7 +84,7 @@ pub struct Device {
 
 // JSON object keys are strings. Parse them explicitly so metadata also works
 // inside serde's internally tagged recording enum, which buffers map keys.
-mod numeric_map {
+pub(crate) mod numeric_map {
     use super::*;
     pub fn serialize<S: serde::Serializer, V: Serialize>(
         value: &BTreeMap<u16, V>,

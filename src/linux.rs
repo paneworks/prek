@@ -1,16 +1,16 @@
-//! Linux discovery and read-only observation.
-use evdev::{InputEvent, KeyCode, raw_stream::RawDevice};
-use nix::{
-    libc,
-    poll::{PollFd, PollFlags, PollTimeout, poll},
-    time::{ClockId, clock_gettime},
-};
-use prek::{
+//! Linux discovery and the sole worker's device-reading loop.
+use crate::{
     Gesture,
     input::{
         self, Assembly, Axis, Contact, ContactId, Device, Frame, FrameAssembler, RawEvent, Source,
     },
     replay::{self, Observation, Record, Replay},
+};
+use evdev::{InputEvent, KeyCode, raw_stream::RawDevice};
+use nix::{
+    libc,
+    poll::{PollFd, PollFlags, PollTimeout, poll},
+    time::{ClockId, clock_gettime},
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -35,7 +35,7 @@ fn open(path: &Path) -> io::Result<RawDevice> {
     RawDevice::from_fd(file.into())
 }
 
-use prek::diagnostics::Entry;
+use crate::diagnostics::Entry;
 
 pub fn inventory() -> io::Result<Vec<Entry>> {
     let mut paths = Vec::new();
@@ -221,7 +221,7 @@ pub fn describe(path: &Path, raw: &RawDevice, generation: u64) -> io::Result<Dev
     })
 }
 
-fn initial_contacts(raw: &RawDevice, device: &Device) -> io::Result<Vec<Contact>> {
+pub(crate) fn initial_contacts(raw: &RawDevice, device: &Device) -> io::Result<Vec<Contact>> {
     let Some(capacity) = device.touch_capacity() else {
         return Ok(Vec::new());
     };
@@ -364,9 +364,19 @@ pub fn watch(
     observe(paths, duration, &mut sink)
 }
 
-/// Read-only transport shared by generic monitoring and configured rules.
-/// Only this loop reads descriptors; the sink has no grab/output-device API.
+/// Transport shared by monitoring and configured rules. Original descriptors
+/// stay in this loop; supervised ownership is available through `reader`.
 pub trait InputSink {
+    /// Runs only in the sole device-owning worker. A ready transport can take
+    /// ownership here; the original descriptor never crosses IPC.
+    fn reader(
+        &mut self,
+        _raw: &mut RawDevice,
+        _device: &Device,
+        _health: Option<&crate::supervisor::Heartbeat>,
+    ) -> io::Result<()> {
+        Ok(())
+    }
     fn push(&mut self, record: Record) -> io::Result<()>;
     fn deadline(&self) -> Option<Duration>;
     fn flush(&mut self) -> io::Result<()>;
@@ -379,7 +389,7 @@ pub trait InputSink {
     fn poll_sources(&self) -> Vec<PollFd<'_>> {
         Vec::new()
     }
-    fn device_policy(&self) -> Option<(&prek::config::Config, u64)> {
+    fn device_policy(&self) -> Option<(&crate::config::Config, u64)> {
         None
     }
 }
@@ -425,7 +435,7 @@ pub fn observe_supervised(
     paths: &[PathBuf],
     duration: Option<Duration>,
     sink: &mut impl InputSink,
-    health: &mut prek::supervisor::Heartbeat,
+    health: &mut crate::supervisor::Heartbeat,
 ) -> io::Result<()> {
     observe_loop(paths, duration, sink, Some(health))
 }
@@ -434,7 +444,7 @@ fn observe_loop(
     paths: &[PathBuf],
     duration: Option<Duration>,
     sink: &mut impl InputSink,
-    mut health: Option<&mut prek::supervisor::Heartbeat>,
+    mut health: Option<&mut crate::supervisor::Heartbeat>,
 ) -> io::Result<()> {
     if let Some(health) = health.as_mut() {
         health.progress()?;
@@ -515,6 +525,9 @@ fn observe_loop(
             scan_at = monotonic()? + Duration::from_millis(250);
         }
         sink.flush()?;
+        for reader in &mut readers {
+            sink.reader(&mut reader.raw, &reader.device, health.as_deref())?;
+        }
         if stop_at.is_some_and(|stop| now >= stop) {
             break;
         }
@@ -610,7 +623,7 @@ fn observe_loop(
     Ok(())
 }
 
-fn selected(config: &prek::config::Config, device: &Device) -> bool {
+fn selected(config: &crate::config::Config, device: &Device) -> bool {
     config.policy.allowed_seats.contains(&device.source.seat)
         && config.devices.iter().any(|(id, selector)| {
             config.policy.allowed_devices.contains(id) && selector.matches(device)
@@ -664,7 +677,7 @@ fn same_node(reader: &Reader) -> bool {
 }
 
 fn refresh_readers(
-    config: &prek::config::Config,
+    config: &crate::config::Config,
     readers: &mut Vec<Reader>,
     generations: &mut BTreeMap<u64, u64>,
     pending: &mut Vec<Frame>,

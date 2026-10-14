@@ -65,6 +65,15 @@ fn capability(action: &Action) -> Capability {
     }
 }
 impl Routing {
+    pub(crate) fn configuration_generation(&mut self, generation: u64) -> io::Result<()> {
+        if generation == 0 || !self.routes.is_empty() {
+            return Err(io::Error::other(
+                "routing generation requires a fresh coordinator",
+            ));
+        }
+        self.engine.configuration_generation(generation);
+        Ok(())
+    }
     pub fn new(config: Config) -> io::Result<Self> {
         if config.mode != crate::config::Mode::Route {
             return Err(io::Error::other(
@@ -101,6 +110,9 @@ impl Routing {
     /// Registration/provider verification belongs to the trusted caller.
     pub fn authority_mut(&mut self) -> &mut Authority {
         self.engine.authority_mut()
+    }
+    pub(crate) fn authority(&self) -> &Authority {
+        self.engine.authority()
     }
     /// Availability alone creates no authority. Its generation must match the
     /// active authority and its bounded lease is checked at claim and dequeue.

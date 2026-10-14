@@ -417,6 +417,8 @@ impl Broker {
                 seat: bound.seat.clone(),
                 fence: bound.fence,
                 context: bound.context.value.clone(),
+                capabilities: bound.capabilities.clone(),
+                consumer: Some(bound.client.consumer()),
             })
             .collect();
         if !subscriptions_fit(&subscriptions) {
@@ -541,6 +543,42 @@ impl Broker {
         }
         // Overflow/disconnection drops only this subscriber, not the worker.
         Ok(())
+    }
+    pub fn transport(
+        &mut self,
+        subscription: &Subscription,
+        descriptor: &crate::transport::Descriptor,
+        now: Duration,
+    ) -> io::Result<Option<crate::configuration::Command>> {
+        descriptor.validate().map_err(protocol::invalid)?;
+        let Some(bound) = self
+            .connections
+            .iter_mut()
+            .filter_map(|connection| connection.bound.as_mut())
+            .find(|bound| {
+                bound.role == Role::Agent
+                    && bound.fence == subscription.fence
+                    && bound.seat == subscription.seat
+                    && bound.context.fresh(now)
+            })
+        else {
+            return Ok(None);
+        };
+        if descriptor.source.seat != bound.seat {
+            return Err(protocol::invalid(
+                "transport source belongs to another seat",
+            ));
+        }
+        bound.registration.check(&self.logind, &bound.client)?;
+        let Some(evidence) = bound.client.device_evidence(descriptor, monotonic()?)? else {
+            return Ok(None);
+        };
+        bound.registration.check(&self.logind, &bound.client)?;
+        Ok(Some(crate::configuration::Command::Transport {
+            fence: bound.fence,
+            source: descriptor.source.clone(),
+            evidence,
+        }))
     }
     pub fn deadline(&self) -> Option<Duration> {
         self.connections
@@ -1125,6 +1163,8 @@ mod tests {
                 session: 3,
             },
             context: None,
+            capabilities: BTreeSet::new(),
+            consumer: None,
         };
         assert!(subscriptions_fit(std::slice::from_ref(&subscription)));
         let mut oversized = subscription;

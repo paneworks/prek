@@ -11,7 +11,7 @@ use std::{
 use clap::{Parser, Subcommand};
 
 #[cfg(target_os = "linux")]
-mod linux;
+use prek::linux;
 
 #[derive(Parser)]
 #[command(
@@ -780,6 +780,16 @@ fn run_broker(
                             )?;
                             refresh = monotonic()?;
                             subscriptions = None;
+                        }
+                    }
+                    prek::worker::Message::Transport {
+                        subscription,
+                        descriptor,
+                    } => {
+                        if let Some(command) =
+                            broker.transport(&subscription, &descriptor, monotonic()?)?
+                        {
+                            let _ = control.send(&command, monotonic()?)?;
                         }
                     }
                 },

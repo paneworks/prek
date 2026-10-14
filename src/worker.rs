@@ -25,6 +25,10 @@ pub struct Subscription {
     pub fence: Fence,
     #[serde(default)]
     pub context: Option<Box<ProvidedContext>>,
+    #[serde(default)]
+    pub capabilities: BTreeSet<crate::protocol::Capability>,
+    #[serde(default)]
+    pub consumer: Option<crate::transport::Consumer>,
 }
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -41,6 +45,8 @@ impl Subscription {
             seat: self.seat.clone(),
             fence: self.fence,
             context: None,
+            capabilities: BTreeSet::new(),
+            consumer: None,
         }
     }
 }
@@ -67,6 +73,10 @@ pub enum Report {
     ContextLost {
         subscription: Subscription,
     },
+    Dispatch {
+        subscription: Subscription,
+        event: Box<Event>,
+    },
 }
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -78,6 +88,10 @@ pub enum Message {
     Outcome {
         report: Report,
     },
+    Transport {
+        subscription: Subscription,
+        descriptor: Box<crate::transport::Descriptor>,
+    },
 }
 impl Report {
     pub fn subscription(&self) -> &Subscription {
@@ -85,7 +99,8 @@ impl Report {
             Self::Ready { subscription }
             | Self::Observation { subscription, .. }
             | Self::Ended { subscription, .. }
-            | Self::ContextLost { subscription } => subscription,
+            | Self::ContextLost { subscription }
+            | Self::Dispatch { subscription, .. } => subscription,
         }
     }
 }
@@ -745,6 +760,8 @@ mod tests {
                 session,
             },
             context: None,
+            capabilities: BTreeSet::new(),
+            consumer: None,
         }
     }
     fn with_context(mut subscription: Subscription, revision: u64, at: u64) -> Subscription {

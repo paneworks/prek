@@ -18,6 +18,11 @@ pub enum Command {
     Subscriptions {
         update: Subscriptions,
     },
+    Transport {
+        fence: crate::protocol::Fence,
+        source: crate::input::Source,
+        evidence: crate::transport::ConsumerEvidence,
+    },
     Begin {
         generation: u64,
         bytes: usize,

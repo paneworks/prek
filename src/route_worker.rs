@@ -1,0 +1,585 @@
+//! Configured routing in the sole descriptor-owning supervised worker.
+//!
+//! This integration is under construction and is not wired into the CLI. The
+//! broker continues to refuse route mode until handoff, recovery, and action
+//! execution have been validated together.
+use crate::{
+    config::{Config, Mode},
+    configuration::{Assembly, Command},
+    input::{Device, Frame, Source},
+    ipc::{Channel, monotonic},
+    kernel::{Flush, Registry, Virtual},
+    linux::{self, InputSink},
+    protocol::{self, Fence},
+    replay::Record,
+    routing::Routing,
+    rules::Engine,
+    supervisor::Heartbeat,
+    transport::{Descriptor, KernelIdentity, Readiness},
+    worker::{Message, Report, Subscription, Subscriptions},
+};
+use evdev::raw_stream::RawDevice;
+use nix::poll::{PollFd, PollFlags};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    io,
+    os::fd::AsFd,
+    time::Duration,
+};
+
+struct Seat {
+    subscription: Subscription,
+    routing: Routing,
+    expires: Duration,
+}
+struct Output {
+    fence: Fence,
+    virtual_device: Virtual,
+    readiness: Option<Readiness>,
+    consumer: Option<crate::transport::ConsumerEvidence>,
+    offered: Duration,
+    started: Duration,
+    in_flight: Option<u64>,
+    sequence: u64,
+}
+pub struct Stream {
+    channel: Channel,
+    registry: Registry,
+    config: Config,
+    baseline: Engine,
+    generation: u64,
+    revision: u64,
+    seats: BTreeMap<String, Seat>,
+    outputs: BTreeMap<Source, Output>,
+    grabbed: BTreeSet<Source>,
+    assembly: Assembly,
+    messages: VecDeque<Message>,
+}
+fn identity(subscription: &Subscription) -> Subscription {
+    Subscription {
+        seat: subscription.seat.clone(),
+        fence: subscription.fence,
+        context: None,
+        capabilities: BTreeSet::new(),
+        consumer: None,
+    }
+}
+fn invalid(reason: &str) -> io::Error {
+    protocol::invalid(reason)
+}
+impl Stream {
+    pub fn new(config: Config, channel: Channel) -> io::Result<Self> {
+        if config.mode != Mode::Route {
+            return Err(invalid("routing worker requires route configuration"));
+        }
+        Routing::new(config.clone())?;
+        let mut baseline = config.clone();
+        for rule in &mut baseline.rules {
+            rule.enabled = false;
+        }
+        let mut baseline = Engine::new(baseline)?;
+        baseline.push(Record::Header { version: 1 })?;
+        Ok(Self {
+            channel,
+            registry: Registry::system()?,
+            config,
+            baseline,
+            generation: 1,
+            revision: 0,
+            seats: BTreeMap::new(),
+            outputs: BTreeMap::new(),
+            grabbed: BTreeSet::new(),
+            assembly: Assembly::default(),
+            messages: VecDeque::from([Message::Configuration {
+                generation: 1,
+                error: None,
+            }]),
+        })
+    }
+    fn queue(&mut self, message: Message) -> io::Result<()> {
+        // Keep this transport independent of the private health channel.
+        protocol::encode(&protocol::Packet {
+            version: 1,
+            sequence: u64::MAX,
+            at: Duration::MAX,
+            message: &message,
+        })?;
+        if self.messages.len() >= protocol::MAX_QUEUED_PACKETS {
+            return Err(invalid("routing outcome queue overflow"));
+        }
+        self.messages.push_back(message);
+        Ok(())
+    }
+    fn teardown(&mut self, seat: &str, now: Duration) {
+        if let Some(mut owner) = self.seats.remove(seat) {
+            let sources: Vec<_> = self
+                .outputs
+                .keys()
+                .filter(|source| source.seat == seat)
+                .cloned()
+                .collect();
+            for source in &sources {
+                owner.routing.recover(source);
+            }
+            for recovery in owner.routing.take_recoveries() {
+                if let Some(mut output) = self.outputs.remove(&recovery.source) {
+                    let frame = Frame {
+                        source: recovery.source,
+                        at: now,
+                        sequence: output.sequence.saturating_add(1),
+                        events: recovery.neutral_events,
+                    };
+                    let _ = output.virtual_device.enqueue(&frame);
+                    let _ = output.virtual_device.flush();
+                    // Device destruction is mandatory even after an uncertain
+                    // neutral write. The reader releases its grab afterwards.
+                }
+            }
+        }
+        self.outputs.retain(|source, _| source.seat != seat);
+        self.messages.retain(|message| {
+            !matches!(message, Message::Outcome { report }
+            if report.subscription().seat == seat)
+        });
+    }
+    fn subscriptions(&mut self, update: Subscriptions, now: Duration) -> io::Result<()> {
+        if update.revision <= self.revision || update.seats.len() > crate::service::MAX_CLIENTS {
+            return Err(invalid("invalid routing subscription revision"));
+        }
+        let mut prepared = BTreeMap::new();
+        let mut seen = BTreeSet::new();
+        for subscription in &update.seats {
+            subscription.fence.validate()?;
+            if !seen.insert(subscription.seat.clone())
+                || subscription.fence.configuration != self.generation
+                || !self
+                    .config
+                    .policy
+                    .allowed_seats
+                    .contains(&subscription.seat)
+            {
+                return Err(invalid(
+                    "routing subscription differs from configured policy",
+                ));
+            }
+            let context = subscription
+                .context
+                .as_ref()
+                .ok_or_else(|| invalid("routing needs positive live context"))?;
+            if context.binding.seat != subscription.seat
+                || context.snapshot.generation != subscription.fence.session
+                || subscription.consumer.is_none()
+            {
+                return Err(invalid("routing context/consumer binding differs"));
+            }
+            if let Some(seat) = self.seats.get(&subscription.seat)
+                && seat.subscription.fence == subscription.fence
+            {
+                let mut authority = seat.routing.authority().clone();
+                if seat
+                    .subscription
+                    .context
+                    .as_ref()
+                    .is_none_or(|old| old.snapshot.revision < context.snapshot.revision)
+                {
+                    authority
+                        .update(context.snapshot.clone(), now)
+                        .map_err(io::Error::other)?;
+                }
+                if authority.generation() != subscription.fence.session {
+                    return Err(invalid("routing context expired"));
+                }
+                prepared.insert(subscription.seat.clone(), authority);
+            } else {
+                let mut authority = crate::context::Authority::default();
+                authority
+                    .adopt(context.binding.clone(), subscription.fence.session)
+                    .map_err(io::Error::other)?;
+                authority
+                    .update(context.snapshot.clone(), now)
+                    .map_err(io::Error::other)?;
+                prepared.insert(subscription.seat.clone(), authority);
+            }
+        }
+        let removed: Vec<_> = self
+            .seats
+            .iter()
+            .filter(|(name, seat)| {
+                !update.seats.iter().any(|subscription| {
+                    &subscription.seat == *name && subscription.fence == seat.subscription.fence
+                })
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        for seat in removed {
+            self.teardown(&seat, now);
+        }
+        for subscription in update.seats {
+            if !self.seats.contains_key(&subscription.seat) {
+                let mut routing = Routing::new(self.config.clone())?;
+                routing.configuration_generation(self.generation)?;
+                self.seats.insert(
+                    subscription.seat.clone(),
+                    Seat {
+                        subscription: subscription.clone(),
+                        routing,
+                        expires: now + protocol::MAX_PACKET_AGE,
+                    },
+                );
+                self.queue(Message::Outcome {
+                    report: Report::Ready {
+                        subscription: identity(&subscription),
+                    },
+                })?;
+            }
+            let seat = self.seats.get_mut(&subscription.seat).unwrap();
+            *seat.routing.authority_mut() = prepared.remove(&subscription.seat).unwrap();
+            seat.routing.actions_available(
+                subscription.fence.session,
+                subscription.capabilities.clone(),
+                now,
+            );
+            seat.subscription = subscription;
+            seat.expires = now + protocol::MAX_PACKET_AGE;
+        }
+        self.revision = update.revision;
+        Ok(())
+    }
+    fn collect(&mut self, name: &str, now: Duration) -> io::Result<()> {
+        let Some(seat) = self.seats.get_mut(name) else {
+            return Ok(());
+        };
+        let subscription = identity(&seat.subscription);
+        let diagnostics = seat.routing.take_events();
+        let dispatches = seat.routing.take_dispatches(now);
+        let recoveries = seat.routing.take_recoveries();
+        for recovery in recoveries {
+            self.outputs.remove(&recovery.source);
+        }
+        for event in diagnostics {
+            self.queue(Message::Outcome {
+                report: Report::Observation {
+                    subscription: subscription.clone(),
+                    event: Box::new(event),
+                },
+            })?;
+        }
+        for event in dispatches {
+            self.queue(Message::Outcome {
+                report: Report::Dispatch {
+                    subscription: subscription.clone(),
+                    event: Box::new(event),
+                },
+            })?;
+        }
+        Ok(())
+    }
+}
+impl InputSink for Stream {
+    fn reader(
+        &mut self,
+        raw: &mut RawDevice,
+        device: &Device,
+        health: Option<&Heartbeat>,
+    ) -> io::Result<()> {
+        let now = monotonic()?;
+        let eligible = self.seats.get(&device.source.seat).is_some_and(|seat| {
+            now < seat.expires
+                && seat.routing.authority().state(now) == crate::context::State::Desktop
+        });
+        if !eligible {
+            self.outputs.remove(&device.source);
+            if self.grabbed.remove(&device.source) {
+                raw.ungrab()?;
+            }
+            return Ok(());
+        }
+        if self.grabbed.contains(&device.source) {
+            return Ok(());
+        }
+        if !self.outputs.contains_key(&device.source) {
+            let health = health.ok_or_else(|| invalid("routing requires supervisor ownership"))?;
+            let id = raw.input_id();
+            let descriptor = Descriptor::mirror(
+                device,
+                KernelIdentity {
+                    bus: id.bus_type().0,
+                    vendor: id.vendor(),
+                    product: id.product(),
+                    version: id.version(),
+                },
+                None,
+                &BTreeMap::new(),
+                BTreeMap::new(),
+            )
+            .map_err(invalid)?;
+            if descriptor.feedback_required() {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "routing requires a verified physical feedback bridge",
+                ));
+            }
+            let output = Virtual::create(
+                self.registry
+                    .prepare_for_worker(descriptor.clone(), health)?,
+            )?;
+            let subscription = self.seats[&device.source.seat].subscription.clone();
+            let readiness = Readiness::new(descriptor, subscription.consumer.clone().unwrap(), now)
+                .map_err(invalid)?;
+            self.outputs.insert(
+                device.source.clone(),
+                Output {
+                    fence: subscription.fence,
+                    virtual_device: output,
+                    readiness: Some(readiness),
+                    consumer: None,
+                    offered: Duration::ZERO,
+                    started: now,
+                    in_flight: None,
+                    sequence: 0,
+                },
+            );
+        }
+        let output = self.outputs.get_mut(&device.source).unwrap();
+        if now.saturating_sub(output.started) >= Duration::from_secs(5) {
+            return Err(invalid("virtual device readiness timed out before grab"));
+        }
+        if now >= output.offered + Duration::from_millis(100) {
+            output.offered = now;
+            let descriptor = Box::new(output.virtual_device.descriptor().clone());
+            let subscription = identity(&self.seats[&device.source.seat].subscription);
+            self.queue(Message::Transport {
+                subscription,
+                descriptor,
+            })?;
+        }
+        let output = self.outputs.get_mut(&device.source).unwrap();
+        let Some(evidence) = output.consumer.as_ref() else {
+            return Ok(());
+        };
+        if now < evidence.at || now - evidence.at > Duration::from_millis(250) {
+            return Ok(());
+        }
+        if !output.virtual_device.processed_metadata()? {
+            return Ok(());
+        }
+        if raw.get_key_state()?.iter().next().is_some()
+            || !linux::initial_contacts(raw, device)?.is_empty()
+        {
+            return Ok(());
+        }
+        let gate = output.readiness.as_mut().unwrap();
+        gate.metadata(output.virtual_device.descriptor(), now)
+            .map_err(invalid)?;
+        gate.consumer(evidence, now).map_err(invalid)?;
+        gate.neutral(true, now).map_err(invalid)?;
+        let ready = output
+            .readiness
+            .take()
+            .unwrap()
+            .finish(now)
+            .map_err(invalid)?;
+        raw.grab()?;
+        // A handoff cannot convert already held input into a new gesture.
+        if raw.get_key_state()?.iter().next().is_some()
+            || !linux::initial_contacts(raw, device)?.is_empty()
+        {
+            raw.ungrab()?;
+            self.outputs.remove(&device.source);
+            return Ok(());
+        }
+        // Discard unread pre-grab input; only fresh complete frames start the
+        // virtual epoch. No output was injected during preparation.
+        loop {
+            let fetched = raw.fetch_events().map(|events| events.count());
+            match fetched {
+                Ok(count) => {
+                    if count == 0 {
+                        break;
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => {
+                    let _ = raw.ungrab();
+                    return Err(error);
+                }
+            }
+        }
+        let seat = self.seats.get_mut(&device.source.seat).unwrap();
+        if let Err(error) = seat.routing.attach(device.clone(), &ready, None, now) {
+            let _ = raw.ungrab();
+            return Err(error);
+        }
+        self.grabbed.insert(device.source.clone());
+        Ok(())
+    }
+    fn push(&mut self, record: Record) -> io::Result<()> {
+        if matches!(record, Record::Header { .. }) {
+            return Ok(());
+        }
+        self.baseline.push(record.clone())?;
+        self.baseline.take_events();
+        let source = match &record {
+            Record::Frame { frame } => Some(&frame.source),
+            Record::Remove { source, .. }
+            | Record::Mapping { source, .. }
+            | Record::Reconcile { source, .. } => Some(source),
+            _ => None,
+        };
+        let names: Vec<_> = self
+            .seats
+            .keys()
+            .filter(|name| source.is_none_or(|source| &source.seat == *name))
+            .cloned()
+            .collect();
+        for name in names {
+            let seat = self.seats.get_mut(&name).unwrap();
+            if matches!(record, Record::Tick { .. })
+                || source.is_some_and(|source| self.grabbed.contains(source))
+            {
+                seat.routing.push(record.clone())?;
+                self.collect(&name, monotonic()?)?;
+            }
+        }
+        if let Record::Remove { source, .. } = record {
+            self.outputs.remove(&source);
+            self.grabbed.remove(&source);
+        }
+        Ok(())
+    }
+    fn service(&mut self) -> io::Result<()> {
+        let now = monotonic()?;
+        let expired: Vec<_> = self
+            .seats
+            .iter()
+            .filter(|(_, seat)| {
+                now >= seat.expires
+                    || seat.routing.authority().state(now) != crate::context::State::Desktop
+            })
+            .map(|(name, seat)| (name.clone(), identity(&seat.subscription)))
+            .collect();
+        for (name, subscription) in expired {
+            self.teardown(&name, now);
+            self.queue(Message::Outcome {
+                report: Report::ContextLost { subscription },
+            })?;
+        }
+        for _ in 0..8 {
+            let Some(packet) = self.channel.receive::<Command>()? else {
+                break;
+            };
+            match packet.message {
+                Command::Subscriptions { update } => self.subscriptions(update, now)?,
+                Command::Transport {
+                    fence,
+                    source,
+                    evidence,
+                } => {
+                    if let Some(output) = self.outputs.get_mut(&source)
+                        && output.fence == fence
+                    {
+                        output.consumer = Some(evidence);
+                    }
+                }
+                command => {
+                    if let Some(installation) = self.assembly.accept(command, now)? {
+                        let result = installation.config.and_then(|config| {
+                            if config.mode != Mode::Route
+                                || self.generation.checked_add(1) != Some(installation.generation)
+                            {
+                                return Err(invalid("routing reload mode/generation differs"));
+                            }
+                            let baseline =
+                                self.baseline.prepare_replacement(config.clone(), now)?;
+                            Routing::new(config.clone())?;
+                            let names: Vec<_> = self.seats.keys().cloned().collect();
+                            for name in names {
+                                self.teardown(&name, now);
+                            }
+                            self.config = config;
+                            self.baseline = baseline;
+                            self.generation = installation.generation;
+                            Ok(())
+                        });
+                        self.queue(Message::Configuration {
+                            generation: installation.generation,
+                            error: result.err().map(|error| error.to_string()),
+                        })?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        let now = monotonic()?;
+        let sources: Vec<_> = self
+            .outputs
+            .keys()
+            .filter(|source| self.grabbed.contains(*source))
+            .cloned()
+            .collect();
+        for source in sources {
+            let Some(seat) = self.seats.get_mut(&source.seat) else {
+                continue;
+            };
+            let output = self.outputs.get_mut(&source).unwrap();
+            if output.in_flight.is_none()
+                && let Some(scheduled) = seat.routing.due(&source, now)?
+            {
+                output.sequence = scheduled.frame.sequence;
+                output.virtual_device.enqueue(&scheduled.frame)?;
+                output.in_flight = Some(scheduled.ticket);
+            }
+            if output.in_flight.is_some() && output.virtual_device.flush()? == Flush::Complete {
+                let ticket = output.in_flight.take().unwrap();
+                seat.routing.delivered(&source, ticket, monotonic()?)?;
+            }
+        }
+        for _ in 0..4 {
+            let Some(message) = self.messages.front() else {
+                break;
+            };
+            if !self.channel.send(message, monotonic()?)? {
+                break;
+            }
+            self.messages.pop_front();
+        }
+        Ok(())
+    }
+    fn deadline(&self) -> Option<Duration> {
+        self.seats
+            .values()
+            .flat_map(|seat| seat.routing.deadline().into_iter().chain([seat.expires]))
+            .chain(
+                self.outputs
+                    .values()
+                    .filter(|output| output.readiness.is_some())
+                    .map(|output| output.offered + Duration::from_millis(100)),
+            )
+            .min()
+    }
+    fn poll_sources(&self) -> Vec<PollFd<'_>> {
+        vec![PollFd::new(
+            self.channel.as_fd(),
+            PollFlags::POLLIN
+                | if self.messages.is_empty() {
+                    PollFlags::empty()
+                } else {
+                    PollFlags::POLLOUT
+                },
+        )]
+    }
+    fn device_policy(&self) -> Option<(&Config, u64)> {
+        Some((&self.config, self.generation))
+    }
+}
+impl Drop for Stream {
+    fn drop(&mut self) {
+        let now = monotonic().unwrap_or(Duration::ZERO);
+        let names: Vec<_> = self.seats.keys().cloned().collect();
+        for name in names {
+            self.teardown(&name, now);
+        }
+    }
+}

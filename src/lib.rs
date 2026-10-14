@@ -27,10 +27,14 @@ pub mod kernel;
 pub mod keys;
 pub mod learner;
 #[cfg(target_os = "linux")]
+pub mod linux;
+#[cfg(target_os = "linux")]
 pub mod morf;
 pub mod paths;
 pub mod protocol;
 pub mod replay;
+#[cfg(target_os = "linux")]
+pub mod route_worker;
 pub mod router;
 pub mod routing;
 pub mod rules;
