@@ -54,6 +54,9 @@ pub enum Evidence {
         fingers: Option<u16>,
         shape: ShapeMatch,
     },
+    Sequence {
+        steps: Vec<Evidence>,
+    },
 }
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
@@ -99,6 +102,7 @@ struct DeviceState {
     keys: BTreeSet<u16>,
     contacts: Vec<Contact>,
 }
+#[derive(Clone)]
 struct Candidate {
     id: u64,
     ordinal: u64,
@@ -107,6 +111,15 @@ struct Candidate {
     permit: Option<Permit>,
     progress: bool,
     expires: Option<Duration>,
+    started: Duration,
+    contacts: BTreeSet<crate::input::ContactId>,
+    sources: BTreeSet<Source>,
+}
+#[derive(Clone)]
+struct StepMatch {
+    event: Event,
+    candidate: Candidate,
+    finished: Duration,
 }
 enum Recognizer {
     Key,
@@ -129,14 +142,14 @@ struct Worker {
     recognizer: Recognizer,
     candidates: BTreeMap<Source, Candidate>,
     touch_active: BTreeSet<Source>,
+    trace: bool,
+    matches: Vec<StepMatch>,
+    released: BTreeMap<Source, Duration>,
 }
 
-/// Unconnected temporal composition is refused before observation starts.
-pub fn unsupported(trigger: &Trigger) -> Option<&'static str> {
-    match trigger {
-        Trigger::Sequence { .. } => Some("configured sequence composition is not connected yet"),
-        _ => None,
-    }
+/// All current schema triggers have an observation/replay implementation.
+pub fn unsupported(_trigger: &Trigger) -> Option<&'static str> {
+    None
 }
 impl Worker {
     fn new(rule: Rule, config: &Config) -> io::Result<Self> {
@@ -193,6 +206,9 @@ impl Worker {
             recognizer,
             candidates: BTreeMap::new(),
             touch_active: BTreeSet::new(),
+            trace: false,
+            matches: Vec::new(),
+            released: BTreeMap::new(),
         })
     }
     fn register(&mut self, state: &DeviceState, config: &Config) -> io::Result<()> {
@@ -279,6 +295,7 @@ pub struct Engine {
     last_at: Option<Duration>,
     capture_rule: Option<String>,
     captured: Vec<Stroke>,
+    sequences: Vec<Sequence>,
 }
 impl Engine {
     pub fn new(config: Config) -> io::Result<Self> {
@@ -287,6 +304,7 @@ impl Engine {
             .rules
             .iter()
             .filter(|r| r.enabled)
+            .filter(|rule| !matches!(rule.trigger, Trigger::Sequence { .. }))
             .cloned()
             .map(|r| Worker::new(r, &config))
             .collect::<io::Result<Vec<_>>>()?;
@@ -298,6 +316,12 @@ impl Engine {
         });
         let conditions =
             Keys::new(Vec::new(), Vec::new(), config.layers.clone()).map_err(invalid)?;
+        let sequences = config
+            .rules
+            .iter()
+            .filter(|rule| rule.enabled && matches!(rule.trigger, Trigger::Sequence { .. }))
+            .map(|rule| Sequence::new(rule.clone(), &config))
+            .collect::<io::Result<Vec<_>>>()?;
         Ok(Self {
             config,
             generation: 1,
@@ -312,6 +336,7 @@ impl Engine {
             last_at: None,
             capture_rule: None,
             captured: Vec::new(),
+            sequences,
         })
     }
     /// Explicit diagnostic capture only. Ordinary engines never retain or
@@ -352,6 +377,7 @@ impl Engine {
         self.workers
             .iter()
             .filter_map(Worker::deadline)
+            .chain(self.sequences.iter().filter_map(Sequence::deadline))
             .chain(self.conditions.deadline())
             .min()
     }
@@ -495,8 +521,21 @@ impl Engine {
                 _ => {}
             }
         }
-        if let Record::Tick { at } = record {
-            self.advance(at)?;
+        if let Record::Tick { at } = &record {
+            self.advance(*at)?;
+        }
+        let context = SequenceContext {
+            devices: &self.devices,
+            authority: &self.authority,
+            keys: &self.conditions,
+            generation: self.generation,
+            at: self.last_at.unwrap_or_default(),
+        };
+        for sequence in &mut self.sequences {
+            sequence.push(&record, &context, &mut self.next_id, &mut self.events)?;
+        }
+        if self.shape_samples() > 65_536 {
+            return Err(invalid("total shape sample budget exceeded"));
         }
         if self.events.len() > 16384 {
             return Err(invalid("rule observation queue limit exceeded"));
@@ -519,6 +558,27 @@ impl Engine {
                 self.events.len()
             )))
         }
+    }
+    fn shape_samples(&self) -> usize {
+        self.workers
+            .iter()
+            .filter_map(|worker| match &worker.recognizer {
+                Recognizer::Shape { captures, .. } => Some(
+                    captures
+                        .values()
+                        .filter_map(|capture| capture.path.as_ref())
+                        .map(PathCapture::sample_count)
+                        .sum::<usize>(),
+                ),
+                _ => None,
+            })
+            .sum::<usize>()
+            + self
+                .sequences
+                .iter()
+                .flat_map(|sequence| sequence.steps.iter())
+                .map(Engine::shape_samples)
+                .sum::<usize>()
     }
     fn prepare_registration(&self, record: &Record) -> io::Result<()> {
         let state = match record {
@@ -594,6 +654,9 @@ impl Engine {
             }
         }
         self.cancel_all(at, "configuration replaced");
+        for sequence in &mut self.sequences {
+            sequence.cancel_all(at, "configuration replaced", &mut self.events);
+        }
         next.replay.inherit_history(&self.replay);
         next.generation = generation;
         next.next_id = self.next_id;
@@ -721,6 +784,27 @@ impl Engine {
                 continue;
             }
             let state = &self.devices[&source.device];
+            if worker.trace {
+                if match &worker.rule.trigger {
+                    Trigger::ButtonTaps { key, .. } => frame.changes.iter().any(|change| matches!(change, Change::Key { code, state:KeyState::Release } if *code == key.0)),
+                    Trigger::TouchTaps { .. } => frame.contacts.is_empty() && !frame.contacts_ended.is_empty(),
+                    _ => false,
+                } { worker.released.insert(source.clone(), at); }
+                if let Some(candidate) = worker.candidates.get_mut(source)
+                    && !frame.contacts.is_empty()
+                {
+                    candidate.contacts = frame.contacts.iter().map(|contact| contact.id).collect();
+                }
+                if matches!(worker.rule.trigger, Trigger::Chord { .. }) {
+                    for candidate in worker
+                        .candidates
+                        .values_mut()
+                        .filter(|candidate| candidate.source.seat == source.seat)
+                    {
+                        candidate.sources.insert(source.clone());
+                    }
+                }
+            }
             match &worker.rule.trigger {
                 Trigger::Shape { .. } => {
                     shape_frame(
@@ -1039,6 +1123,16 @@ impl Engine {
     }
     fn cancel_source(&mut self, source: &Source, at: Duration, reason: &str) {
         self.conditions.cancel_source(source);
+        for sequence in &mut self.sequences {
+            if sequence
+                .pending
+                .get(&source.seat)
+                .is_some_and(|pending| pending.sources.contains(source))
+            {
+                sequence.cancel(&source.seat, at, reason, &mut self.events);
+                sequence.reset.insert(source.seat.clone());
+            }
+        }
         for worker in &mut self.workers {
             let sources: Vec<_> = worker
                 .candidates
@@ -1092,6 +1186,499 @@ impl Engine {
             self.cancel_source(&source, at, reason);
         }
     }
+}
+
+struct SequenceContext<'a> {
+    devices: &'a BTreeMap<u64, DeviceState>,
+    authority: &'a Authority,
+    keys: &'a Keys,
+    generation: u64,
+    at: Duration,
+}
+struct SequenceGroup {
+    first: usize,
+    end: usize,
+    timeout: Duration,
+}
+struct PendingSequence {
+    id: u64,
+    ordinal: u64,
+    first: Candidate,
+    step: usize,
+    finished: Duration,
+    evidence: Vec<Evidence>,
+    sources: BTreeSet<Source>,
+    groups: BTreeMap<usize, Duration>,
+    progress: bool,
+    previous: Option<Candidate>,
+}
+struct Sequence {
+    rule: Rule,
+    steps: Vec<Engine>,
+    triggers: Vec<Trigger>,
+    groups: Vec<SequenceGroup>,
+    pending: BTreeMap<String, PendingSequence>,
+    reset: BTreeSet<String>,
+}
+fn flatten_sequence(
+    trigger: &Trigger,
+    leaves: &mut Vec<Trigger>,
+    groups: &mut Vec<SequenceGroup>,
+) -> io::Result<()> {
+    if let Trigger::Sequence { steps, timeout } = trigger {
+        let index = groups.len();
+        if index >= 64 {
+            return Err(invalid("sequence exceeds 64 bounded groups"));
+        }
+        groups.push(SequenceGroup {
+            first: leaves.len(),
+            end: 0,
+            timeout: timeout.duration(),
+        });
+        for step in steps {
+            flatten_sequence(step, leaves, groups)?;
+        }
+        groups[index].end = leaves.len();
+    } else {
+        if leaves.len() >= 64 {
+            return Err(invalid("sequence exceeds 64 recognizer steps"));
+        }
+        leaves.push(trigger.clone());
+    }
+    Ok(())
+}
+impl Sequence {
+    fn new(rule: Rule, config: &Config) -> io::Result<Self> {
+        let mut triggers = Vec::new();
+        let mut groups = Vec::new();
+        flatten_sequence(&rule.trigger, &mut triggers, &mut groups)?;
+        let mut steps = Vec::new();
+        for (index, trigger) in triggers.iter().enumerate() {
+            let mut child = config.clone();
+            let mut leaf = rule.clone();
+            leaf.trigger = trigger.clone();
+            if index != 0 {
+                leaf.require_keys.clear();
+                leaf.layer = None;
+                leaf.keys_throughout = false;
+            }
+            if let Trigger::Shape {
+                fingers: None,
+                button,
+                ..
+            } = trigger
+                && leaf.require_keys.is_empty()
+                && leaf.layer.is_none()
+            {
+                leaf.require_keys = vec![button.unwrap_or(crate::config::Key(0x110))];
+            }
+            child.rules = vec![leaf];
+            let mut engine = Engine::new(child)?;
+            engine.workers[0].trace = true;
+            steps.push(engine);
+        }
+        Ok(Self {
+            rule,
+            steps,
+            triggers,
+            groups,
+            pending: BTreeMap::new(),
+            reset: BTreeSet::new(),
+        })
+    }
+    fn deadline(&self) -> Option<Duration> {
+        self.steps
+            .iter()
+            .filter_map(Engine::deadline)
+            .chain(self.pending.values().flat_map(|pending| {
+                pending
+                    .groups
+                    .iter()
+                    .map(|(index, started)| *started + self.groups[*index].timeout)
+            }))
+            .min()
+    }
+    fn cancel_all(&mut self, at: Duration, reason: &str, events: &mut Vec<Event>) {
+        let seats: Vec<_> = self.pending.keys().cloned().collect();
+        for seat in seats {
+            self.cancel(&seat, at, reason, events);
+        }
+    }
+    fn cancel(&mut self, seat: &str, at: Duration, reason: &str, events: &mut Vec<Event>) {
+        if let Some(pending) = self.pending.remove(seat) {
+            events.push(Event::Cancelled {
+                version: 1,
+                rule: self.rule.id.clone(),
+                id: pending.id,
+                source: pending.first.source,
+                at,
+                reason: reason.into(),
+            });
+        }
+    }
+    fn reset_seat(&mut self, seat: &str, context: &SequenceContext<'_>) -> io::Result<()> {
+        for engine in &mut self.steps {
+            let states: Vec<_> = context
+                .devices
+                .values()
+                .filter(|state| state.device.source.seat == seat)
+                .cloned()
+                .collect();
+            for state in states {
+                engine.cancel_source(&state.device.source, context.at, "sequence reset");
+                if policy_selected(&engine.config, &state.device) {
+                    engine
+                        .conditions
+                        .reconcile(&state.device.source, state.keys.iter().copied())
+                        .map_err(invalid)?;
+                }
+                engine
+                    .devices
+                    .insert(state.device.source.device, state.clone());
+                for worker in &mut engine.workers {
+                    worker.register(&state, &engine.config)?;
+                    if let Recognizer::Touch(touches) = &mut worker.recognizer
+                        && let Some(touch) = touches.get_mut(&state.device.source.device)
+                    {
+                        touch.reconcile(context.at, !state.contacts.is_empty());
+                    }
+                    worker.matches.clear();
+                }
+            }
+            engine.events.clear();
+        }
+        Ok(())
+    }
+    fn begin(&mut self, candidate: Candidate, next_id: &mut u64) -> io::Result<()> {
+        let seat = candidate.source.seat.clone();
+        if self.pending.contains_key(&seat) {
+            return Ok(());
+        }
+        *next_id = next_id
+            .checked_add(1)
+            .ok_or_else(|| invalid("sequence gesture identity exhausted"))?;
+        let groups = self
+            .groups
+            .iter()
+            .enumerate()
+            .filter(|(_, group)| group.first == 0)
+            .map(|(index, _)| (index, candidate.started))
+            .collect();
+        self.pending.insert(
+            seat,
+            PendingSequence {
+                id: *next_id,
+                ordinal: 0,
+                finished: candidate.started,
+                sources: candidate.sources.clone(),
+                first: candidate,
+                step: 0,
+                evidence: Vec::new(),
+                groups,
+                progress: false,
+                previous: None,
+            },
+        );
+        Ok(())
+    }
+    fn push(
+        &mut self,
+        record: &Record,
+        context: &SequenceContext<'_>,
+        next_id: &mut u64,
+        events: &mut Vec<Event>,
+    ) -> io::Result<()> {
+        let queued = std::mem::take(&mut self.reset);
+        for seat in queued {
+            self.reset_seat(&seat, context)?;
+        }
+        let mut traces = Vec::new();
+        let mut cancelled = Vec::new();
+        let mut skipped = Vec::new();
+        for (index, engine) in self.steps.iter_mut().enumerate() {
+            engine.authority = context.authority.clone();
+            engine.push(record.clone())?;
+            for worker in &mut engine.workers {
+                traces.extend(worker.matches.drain(..).map(|trace| (index, trace)));
+            }
+            for event in engine.take_events() {
+                match event {
+                    Event::Cancelled { source, reason, .. } => {
+                        cancelled.push((index, source, reason))
+                    }
+                    Event::Skipped { ref source, .. }
+                        if index == 0 && !self.pending.contains_key(&source.seat) =>
+                    {
+                        skipped.push(event)
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let starters: Vec<_> = self.steps[0].workers[0]
+            .candidates
+            .values()
+            .cloned()
+            .collect();
+        for candidate in starters {
+            self.begin(candidate, next_id)?;
+        }
+        for (index, trace) in &traces {
+            if *index == 0 {
+                self.begin(trace.candidate.clone(), next_id)?;
+            }
+        }
+        for (seat, pending) in &mut self.pending {
+            if let Some(candidate) = self.steps[pending.step].workers[0]
+                .candidates
+                .values()
+                .find(|candidate| {
+                    candidate.source.seat == *seat
+                        && (pending.step == 0
+                            || candidate.started >= pending.finished
+                            || pending.previous.as_ref().is_some_and(|previous| {
+                                same_contact_continuation(
+                                    &self.triggers[pending.step - 1],
+                                    &self.triggers[pending.step],
+                                    previous,
+                                    candidate,
+                                )
+                            }))
+                })
+            {
+                for (index, _) in self
+                    .groups
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, group)| group.first == pending.step)
+                {
+                    pending.groups.entry(index).or_insert(candidate.started);
+                }
+            }
+        }
+        let invalidated: Vec<_> = self
+            .pending
+            .iter()
+            .filter_map(|(seat, pending)| {
+                let changed = matches!(record, Record::Mapping {source,..}|Record::Reconcile {source,..} if pending.sources.contains(source));
+                let reason = if changed {Some("sequence input mapping/state changed".into())}
+                else if pending.first.session_generation != context.authority.generation() {
+                    Some("session generation changed".into())
+                } else if self.rule.keys_throughout && !conditions(&self.rule, context.keys, seat) {
+                    Some("activation condition released".into())
+                } else if pending
+                    .groups
+                    .iter()
+                    .any(|(index, started)| context.at >= *started + self.groups[*index].timeout)
+                {
+                    Some("sequence timeout".into())
+                } else if pending.sources.iter().any(|source| {
+                    context
+                        .devices
+                        .get(&source.device)
+                        .is_none_or(|state| state.device.source != *source)
+                }) {
+                    Some("sequence source changed".into())
+                } else if let Some(state) = context.devices.get(&pending.first.source.device) {
+                    pending.first.permit.as_ref().and_then(|permit| {
+                        context
+                            .authority
+                            .validate(permit, input(state, context.at))
+                            .err()
+                            .map(|reason| reason.to_string())
+                    })
+                } else {
+                    Some("sequence source changed".into())
+                };
+                reason.map(|reason| (seat.clone(), reason))
+            })
+            .collect();
+        let mut reset = BTreeSet::new();
+        for (seat, reason) in invalidated {
+            self.cancel(&seat, context.at, &reason, events);
+            reset.insert(seat);
+        }
+        // Group entry clocks are anchored to candidate input, not delayed match
+        // notifications. Future recognizers can never lend an old press/path.
+        traces.sort_by(|(ai, a), (bi, b)| ai.cmp(bi).then_with(|| a.finished.cmp(&b.finished)));
+        for (index, trace) in traces {
+            let seat = trace.candidate.source.seat.clone();
+            if reset.contains(&seat) {
+                continue;
+            }
+            let Some(pending) = self.pending.get_mut(&seat) else {
+                continue;
+            };
+            if pending.step != index {
+                continue;
+            }
+            let Event::Matched {
+                stage,
+                evidence,
+                at,
+                ..
+            } = &trace.event
+            else {
+                continue;
+            };
+            if matches!(stage, Stage::Update | Stage::End)
+                && !pending.progress
+                && index + 1 == self.steps.len()
+            {
+                continue;
+            }
+            let final_step = index + 1 == self.steps.len();
+            if !final_step
+                && !matches!(stage, Stage::Discrete | Stage::End)
+                && !matches!(self.triggers[index], Trigger::Key { .. })
+            {
+                continue;
+            }
+            if matches!(evidence, Evidence::Hold { repeat: true }) {
+                continue;
+            }
+            let continuation = index > 0
+                && pending.previous.as_ref().is_some_and(|previous| {
+                    same_contact_continuation(
+                        &self.triggers[index - 1],
+                        &self.triggers[index],
+                        previous,
+                        &trace.candidate,
+                    )
+                });
+            if index > 0 && trace.candidate.started < pending.finished && !continuation {
+                continue;
+            }
+            if let (Some(first), Some(later)) = (&pending.first.permit, &trace.candidate.permit)
+                && !same_target(first, later)
+            {
+                self.cancel(&seat, context.at, "sequence target changed", events);
+                reset.insert(seat);
+                continue;
+            }
+            for (group_index, _) in self
+                .groups
+                .iter()
+                .enumerate()
+                .filter(|(_, group)| group.first == index)
+            {
+                pending
+                    .groups
+                    .entry(group_index)
+                    .or_insert(trace.candidate.started);
+            }
+            if pending
+                .groups
+                .iter()
+                .any(|(index, started)| *at >= *started + self.groups[*index].timeout)
+            {
+                self.cancel(&seat, context.at, "sequence timeout", events);
+                reset.insert(seat);
+                continue;
+            }
+            pending.sources.extend(trace.candidate.sources.clone());
+            if final_step {
+                pending.ordinal = pending
+                    .ordinal
+                    .checked_add(1)
+                    .ok_or_else(|| invalid("sequence event ordinal exhausted"))?;
+                let mut steps = pending.evidence.clone();
+                steps.push(evidence.clone());
+                let source = pending.first.source.clone();
+                let permit = pending.first.permit.as_ref();
+                events.push(Event::Matched {
+                    version: 1,
+                    rule: self.rule.id.clone(),
+                    id: pending.id,
+                    ordinal: pending.ordinal,
+                    source,
+                    at: *at,
+                    config_generation: context.generation,
+                    session_generation: pending.first.session_generation,
+                    stage: if matches!(self.triggers[index], Trigger::Key { .. }) {
+                        Stage::Discrete
+                    } else {
+                        *stage
+                    },
+                    action: self.rule.action.clone(),
+                    evidence: Evidence::Sequence { steps },
+                    window: permit
+                        .and_then(Permit::window)
+                        .map(|window| window.id.clone()),
+                    output: permit
+                        .and_then(Permit::output)
+                        .map(|output| output.geometry.name.clone()),
+                    workspace: permit
+                        .and_then(Permit::output)
+                        .and_then(|output| output.active_workspace),
+                });
+                if *stage == Stage::Begin && !matches!(self.triggers[index], Trigger::Key { .. }) {
+                    pending.progress = true;
+                } else if matches!(stage, Stage::Discrete | Stage::End)
+                    || matches!(self.triggers[index], Trigger::Key { .. })
+                {
+                    self.pending.remove(&seat);
+                    reset.insert(seat);
+                }
+            } else {
+                pending.evidence.push(evidence.clone());
+                pending.finished = trace.finished;
+                pending.previous = Some(trace.candidate.clone());
+                pending.step += 1;
+                let completed_groups: Vec<_> = pending
+                    .groups
+                    .keys()
+                    .filter(|index| self.groups[**index].end == pending.step)
+                    .copied()
+                    .collect();
+                // The outer group remains active until the entire sequence ends.
+                for group in completed_groups {
+                    if self.groups[group].end < self.steps.len() {
+                        pending.groups.remove(&group);
+                    }
+                }
+            }
+        }
+        for (index, source, reason) in cancelled {
+            if self
+                .pending
+                .get(&source.seat)
+                .is_some_and(|pending| pending.step == index)
+            {
+                self.cancel(&source.seat, context.at, &reason, events);
+                reset.insert(source.seat);
+            }
+        }
+        for seat in reset {
+            self.reset_seat(&seat, context)?;
+        }
+        events.extend(skipped);
+        Ok(())
+    }
+}
+fn same_target(first: &Permit, later: &Permit) -> bool {
+    first.same_target(later)
+}
+fn same_contact_continuation(
+    previous: &Trigger,
+    current: &Trigger,
+    first: &Candidate,
+    later: &Candidate,
+) -> bool {
+    matches!(previous, Trigger::TouchHold { .. })
+        && matches!(
+            current,
+            Trigger::Swipe { .. }
+                | Trigger::Shape {
+                    fingers: Some(_),
+                    ..
+                }
+                | Trigger::Pinch { .. }
+                | Trigger::Rotate { .. }
+        )
+        && first.source == later.source
+        && !first.contacts.is_empty()
+        && first.contacts == later.contacts
 }
 
 fn selected(config: &Config, rule: &Rule, device: &Device) -> bool {
@@ -1477,6 +2064,9 @@ fn start_candidate(
                     permit,
                     progress: false,
                     expires: None,
+                    started: at,
+                    contacts: state.contacts.iter().map(|contact| contact.id).collect(),
+                    sources: BTreeSet::from([source.clone()]),
                 },
             );
         }
@@ -1794,6 +2384,20 @@ fn report_signals(
                     .and_then(|p| p.output())
                     .and_then(|o| o.active_workspace),
             });
+            if worker.trace {
+                worker.matches.push(StepMatch {
+                    event: events.last().unwrap().clone(),
+                    candidate: candidate.clone(),
+                    finished: if matches!(
+                        worker.rule.trigger,
+                        Trigger::ButtonTaps { .. } | Trigger::TouchTaps { .. }
+                    ) {
+                        worker.released.get(&source).copied().unwrap_or(at)
+                    } else {
+                        at
+                    },
+                });
+            }
             if stage == Stage::End {
                 candidate.progress = false;
             }
@@ -2618,18 +3222,12 @@ mod tests {
         );
     }
     #[test]
-    fn t02_runtime_reports_unconnected_composition_instead_of_accepting_it() {
+    fn t02_runtime_compiles_sequences_and_configured_shapes() {
         let trigger = Trigger::Sequence {
             steps: vec![taps(2), hold(2000)],
             timeout: Millis(5000),
         };
-        assert!(
-            Engine::new(config(trigger))
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("composition")
-        );
+        assert!(Engine::new(config(trigger)).is_ok());
         let mut config = config(Trigger::Shape {
             name: "v".into(),
             fingers: Some(1),
@@ -2991,5 +3589,402 @@ mod tests {
             &[(EV_REL, 0, 50), (EV_REL, 1, -100), (EV_KEY, 0x110, 0)],
         );
         assert_eq!(matches(&engine.events).len(), 1);
+    }
+    fn sequence_engine(steps: Vec<Trigger>, timeout: u64) -> Engine {
+        let mut engine = engine(config(Trigger::Sequence {
+            steps,
+            timeout: Millis(timeout),
+        }));
+        add(&mut engine, device(2), &[]);
+        engine
+    }
+    #[test]
+    fn t42_tap_twice_then_hold_emits_only_the_complete_sequence() {
+        let mut engine = sequence_engine(vec![taps(2), hold(600)], 5000);
+        for (at, seq, down) in [
+            (0, 1, true),
+            (50, 2, false),
+            (150, 3, true),
+            (200, 4, false),
+            (300, 5, true),
+        ] {
+            key(&mut engine, 1, at, seq, 115, down);
+        }
+        assert!(matches(&engine.events).is_empty());
+        tick(&mut engine, 900);
+        assert_eq!(matches(&engine.events).len(), 1);
+        assert!(
+            matches!(matches(&engine.events)[0],Event::Matched {evidence:Evidence::Sequence {steps},stage:Stage::Discrete,..} if steps.len()==2 && matches!(steps[0],Evidence::Taps {count:2}) && matches!(steps[1],Evidence::Hold {repeat:false}))
+        );
+    }
+    #[test]
+    fn t42_hold_then_shape_combines_permitted_sources_and_retains_one_identity() {
+        let mut engine = sequence_engine(
+            vec![
+                hold(600),
+                Trigger::Shape {
+                    name: "v".into(),
+                    fingers: Some(1),
+                    button: None,
+                },
+            ],
+            5000,
+        );
+        key(&mut engine, 2, 0, 1, 115, true);
+        tick(&mut engine, 600);
+        assert!(matches(&engine.events).is_empty());
+        shape_touch(&mut engine, 610, 1, &[(0, 100, 100)], true, false);
+        shape_touch(&mut engine, 650, 2, &[(0, 500, 900)], false, false);
+        shape_touch(&mut engine, 680, 3, &[(0, 900, 100)], false, true);
+        assert_eq!(matches(&engine.events).len(), 1);
+        assert!(
+            matches!(matches(&engine.events)[0],Event::Matched {source,evidence:Evidence::Sequence {steps},..} if source.device==2 && steps.len()==2 && matches!(steps[1],Evidence::Shape {..}))
+        );
+    }
+    #[test]
+    fn t41_a_future_hold_started_before_the_previous_step_cannot_complete() {
+        let mut engine = sequence_engine(
+            vec![
+                taps(2),
+                Trigger::ButtonHold {
+                    key: Key(30),
+                    after: Millis(600),
+                    repeat: None,
+                },
+            ],
+            5000,
+        );
+        key(&mut engine, 2, 0, 1, 30, true);
+        for (at, seq, down) in [
+            (10, 1, true),
+            (50, 2, false),
+            (150, 3, true),
+            (200, 4, false),
+        ] {
+            key(&mut engine, 1, at, seq, 115, down);
+        }
+        tick(&mut engine, 600);
+        assert!(matches(&engine.events).is_empty());
+        key(&mut engine, 2, 650, 2, 30, false);
+        key(&mut engine, 2, 700, 3, 30, true);
+        tick(&mut engine, 1300);
+        assert_eq!(matches(&engine.events).len(), 1);
+    }
+    #[test]
+    fn t42_sequence_timeout_and_source_loss_cancel_the_chain() {
+        for loss in [false, true] {
+            let mut engine = sequence_engine(vec![hold(600), taps(2)], 1000);
+            key(&mut engine, 1, 0, 1, 115, true);
+            tick(&mut engine, 600);
+            if loss {
+                engine
+                    .push(Record::Remove {
+                        source: device(1).source,
+                        at: ms(700),
+                    })
+                    .unwrap();
+            } else {
+                tick(&mut engine, 1000);
+            }
+            assert!(matches(&engine.events).is_empty());
+            assert!(
+                engine
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, Event::Cancelled { .. }))
+            );
+        }
+    }
+    #[test]
+    fn t40_sequence_steps_do_not_cross_seats() {
+        let mut engine = sequence_engine(
+            vec![
+                hold(600),
+                Trigger::ButtonHold {
+                    key: Key(30),
+                    after: Millis(600),
+                    repeat: None,
+                },
+            ],
+            5000,
+        );
+        let mut other = device(3);
+        other.source.seat = "seat1".into();
+        let mut config = engine.config.clone();
+        config.policy.allowed_seats.push("seat1".into());
+        engine.reload(config, ms(0)).unwrap();
+        add(&mut engine, other.clone(), &[]);
+        key(&mut engine, 1, 0, 1, 115, true);
+        tick(&mut engine, 600);
+        frame(&mut engine, other.source, 700, 1, &[(EV_KEY, 30, 1)]);
+        tick(&mut engine, 1300);
+        assert!(matches(&engine.events).is_empty());
+    }
+    #[test]
+    fn t42_touch_hold_then_swipe_continues_only_the_same_contacts() {
+        let mut engine = sequence_engine(
+            vec![
+                Trigger::TouchHold {
+                    fingers: 1,
+                    after: Millis(600),
+                },
+                Trigger::Swipe {
+                    fingers: 1,
+                    direction: Direction::Right,
+                    travel: crate::config::Distance::Millimetres(12.0),
+                    fallback_travel: crate::config::Distance::Normalized(0.04),
+                    continuous: false,
+                },
+            ],
+            5000,
+        );
+        shape_touch(&mut engine, 0, 1, &[(0, 100, 100)], true, false);
+        tick(&mut engine, 600);
+        shape_touch(&mut engine, 650, 2, &[(0, 900, 100)], false, false);
+        shape_touch(&mut engine, 700, 3, &[(0, 900, 100)], false, true);
+        assert_eq!(matches(&engine.events).len(), 1);
+    }
+    #[test]
+    fn final_continuous_step_preserves_begin_update_and_end() {
+        let mut engine = sequence_engine(
+            vec![
+                hold(600),
+                Trigger::Swipe {
+                    fingers: 1,
+                    direction: Direction::Right,
+                    travel: crate::config::Distance::Millimetres(12.0),
+                    fallback_travel: crate::config::Distance::Normalized(0.04),
+                    continuous: true,
+                },
+            ],
+            5000,
+        );
+        key(&mut engine, 2, 0, 1, 115, true);
+        tick(&mut engine, 600);
+        shape_touch(&mut engine, 610, 1, &[(0, 100, 100)], true, false);
+        shape_touch(&mut engine, 740, 2, &[(0, 400, 100)], false, false);
+        shape_touch(&mut engine, 780, 3, &[(0, 700, 100)], false, false);
+        shape_touch(&mut engine, 800, 4, &[(0, 900, 100)], false, true);
+        let matched = matches(&engine.events);
+        assert!(matched.iter().any(|event| matches!(
+            event,
+            Event::Matched {
+                stage: Stage::Begin,
+                ..
+            }
+        )));
+        assert!(matched.iter().any(|event| matches!(
+            event,
+            Event::Matched {
+                stage: Stage::Update,
+                ..
+            }
+        )));
+        assert!(matched.iter().any(|event| matches!(
+            event,
+            Event::Matched {
+                stage: Stage::End,
+                ..
+            }
+        )));
+        let Event::Matched { id: first, .. } = matched[0] else {
+            unreachable!()
+        };
+        assert!(
+            matched
+                .iter()
+                .all(|event| matches!(event,Event::Matched {id,..} if id==first))
+        );
+    }
+    #[test]
+    fn sampled_sequence_activation_survives_release_but_throughout_cancels() {
+        for throughout in [false, true] {
+            let mut engine = sequence_engine(
+                vec![
+                    hold(600),
+                    Trigger::ButtonHold {
+                        key: Key(30),
+                        after: Millis(600),
+                        repeat: None,
+                    },
+                ],
+                5000,
+            );
+            let mut config = engine.config.clone();
+            config.rules[0].require_keys = vec![Key(125)];
+            config.rules[0].keys_throughout = throughout;
+            engine.reload(config, ms(0)).unwrap();
+            key(&mut engine, 2, 0, 1, 125, true);
+            key(&mut engine, 1, 10, 1, 115, true);
+            tick(&mut engine, 610);
+            key(&mut engine, 2, 620, 2, 125, false);
+            key(&mut engine, 2, 630, 3, 30, true);
+            tick(&mut engine, 1230);
+            assert_eq!(matches(&engine.events).len(), usize::from(!throughout));
+        }
+    }
+    #[test]
+    fn nested_timeout_starts_at_input_and_reset_does_not_reuse_held_keys() {
+        let mut engine = sequence_engine(
+            vec![
+                hold(600),
+                Trigger::Sequence {
+                    steps: vec![
+                        Trigger::ButtonHold {
+                            key: Key(30),
+                            after: Millis(600),
+                            repeat: None,
+                        },
+                        Trigger::Key { key: Key(125) },
+                    ],
+                    timeout: Millis(300),
+                },
+            ],
+            5000,
+        );
+        key(&mut engine, 1, 0, 1, 115, true);
+        tick(&mut engine, 600);
+        key(&mut engine, 2, 610, 1, 30, true);
+        tick(&mut engine, 910);
+        assert!(engine.events.iter().any(
+            |event| matches!(event,Event::Cancelled {reason,..} if reason=="sequence timeout")
+        ));
+        tick(&mut engine, 2000);
+        key(&mut engine, 2, 2010, 2, 125, true);
+        assert!(matches(&engine.events).is_empty());
+    }
+    #[test]
+    fn sequence_context_keeps_the_first_window_across_focus_change() {
+        let mut engine = phone();
+        let mut config = engine.config.clone();
+        config.rules[0].trigger = Trigger::Sequence {
+            steps: vec![
+                Trigger::TouchHold {
+                    fingers: 2,
+                    after: Millis(150),
+                },
+                Trigger::Swipe {
+                    fingers: 2,
+                    direction: Direction::Up,
+                    travel: crate::config::Distance::Millimetres(12.0),
+                    fallback_travel: crate::config::Distance::Normalized(0.04),
+                    continuous: false,
+                },
+            ],
+            timeout: Millis(1000),
+        };
+        engine.reload(config, ms(0)).unwrap();
+        touch_start(&mut engine, 200);
+        tick(&mut engine, 150);
+        let generation = engine.authority.generation();
+        let mut snap = snapshot(generation, 2, 160);
+        snap.windows[0].focused = false;
+        snap.windows[1].focused = true;
+        engine.authority.update(snap, ms(160)).unwrap();
+        frame(
+            &mut engine,
+            device(1).source,
+            180,
+            2,
+            &[
+                (EV_ABS, ABS_MT_SLOT, 0),
+                (EV_ABS, ABS_MT_POSITION_Y, 300),
+                (EV_ABS, ABS_MT_SLOT, 1),
+                (EV_ABS, ABS_MT_POSITION_Y, 300),
+            ],
+        );
+        frame(
+            &mut engine,
+            device(1).source,
+            200,
+            3,
+            &[
+                (EV_ABS, ABS_MT_SLOT, 0),
+                (EV_ABS, ABS_MT_TRACKING_ID, -1),
+                (EV_ABS, ABS_MT_SLOT, 1),
+                (EV_ABS, ABS_MT_TRACKING_ID, -1),
+            ],
+        );
+        assert_eq!(matches(&engine.events).len(), 1);
+        assert!(
+            matches!(matches(&engine.events)[0],Event::Matched {window:Some(window),..} if window=="a")
+        );
+    }
+    #[test]
+    fn event_loss_on_an_already_completed_step_cancels_the_remaining_chain() {
+        let mut engine = sequence_engine(
+            vec![
+                hold(600),
+                Trigger::ButtonHold {
+                    key: Key(30),
+                    after: Millis(600),
+                    repeat: None,
+                },
+            ],
+            5000,
+        );
+        key(&mut engine, 1, 0, 1, 115, true);
+        tick(&mut engine, 600);
+        frame(
+            &mut engine,
+            device(1).source,
+            650,
+            2,
+            &[(EV_SYN, SYN_DROPPED, 0)],
+        );
+        key(&mut engine, 2, 700, 1, 30, true);
+        tick(&mut engine, 1300);
+        assert!(matches(&engine.events).is_empty());
+        assert!(
+            engine
+                .events
+                .iter()
+                .any(|event| matches!(event, Event::Cancelled { .. }))
+        );
+    }
+    #[test]
+    fn sequence_missing_context_reports_skipped_instead_of_silently_disappearing() {
+        let mut config = config(Trigger::Sequence {
+            steps: vec![hold(600), taps(2)],
+            timeout: Millis(5000),
+        });
+        config.rules[0].contexts = vec![Context::Desktop];
+        let mut engine = engine(config);
+        key(&mut engine, 1, 0, 1, 115, true);
+        assert!(
+            engine
+                .events
+                .iter()
+                .any(|event| matches!(event, Event::Skipped { .. }))
+        );
+    }
+    #[test]
+    fn nested_sequences_keep_their_own_timeout() {
+        let mut engine = sequence_engine(
+            vec![
+                hold(600),
+                Trigger::Sequence {
+                    steps: vec![
+                        Trigger::Key { key: Key(30) },
+                        Trigger::ButtonHold {
+                            key: Key(125),
+                            after: Millis(600),
+                            repeat: None,
+                        },
+                    ],
+                    timeout: Millis(300),
+                },
+            ],
+            5000,
+        );
+        key(&mut engine, 1, 0, 1, 115, true);
+        tick(&mut engine, 600);
+        key(&mut engine, 2, 610, 1, 30, true);
+        key(&mut engine, 2, 620, 2, 125, true);
+        tick(&mut engine, 1220);
+        assert!(matches(&engine.events).is_empty());
+        assert!(engine.events.iter().any(
+            |event| matches!(event,Event::Cancelled {reason,..} if reason=="sequence timeout")
+        ));
     }
 }

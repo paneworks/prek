@@ -594,6 +594,15 @@ impl Config {
         {
             return fail("configuration collection limit exceeded".into());
         }
+        let compiled: usize = self
+            .rules
+            .iter()
+            .filter(|rule| rule.enabled)
+            .map(|rule| recognizer_count(&rule.trigger))
+            .sum();
+        if compiled > 4096 {
+            return fail("configuration exceeds 4096 compiled recognizers".into());
+        }
         if crate::Buttons::new(self.timing.buttons()).is_err() {
             return fail("timing: hold_after must exceed positive tap_max/tap_gap".into());
         }
@@ -1174,6 +1183,9 @@ fn validate_trigger(
             if steps.len() < 2 || steps.len() > 16 {
                 return Err("sequence requires 2..16 bounded steps".into());
             }
+            if recognizer_count(trigger) > 64 {
+                return Err("sequence exceeds 64 recognizer steps".into());
+            }
             for step in steps {
                 validate_trigger(step, shapes, depth + 1)?;
             }
@@ -1188,6 +1200,21 @@ fn validate_duration(duration: Millis) -> Result<(), String> {
     } else {
         Ok(())
     }
+}
+fn recognizer_count(trigger: &Trigger) -> usize {
+    fn count(trigger: &Trigger, depth: usize) -> usize {
+        if depth > 8 {
+            return 4097;
+        }
+        match trigger {
+            Trigger::Sequence { steps, .. } => steps
+                .iter()
+                .map(|step| count(step, depth + 1))
+                .fold(0usize, usize::saturating_add),
+            _ => 1,
+        }
+    }
+    count(trigger, 0)
 }
 fn validate_distance(distance: Distance) -> Result<(), String> {
     if !distance.value().is_finite()

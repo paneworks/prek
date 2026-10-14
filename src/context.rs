@@ -272,7 +272,29 @@ impl Permit {
     pub fn scope(&self) -> Scope {
         self.scope
     }
+    pub(crate) fn same_target(&self, later: &Self) -> bool {
+        self.generation == later.generation
+            && self.state == later.state
+            && self.scope == later.scope
+            && self.output == later.output
+            && self.region == later.region
+            && self.secure_overlay == later.secure_overlay
+            && match (&self.window, &later.window) {
+                (None, None) => true,
+                (Some(first), Some(later)) => {
+                    first.id == later.id
+                        && first.output == later.output
+                        && first.workspace == later.workspace
+                        && first.rect == later.rect
+                        && first.content == later.content
+                        && first.mapped == later.mapped
+                        && first.visible == later.visible
+                }
+                _ => false,
+            }
+    }
 }
+#[derive(Clone)]
 pub struct Authority {
     binding: Option<Binding>,
     generation: u64,

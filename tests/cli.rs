@@ -241,6 +241,145 @@ fn t33_configured_mouse_shape_cli_replay_checks_a_hand_written_outcome() {
     let events: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
     assert_eq!(events[0]["evidence"]["shape"]["name"], "my-v");
 }
+#[test]
+fn t42_configured_sequence_cli_replay_matches_a_hand_written_outcome() {
+    use prek::{
+        config::{Key, Millis, Trigger},
+        rules::{Event, Evidence, Stage},
+    };
+    let directory = Directory::new();
+    let source = Source {
+        device: 7,
+        generation: 1,
+        seat: "seat0".into(),
+    };
+    let device = Device {
+        identity: "sequence-key".into(),
+        source: source.clone(),
+        name: "fixture".into(),
+        path: "fixture".into(),
+        physical: "fixture".into(),
+        unique: String::new(),
+        vendor: 1,
+        product: 1,
+        properties: vec![],
+        capabilities: BTreeMap::from([(EV_KEY, vec![30])]),
+        axes: BTreeMap::new(),
+        virtual_device: false,
+    };
+    let mut config = Config::preset("desktop").unwrap();
+    config.rules[0].enabled = true;
+    config.devices.get_mut("keyboard").unwrap().keys = vec![Key(30)];
+    config.rules[0].trigger = Trigger::Sequence {
+        steps: vec![
+            Trigger::ButtonTaps {
+                key: Key(30),
+                count: 2,
+            },
+            Trigger::ButtonHold {
+                key: Key(30),
+                after: Millis(600),
+                repeat: None,
+            },
+        ],
+        timeout: Millis(5000),
+    };
+    let expected = Event::Matched {
+        version: 1,
+        rule: config.rules[0].id.clone(),
+        id: 1,
+        ordinal: 1,
+        source: source.clone(),
+        at: Duration::from_millis(900),
+        config_generation: 1,
+        session_generation: 0,
+        stage: Stage::Discrete,
+        action: config.rules[0].action.clone(),
+        evidence: Evidence::Sequence {
+            steps: vec![
+                Evidence::Taps { count: 2 },
+                Evidence::Hold { repeat: false },
+            ],
+        },
+        window: None,
+        output: None,
+        workspace: None,
+    };
+    let mut bytes = Vec::new();
+    write_record(&mut bytes, &Record::Header { version: 1 }).unwrap();
+    write_record(
+        &mut bytes,
+        &Record::Device {
+            device,
+            keys: BTreeSet::new(),
+            contacts: vec![],
+        },
+    )
+    .unwrap();
+    for (index, (at, value)) in [(0, 1), (50, 0), (150, 1), (200, 0), (300, 1)]
+        .into_iter()
+        .enumerate()
+    {
+        write_record(
+            &mut bytes,
+            &Record::Frame {
+                frame: Frame {
+                    source: source.clone(),
+                    at: Duration::from_millis(at),
+                    sequence: index as u64 + 1,
+                    events: vec![
+                        RawEvent {
+                            kind: EV_KEY,
+                            code: 30,
+                            value,
+                        },
+                        RawEvent {
+                            kind: EV_SYN,
+                            code: SYN_REPORT,
+                            value: 0,
+                        },
+                    ],
+                },
+            },
+        )
+        .unwrap();
+    }
+    write_record(
+        &mut bytes,
+        &Record::Tick {
+            at: Duration::from_millis(900),
+        },
+    )
+    .unwrap();
+    write_record(
+        &mut bytes,
+        &Record::ExpectedRules {
+            events: vec![expected],
+        },
+    )
+    .unwrap();
+    let config_path = directory.0.join("sequence.toml");
+    let path = directory.0.join("sequence.jsonl");
+    fs::write(&config_path, toml::to_string_pretty(&config).unwrap()).unwrap();
+    fs::write(&path, bytes).unwrap();
+    let result = run(&[
+        "replay",
+        path.to_str().unwrap(),
+        "--config",
+        config_path.to_str().unwrap(),
+        "--check",
+        "--json",
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let events: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(events.as_array().unwrap().len(), 1);
+    assert_eq!(events[0]["evidence"]["steps"][0]["count"], 2);
+}
+
 struct Directory(PathBuf);
 impl Directory {
     fn new() -> Self {

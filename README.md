@@ -11,8 +11,7 @@ The library additionally provides seat-scoped chords, layers, repeatable holds,
 reference-counted logical keys, armed path capture and shape matching. These
 primitives are tested. Configured key edges, button taps/holds/repeats, chords,
 layers, wheels, touch gestures and configured shapes now run in observation and
-replay. Temporal sequence composition remains pending; enabling those rules
-produces an explicit runtime/preflight error. Exclusive input routing, a
+replay. Ordered temporal sequences now compose those recognizers. Exclusive input routing, a
 broker/session service and desktop actions are still in progress.
 The current executable does not grab devices or execute configured actions.
 
@@ -165,6 +164,25 @@ samples, five seconds, 20 mm length, 12 mm extent, normalized fallbacks of
 0.1/0.04 and mouse limits of 20/12 counts. The engine also caps retained shape
 samples at 65,536 across all rules/sources. Capture failure or low/ambiguous
 confidence produces cancellation and no match.
+
+`trigger = { kind = "sequence", steps = [...], timeout = "5s" }` composes
+ordered triggers within one permitted seat. Intermediate steps stay internal;
+the completed sequence reports one outcome with evidence for each step. A final
+continuous trigger retains begin/update/end, one gesture ID and ordered ordinals.
+Tap-then-hold uses the actual last tap release for ordering, so the hold may
+already be in progress when the tap count settles. A touch hold may continue
+into a swipe or shape only with the same source and contact identities. Other
+steps require fresh input starting after the previous step completes.
+
+Timeouts start with candidate input. Nested sequences retain their own deadlines.
+Sampled activation applies from the sequence's first step; throughout activation
+must remain valid for the whole chain. Source loss, reconciliation, mapping or
+session/context changes cancel pending work. Resets suppress already-held input
+instead of inventing a new press. Contextual sequences retain their first target;
+a focus change cannot redirect the result. Configuration bounds each sequence
+to 64 compiled recognizers and the program to 4,096. Shape sample retention
+remains globally bounded across sequence steps. These are observation/replay
+semantics; exclusive sequence routing remains pending.
 
 `learn-shape NAME --device PATH --output TEMPLATE.toml` explicitly arms one
 read-only touch capture. Use `--fingers 2` for a fixed two-contact centroid, or
