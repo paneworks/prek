@@ -30,11 +30,37 @@ pub enum Command {
     Chunk {
         generation: u64,
         offset: usize,
+        #[serde(with = "chunk_bytes")]
         data: Vec<u8>,
     },
     Commit {
         generation: u64,
     },
+}
+
+// Compact binary transport preserves arbitrary UTF-8 boundaries without the
+// per-byte JSON integer overhead of the maximum approved source snapshot.
+mod chunk_bytes {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use serde::{Deserialize, Deserializer, Serializer, de::Error};
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&STANDARD.encode(bytes))
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        let encoded = String::deserialize(deserializer)?;
+        if encoded.len() > super::CHUNK_BYTES.div_ceil(3) * 4 {
+            return Err(D::Error::custom(
+                "configuration chunk exceeds decoded byte limit",
+            ));
+        }
+        let bytes = STANDARD.decode(encoded).map_err(D::Error::custom)?;
+        if bytes.len() > super::CHUNK_BYTES {
+            return Err(D::Error::custom(
+                "configuration chunk exceeds decoded byte limit",
+            ));
+        }
+        Ok(bytes)
+    }
 }
 pub struct Transfer {
     generation: u64,
@@ -179,6 +205,40 @@ impl Assembly {
 mod tests {
     use super::*;
     use crate::ipc::monotonic;
+    #[test]
+    fn compact_chunks_preserve_bytes_and_reject_invalid_or_oversized_encoding() {
+        let bytes = vec![195, 169, 0, 255];
+        let command = Command::Chunk {
+            generation: 1,
+            offset: 0,
+            data: bytes.clone(),
+        };
+        let encoded = serde_json::to_vec(&command).unwrap();
+        let Command::Chunk { data, .. } = serde_json::from_slice(&encoded).unwrap() else {
+            unreachable!()
+        };
+        assert_eq!(data, bytes);
+        assert!(
+            serde_json::from_str::<Command>(
+                r#"{"kind":"chunk","generation":1,"offset":0,"data":"not-base64!"}"#
+            )
+            .is_err()
+        );
+        let encoded = serde_json::to_vec(&Command::Chunk {
+            generation: 1,
+            offset: 0,
+            data: vec![255; CHUNK_BYTES + 1],
+        })
+        .unwrap();
+        assert!(serde_json::from_slice::<Command>(&encoded).is_err());
+        let encoded = serde_json::to_vec(&Command::Chunk {
+            generation: 1,
+            offset: 0,
+            data: vec![255; CHUNK_BYTES],
+        })
+        .unwrap();
+        assert!(encoded.len() < 12_000);
+    }
     #[test]
     fn maximum_snapshot_crosses_packet_boundaries_and_preserves_utf8_bytes() {
         let mut text = "version = 1\n# ".to_owned();

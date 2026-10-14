@@ -1,5 +1,5 @@
 # Real stock compositor in a disposable VM, with no host device passthrough.
-{ pkgs, package, morf ? null }:
+{ pkgs, package, morf ? null, lua ? false }:
 let
   tests = package.overrideAttrs (_: {
     pname = "prek-compositor-tests";
@@ -42,7 +42,18 @@ let
     end
     ui.Rect { color = "#101010", width = 64, height = 64 }
   '';
-  brokerConfig = pkgs.writeText "prek-broker-fixture.toml" ''
+  brokerConfig = pkgs.writeText "prek-broker-fixture" (if lua then ''
+    local prek = require("prek")
+    return prek.config.new {
+      policy = { allowed_devices = { "fixture" } },
+      devices = { fixture = { name = "Prek broker fixture" } },
+      rules = { prek.rules.define {
+        id = "broker-a", contexts = { "desktop" },
+        trigger = { kind = "key", key = "KEY_A" },
+        action = { kind = "event", name = "fixture_press" },
+      } },
+    }
+  '' else ''
     version = 1
     [policy]
     allowed_devices = ["fixture"]
@@ -53,7 +64,7 @@ let
     contexts = ["desktop"]
     trigger = { kind = "key", key = "KEY_A" }
     action = { kind = "event", name = "fixture_press" }
-  '';
+  '');
 in
 pkgs.testers.runNixOSTest {
   name = "prek-stock-compositor";
@@ -85,7 +96,7 @@ pkgs.testers.runNixOSTest {
     virtualisation.qemu.options = [ "-vga none -device virtio-gpu-pci" ];
     system.stateVersion = "25.11";
   };
-  testScript = ''
+  testScript = let script = ''
     machine.start()
     machine.wait_for_unit("multi-user.target")
     machine.wait_until_succeeds("test -n \"$(find /run/user/1000/hypr -name .socket.sock 2>/dev/null)\"", timeout=60)
@@ -286,5 +297,5 @@ pkgs.testers.runNixOSTest {
     machine.succeed(f"{broker} --duration 1", timeout=5)
     machine.succeed("systemctl stop prek-broker-source")
     machine.wait_until_succeeds(f"test ! -e {source}")
-  '';
+  ''; in if lua then builtins.replaceStrings [ "config.toml" ] [ "config.lua" ] script else script;
 }

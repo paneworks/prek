@@ -226,7 +226,14 @@ pending. Offline replay supports reconciliation and mapping-generation changes.
 
 ## Configuration
 
-`init` writes schema version 1 as TOML. Presets are `minimal`, `desktop`, and
+Prek now embeds onix-os/luna for Lua configuration. `init --output config.lua`
+writes a Lua preset; `.lua` files work with `check`, `doctor`, `replay`, `run`
+and the protected broker configuration. `prek api --json` describes implemented
+configuration bindings; the [Lua reference](docs/lua-api.md) documents fields,
+constructors, libraries and limits. Runtime Lua callbacks, custom recognizers
+and live Lua adapter APIs remain required work. Production routing remains disabled.
+
+`init` also writes schema version 1 as legacy TOML. Presets are `minimal`, `desktop`, and
 `phone`; each round-trips through `check`. Existing files are preserved unless
 `--force` is supplied. New configurations and recordings use private permissions.
 

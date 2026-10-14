@@ -17,14 +17,19 @@
             src = pkgs.lib.fileset.toSource {
               root = ./.;
               fileset = pkgs.lib.fileset.unions [
-                ./Cargo.toml ./Cargo.lock ./src ./examples ./tests ./udev ./README.md ./LICENSE
+                ./Cargo.toml ./Cargo.lock ./src ./examples ./tests ./docs ./udev ./README.md ./LICENSE
               ];
             };
             cargoLock.lockFile = ./Cargo.lock;
+            cargoLock.outputHashes = {
+              "luna-0.5.1" = "sha256-gCdX/Ni2RbK69KMJFVzK72QSuDFVVQM2deiKXH3AvoI=";
+            };
             postInstall = ''
               mkdir -p "$out/lib/udev/rules.d"
               substitute ${./udev/70-prek.rules} "$out/lib/udev/rules.d/70-prek.rules" \
                 --replace-fail '@prek@' "$out/bin/prek"
+              mkdir -p "$out/share/doc/prek"
+              cp ${./docs/lua-api.md} ${./docs/lua-api.json} "$out/share/doc/prek/"
             '';
             meta = {
               description = "Low-level Linux input tools and gesture recognition";
@@ -43,6 +48,11 @@
       });
 
       checks = forSystems (system: {
+        lua = import ./tests/compositor.nix {
+          pkgs = nixpkgs.legacyPackages.${system};
+          package = self.packages.${system}.default;
+          lua = true;
+        };
         compositor = import ./tests/compositor.nix {
           pkgs = nixpkgs.legacyPackages.${system};
           package = self.packages.${system}.default;

@@ -10,6 +10,8 @@
 //! [`transport`] and [`router`] model virtual-device preflight and bounded raw
 //! forwarding; kernel takeover and session dispatch remain separate gates.
 
+#[cfg(target_os = "linux")]
+pub mod actions;
 mod buttons;
 pub mod config;
 #[cfg(target_os = "linux")]
@@ -28,6 +30,7 @@ pub mod keys;
 pub mod learner;
 #[cfg(target_os = "linux")]
 pub mod linux;
+pub mod lua;
 #[cfg(target_os = "linux")]
 pub mod morf;
 pub mod paths;

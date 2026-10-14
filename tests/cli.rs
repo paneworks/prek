@@ -381,6 +381,50 @@ fn t42_configured_sequence_cli_replay_matches_a_hand_written_outcome() {
 }
 
 struct Directory(PathBuf);
+#[test]
+fn t84_lua_presets_validate_through_the_real_cli_without_a_display() {
+    let directory = Directory::new();
+    for preset in ["minimal", "desktop", "phone"] {
+        let path = directory.0.join(format!("{preset}.lua"));
+        let initialized = run(&[
+            "init",
+            "--preset",
+            preset,
+            "--output",
+            path.to_str().unwrap(),
+        ]);
+        assert!(
+            initialized.status.success(),
+            "{}",
+            String::from_utf8_lossy(&initialized.stderr)
+        );
+        assert!(
+            fs::read_to_string(&path)
+                .unwrap()
+                .contains("require(\"prek\")")
+        );
+        let checked = run(&["check", "--config", path.to_str().unwrap(), "--json"]);
+        assert!(
+            checked.status.success(),
+            "{}",
+            String::from_utf8_lossy(&checked.stderr)
+        );
+        let checked: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
+        assert_eq!(checked["status"], "valid");
+    }
+}
+
+#[test]
+fn t85_installed_api_discovery_matches_the_configuration_manifest() {
+    let result = run(&["api", "--json"]);
+    assert!(result.status.success());
+    let actual: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    let documented: serde_json::Value =
+        serde_json::from_str(include_str!("../docs/lua-api.json")).unwrap();
+    assert_eq!(actual, documented);
+    assert_eq!(actual["runtime_api"], "pending");
+}
+
 impl Directory {
     fn new() -> Self {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

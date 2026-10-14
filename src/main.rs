@@ -88,6 +88,10 @@ enum Command {
         /// Use fresh context sampled from the broker-verified compositor.
         #[arg(long)]
         context: bool,
+        /// Execute root-configured argv actions in this user session. Requires
+        /// a routing broker; fresh compositor context is negotiated implicitly.
+        #[arg(long)]
+        commands: bool,
     },
     /// Query broker status from a verified compositor login session.
     Status {
@@ -147,7 +151,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Create a complete declarative preset without overwriting existing files.
+    /// Describe the implemented Lua exports without accessing devices.
+    Api {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create a complete declarative preset (.lua or legacy .toml).
     Init {
         #[arg(long)]
         preset: String,
@@ -212,6 +221,23 @@ fn main() -> ExitCode {
 fn run(command: Command) -> io::Result<()> {
     let mut output = io::stdout().lock();
     match command {
+        Command::Api { json } => {
+            let api = prek::lua::api();
+            if json {
+                serde_json::to_writer(&mut output, &api).map_err(io::Error::other)?;
+                writeln!(output)
+            } else {
+                writeln!(
+                    output,
+                    "Lua API {}: configuration bindings; runtime bindings are pending",
+                    prek::lua::API_VERSION
+                )?;
+                for symbol in api["symbols"].as_array().unwrap() {
+                    writeln!(output, "{}", symbol["signature"].as_str().unwrap())?;
+                }
+                Ok(())
+            }
+        }
         Command::LearnShape {
             name,
             device,
@@ -326,6 +352,7 @@ fn run(command: Command) -> io::Result<()> {
             duration,
             observations,
             context,
+            commands,
         } => run_session(
             &socket,
             instance,
@@ -335,6 +362,7 @@ fn run(command: Command) -> io::Result<()> {
                 inspect: false,
                 observations,
                 context,
+                commands,
             },
             &mut output,
         ),
@@ -360,7 +388,8 @@ fn run(command: Command) -> io::Result<()> {
             json,
             duration,
         } => {
-            prek::config::Config::parse(&read_config(&path)?).map_err(io::Error::other)?;
+            prek::config::Config::parse_named(&read_config(&path)?, &path.to_string_lossy())
+                .map_err(io::Error::other)?;
             if mode != "observe" {
                 return Err(io::Error::other(
                     "routing is unavailable: virtual-device readiness, ownership and recovery gates are pending",
@@ -379,7 +408,8 @@ fn run(command: Command) -> io::Result<()> {
             let config = if let Some(channel) = control.as_mut() {
                 prek::worker::bootstrap(channel, &mut health)?
             } else {
-                prek::config::Config::parse(&read_config(&path)?).map_err(io::Error::other)?
+                prek::config::Config::parse_named(&read_config(&path)?, &path.to_string_lossy())
+                    .map_err(io::Error::other)?
             };
             let engine = prek::rules::Engine::new(config.clone())?;
             let paths = Vec::new();
@@ -411,7 +441,8 @@ fn run(command: Command) -> io::Result<()> {
         }
         Command::Doctor { config: path, json } => {
             let config =
-                prek::config::Config::parse(&read_config(&path)?).map_err(io::Error::other)?;
+                prek::config::Config::parse_named(&read_config(&path)?, &path.to_string_lossy())
+                    .map_err(io::Error::other)?;
             let report = prek::diagnostics::Report::inspect(&config, &linux::inventory()?);
             if json {
                 serde_json::to_writer(&mut output, &report).map_err(io::Error::other)?;
@@ -450,12 +481,13 @@ fn run(command: Command) -> io::Result<()> {
         }
         Command::Check { config: path, json } => {
             let text = read_config(&path)?;
-            let config = prek::config::Config::parse(&text).map_err(|error| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("{}: {error}", path.display()),
-                )
-            })?;
+            let config = prek::config::Config::parse_named(&text, &path.to_string_lossy())
+                .map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("{}: {error}", path.display()),
+                    )
+                })?;
             if json {
                 serde_json::to_writer(&mut output,&serde_json::json!({ "version":prek::config::SCHEMA_VERSION,"status":"valid","mode":config.mode,"rules":config.rules.len(),"selectors":config.devices.len() })).map_err(io::Error::other)?;
                 writeln!(output)?;
@@ -477,7 +509,13 @@ fn run(command: Command) -> io::Result<()> {
         } => {
             let config = prek::config::Config::preset(&preset)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-            let text = toml::to_string_pretty(&config).map_err(io::Error::other)?;
+            let text = if path.extension().is_some_and(|extension| extension == "lua") {
+                format!(
+                    "local prek = require(\"prek\")\nlocal config = prek.config.preset(\"{preset}\")\n\n-- Add or customize validated rules here.\nreturn config\n"
+                )
+            } else {
+                toml::to_string_pretty(&config).map_err(io::Error::other)?
+            };
             write_config(&path, &text, force)?;
             writeln!(output, "Created {} ({preset}).", path.display())
         }
@@ -527,8 +565,11 @@ fn run(command: Command) -> io::Result<()> {
             check,
             json,
         } => {
-            let config = prek::config::Config::parse(&read_config(&config_path)?)
-                .map_err(io::Error::other)?;
+            let config = prek::config::Config::parse_named(
+                &read_config(&config_path)?,
+                &config_path.to_string_lossy(),
+            )
+            .map_err(io::Error::other)?;
             let mut engine = prek::rules::Engine::new(config)?;
             prek::replay::visit(&mut BufReader::new(File::open(path)?), |record| {
                 engine.push(record)
@@ -609,7 +650,9 @@ fn run_broker(
         ));
     }
     let text = read_system_config(config_path)?;
-    let config = prek::config::Config::parse(&text).map_err(io::Error::other)?;
+    let config = prek::config::Config::parse_named(&text, &config_path.to_string_lossy())
+        .map_err(io::Error::other)?;
+    let text = approved_worker_source(text, config_path, &config)?;
     // Compile before touching runtime state or starting the device worker.
     prek::rules::Engine::new(config.clone())?;
     std::fs::create_dir_all(runtime)?;
@@ -687,7 +730,10 @@ fn run_broker(
                 )?;
             } else {
                 let proposed = read_system_config(config_path).and_then(|text| {
-                    let config = prek::config::Config::parse(&text).map_err(io::Error::other)?;
+                    let config =
+                        prek::config::Config::parse_named(&text, &config_path.to_string_lossy())
+                            .map_err(io::Error::other)?;
+                    let text = approved_worker_source(text, config_path, &config)?;
                     prek::rules::Engine::new(config.clone())?;
                     Ok((text, config))
                 });
@@ -771,11 +817,8 @@ fn run_broker(
                             }
                             startup = false;
                         } else {
-                            broker.finish_reload(
-                                error.map_or_else(
-                                    || Ok(config.policy.allowed_seats.into_iter().collect()),
-                                    Err,
-                                ),
+                            broker.finish_configuration(
+                                error.map_or(Ok(config), Err),
                                 monotonic()?,
                             )?;
                             refresh = monotonic()?;
@@ -920,6 +963,7 @@ struct SessionOptions {
     inspect: bool,
     observations: bool,
     context: bool,
+    commands: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -935,6 +979,7 @@ fn run_session(
         inspect,
         observations,
         context,
+        commands,
     } = options;
     use nix::{
         libc,
@@ -963,8 +1008,11 @@ fn run_session(
     if observations {
         requested.insert(Capability::Observations);
     }
-    if context {
+    if context || commands {
         requested.insert(Capability::Context);
+    }
+    if commands {
+        requested.insert(Capability::Commands);
     }
     let registration = Request::Register {
         instance,
@@ -988,6 +1036,8 @@ fn run_session(
     let mut fence = None;
     let mut next = started + Duration::from_secs(1);
     let mut last_reply = started;
+    let mut broker_mode = Mode::Observe;
+    let mut executor = None::<prek::actions::Executor>;
     loop {
         let now = monotonic()?;
         if signals.requested() || stop_at.is_some_and(|deadline| now >= deadline) {
@@ -996,7 +1046,12 @@ fn run_session(
             }
             return Ok(());
         }
-        if let Some(packet) = channel.receive::<Reply>()? {
+        let mut drained = false;
+        for _ in 0..32 {
+            let Some(packet) = channel.receive::<Reply>()? else {
+                drained = true;
+                break;
+            };
             packet.message.validate()?;
             last_reply = now;
             match packet.message {
@@ -1007,10 +1062,19 @@ fn run_session(
                     mode,
                     capabilities,
                 } if fence.is_none() => {
-                    if mode != Mode::Observe || capabilities != requested {
+                    if (commands && mode != Mode::Route) || capabilities != requested {
                         return Err(io::Error::other(
                             "session adapter does not support these broker capabilities",
                         ));
+                    }
+                    broker_mode = mode;
+                    if commands {
+                        executor = Some(prek::actions::Executor::new(
+                            accepted,
+                            seat.clone(),
+                            mode,
+                            capabilities,
+                        )?);
                     }
                     fence = Some(accepted);
                     if !channel.send(&Request::Status { fence: accepted }, now)? {
@@ -1020,11 +1084,11 @@ fn run_session(
                         if json {
                             serde_json::to_writer(
                                 &mut *output,
-                                &serde_json::json!({"version": 1, "registered": true, "seat": seat, "session": session, "mode": "observe"}),
+                                &serde_json::json!({"version": 1, "registered": true, "seat": seat, "session": session, "mode": mode}),
                             )?;
                             writeln!(output)?;
                         } else {
-                            writeln!(output, "registered {session} on {seat}; observation mode")?;
+                            writeln!(output, "registered {session} on {seat}; {mode:?} mode")?;
                         }
                         output.flush()?;
                     }
@@ -1041,13 +1105,13 @@ fn run_session(
                     if json {
                         serde_json::to_writer(
                             &mut *output,
-                            &serde_json::json!({"version": 1, "fence": observed, "mode": "observe", "state": state, "revision": revision, "pending": pending, "last_reload_error": last_reload_error, "context_error": context_error}),
+                            &serde_json::json!({"version": 1, "fence": observed, "mode": broker_mode, "state": state, "revision": revision, "pending": pending, "last_reload_error": last_reload_error, "context_error": context_error}),
                         )?;
                         writeln!(output)?;
                     } else {
                         writeln!(
                             output,
-                            "broker: observe, context {state:?}, pending {pending}"
+                            "broker: {broker_mode:?}, context {state:?}, pending {pending}"
                         )?;
                     }
                     output.flush()?;
@@ -1066,6 +1130,9 @@ fn run_session(
                             && old.configuration < next_fence.configuration
                     }) =>
                 {
+                    if let Some(executor) = executor.as_mut() {
+                        executor.transition(next_fence)?;
+                    }
                     fence = Some(next_fence);
                     if json {
                         serde_json::to_writer(
@@ -1098,6 +1165,9 @@ fn run_session(
                         && old.session < next_fence.session
                 }) =>
                 {
+                    if let Some(executor) = executor.as_mut() {
+                        executor.transition(next_fence)?;
+                    }
                     fence = Some(next_fence);
                     if json {
                         serde_json::to_writer(
@@ -1123,7 +1193,7 @@ fn run_session(
                     next = now + Duration::from_millis(250);
                 }
                 Reply::Subscribed { fence: subscribed }
-                    if observations && Some(subscribed) == fence =>
+                    if (observations || commands) && Some(subscribed) == fence =>
                 {
                     if json {
                         serde_json::to_writer(
@@ -1154,6 +1224,29 @@ fn run_session(
                     }
                     output.flush()?;
                 }
+                Reply::Dispatch {
+                    fence: offered,
+                    event,
+                } if commands && Some(offered) == fence => {
+                    executor
+                        .as_mut()
+                        .unwrap()
+                        .offer(offered, event, monotonic()?)?;
+                }
+                Reply::Execute {
+                    fence: granted,
+                    id,
+                    ordinal,
+                    expires,
+                } if commands && Some(granted) == fence => {
+                    executor.as_mut().unwrap().grant(
+                        granted,
+                        id,
+                        ordinal,
+                        expires,
+                        monotonic()?,
+                    )?;
+                }
                 Reply::Rejected { reason } | Reply::Revoked { reason, .. } => {
                     return Err(io::Error::other(reason));
                 }
@@ -1163,6 +1256,13 @@ fn run_session(
                     ));
                 }
             }
+        }
+        if let Some(executor) = executor.as_mut() {
+            executor.reap()?;
+            if drained {
+                executor.execute_ready(monotonic()?)?;
+            }
+            executor.flush(&mut channel)?;
         }
         if now.saturating_sub(last_reply) >= Duration::from_secs(1) {
             return Err(io::Error::new(
@@ -1182,10 +1282,26 @@ fn run_session(
         let until = stop_at.map_or(until, |stop| until.min(stop));
         let timeout =
             PollTimeout::try_from(until.saturating_sub(monotonic()?)).map_err(io::Error::other)?;
-        if let Err(error) = poll(
-            &mut [PollFd::new(channel.as_fd(), PollFlags::POLLIN)],
-            timeout,
-        ) && error != nix::errno::Errno::EINTR
+        if !drained {
+            continue;
+        }
+        let mut sources = vec![PollFd::new(
+            channel.as_fd(),
+            PollFlags::POLLIN
+                | if executor
+                    .as_ref()
+                    .is_some_and(|executor| executor.wants_write())
+                {
+                    PollFlags::POLLOUT
+                } else {
+                    PollFlags::empty()
+                },
+        )];
+        if let Some(executor) = executor.as_ref() {
+            sources.extend(executor.poll_sources());
+        }
+        if let Err(error) = poll(&mut sources, timeout)
+            && error != nix::errno::Errno::EINTR
         {
             return Err(error.into());
         }
@@ -1325,6 +1441,20 @@ impl<W: Write> linux::InputSink for RuleSink<'_, W> {
     }
     fn device_policy(&self) -> Option<(&prek::config::Config, u64)> {
         Some((self.engine.config(), self.engine.generation()))
+    }
+}
+
+fn approved_worker_source(
+    text: String,
+    path: &std::path::Path,
+    config: &prek::config::Config,
+) -> io::Result<String> {
+    if path.extension().is_some_and(|extension| extension == "lua") {
+        // The root-validated model crosses the private channel. The device
+        // worker never evaluates the source or rereads its Lua filepath.
+        toml::to_string(config).map_err(io::Error::other)
+    } else {
+        Ok(text)
     }
 }
 

@@ -95,6 +95,17 @@ pub enum Request {
     LockRequested {
         fence: Fence,
     },
+    /// Ask for fresh authorization of a broker-offered action. This request
+    /// carries no executable, argv, or target supplied by the session agent.
+    Authorize {
+        fence: Fence,
+        id: u64,
+        ordinal: u64,
+    },
+    Availability {
+        fence: Fence,
+        capabilities: BTreeSet<Capability>,
+    },
     Complete {
         fence: Fence,
         id: u64,
@@ -115,6 +126,8 @@ impl Request {
             Self::Heartbeat { fence }
             | Self::Context { fence, .. }
             | Self::LockRequested { fence }
+            | Self::Authorize { fence, .. }
+            | Self::Availability { fence, .. }
             | Self::Complete { fence, .. }
             | Self::Status { fence }
             | Self::Disconnect { fence } => Some(*fence),
@@ -141,7 +154,9 @@ impl Request {
                 }
                 snapshot.validate().map_err(io::Error::other)?;
             }
-            Self::Complete { id, ordinal, .. } if *id == 0 || *ordinal == 0 => {
+            Self::Complete { id, ordinal, .. } | Self::Authorize { id, ordinal, .. }
+                if *id == 0 || *ordinal == 0 =>
+            {
                 return Err(invalid("invalid action completion identity"));
             }
             _ => {}
@@ -199,6 +214,14 @@ pub enum Reply {
         fence: Fence,
         event: Box<Event>,
     },
+    /// Short-lived permission for an already offered action. The consumer
+    /// must still check its current fence and this deadline before execution.
+    Execute {
+        fence: Fence,
+        id: u64,
+        ordinal: u64,
+        expires: Duration,
+    },
     Revoked {
         fence: Fence,
         reason: String,
@@ -219,6 +242,7 @@ impl Reply {
             | Self::SessionChanged { fence, .. }
             | Self::Observation { fence, .. }
             | Self::Dispatch { fence, .. }
+            | Self::Execute { fence, .. }
             | Self::Revoked { fence, .. } => Some(*fence),
         }
     }
@@ -253,6 +277,14 @@ impl Reply {
             }
             Self::Revoked { reason, .. } | Self::Rejected { reason } if !text(reason) => {
                 return Err(invalid("invalid protocol rejection"));
+            }
+            Self::Execute {
+                id,
+                ordinal,
+                expires,
+                ..
+            } if *id == 0 || *ordinal == 0 || expires.is_zero() => {
+                return Err(invalid("invalid action execution identity/deadline"));
             }
             Self::Observation { fence, event } | Self::Dispatch { fence, event } => {
                 if let Event::Matched {

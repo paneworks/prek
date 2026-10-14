@@ -161,6 +161,116 @@ struct Bound {
     context: ContextFeed,
     compositor: (u32, u64),
     native: Option<crate::morf::Client>,
+    actions: ActionLedger,
+    available_actions: BTreeSet<Capability>,
+}
+
+#[derive(Default)]
+struct ActionLedger {
+    pending: BTreeMap<(u64, u64), Offered>,
+    seen: BTreeMap<u64, u64>,
+}
+struct Offered {
+    snapshot: crate::context::Snapshot,
+    output: Option<String>,
+    window: Option<String>,
+    deadline: Duration,
+    granted: bool,
+    sent: bool,
+}
+impl ActionLedger {
+    fn offer(
+        &mut self,
+        event: &crate::rules::Event,
+        snapshot: &crate::context::Snapshot,
+        now: Duration,
+    ) -> io::Result<()> {
+        let crate::rules::Event::Matched {
+            id,
+            ordinal,
+            output,
+            window,
+            ..
+        } = event
+        else {
+            return Err(protocol::invalid("only matched actions can be offered"));
+        };
+        if *id == 0
+            || *ordinal == 0
+            || self.pending.len() >= 64
+            || self.seen.get(id).is_some_and(|old| ordinal <= old)
+            || !self.seen.contains_key(id) && self.seen.len() >= 4096
+        {
+            return Err(protocol::invalid(
+                "duplicate action or bounded action ledger exhausted",
+            ));
+        }
+        self.seen.insert(*id, *ordinal);
+        self.pending.insert(
+            (*id, *ordinal),
+            Offered {
+                snapshot: snapshot.clone(),
+                output: output.clone(),
+                window: window.clone(),
+                deadline: now + protocol::MAX_PACKET_AGE,
+                granted: false,
+                sent: false,
+            },
+        );
+        Ok(())
+    }
+    fn authorize(
+        &mut self,
+        id: u64,
+        ordinal: u64,
+        snapshot: &crate::context::Snapshot,
+        now: Duration,
+    ) -> io::Result<()> {
+        let offer = self
+            .pending
+            .get_mut(&(id, ordinal))
+            .ok_or_else(|| protocol::invalid("action authorization has no broker offer"))?;
+        let output = |snapshot: &crate::context::Snapshot| {
+            snapshot
+                .outputs
+                .iter()
+                .find(|output| Some(&output.geometry.name) == offer.output.as_ref())
+                .cloned()
+        };
+        let window = |snapshot: &crate::context::Snapshot| {
+            snapshot
+                .windows
+                .iter()
+                .find(|window| Some(&window.id) == offer.window.as_ref())
+                .cloned()
+        };
+        if offer.granted
+            || now >= offer.deadline
+            || snapshot.state != State::Desktop
+            || snapshot.secure_overlay
+            || snapshot.generation != offer.snapshot.generation
+            || offer.output.is_some() && output(snapshot) != output(&offer.snapshot)
+            || offer.window.is_some() && window(snapshot) != window(&offer.snapshot)
+            || offer.output.is_some() && snapshot.regions != offer.snapshot.regions
+        {
+            return Err(protocol::invalid(
+                "action target or execution authority expired",
+            ));
+        }
+        offer.granted = true;
+        Ok(())
+    }
+    fn complete(&mut self, id: u64, ordinal: u64) -> io::Result<()> {
+        if self
+            .pending
+            .get(&(id, ordinal))
+            .is_none_or(|offer| !offer.granted || !offer.sent)
+        {
+            return Err(protocol::invalid("completion has no granted broker action"));
+        }
+        self.pending.remove(&(id, ordinal));
+        Ok(())
+    }
 }
 struct Connection {
     channel: Channel,
@@ -202,6 +312,12 @@ impl Connection {
             && self.channel.send(reply, now)?
         {
             let reply = self.outgoing.pop_front().unwrap();
+            if let Reply::Execute { id, ordinal, .. } = &reply
+                && let Some(bound) = self.bound.as_mut()
+                && let Some(offer) = bound.actions.pending.get_mut(&(*id, *ordinal))
+            {
+                offer.sent = true;
+            }
             self.bytes -= reply_size(&reply)?;
         }
         Ok(())
@@ -259,6 +375,7 @@ pub struct Broker {
     inhibited: BTreeSet<(u32, u64)>,
     lock_proofs: BTreeMap<(u32, u64), crate::morf::Proof>,
     completed_providers: BTreeSet<crate::morf::Proof>,
+    routing: Option<crate::config::Config>,
 }
 impl Broker {
     /// Context is sampled directly from a verified compositor. Action dispatch
@@ -293,6 +410,7 @@ impl Broker {
             inhibited: BTreeSet::new(),
             lock_proofs: BTreeMap::new(),
             completed_providers: BTreeSet::new(),
+            routing: None,
         })
     }
     pub fn clients(&self) -> usize {
@@ -311,6 +429,19 @@ impl Broker {
     }
     pub fn enable_observations(&mut self) {
         self.observations = true;
+    }
+    /// Install root-owned action policy before registration. The CLI leaves
+    /// this disabled until the complete device handoff is ready.
+    pub fn enable_routing(&mut self, config: crate::config::Config) -> io::Result<()> {
+        if !self.connections.is_empty() || config.mode != crate::config::Mode::Route {
+            return Err(protocol::invalid(
+                "routing policy requires a fresh route broker",
+            ));
+        }
+        crate::routing::Routing::new(config.clone())?;
+        self.routing = Some(config);
+        self.observations = true;
+        Ok(())
     }
     pub fn configuration(&self) -> u64 {
         self.configuration
@@ -343,6 +474,7 @@ impl Broker {
                     }
                     bound.fence.configuration = self.configuration;
                     bound.observing = false;
+                    bound.actions = ActionLedger::default();
                     let fence = bound.fence;
                     connection.outgoing.clear();
                     connection.bytes = 0;
@@ -373,6 +505,31 @@ impl Broker {
         }
         self.reload_pending = false;
         Ok(())
+    }
+    pub fn finish_configuration(
+        &mut self,
+        result: Result<crate::config::Config, String>,
+        now: Duration,
+    ) -> io::Result<()> {
+        let result = result.and_then(|config| {
+            if self.routing.is_some() {
+                crate::routing::Routing::new(config.clone()).map_err(|error| error.to_string())?;
+            }
+            Ok(config)
+        });
+        match result {
+            Ok(config) => {
+                self.finish_reload(
+                    Ok(config.policy.allowed_seats.iter().cloned().collect()),
+                    now,
+                )?;
+                if self.routing.is_some() {
+                    self.routing = Some(config);
+                }
+                Ok(())
+            }
+            Err(error) => self.finish_reload(Err(error), now),
+        }
     }
     pub fn subscriptions(&mut self, now: Duration) -> io::Result<Vec<Subscription>> {
         self.connections.retain_mut(|connection| {
@@ -410,14 +567,25 @@ impl Broker {
             .filter_map(|connection| connection.bound.as_ref())
             .filter(|bound| {
                 bound.role == Role::Agent
-                    && bound.capabilities.contains(&Capability::Observations)
+                    && (bound.capabilities.contains(&Capability::Observations)
+                        || self.routing.is_some()
+                            && bound.capabilities.contains(&Capability::Commands))
                     && bound.context.fresh(now)
             })
             .map(|bound| Subscription {
                 seat: bound.seat.clone(),
                 fence: bound.fence,
                 context: bound.context.value.clone(),
-                capabilities: bound.capabilities.clone(),
+                capabilities: bound
+                    .capabilities
+                    .iter()
+                    .filter(|capability| {
+                        **capability != Capability::Commands
+                            || bound.available_actions.contains(capability)
+                                && bound.actions.pending.len() < crate::actions::MAX_RUNNING
+                    })
+                    .copied()
+                    .collect(),
                 consumer: Some(bound.client.consumer()),
             })
             .collect();
@@ -452,7 +620,9 @@ impl Broker {
                 bound.fence == subscription.fence
                     && bound.seat == subscription.seat
                     && bound.role == Role::Agent
-                    && bound.capabilities.contains(&Capability::Observations)
+                    && (bound.capabilities.contains(&Capability::Observations)
+                        || self.routing.is_some()
+                            && bound.capabilities.contains(&Capability::Commands))
                     && (bound.context.fresh(now) || matches!(&report, Report::ContextLost { .. }))
             })
         }) else {
@@ -484,8 +654,10 @@ impl Broker {
             );
             return Ok(());
         }
-        if matches!(&report, Report::Observation { .. })
-            && !self.guard_observation(&mut connection, now)?
+        if matches!(
+            &report,
+            Report::Observation { .. } | Report::Dispatch { .. }
+        ) && !self.guard_observation(&mut connection, now)?
         {
             self.connections.insert(index, connection);
             return Ok(());
@@ -518,6 +690,10 @@ impl Broker {
                 return Ok(());
             }
             Report::Observation { event, .. } if bound.observing => {
+                if !bound.capabilities.contains(&Capability::Observations) {
+                    self.connections.insert(index, connection);
+                    return Ok(());
+                }
                 let source = match event.as_ref() {
                     crate::rules::Event::Matched { source, .. }
                     | crate::rules::Event::Skipped { source, .. }
@@ -529,6 +705,83 @@ impl Broker {
                     ));
                 }
                 Reply::Observation { fence, event }
+            }
+            Report::Dispatch { event, .. } if bound.observing => {
+                if !bound.available_actions.contains(&Capability::Commands)
+                    || bound.actions.pending.len() >= crate::actions::MAX_RUNNING
+                {
+                    self.advance_session(&mut connection, now)?;
+                    self.connections.insert(index, connection);
+                    return Ok(());
+                }
+                let config = self
+                    .routing
+                    .as_ref()
+                    .ok_or_else(|| protocol::invalid("observe broker cannot dispatch actions"))?;
+                let crate::rules::Event::Matched {
+                    rule,
+                    source,
+                    at,
+                    action,
+                    window,
+                    output,
+                    ..
+                } = event.as_ref()
+                else {
+                    return Err(protocol::invalid("worker action is not a match"));
+                };
+                let configured = config
+                    .rules
+                    .iter()
+                    .find(|configured| {
+                        configured.id == *rule && configured.enabled && configured.action == *action
+                    })
+                    .ok_or_else(|| {
+                        protocol::invalid("worker action differs from root configuration")
+                    })?;
+                let context = bound
+                    .context
+                    .value
+                    .as_ref()
+                    .ok_or_else(|| protocol::invalid("action lacks compositor context"))?;
+                if !bound.capabilities.contains(&Capability::Commands)
+                    || !matches!(action, crate::config::Action::Command { .. })
+                    || source.seat != bound.seat
+                    || source.generation == 0
+                    || *at > now
+                    || now - *at > protocol::MAX_PACKET_AGE
+                    || context.snapshot.state != State::Desktop
+                    || context.snapshot.secure_overlay
+                    || !configured
+                        .contexts
+                        .contains(&crate::config::Context::Desktop)
+                    || configured.scope != crate::config::Scope::Everywhere && output.is_none()
+                    || output.as_ref().is_some_and(|name| {
+                        !context
+                            .snapshot
+                            .outputs
+                            .iter()
+                            .any(|output| output.geometry.name == *name)
+                    })
+                    || window.as_ref().is_some_and(|id| {
+                        !context
+                            .snapshot
+                            .windows
+                            .iter()
+                            .any(|window| window.id == *id && window.visible)
+                    })
+                {
+                    return Err(protocol::invalid(
+                        "action is unavailable for this session/context",
+                    ));
+                }
+                Reply::Dispatch {
+                    fence,
+                    event: event.clone(),
+                }
+                .validate()?;
+                bound.actions.offer(&event, &context.snapshot, now)?;
+                Reply::Dispatch { fence, event }
             }
             Report::Ended { reason, .. } => {
                 let _ = connection
@@ -713,8 +966,17 @@ impl Broker {
                     role,
                     capabilities,
                 } if connection.bound.is_none() => {
+                    let commands = self.routing.as_ref().is_some_and(|config| {
+                        config.rules.iter().any(|rule| {
+                            rule.enabled
+                                && matches!(rule.action, crate::config::Action::Command { .. })
+                        })
+                    });
                     if capabilities.iter().any(|capability| {
-                        !matches!(capability, Capability::Observations | Capability::Context)
+                        !(matches!(capability, Capability::Observations | Capability::Context)
+                            || *capability == Capability::Commands
+                                && commands
+                                && capabilities.contains(&Capability::Context))
                     }) || !capabilities.is_empty() && (!self.observations || role != Role::Agent)
                     {
                         return Err(protocol::invalid(
@@ -775,12 +1037,22 @@ impl Broker {
                         context,
                         compositor,
                         native: None,
+                        actions: ActionLedger::default(),
+                        available_actions: capabilities
+                            .iter()
+                            .filter(|capability| **capability == Capability::Commands)
+                            .copied()
+                            .collect(),
                     });
                     connection.push(Reply::Welcome {
                         fence,
                         seat,
                         session,
-                        mode: Mode::Observe,
+                        mode: if self.routing.is_some() {
+                            Mode::Route
+                        } else {
+                            Mode::Observe
+                        },
                         capabilities,
                     })?;
                 }
@@ -848,6 +1120,46 @@ impl Broker {
                         Request::Disconnect { .. } => {
                             return Err(io::ErrorKind::UnexpectedEof.into());
                         }
+                        Request::Authorize { id, ordinal, .. } => {
+                            if !bound.capabilities.contains(&Capability::Commands)
+                                || self.routing.is_none()
+                            {
+                                return Err(protocol::invalid(
+                                    "command execution was not negotiated",
+                                ));
+                            }
+                            if !self.guard_observation(connection, monotonic()?)? {
+                                return Ok(());
+                            }
+                            let bound = connection.bound.as_mut().unwrap();
+                            let now = monotonic()?;
+                            let context = bound.context.value.as_ref().ok_or_else(|| {
+                                protocol::invalid("command context is unavailable")
+                            })?;
+                            bound
+                                .actions
+                                .authorize(id, ordinal, &context.snapshot, now)?;
+                            connection.push(Reply::Execute {
+                                fence,
+                                id,
+                                ordinal,
+                                expires: now + SNAPSHOT_MAX_AGE,
+                            })?;
+                        }
+                        Request::Complete { id, ordinal, .. } => {
+                            bound.actions.complete(id, ordinal)?;
+                        }
+                        Request::Availability { capabilities, .. } => {
+                            if capabilities.iter().any(|capability| {
+                                *capability != Capability::Commands
+                                    || !bound.capabilities.contains(capability)
+                            }) {
+                                return Err(protocol::invalid(
+                                    "action availability exceeds negotiated capabilities",
+                                ));
+                            }
+                            bound.available_actions = capabilities;
+                        }
                         _ => {
                             return Err(protocol::invalid(
                                 "operation requires an unavailable provider capability",
@@ -860,7 +1172,10 @@ impl Broker {
         if registered {
             self.refresh_context(connection, monotonic()?)?;
         }
-        if matches!(connection.outgoing.front(), Some(Reply::Observation { .. })) {
+        if matches!(
+            connection.outgoing.front(),
+            Some(Reply::Observation { .. } | Reply::Dispatch { .. } | Reply::Execute { .. })
+        ) {
             self.guard_observation(connection, monotonic()?)?;
         }
         connection.flush(monotonic()?)
@@ -916,6 +1231,7 @@ impl Broker {
             context.snapshot.generation = self.session;
         }
         bound.observing = false;
+        bound.actions = ActionLedger::default();
         let fence = bound.fence;
         let state = bound.context.state;
         connection.outgoing.clear();
@@ -1102,6 +1418,60 @@ mod tests {
         input::Source,
         rules::{Event, Evidence, Stage},
     };
+    #[test]
+    fn action_receipts_require_a_fresh_offer_grant_and_actual_delivery() {
+        let fence = Fence {
+            broker: Epoch([1, 2]),
+            configuration: 1,
+            session: 1,
+        };
+        let Reply::Observation { event, .. } = progress(fence, 1, Stage::Begin) else {
+            unreachable!()
+        };
+        let snapshot = crate::context::Snapshot {
+            generation: 1,
+            revision: 1,
+            captured_at: Duration::ZERO,
+            state: State::Desktop,
+            outputs: vec![],
+            windows: vec![],
+            regions: vec![],
+            secure_overlay: false,
+        };
+        let mut actions = ActionLedger::default();
+        assert!(actions.authorize(1, 1, &snapshot, Duration::ZERO).is_err());
+        actions.offer(&event, &snapshot, Duration::ZERO).unwrap();
+        assert!(actions.offer(&event, &snapshot, Duration::ZERO).is_err());
+        assert!(actions.complete(1, 1).is_err());
+        actions.authorize(1, 1, &snapshot, Duration::ZERO).unwrap();
+        assert!(actions.authorize(1, 1, &snapshot, Duration::ZERO).is_err());
+        assert!(
+            actions.complete(1, 1).is_err(),
+            "unsent grant accepted a receipt"
+        );
+        actions.pending.get_mut(&(1, 1)).unwrap().sent = true;
+        actions.complete(1, 1).unwrap();
+        assert!(actions.complete(1, 1).is_err());
+
+        for (at, state, generation) in [
+            (1000, State::Desktop, 1),
+            (1, State::Locked, 1),
+            (1, State::Desktop, 2),
+        ] {
+            let mut actions = ActionLedger::default();
+            actions.offer(&event, &snapshot, Duration::ZERO).unwrap();
+            let changed = crate::context::Snapshot {
+                state,
+                generation,
+                ..snapshot.clone()
+            };
+            assert!(
+                actions
+                    .authorize(1, 1, &changed, Duration::from_millis(at))
+                    .is_err()
+            );
+        }
+    }
     #[test]
     fn heartbeat_grace_accepts_only_issued_fences_and_never_control_requests() {
         let fence = Fence {

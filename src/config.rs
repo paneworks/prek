@@ -574,6 +574,18 @@ impl fmt::Display for ConfigError {
 impl std::error::Error for ConfigError {}
 
 impl Config {
+    /// Lua is selected by its explicit file suffix; legacy TOML remains a
+    /// compatibility format. Worker snapshots use the compiled TOML model.
+    pub fn parse_named(text: &str, name: &str) -> Result<Self, ConfigError> {
+        if std::path::Path::new(name)
+            .extension()
+            .is_some_and(|extension| extension == "lua")
+        {
+            crate::lua::compile(text, name)
+        } else {
+            Self::parse(text)
+        }
+    }
     pub fn parse(text: &str) -> Result<Self, ConfigError> {
         if text.len() > MAX_CONFIG_BYTES {
             return Err(ConfigError("configuration exceeds 1 MiB".into()));
@@ -1231,7 +1243,7 @@ fn validate_distance(distance: Distance) -> Result<(), String> {
         Ok(())
     }
 }
-fn validate_action(action: &Action) -> Result<(), String> {
+pub(crate) fn validate_action(action: &Action) -> Result<(), String> {
     match action {
         Action::Command { argv }
             if argv.is_empty()
