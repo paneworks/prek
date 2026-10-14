@@ -10,8 +10,8 @@ configured rule observation, and authenticated broker/session status.
 The library additionally provides seat-scoped chords, layers, repeatable holds,
 reference-counted logical keys, armed path capture and shape matching. These
 primitives are tested. Configured key edges, button taps/holds/repeats, chords,
-layers, wheels and touch gestures now run in observation and replay. Configured
-shape capture and sequence composition remain pending; enabling those rules
+layers, wheels, touch gestures and configured shapes now run in observation and
+replay. Temporal sequence composition remains pending; enabling those rules
 produces an explicit runtime/preflight error. Exclusive input routing, a
 broker/session service and desktop actions are still in progress.
 The current executable does not grab devices or execute configured actions.
@@ -140,6 +140,31 @@ explicit reconciliation and mapping-generation changes.
 `phone`; each round-trips through `check`. Existing files are preserved unless
 `--force` is supplied. New configurations and recordings use private permissions.
 
+Shape rules name a template with `trigger = { kind = "shape", name = "v",
+fingers = 1 }`. Touch shapes follow the centroid of a fixed contact set; all
+required fingers must join before the join deadline. A partial lift, replacement
+or extra finger cancels capture. All contacts lifting together complete it,
+including their final release-frame positions. Generic paths use reported
+millimetres where available, with normalized fallback; mapped paths use logical
+output coordinates. Matching retains physical aspect ratio without a display map.
+
+For mouse shapes, omit `fingers` and provide an arming key or layer. The default
+capture button is `BTN_LEFT`; `button = "BTN_RIGHT"` selects another delimiter.
+Press starts capture and release completes it, including release-frame movement.
+Paths integrate raw relative counts. They do not infer pointer pixels or a
+window under the pointer. The capture button can also be an arming key; other
+throughout activation keys must remain held. Releasing a required key from
+another selected device cancels immediately. Sampled activation remains valid
+for the rest of that capture. Unarmed or already-held sequences wait for neutral.
+
+`[shape_capture]` controls `max_samples`, `timeout`, `minimum_length`,
+`minimum_size`, normalized `fallback_length`/`fallback_size`, and
+`mouse_minimum_length_counts`/`mouse_minimum_size_counts`. Defaults are 2,048
+samples, five seconds, 20 mm length, 12 mm extent, normalized fallbacks of
+0.1/0.04 and mouse limits of 20/12 counts. The engine also caps retained shape
+samples at 65,536 across all rules/sources. Capture failure or low/ambiguous
+confidence produces cancellation and no match. `learn-shape` remains pending.
+
 The phone preset describes the intended Morf/Hyprland gesture bindings and
 ownership policies. It does not enable a service or install those bindings yet.
 The desktop example is disabled until you enable its rule. Desktop shape templates
@@ -259,6 +284,11 @@ synthetic idle source, including single-owner enforcement, descriptor isolation,
 lease renewal, graceful shutdown and agent exit on broker loss.
 `tests/protocol.rs` covers schema/size/order/time bounds, nonblocking backpressure,
 descriptor rejection/cleanup, endpoint lifetimes and inherited-socket misuse.
+Configured shape tests cover touch/mouse V, circle/zigzag, fixed multi-finger
+centroids, arming changes, release-frame motion, confidence/size/resource limits
+and mapping/contact replacement. CLI shape replay checks a hand-written expected
+outcome. This is recognition/replay evidence; physical trials and exclusive
+shape routing remain pending.
 
 Shape matching preserves path order and aspect ratio;
 rotation/reflection invariance must be enabled explicitly. Too-small, unmatched

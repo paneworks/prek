@@ -278,6 +278,8 @@ pub enum Phase {
 pub enum Space {
     Normalized,
     Logical,
+    Millimetres,
+    Relative,
 }
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]

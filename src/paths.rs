@@ -30,6 +30,15 @@ pub struct CaptureLimits {
     /// Activation is sampled at begin, or required throughout capture.
     pub armed_throughout: bool,
 }
+#[derive(Clone, Debug)]
+pub struct RelativeLimits {
+    pub max_samples: usize,
+    pub timeout: Duration,
+    /// Raw evdev relative counts, not accelerated pointer pixels.
+    pub minimum_length: f64,
+    pub minimum_size: f64,
+    pub armed_throughout: bool,
+}
 impl Default for CaptureLimits {
     fn default() -> Self {
         Self {
@@ -106,6 +115,7 @@ pub struct PathCapture {
     last_at: Duration,
     samples: Vec<Position>,
     error: Option<CaptureError>,
+    relative: Option<RelativeLimits>,
 }
 impl PathCapture {
     pub fn new(
@@ -136,9 +146,82 @@ impl PathCapture {
             last_at: started,
             samples: Vec::new(),
             error: None,
+            relative: None,
         })
     }
+    pub fn new_relative(
+        identity: CaptureIdentity,
+        started: Duration,
+        limits: RelativeLimits,
+        armed: bool,
+    ) -> Result<Self, CaptureError> {
+        if !identity.contacts.is_empty()
+            || [limits.minimum_length, limits.minimum_size]
+                .iter()
+                .any(|value| !value.is_finite() || *value <= 0.0 || *value > 1e9)
+        {
+            return Err(CaptureError::InvalidGeometry);
+        }
+        let mut capture = Self::new(
+            identity,
+            started,
+            CaptureLimits {
+                max_samples: limits.max_samples,
+                timeout: limits.timeout,
+                armed_throughout: limits.armed_throughout,
+                ..CaptureLimits::default()
+            },
+            armed,
+        )?;
+        capture.relative = Some(limits);
+        let identity = capture.identity.clone();
+        capture.sample_relative(&identity, started, Point::default(), armed)?;
+        Ok(capture)
+    }
+    /// Integrate only relative X/Y deltas. No pointer position or display
+    /// scaling is inferred from this trajectory.
+    pub fn sample_relative(
+        &mut self,
+        identity: &CaptureIdentity,
+        at: Duration,
+        delta: Point,
+        armed: bool,
+    ) -> Result<(), CaptureError> {
+        if self.relative.is_none() {
+            return Err(CaptureError::InvalidGeometry);
+        }
+        let previous = self
+            .samples
+            .last()
+            .map_or(Point::default(), |position| position.normalized);
+        self.sample_position(
+            identity,
+            at,
+            Position {
+                normalized: Point {
+                    x: previous.x + delta.x,
+                    y: previous.y + delta.y,
+                },
+                millimetres: None,
+                local: None,
+                global: None,
+            },
+            armed,
+        )
+    }
     pub fn sample(
+        &mut self,
+        identity: &CaptureIdentity,
+        at: Duration,
+        position: Position,
+        armed: bool,
+    ) -> Result<(), CaptureError> {
+        if self.relative.is_some() {
+            return Err(CaptureError::InvalidGeometry);
+        }
+        self.sample_position(identity, at, position, armed)
+    }
+    fn sample_position(
         &mut self,
         identity: &CaptureIdentity,
         at: Duration,
@@ -286,24 +369,42 @@ impl PathCapture {
             };
             Ok(metric(points) >= threshold)
         };
-        if !measure(
-            self.limits.minimum_length,
-            self.limits.fallback_length,
-            &length,
-        )? || !measure(self.limits.minimum_size, self.limits.fallback_size, &size)?
-        {
+        let sufficient = if let Some(relative) = &self.relative {
+            let points: Vec<_> = self
+                .samples
+                .iter()
+                .map(|position| position.normalized)
+                .collect();
+            length(points.clone()) >= relative.minimum_length
+                && size(points) >= relative.minimum_size
+        } else {
+            measure(
+                self.limits.minimum_length,
+                self.limits.fallback_length,
+                &length,
+            )? && measure(self.limits.minimum_size, self.limits.fallback_size, &size)?
+        };
+        if !sufficient {
             return Err(CaptureError::TooSmall);
         }
         Ok(Stroke {
             identity: self.identity,
             started: self.started,
             finished: at,
-            space: if self.samples[0].local.is_some() {
+            space: if self.relative.is_some() {
+                Space::Relative
+            } else if self.samples[0].local.is_some() {
                 Space::Logical
+            } else if self.samples[0].millimetres.is_some() {
+                Space::Millimetres
             } else {
                 Space::Normalized
             },
-            points: self.samples.iter().map(|p| p.point()).collect(),
+            points: self
+                .samples
+                .iter()
+                .map(|p| p.local.or(p.millimetres).unwrap_or(p.normalized))
+                .collect(),
         })
     }
 }
@@ -956,6 +1057,114 @@ mod tests {
             .unwrap()
             .last(),
             Some(&Point { x: 1.0, y: 0.0 })
+        );
+    }
+    #[test]
+    fn t33_uncalibrated_display_paths_preserve_physical_aspect_ratio() {
+        let identity = CaptureIdentity {
+            source: Source {
+                device: 1,
+                generation: 1,
+                seat: "seat0".into(),
+            },
+            mapping_generation: 1,
+            contacts: BTreeSet::new(),
+        };
+        let mut capture = PathCapture::new(
+            identity.clone(),
+            Duration::ZERO,
+            CaptureLimits::default(),
+            true,
+        )
+        .unwrap();
+        for (index, (x, y)) in [(0.0, 0.0), (50.0, 100.0), (100.0, 0.0)]
+            .into_iter()
+            .enumerate()
+        {
+            capture
+                .sample(
+                    &identity,
+                    Duration::from_millis(index as u64),
+                    Position {
+                        normalized: Point {
+                            x: x / 200.0,
+                            y: y / 100.0,
+                        },
+                        millimetres: Some(Point { x, y }),
+                        local: None,
+                        global: None,
+                    },
+                    true,
+                )
+                .unwrap();
+        }
+        let stroke = capture.finish(Duration::from_millis(3)).unwrap();
+        assert_eq!(stroke.space, Space::Millimetres);
+        matched(
+            Matcher::new(&demo_templates()).unwrap().classify(&stroke),
+            "v",
+        );
+    }
+    #[test]
+    fn t33_relative_capture_starts_at_origin_and_rejects_position_mixing() {
+        let identity = CaptureIdentity {
+            source: Source {
+                device: 1,
+                generation: 1,
+                seat: "seat0".into(),
+            },
+            mapping_generation: 0,
+            contacts: BTreeSet::new(),
+        };
+        let mut capture = PathCapture::new_relative(
+            identity.clone(),
+            Duration::ZERO,
+            RelativeLimits {
+                max_samples: 8,
+                timeout: Duration::from_secs(1),
+                minimum_length: 20.0,
+                minimum_size: 12.0,
+                armed_throughout: true,
+            },
+            true,
+        )
+        .unwrap();
+        assert!(
+            capture
+                .sample(
+                    &identity,
+                    Duration::ZERO,
+                    Position {
+                        normalized: Point::default(),
+                        local: None,
+                        global: None,
+                        millimetres: None
+                    },
+                    true
+                )
+                .is_err()
+        );
+        capture
+            .sample_relative(
+                &identity,
+                Duration::from_millis(1),
+                Point { x: 50.0, y: 100.0 },
+                true,
+            )
+            .unwrap();
+        capture
+            .sample_relative(
+                &identity,
+                Duration::from_millis(2),
+                Point { x: 50.0, y: -100.0 },
+                true,
+            )
+            .unwrap();
+        let stroke = capture.finish(Duration::from_millis(3)).unwrap();
+        assert_eq!(stroke.space, Space::Relative);
+        matched(
+            Matcher::new(&demo_templates()).unwrap().classify(&stroke),
+            "v",
         );
     }
 }

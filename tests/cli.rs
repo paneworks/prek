@@ -39,6 +39,140 @@ fn broker_route_mode_refuses_before_runtime_or_device_access() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("broker routing is unavailable"));
     assert!(!runtime.exists());
 }
+
+#[test]
+fn t33_configured_mouse_shape_cli_replay_checks_a_hand_written_outcome() {
+    use prek::{
+        config::{Key, Trigger},
+        gestures::Space,
+        paths::ShapeMatch,
+        rules::{Event, Evidence, Stage},
+    };
+    let directory = Directory::new();
+    let source = Source {
+        device: 9,
+        generation: 1,
+        seat: "seat0".into(),
+    };
+    let device = Device {
+        identity: "shape-mouse".into(),
+        source: source.clone(),
+        name: "fixture".into(),
+        path: "fixture".into(),
+        physical: "fixture".into(),
+        unique: String::new(),
+        vendor: 1,
+        product: 1,
+        properties: vec![],
+        virtual_device: false,
+        capabilities: BTreeMap::from([(EV_KEY, vec![0x110]), (2, vec![0, 1])]),
+        axes: BTreeMap::new(),
+    };
+    let mut config = Config::preset("desktop").unwrap();
+    config.shapes.truncate(1);
+    config.devices.get_mut("keyboard").unwrap().keys = vec![Key(0x110)];
+    let rule = &mut config.rules[0];
+    rule.enabled = true;
+    rule.require_keys = vec![Key(0x110)];
+    rule.keys_throughout = true;
+    rule.trigger = Trigger::Shape {
+        name: "v".into(),
+        fingers: None,
+        button: None,
+    };
+    let expected = Event::Matched {
+        version: 1,
+        rule: rule.id.clone(),
+        id: 1,
+        ordinal: 1,
+        source: source.clone(),
+        at: Duration::from_millis(80),
+        config_generation: 1,
+        session_generation: 0,
+        stage: Stage::Discrete,
+        action: rule.action.clone(),
+        evidence: Evidence::Shape {
+            space: Space::Relative,
+            fingers: None,
+            shape: ShapeMatch {
+                name: "v".into(),
+                confidence: 1.0,
+                margin: 1.0,
+            },
+        },
+        window: None,
+        output: None,
+        workspace: None,
+    };
+    let config_path = directory.0.join("shape.toml");
+    fs::write(&config_path, toml::to_string_pretty(&config).unwrap()).unwrap();
+    let mut bytes = Vec::new();
+    write_record(&mut bytes, &Record::Header { version: 1 }).unwrap();
+    write_record(
+        &mut bytes,
+        &Record::Device {
+            device,
+            keys: BTreeSet::new(),
+            contacts: vec![],
+        },
+    )
+    .unwrap();
+    for (index, (at, input)) in [
+        (10, vec![(EV_KEY, 0x110, 1)]),
+        (50, vec![(2, 0, 50), (2, 1, 100)]),
+        (80, vec![(2, 0, 50), (2, 1, -100), (EV_KEY, 0x110, 0)]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut events: Vec<_> = input
+            .into_iter()
+            .map(|(kind, code, value)| RawEvent { kind, code, value })
+            .collect();
+        events.push(RawEvent {
+            kind: EV_SYN,
+            code: SYN_REPORT,
+            value: 0,
+        });
+        write_record(
+            &mut bytes,
+            &Record::Frame {
+                frame: Frame {
+                    source: source.clone(),
+                    at: Duration::from_millis(at),
+                    sequence: index as u64 + 1,
+                    events,
+                },
+            },
+        )
+        .unwrap();
+    }
+    write_record(
+        &mut bytes,
+        &Record::ExpectedRules {
+            events: vec![expected],
+        },
+    )
+    .unwrap();
+    let path = directory.0.join("shape.jsonl");
+    fs::write(&path, bytes).unwrap();
+    let result = run(&[
+        "replay",
+        path.to_str().unwrap(),
+        "--config",
+        config_path.to_str().unwrap(),
+        "--check",
+        "--json",
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let events: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(events.as_array().unwrap().len(), 1);
+    assert_eq!(events[0]["evidence"]["shape"]["name"], "v");
+}
 struct Directory(PathBuf);
 impl Directory {
     fn new() -> Self {

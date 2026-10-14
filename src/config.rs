@@ -347,6 +347,9 @@ pub enum Trigger {
         name: String,
         /// None selects an armed mouse path; Some selects touch contacts.
         fingers: Option<u16>,
+        /// Capture delimiter for mouse paths; defaults to BTN_LEFT.
+        #[serde(default)]
+        button: Option<Key>,
     },
     Wheel {
         horizontal: bool,
@@ -481,6 +484,55 @@ pub struct ShapeTemplate {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ShapeCapture {
+    pub max_samples: usize,
+    pub timeout: Millis,
+    pub minimum_length: Distance,
+    pub minimum_size: Distance,
+    pub fallback_length: Distance,
+    pub fallback_size: Distance,
+    pub mouse_minimum_length_counts: f64,
+    pub mouse_minimum_size_counts: f64,
+}
+impl Default for ShapeCapture {
+    fn default() -> Self {
+        Self {
+            max_samples: 2048,
+            timeout: Millis(5000),
+            minimum_length: Distance::Millimetres(20.0),
+            minimum_size: Distance::Millimetres(12.0),
+            fallback_length: Distance::Normalized(0.1),
+            fallback_size: Distance::Normalized(0.04),
+            mouse_minimum_length_counts: 20.0,
+            mouse_minimum_size_counts: 12.0,
+        }
+    }
+}
+impl ShapeCapture {
+    pub fn touch_limits(&self, throughout: bool) -> crate::paths::CaptureLimits {
+        crate::paths::CaptureLimits {
+            max_samples: self.max_samples,
+            timeout: self.timeout.duration(),
+            minimum_length: self.minimum_length,
+            minimum_size: self.minimum_size,
+            fallback_length: self.fallback_length,
+            fallback_size: self.fallback_size,
+            armed_throughout: throughout,
+        }
+    }
+    pub fn mouse_limits(&self, throughout: bool) -> crate::paths::RelativeLimits {
+        crate::paths::RelativeLimits {
+            max_samples: self.max_samples,
+            timeout: self.timeout.duration(),
+            minimum_length: self.mouse_minimum_length_counts,
+            minimum_size: self.mouse_minimum_size_counts,
+            armed_throughout: throughout,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub version: u32,
@@ -488,6 +540,8 @@ pub struct Config {
     pub mode: Mode,
     #[serde(default)]
     pub timing: Timings,
+    #[serde(default)]
+    pub shape_capture: ShapeCapture,
     #[serde(default)]
     pub policy: Policy,
     #[serde(default)]
@@ -542,6 +596,28 @@ impl Config {
         }
         if crate::Buttons::new(self.timing.buttons()).is_err() {
             return fail("timing: hold_after must exceed positive tap_max/tap_gap".into());
+        }
+        let capture = &self.shape_capture;
+        if !(2..=65536).contains(&capture.max_samples)
+            || validate_duration(capture.timeout).is_err()
+            || [
+                capture.minimum_length,
+                capture.minimum_size,
+                capture.fallback_length,
+                capture.fallback_size,
+            ]
+            .iter()
+            .any(|distance| validate_distance(*distance).is_err())
+            || !matches!(capture.fallback_length, Distance::Normalized(_))
+            || !matches!(capture.fallback_size, Distance::Normalized(_))
+            || [
+                capture.mouse_minimum_length_counts,
+                capture.mouse_minimum_size_counts,
+            ]
+            .iter()
+            .any(|value| !value.is_finite() || *value <= 0.0 || *value > 1e9)
+        {
+            return fail("shape_capture: invalid sample, timeout, size or fallback limits".into());
         }
         for duration in [
             self.timing.tap_max,
@@ -622,14 +698,13 @@ impl Config {
                     "{prefix}: remap requires a key press/release trigger"
                 ));
             }
-            if self.mode == Mode::Route
-                && rule.enabled
+            if rule.enabled
                 && matches!(rule.trigger, Trigger::Shape { fingers: None, .. })
                 && rule.require_keys.is_empty()
                 && rule.layer.is_none()
             {
                 return fail(format!(
-                    "{prefix}: routed mouse shapes require an arming key or layer"
+                    "{prefix}: mouse shapes require an arming key or layer"
                 ));
             }
             if rule
@@ -732,6 +807,7 @@ impl Config {
             version: 1,
             mode: Mode::Observe,
             timing: Timings::default(),
+            shape_capture: ShapeCapture::default(),
             policy: Policy::default(),
             devices: BTreeMap::new(),
             layers: vec![],
@@ -1065,6 +1141,13 @@ fn validate_trigger(
         Trigger::Shape { name, .. } if !shapes.contains(name) => {
             Err(format!("unknown shape template {name}"))
         }
+        Trigger::Shape {
+            fingers,
+            button: Some(button),
+            ..
+        } if fingers.is_some() || !matches!(button.0, 0x110..=0x117) => {
+            Err("shape button requires a mouse shape and an ordinary mouse button".into())
+        }
         Trigger::Chord { keys, .. }
             if keys.len() < 2
                 || keys.len() > 32
@@ -1374,6 +1457,7 @@ mod tests {
         config.rules[0].trigger = Trigger::Shape {
             name: "v".into(),
             fingers: None,
+            button: None,
         };
         assert!(config.validate().is_err());
         config.rules[0].require_keys = vec![Key(272)];
@@ -1382,5 +1466,24 @@ mod tests {
         assert!(config.validate().is_err());
         config.rules[0].trigger = Trigger::Key { key: Key(272) };
         assert!(config.validate().is_ok());
+    }
+    #[test]
+    fn shape_capture_limits_and_mouse_arming_are_validated_in_observation() {
+        let mut config = Config::preset("desktop").unwrap();
+        config.rules[0].enabled = true;
+        config.rules[0].trigger = Trigger::Shape {
+            name: "v".into(),
+            fingers: None,
+            button: None,
+        };
+        assert!(config.validate().is_err());
+        config.rules[0].require_keys = vec![Key(0x110)];
+        assert!(config.validate().is_ok());
+        config.shape_capture.max_samples = 1;
+        assert!(config.validate().is_err());
+        config.shape_capture.max_samples = 2048;
+        config.shape_capture.mouse_minimum_size_counts = f64::NAN;
+        assert!(config.validate().is_err());
+        assert!(Config::parse("version=1\n[shape_capture]\nunknown=1\n").is_err());
     }
 }

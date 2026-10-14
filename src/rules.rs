@@ -8,6 +8,7 @@ use crate::{
     gestures::{Mapping, Phase, Space, TouchEvent, TouchGesture, TouchRecognizer, TouchSettings},
     input::{Change, Contact, Device, KeyState, NormalizedFrame, Source},
     keys::{Chord, Hold, KeyObservation, Keys, Repeat},
+    paths::{CaptureIdentity, MatchOutcome, Matcher, PathCapture, ShapeMatch},
     replay::{Observation, Record, Replay},
 };
 use serde::{Deserialize, Serialize};
@@ -30,12 +31,29 @@ pub enum Stage {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Evidence {
-    Key { down: bool },
-    Taps { count: u32 },
-    Hold { repeat: bool },
+    Key {
+        down: bool,
+    },
+    Taps {
+        count: u32,
+    },
+    Hold {
+        repeat: bool,
+    },
     Chord,
-    Touch { space: Space, gesture: TouchGesture },
-    Wheel { horizontal: bool, amount: f64 },
+    Touch {
+        space: Space,
+        gesture: TouchGesture,
+    },
+    Wheel {
+        horizontal: bool,
+        amount: f64,
+    },
+    Shape {
+        space: Space,
+        fingers: Option<u16>,
+        shape: ShapeMatch,
+    },
 }
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
@@ -96,6 +114,15 @@ enum Recognizer {
     Keys(Keys),
     Touch(BTreeMap<u64, TouchRecognizer>),
     Wheel(BTreeMap<Source, f64>),
+    Shape {
+        captures: BTreeMap<Source, ShapeCapture>,
+        matcher: Matcher,
+    },
+}
+struct ShapeCapture {
+    started: Duration,
+    path: Option<PathCapture>,
+    identity: CaptureIdentity,
 }
 struct Worker {
     rule: Rule,
@@ -104,12 +131,9 @@ struct Worker {
     touch_active: BTreeSet<Source>,
 }
 
-/// Explicit unsupported requirements are returned before observation starts.
-/// In particular, accepting a shape/sequence in the schema doesn't mean the
-/// configured composition runner is operational yet.
+/// Unconnected temporal composition is refused before observation starts.
 pub fn unsupported(trigger: &Trigger) -> Option<&'static str> {
     match trigger {
-        Trigger::Shape { .. } => Some("configured shape capture is not connected yet"),
         Trigger::Sequence { .. } => Some("configured sequence composition is not connected yet"),
         _ => None,
     }
@@ -158,6 +182,10 @@ impl Worker {
                 .map_err(invalid)?,
             ),
             Trigger::Wheel { .. } => Recognizer::Wheel(BTreeMap::new()),
+            Trigger::Shape { .. } => Recognizer::Shape {
+                captures: BTreeMap::new(),
+                matcher: Matcher::new(&config.shapes).map_err(invalid)?,
+            },
             _ => Recognizer::Touch(BTreeMap::new()),
         };
         Ok(Self {
@@ -172,6 +200,12 @@ impl Worker {
             return Ok(());
         }
         match &mut self.recognizer {
+            Recognizer::Shape { .. }
+                if !state.contacts.is_empty()
+                    || matches!(self.rule.trigger, Trigger::Shape { fingers: None, button, .. } if state.keys.contains(&button.map_or(0x110, |key| key.0))) =>
+            {
+                self.touch_active.insert(state.device.source.clone());
+            }
             Recognizer::Keys(keys) => {
                 keys.reconcile(&state.device.source, state.keys.iter().copied())
                     .map_err(invalid)?;
@@ -218,6 +252,10 @@ impl Worker {
             Recognizer::Touch(touches) => {
                 touches.values().filter_map(TouchRecognizer::deadline).min()
             }
+            Recognizer::Shape { captures, .. } => captures
+                .values()
+                .filter_map(|capture| capture.path.as_ref().map(PathCapture::deadline))
+                .min(),
             _ => None,
         };
         recognizer
@@ -368,6 +406,9 @@ impl Engine {
                         .map_err(invalid)?;
                 }
                 for worker in &mut self.workers {
+                    if matches!(worker.recognizer, Recognizer::Shape { .. }) {
+                        worker.register(state, &self.config)?;
+                    }
                     if let Recognizer::Touch(touches) = &mut worker.recognizer
                         && let Some(touch) = touches.get_mut(&source.device)
                     {
@@ -397,6 +438,9 @@ impl Engine {
                         .map_err(invalid)?;
                 }
                 for worker in &mut self.workers {
+                    if matches!(worker.recognizer, Recognizer::Shape { .. }) {
+                        worker.register(state, &self.config)?;
+                    }
                     if let Recognizer::Keys(core) = &mut worker.recognizer
                         && selected(&self.config, &worker.rule, &state.device)
                     {
@@ -626,19 +670,46 @@ impl Engine {
         state.contacts = frame.contacts.clone();
         let state = &self.devices[&source.device];
         for worker in &mut self.workers {
-            if !selected(&self.config, &worker.rule, &state.device) {
-                continue;
-            }
-            validate_candidates(
+            let finish = match worker.rule.trigger {
+                Trigger::Shape {
+                    fingers: None,
+                    button,
+                    ..
+                } => {
+                    let button = button.map_or(0x110, |key| key.0);
+                    frame.changes.iter().any(|change| matches!(change, Change::Key { code, state: KeyState::Release } if *code == button)).then_some((source, button))
+                }
+                _ => None,
+            };
+            validate_candidates_except(
                 worker,
                 &self.authority,
                 &self.devices,
                 &self.conditions,
                 at,
                 &mut self.events,
+                finish,
             );
+            if !selected(&self.config, &worker.rule, &state.device) {
+                continue;
+            }
             let state = &self.devices[&source.device];
             match &worker.rule.trigger {
+                Trigger::Shape { .. } => {
+                    shape_frame(
+                        worker,
+                        state,
+                        &frame,
+                        ShapeContext {
+                            config: &self.config,
+                            authority: &self.authority,
+                            keys: &self.conditions,
+                            generation: self.generation,
+                        },
+                        &mut self.next_id,
+                        &mut self.events,
+                    )?;
+                }
                 Trigger::Key { key }
                 | Trigger::ButtonTaps { key, .. }
                 | Trigger::ButtonHold { key, .. } => {
@@ -917,6 +988,23 @@ impl Engine {
                 }
             }
         }
+        let samples: usize = self
+            .workers
+            .iter()
+            .filter_map(|worker| match &worker.recognizer {
+                Recognizer::Shape { captures, .. } => Some(
+                    captures
+                        .values()
+                        .filter_map(|capture| capture.path.as_ref())
+                        .map(PathCapture::sample_count)
+                        .sum::<usize>(),
+                ),
+                _ => None,
+            })
+            .sum();
+        if samples > 65_536 {
+            return Err(invalid("total shape sample budget exceeded"));
+        }
         Ok(())
     }
     fn cancel_source(&mut self, source: &Source, at: Duration, reason: &str) {
@@ -948,9 +1036,20 @@ impl Engine {
                 Recognizer::Wheel(sums) => {
                     sums.remove(source);
                 }
+                Recognizer::Shape { captures, .. } => {
+                    captures.remove(source);
+                }
                 _ => {}
             }
             worker.touch_active.remove(source);
+            validate_candidates(
+                worker,
+                &self.authority,
+                &self.devices,
+                &self.conditions,
+                at,
+                &mut self.events,
+            );
         }
     }
     fn cancel_all(&mut self, at: Duration, reason: &str) {
@@ -975,6 +1074,288 @@ fn selected(config: &Config, rule: &Rule, device: &Device) -> bool {
                 && selector.matches(device)
         })
 }
+
+struct ShapeContext<'a> {
+    config: &'a Config,
+    authority: &'a Authority,
+    keys: &'a Keys,
+    generation: u64,
+}
+fn shape_frame(
+    worker: &mut Worker,
+    state: &DeviceState,
+    frame: &NormalizedFrame,
+    context: ShapeContext<'_>,
+    next_id: &mut u64,
+    events: &mut Vec<Event>,
+) -> io::Result<()> {
+    let Trigger::Shape {
+        fingers, button, ..
+    } = worker.rule.trigger
+    else {
+        unreachable!()
+    };
+    let source = &frame.raw.source;
+    let at = frame.raw.at;
+    let button = button.map_or(0x110, |key| key.0);
+    let mouse = fingers.is_none();
+    if mouse
+        && !(state.device.has(crate::input::EV_REL, 0)
+            && state.device.has(crate::input::EV_REL, 1)
+            && state.device.has(crate::input::EV_KEY, button))
+    {
+        return Ok(());
+    }
+    if !mouse && state.mapping.is_none() {
+        return Ok(());
+    }
+    let released = mouse && frame.changes.iter().any(|change| matches!(change, Change::Key { code, state: KeyState::Release } if *code == button));
+    let neutral = if mouse {
+        !state.keys.contains(&button)
+    } else {
+        frame.contacts.is_empty()
+    };
+    let fresh_begin = if mouse {
+        frame.changes.iter().any(|change| matches!(change, Change::Key { code, state: KeyState::Press } if *code == button))
+    } else {
+        !frame.contacts.is_empty() && frame.contacts.iter().all(|contact| contact.fresh)
+    };
+    let new_group = !worker.touch_active.contains(source) && fresh_begin;
+    if new_group {
+        worker.touch_active.insert(source.clone());
+        let positions = if let Some(mapping) = &state.mapping {
+            frame
+                .contacts
+                .iter()
+                .map(|contact| mapping.map(contact.x, contact.y))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(invalid)?
+        } else {
+            Vec::new()
+        };
+        start_candidate(
+            worker,
+            state,
+            context.authority,
+            context.keys,
+            (at, &positions),
+            next_id,
+            events,
+        );
+        if worker.candidates.contains_key(source) {
+            let identity = CaptureIdentity {
+                source: source.clone(),
+                mapping_generation: state
+                    .mapping
+                    .as_ref()
+                    .map_or(0, |mapping| mapping.generation),
+                contacts: BTreeSet::new(),
+            };
+            let path = if mouse {
+                let path = PathCapture::new_relative(
+                    identity.clone(),
+                    at,
+                    context
+                        .config
+                        .shape_capture
+                        .mouse_limits(worker.rule.keys_throughout),
+                    true,
+                )
+                .map_err(invalid)?;
+                Some(path)
+            } else {
+                None
+            };
+            let Recognizer::Shape { captures, .. } = &mut worker.recognizer else {
+                unreachable!()
+            };
+            captures.insert(
+                source.clone(),
+                ShapeCapture {
+                    started: at,
+                    path,
+                    identity,
+                },
+            );
+            worker.candidates.get_mut(source).unwrap().expires = Some(
+                at + if mouse {
+                    context.config.shape_capture.timeout.duration()
+                } else {
+                    context
+                        .config
+                        .timing
+                        .join_window
+                        .duration()
+                        .min(context.config.shape_capture.timeout.duration())
+                },
+            );
+        }
+    }
+    // Later fingers must still start in the frozen target. This happens before
+    // matching or changing any capture identity.
+    if !new_group
+        && let Some(candidate) = worker.candidates.get_mut(source)
+        && let Some(permit) = candidate.permit.as_mut()
+    {
+        for contact in frame
+            .contacts
+            .iter()
+            .filter(|contact| frame.contacts_started.contains(&contact.id))
+        {
+            let position = state
+                .mapping
+                .as_ref()
+                .unwrap()
+                .map(contact.x, contact.y)
+                .map_err(invalid)?;
+            if let Err(reason) =
+                context
+                    .authority
+                    .join(permit, &worker.rule, input(state, at), position)
+            {
+                cancel_candidate(worker, source, at, &reason.to_string(), events);
+                break;
+            }
+        }
+    }
+    let Recognizer::Shape { captures, matcher } = &mut worker.recognizer else {
+        unreachable!()
+    };
+    if let Some(mut capture) = captures.remove(source) {
+        let armed = !worker.rule.keys_throughout
+            || conditions_except(
+                &worker.rule,
+                context.keys,
+                &source.seat,
+                released.then_some(button),
+            );
+        let result = if mouse {
+            let mut delta = crate::gestures::Point::default();
+            for change in &frame.changes {
+                if let Change::Relative { code, value } = change {
+                    if *code == 0 {
+                        delta.x += f64::from(*value);
+                    }
+                    if *code == 1 {
+                        delta.y += f64::from(*value);
+                    }
+                }
+            }
+            capture
+                .path
+                .as_mut()
+                .unwrap()
+                .sample_relative(&capture.identity, at, delta, armed)
+        } else {
+            let expected = usize::from(fingers.unwrap());
+            let positions = frame
+                .contacts
+                .iter()
+                .chain(frame.ended_contacts.iter())
+                .map(|contact| {
+                    state
+                        .mapping
+                        .as_ref()
+                        .unwrap()
+                        .map(contact.x, contact.y)
+                        .map(|position| (contact.id, position))
+                })
+                .collect::<Result<BTreeMap<_, _>, _>>()
+                .map_err(invalid)?;
+            if capture.path.is_none()
+                && frame.contacts.len() == expected
+                && frame.contacts_ended.is_empty()
+            {
+                capture.identity.contacts = positions.keys().copied().collect();
+                capture.path = Some(
+                    PathCapture::new(
+                        capture.identity.clone(),
+                        capture.started,
+                        context
+                            .config
+                            .shape_capture
+                            .touch_limits(worker.rule.keys_throughout),
+                        true,
+                    )
+                    .map_err(invalid)?,
+                );
+                worker.candidates.get_mut(source).unwrap().expires =
+                    Some(capture.started + context.config.shape_capture.timeout.duration());
+            }
+            if !frame.contacts_ended.is_empty() && !neutral || frame.contacts.len() > expected {
+                Err(crate::paths::CaptureError::ContactsChanged)
+            } else if let Some(path) = capture.path.as_mut() {
+                path.sample_contacts(
+                    source,
+                    capture.identity.mapping_generation,
+                    at,
+                    &positions,
+                    armed,
+                )
+            } else if neutral {
+                Err(crate::paths::CaptureError::ContactsChanged)
+            } else {
+                Ok(())
+            }
+        };
+        let completed = released || !mouse && neutral;
+        if let Err(reason) = result {
+            cancel_candidate(worker, source, at, &reason.to_string(), events);
+        } else if completed {
+            match capture
+                .path
+                .take()
+                .ok_or(crate::paths::CaptureError::TooSmall)
+                .and_then(|path| path.finish(at))
+            {
+                Ok(stroke) => match matcher.classify(&stroke) {
+                    MatchOutcome::Matched { shape } if matches!(&worker.rule.trigger, Trigger::Shape { name, .. } if *name == shape.name) => {
+                        report_signals(
+                            worker,
+                            vec![Signal::Shape {
+                                source: source.clone(),
+                                space: stroke.space,
+                                fingers,
+                                shape,
+                            }],
+                            context.generation,
+                            at,
+                            events,
+                        )
+                    }
+                    MatchOutcome::Matched { .. } => cancel_candidate(
+                        worker,
+                        source,
+                        at,
+                        "path matched a different template",
+                        events,
+                    ),
+                    MatchOutcome::Ambiguous { .. } => {
+                        cancel_candidate(worker, source, at, "ambiguous shape", events)
+                    }
+                    MatchOutcome::Rejected { .. } => cancel_candidate(
+                        worker,
+                        source,
+                        at,
+                        "shape confidence below threshold",
+                        events,
+                    ),
+                },
+                Err(reason) => cancel_candidate(worker, source, at, &reason.to_string(), events),
+            }
+            worker.candidates.remove(source);
+        } else {
+            let Recognizer::Shape { captures, .. } = &mut worker.recognizer else {
+                unreachable!()
+            };
+            captures.insert(source.clone(), capture);
+        }
+    }
+    if neutral {
+        worker.touch_active.remove(source);
+    }
+    Ok(())
+}
 fn policy_selected(config: &Config, device: &Device) -> bool {
     !device.virtual_device
         && config.policy.allowed_seats.contains(&device.source.seat)
@@ -983,7 +1364,12 @@ fn policy_selected(config: &Config, device: &Device) -> bool {
         })
 }
 fn conditions(rule: &Rule, keys: &Keys, seat: &str) -> bool {
-    rule.require_keys.iter().all(|key| keys.down(seat, key.0))
+    conditions_except(rule, keys, seat, None)
+}
+fn conditions_except(rule: &Rule, keys: &Keys, seat: &str, completed_button: Option<u16>) -> bool {
+    rule.require_keys
+        .iter()
+        .all(|key| Some(key.0) == completed_button || keys.down(seat, key.0))
         && rule
             .layer
             .as_ref()
@@ -1074,29 +1460,47 @@ fn validate_candidates(
     at: Duration,
     events: &mut Vec<Event>,
 ) {
+    validate_candidates_except(worker, authority, devices, keys, at, events, None)
+}
+fn validate_candidates_except(
+    worker: &mut Worker,
+    authority: &Authority,
+    devices: &BTreeMap<u64, DeviceState>,
+    keys: &Keys,
+    at: Duration,
+    events: &mut Vec<Event>,
+    completed_button: Option<(&Source, u16)>,
+) {
     let invalids: Vec<_> = worker
         .candidates
         .iter()
         .filter_map(|(source, candidate)| {
-            let reason =
-                if worker.rule.keys_throughout && !conditions(&worker.rule, keys, &source.seat) {
-                    Some("activation condition released".into())
-                } else if candidate.session_generation != authority.generation() {
-                    Some(Rejection::StaleGeneration.to_string())
-                } else if let Some(state) = devices.get(&source.device) {
-                    if state.device.source != *source {
-                        Some(Rejection::SourceChanged.to_string())
-                    } else {
-                        candidate.permit.as_ref().and_then(|permit| {
-                            authority
-                                .validate(permit, input(state, at))
-                                .err()
-                                .map(|r| r.to_string())
-                        })
-                    }
-                } else {
+            let reason = if worker.rule.keys_throughout
+                && !conditions_except(
+                    &worker.rule,
+                    keys,
+                    &source.seat,
+                    completed_button
+                        .filter(|(completed, _)| *completed == source)
+                        .map(|(_, button)| button),
+                ) {
+                Some("activation condition released".into())
+            } else if candidate.session_generation != authority.generation() {
+                Some(Rejection::StaleGeneration.to_string())
+            } else if let Some(state) = devices.get(&source.device) {
+                if state.device.source != *source {
                     Some(Rejection::SourceChanged.to_string())
-                };
+                } else {
+                    candidate.permit.as_ref().and_then(|permit| {
+                        authority
+                            .validate(permit, input(state, at))
+                            .err()
+                            .map(|r| r.to_string())
+                    })
+                }
+            } else {
+                Some(Rejection::SourceChanged.to_string())
+            };
             reason.map(|reason| (source.clone(), reason))
         })
         .collect();
@@ -1134,10 +1538,19 @@ fn cancel_candidate(
         Recognizer::Wheel(sums) => {
             sums.remove(source);
         }
+        Recognizer::Shape { captures, .. } => {
+            captures.remove(source);
+        }
         _ => {}
     }
 }
 enum Signal {
+    Shape {
+        source: Source,
+        space: Space,
+        fingers: Option<u16>,
+        shape: ShapeMatch,
+    },
     Edge {
         source: Source,
         down: bool,
@@ -1166,6 +1579,23 @@ fn report_signals(
 ) {
     for signal in signals {
         let proposal = match (&worker.rule.trigger, signal) {
+            (
+                Trigger::Shape { name, .. },
+                Signal::Shape {
+                    source,
+                    space,
+                    fingers,
+                    shape,
+                },
+            ) if *name == shape.name => Some((
+                source,
+                Stage::Discrete,
+                Evidence::Shape {
+                    space,
+                    fingers,
+                    shape,
+                },
+            )),
             (Trigger::Key { .. }, Signal::Edge { source, down }) => Some((
                 source,
                 if down { Stage::Begin } else { Stage::End },
@@ -1325,6 +1755,7 @@ fn report_signals(
                     | Trigger::TouchTaps { .. }
                     | Trigger::Chord { .. }
                     | Trigger::Wheel { .. }
+                    | Trigger::Shape { .. }
             ) {
                 worker.candidates.remove(&source);
             }
@@ -2154,16 +2585,11 @@ mod tests {
         let mut config = config(Trigger::Shape {
             name: "v".into(),
             fingers: Some(1),
+            button: None,
         });
         let shape: ShapeTemplate = crate::paths::demo_templates().remove(0);
         config.shapes = vec![shape];
-        assert!(
-            Engine::new(config)
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("capture")
-        );
+        assert!(Engine::new(config).is_ok());
     }
     #[test]
     fn t61_missing_context_skips_without_emitting_an_action() {
@@ -2176,5 +2602,342 @@ mod tests {
         tick(&mut engine, 600);
         assert!(matches(&engine.events).is_empty());
         assert!(matches!(&engine.events[0], Event::Skipped { .. }));
+    }
+
+    fn shape_engine(fingers: Option<u16>, throughout: bool) -> Engine {
+        let mut config = config(Trigger::Shape {
+            name: "v".into(),
+            fingers,
+            button: None,
+        });
+        config.rules[0].require_keys = vec![Key(115)];
+        config.rules[0].keys_throughout = throughout;
+        let mut engine = Engine::new(config).unwrap();
+        engine.push(Record::Header { version: 1 }).unwrap();
+        if fingers.is_none() {
+            let mut mouse = device(1);
+            mouse.capabilities.insert(EV_REL, vec![0, 1]);
+            mouse.capabilities.get_mut(&EV_KEY).unwrap().push(0x110);
+            add(&mut engine, mouse, &[]);
+        } else {
+            add(&mut engine, device(1), &[]);
+        }
+        add(&mut engine, device(2), &[]);
+        key(&mut engine, 2, 0, 1, 115, true);
+        engine
+    }
+    fn shape_touch(
+        engine: &mut Engine,
+        at: u64,
+        sequence: u64,
+        points: &[(u16, i32, i32)],
+        start: bool,
+        end: bool,
+    ) {
+        let mut events = Vec::new();
+        for &(slot, x, y) in points {
+            events.push((EV_ABS, ABS_MT_SLOT, i32::from(slot)));
+            if start {
+                events.push((EV_ABS, ABS_MT_TRACKING_ID, 10 + i32::from(slot)));
+            }
+            events.push((EV_ABS, ABS_MT_POSITION_X, x));
+            events.push((EV_ABS, ABS_MT_POSITION_Y, y));
+            if end {
+                events.push((EV_ABS, ABS_MT_TRACKING_ID, -1));
+            }
+        }
+        frame(engine, device(1).source, at, sequence, &events);
+    }
+    #[test]
+    fn t33_configured_touch_shape_matches_once_and_keeps_release_frame_motion() {
+        let mut engine = shape_engine(Some(1), true);
+        shape_touch(&mut engine, 10, 1, &[(0, 100, 100)], true, false);
+        shape_touch(&mut engine, 50, 2, &[(0, 500, 900)], false, false);
+        shape_touch(&mut engine, 80, 3, &[(0, 900, 100)], false, true);
+        assert_eq!(matches(&engine.events).len(), 1);
+        assert!(
+            matches!(&matches(&engine.events)[0], Event::Matched { evidence: Evidence::Shape { space: Space::Millimetres, fingers: Some(1), shape }, stage: Stage::Discrete, .. } if shape.name == "v" && shape.confidence >= 0.94)
+        );
+    }
+    #[test]
+    fn t33_configured_armed_mouse_integrates_counts_and_includes_release_delta() {
+        let mut engine = shape_engine(None, true);
+        frame(&mut engine, device(1).source, 10, 1, &[(EV_KEY, 0x110, 1)]);
+        frame(
+            &mut engine,
+            device(1).source,
+            50,
+            2,
+            &[(EV_REL, 0, 50), (EV_REL, 1, 100)],
+        );
+        frame(
+            &mut engine,
+            device(1).source,
+            80,
+            3,
+            &[(EV_REL, 0, 50), (EV_REL, 1, -100), (EV_KEY, 0x110, 0)],
+        );
+        assert_eq!(matches(&engine.events).len(), 1);
+        assert!(matches!(
+            &matches(&engine.events)[0],
+            Event::Matched {
+                evidence: Evidence::Shape {
+                    space: Space::Relative,
+                    fingers: None,
+                    ..
+                },
+                ..
+            }
+        ));
+    }
+    #[test]
+    fn t38_cross_device_release_cancels_throughout_capture_immediately() {
+        for fingers in [None, Some(1)] {
+            let mut engine = shape_engine(fingers, true);
+            if fingers.is_some() {
+                shape_touch(&mut engine, 10, 1, &[(0, 100, 100)], true, false);
+            } else {
+                frame(&mut engine, device(1).source, 10, 1, &[(EV_KEY, 0x110, 1)]);
+            }
+            key(&mut engine, 2, 20, 2, 115, false);
+            assert!(engine.events.iter().any(|event| matches!(event, Event::Cancelled { source, reason, .. } if source.device == 1 && reason == "activation condition released")));
+            assert!(matches(&engine.events).is_empty());
+        }
+    }
+    #[test]
+    fn t38_sampled_arming_survives_release_but_unarmed_touch_never_rearms_mid_path() {
+        let mut engine = shape_engine(Some(1), false);
+        shape_touch(&mut engine, 10, 1, &[(0, 100, 100)], true, false);
+        key(&mut engine, 2, 20, 2, 115, false);
+        shape_touch(&mut engine, 50, 2, &[(0, 500, 900)], false, false);
+        shape_touch(&mut engine, 80, 3, &[(0, 900, 100)], false, true);
+        assert_eq!(matches(&engine.events).len(), 1);
+        engine.take_events();
+        shape_touch(&mut engine, 100, 4, &[(0, 100, 100)], true, false);
+        key(&mut engine, 2, 110, 3, 115, true);
+        shape_touch(&mut engine, 140, 5, &[(0, 500, 900)], false, false);
+        shape_touch(&mut engine, 180, 6, &[(0, 900, 100)], false, true);
+        assert!(matches(&engine.events).is_empty());
+    }
+    #[test]
+    fn t34_tiny_inverted_and_ambiguous_configured_paths_produce_no_match() {
+        for (points, ambiguous) in [
+            ([(100, 100), (110, 120), (120, 100)], false),
+            ([(100, 900), (500, 100), (900, 900)], false),
+            ([(100, 100), (500, 900), (900, 100)], true),
+        ] {
+            let mut engine = shape_engine(Some(1), true);
+            if ambiguous {
+                let mut config = engine.config.clone();
+                let mut duplicate = config.shapes[0].clone();
+                duplicate.name = "other-v".into();
+                config.shapes.push(duplicate);
+                engine.reload(config, ms(1)).unwrap();
+            }
+            for (index, (x, y)) in points.into_iter().enumerate() {
+                shape_touch(
+                    &mut engine,
+                    10 + index as u64 * 30,
+                    index as u64 + 1,
+                    &[(0, x, y)],
+                    index == 0,
+                    index == 2,
+                );
+            }
+            assert!(matches(&engine.events).is_empty());
+            assert!(
+                engine
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, Event::Cancelled { .. }))
+            );
+        }
+    }
+    #[test]
+    fn t36_two_finger_shapes_follow_a_fixed_centroid_and_reject_partial_lifts() {
+        for partial in [false, true] {
+            let mut engine = shape_engine(Some(2), true);
+            shape_touch(
+                &mut engine,
+                10,
+                1,
+                &[(0, 100, 100), (1, 200, 100)],
+                true,
+                false,
+            );
+            shape_touch(
+                &mut engine,
+                50,
+                2,
+                &[(0, 450, 800), (1, 550, 800)],
+                false,
+                false,
+            );
+            if partial {
+                shape_touch(&mut engine, 80, 3, &[(0, 800, 100)], false, true);
+                assert!(matches(&engine.events).is_empty());
+                assert!(engine.events.iter().any(|event| matches!(event, Event::Cancelled { reason, .. } if reason == "ContactsChanged")));
+            } else {
+                shape_touch(
+                    &mut engine,
+                    80,
+                    3,
+                    &[(0, 800, 100), (1, 900, 100)],
+                    false,
+                    true,
+                );
+                assert_eq!(matches(&engine.events).len(), 1);
+            }
+        }
+    }
+    #[test]
+    fn t36_shape_join_sample_and_idle_time_limits_cancel_without_action() {
+        let mut engine = shape_engine(Some(2), true);
+        shape_touch(&mut engine, 10, 1, &[(0, 100, 100)], true, false);
+        tick(&mut engine, 130);
+        assert!(
+            engine
+                .events
+                .iter()
+                .any(|event| matches!(event, Event::Cancelled { .. }))
+        );
+        for samples in [2, 2048] {
+            let mut engine = shape_engine(Some(1), true);
+            let mut config = engine.config.clone();
+            config.shape_capture.max_samples = samples;
+            engine.reload(config, ms(1)).unwrap();
+            shape_touch(&mut engine, 10, 1, &[(0, 100, 100)], true, false);
+            shape_touch(&mut engine, 50, 2, &[(0, 500, 900)], false, false);
+            if samples == 2 {
+                shape_touch(&mut engine, 80, 3, &[(0, 900, 100)], false, true);
+            } else {
+                tick(&mut engine, 5010);
+            }
+            assert!(matches(&engine.events).is_empty());
+            assert!(
+                engine
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, Event::Cancelled { .. }))
+            );
+        }
+    }
+    #[test]
+    fn t39_mapping_replacement_waits_for_neutral_before_a_new_shape() {
+        let mut engine = shape_engine(Some(1), true);
+        shape_touch(&mut engine, 10, 1, &[(0, 100, 100)], true, false);
+        let mut mapping = Mapping::from_device(&device(1)).unwrap();
+        mapping.generation = 2;
+        engine
+            .push(Record::Mapping {
+                source: device(1).source,
+                at: ms(20),
+                mapping,
+            })
+            .unwrap();
+        shape_touch(&mut engine, 50, 2, &[(0, 500, 900)], false, false);
+        shape_touch(&mut engine, 80, 3, &[(0, 900, 100)], false, true);
+        assert!(matches(&engine.events).is_empty());
+        shape_touch(&mut engine, 100, 4, &[(0, 100, 100)], true, false);
+        shape_touch(&mut engine, 130, 5, &[(0, 500, 900)], false, false);
+        shape_touch(&mut engine, 160, 6, &[(0, 900, 100)], false, true);
+        assert_eq!(matches(&engine.events).len(), 1);
+    }
+    #[test]
+    fn t33_circle_and_zigzag_work_from_configuration_with_different_timing() {
+        for name in ["circle", "zigzag"] {
+            let mut engine = shape_engine(Some(1), true);
+            let mut config = engine.config.clone();
+            config.rules[0].trigger = Trigger::Shape {
+                name: name.into(),
+                fingers: Some(1),
+                button: None,
+            };
+            engine.reload(config, ms(1)).unwrap();
+            let points = if name == "circle" {
+                (0..=32)
+                    .map(|index| {
+                        let angle = index as f64 * std::f64::consts::TAU / 32.0;
+                        (
+                            500 + (400.0 * angle.cos()) as i32,
+                            500 + (400.0 * angle.sin()) as i32,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                vec![(100, 100), (300, 900), (500, 100), (700, 900), (900, 100)]
+            };
+            for (index, &(x, y)) in points.iter().enumerate() {
+                shape_touch(
+                    &mut engine,
+                    10 + (index * index) as u64,
+                    index as u64 + 1,
+                    &[(0, x, y)],
+                    index == 0,
+                    index + 1 == points.len(),
+                );
+            }
+            assert_eq!(matches(&engine.events).len(), 1, "{name}");
+        }
+    }
+    #[test]
+    fn t39_reused_slots_and_different_touchscreens_cannot_complete_a_group() {
+        let mut engine = shape_engine(Some(2), true);
+        shape_touch(&mut engine, 10, 1, &[(0, 100, 100)], true, false);
+        frame(
+            &mut engine,
+            device(2).source,
+            20,
+            2,
+            &[
+                (EV_ABS, ABS_MT_TRACKING_ID, 99),
+                (EV_ABS, ABS_MT_POSITION_X, 200),
+                (EV_ABS, ABS_MT_POSITION_Y, 100),
+            ],
+        );
+        tick(&mut engine, 130);
+        assert!(matches(&engine.events).is_empty());
+        let mut engine = shape_engine(Some(1), true);
+        shape_touch(&mut engine, 10, 1, &[(0, 100, 100)], true, false);
+        shape_touch(&mut engine, 50, 2, &[(0, 500, 900)], false, false);
+        frame(
+            &mut engine,
+            device(1).source,
+            60,
+            3,
+            &[
+                (EV_ABS, ABS_MT_TRACKING_ID, -1),
+                (EV_ABS, ABS_MT_TRACKING_ID, 77),
+                (EV_ABS, ABS_MT_POSITION_X, 900),
+                (EV_ABS, ABS_MT_POSITION_Y, 100),
+            ],
+        );
+        assert!(matches(&engine.events).is_empty());
+        assert!(engine.events.iter().any(
+            |event| matches!(event, Event::Cancelled { reason, .. } if reason == "ContactsChanged")
+        ));
+    }
+    #[test]
+    fn t38_mouse_capture_button_can_arm_and_complete_its_own_stroke() {
+        let mut engine = shape_engine(None, true);
+        let mut config = engine.config.clone();
+        config.rules[0].require_keys = vec![Key(0x110)];
+        engine.reload(config, ms(1)).unwrap();
+        frame(&mut engine, device(1).source, 10, 1, &[(EV_KEY, 0x110, 1)]);
+        frame(
+            &mut engine,
+            device(1).source,
+            50,
+            2,
+            &[(EV_REL, 0, 50), (EV_REL, 1, 100)],
+        );
+        frame(
+            &mut engine,
+            device(1).source,
+            80,
+            3,
+            &[(EV_REL, 0, 50), (EV_REL, 1, -100), (EV_KEY, 0x110, 0)],
+        );
+        assert_eq!(matches(&engine.events).len(), 1);
     }
 }
