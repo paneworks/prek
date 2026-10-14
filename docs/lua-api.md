@@ -11,6 +11,39 @@ live adapter bindings and the remaining operational APIs remain required
 work in `PLAN.md`. Discovery labels the runtime API partial.
 Run `prek api --json` for the installed manifest or inspect `prek.api` in Lua.
 
+Lua modules live in `modules/` beside the entry configuration. For example,
+`require("phone.bindings")` loads `modules/phone/bindings.lua`. Names use ASCII
+identifiers separated by dots; the `prek` namespace is reserved. Search paths,
+absolute paths and traversal are unavailable. There are at most 64 modules,
+16 nested imports and 1 MiB of combined entry/module source. All captured
+modules are syntax checked, including unused modules. Import cycles fail with
+the import chain; an import evaluates once and caches its returned value. A
+module returning nil is cached as true; false is also cached.
+
+Directories and Lua files must belong to the entry file's owner and permit no
+group/other writes. Symlinks and special files are rejected. The CLI/broker
+captures sources through directory descriptors and rejects changes during
+capture. Disposable compilation and session reconstruction use exactly those
+bytes. A successful reload replaces the complete approved snapshot; failed
+module imports, permissions, syntax or bounds preserve the active generation.
+Callbacks can require captured modules under their usual budgets, with no
+filesystem reads. Cycles first reached during a callback retire that VM.
+
+```lua
+-- modules/bindings.lua
+local prek = require("prek")
+return function()
+    return prek.config.preset("desktop")
+end
+
+-- config.lua
+return require("bindings")()
+```
+
+The runnable example is `examples/lua/modular/config.lua`, installed at
+`share/prek/examples/lua/modular/config.lua`. Validate it with
+`prek check --config examples/lua/modular/config.lua --json`.
+
 ```lua
 local prek = require("prek")
 local config = prek.config.preset("minimal")

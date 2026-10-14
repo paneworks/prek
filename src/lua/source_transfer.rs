@@ -115,7 +115,14 @@ mod tests {
             "--{}\nlocal p=require('prek');p.events.on('ready',function()end);return {{version=1}}",
             "source ".repeat(8000)
         );
-        let definition = Definition::compile(&source, "approved.lua").unwrap();
+        let mut sources = super::super::Sources::single(source, "approved.lua".into());
+        sources.modules.insert(
+            "large".into(),
+            super::super::Module {
+                source: format!("--{}\nreturn true", "module ".repeat(8000)),
+            },
+        );
+        let definition = Definition::compile_sources(&sources).unwrap();
         let bytes = serde_json::to_vec(&definition).unwrap();
         let mut assembly = Assembly::new(fence(), Duration::ZERO).unwrap();
         loop {

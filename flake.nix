@@ -34,6 +34,8 @@
               mkdir -p "$out/share/doc/prek"
               cp ${./docs/lua-api.md} "$out/share/doc/prek/lua-api.md"
               cp ${./docs/lua-api.json} "$out/share/doc/prek/lua-api.json"
+              mkdir -p "$out/share/prek/examples"
+              cp -r ${./examples/lua} "$out/share/prek/examples/lua"
             '';
             meta = {
               description = "Low-level Linux input tools and gesture recognition";

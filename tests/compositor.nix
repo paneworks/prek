@@ -44,15 +44,16 @@ let
   '';
   brokerConfig = pkgs.writeText "prek-broker-fixture" (if lua then ''
     local prek = require("prek")
+    local callbacks = require("callbacks")
     local marker = prek.actions.define("snapshot-only", {requires={"observations"}}, function()
       error("unused named handler ran")
     end)
     prek.events.on("ready", function(event)
-      prek.log.info("lua-ready", {generation=event.fence.configuration, handler=marker.handler})
+      callbacks.ready(event, marker.handler)
     end)
     prek.events.on("matched", function(event)
       if event.fence.configuration == 2 then while true do end end
-      prek.log.info("lua-match", {rule=event.event.rule, generation=event.fence.configuration})
+      callbacks.matched(event)
     end)
     prek.scheduler.after("10ms", function(event)
       prek.log.info("lua-timer", {generation=event.context.fence.configuration})
@@ -80,6 +81,17 @@ let
     trigger = { kind = "key", key = "KEY_A" }
     action = { kind = "event", name = "fixture_press" }
   '');
+  brokerCallbacks = pkgs.writeText "prek-approved-callbacks.lua" ''
+    local prek = require("prek")
+    return {
+      ready = function(event, handler)
+        prek.log.info("lua-ready", {generation=event.fence.configuration, handler=handler, module="captured"})
+      end,
+      matched = function(event)
+        prek.log.info("lua-match", {rule=event.event.rule, generation=event.fence.configuration, module="captured"})
+      end,
+    }
+  '';
 in
 pkgs.testers.runNixOSTest {
   name = "prek-stock-compositor";
@@ -114,6 +126,9 @@ pkgs.testers.runNixOSTest {
   testScript = let script = ''
     machine.start()
     machine.wait_for_unit("multi-user.target")
+    ${pkgs.lib.optionalString lua ''
+    machine.succeed("${package}/bin/prek check --config ${package}/share/prek/examples/lua/modular/config.lua --json")
+    ''}
     machine.wait_until_succeeds("test -n \"$(find /run/user/1000/hypr -name .socket.sock 2>/dev/null)\"", timeout=60)
     instance = machine.succeed("basename $(dirname $(find /run/user/1000/hypr -name .socket.sock))").strip()
     environment = f"PREK_COMPOSITOR_VM=1 PREK_ISOLATED_ROUTING=1 PREK_TEST_CHVT=${pkgs.kbd}/bin/chvt PREK_LOGIND_LIBRARY=${pkgs.systemd}/lib/libsystemd.so.0 PREK_HYPR_RUNTIME=/run/user/1000 PREK_HYPR_INSTANCE={instance} PREK_HYPR_EXE=${pkgs.hyprland}/bin/.Hyprland-wrapped PREK_HYPR_UID=1000"
@@ -128,6 +143,10 @@ pkgs.testers.runNixOSTest {
     machine.succeed("printf press-initial > /run/prek-control/emit")
     machine.wait_until_succeeds("test \"$(cat /run/prek-control/emitted)\" = press-initial", timeout=3)
     machine.succeed("cp ${brokerConfig} /run/prek-control/config.toml && chmod 0600 /run/prek-control/config.toml")
+    ${pkgs.lib.optionalString lua ''
+    machine.succeed("install -d -m 0700 /run/prek-control/modules && install -m 0600 ${brokerCallbacks} /run/prek-control/modules/callbacks.lua")
+    machine.fail("runuser -u alice -- test -r /run/prek-control/modules/callbacks.lua")
+    ''}
     broker = "${package}/bin/prek broker --config /run/prek-control/config.toml --runtime-dir /run/prek-control --compositor-executable ${pkgs.hyprland}/bin/.Hyprland-wrapped --logind-library ${pkgs.systemd}/lib/libsystemd.so.0 ${pkgs.lib.optionalString (morf != null) "--morf-executable ${morf}/bin/.morf-wrapped"}"
     machine.succeed(f"systemd-run --unit prek-broker --property=Type=exec {broker}")
     try:
@@ -141,6 +160,12 @@ pkgs.testers.runNixOSTest {
     # The worker acknowledges neutral recognition entry; an initially held key
     # cannot become a new press when its session starts receiving observations.
     machine.succeed("! grep -q '\"outcome\":\"matched\"' /run/user/1000/prek-broker-agent.jsonl")
+    ${pkgs.lib.optionalString lua ''
+    # A changed module cannot alter the approved runtime; its failed reload
+    # leaves generation one ready to recognize the next real fixture press.
+    machine.succeed("printf \"error('changed module must not be reread')\" > /run/prek-control/modules/callbacks.lua")
+    machine.fail("${package}/bin/prek reload --socket /run/prek-control/control.sock --json")
+    ''}
     machine.succeed("printf release-initial > /run/prek-control/emit")
     machine.wait_until_succeeds("test \"$(cat /run/prek-control/emitted)\" = release-initial", timeout=3)
     machine.succeed("printf press-fresh > /run/prek-control/emit")
@@ -163,7 +188,7 @@ pkgs.testers.runNixOSTest {
     machine.wait_until_succeeds("grep -q lua-match /run/user/1000/prek-broker-agent.jsonl", timeout=3)
     lua_logs = [__import__("json").loads(line) for line in machine.succeed("cat /run/user/1000/prek-broker-agent.jsonl").splitlines() if '"kind":"lua_log"' in line]
     ready = [row for row in lua_logs if row["record"]["message"] == "lua-ready"]
-    assert ready and all(row["record"]["fields"]["handler"] == "snapshot-only" for row in ready), lua_logs
+    assert ready and all(row["record"]["fields"]["handler"] == "snapshot-only" and row["record"]["fields"]["module"] == "captured" for row in ready), lua_logs
     machine.wait_until_succeeds("grep -q lua-timer /run/user/1000/prek-broker-agent.jsonl", timeout=3)
     timers = [__import__("json").loads(line) for line in machine.succeed("cat /run/user/1000/prek-broker-agent.jsonl").splitlines() if '"message":"lua-timer"' in line]
     assert timers and all(row["record"]["fields"]["generation"] == row["fence"]["configuration"] == 1 for row in timers), timers
@@ -171,6 +196,8 @@ pkgs.testers.runNixOSTest {
     matches = [row for row in lua_logs if row["record"]["message"] == "lua-match"]
     assert len(matches) == 1 and matches[0]["record"]["fields"]["rule"] == "broker-a", matches
     assert matches[0]["record"]["fields"]["generation"] == matches[0]["fence"]["configuration"] == 1, matches
+    assert matches[0]["record"]["fields"]["module"] == "captured", matches
+    machine.succeed("install -m 0600 ${brokerCallbacks} /run/prek-control/modules/callbacks.lua")
     ''}
     # Change the complete file while the old key is held. Successful reload
     # preserves the process and requires a real release before the new hold.

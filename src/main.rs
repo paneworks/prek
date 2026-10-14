@@ -246,13 +246,23 @@ fn run(command: Command) -> io::Result<()> {
         Command::LuaRuntimeWorker => prek::lua::session::worker(),
         Command::LuaCompileWorker { name } => {
             prek::lua_compiler::worker_limits()?;
-            let mut source = String::new();
-            io::Read::read_to_string(
-                &mut io::Read::take(io::stdin(), (prek::config::MAX_CONFIG_BYTES + 1) as u64),
-                &mut source,
+            let mut bytes = Vec::new();
+            io::Read::read_to_end(
+                &mut io::Read::take(io::stdin(), (prek::lua::MAX_SNAPSHOT_BYTES + 1) as u64),
+                &mut bytes,
             )?;
+            if bytes.len() > prek::lua::MAX_SNAPSHOT_BYTES {
+                return Err(io::Error::other(
+                    "Lua compiler source snapshot exceeds size limit",
+                ));
+            }
+            let sources: prek::lua::Sources =
+                serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+            if sources.name != name {
+                return Err(io::Error::other("Lua compiler source name mismatch"));
+            }
             let definition =
-                prek::lua::Definition::compile(&source, &name).map_err(io::Error::other)?;
+                prek::lua::Definition::compile_sources(&sources).map_err(io::Error::other)?;
             serde_json::to_writer(&mut output, &definition).map_err(io::Error::other)
         }
         Command::Api { json } => {
@@ -596,7 +606,7 @@ fn run(command: Command) -> io::Result<()> {
                 )
             })?;
             let source = prek::lua::export_config(&config).map_err(io::Error::other)?;
-            let rebuilt = compile_config(source.clone(), &path)?.config;
+            let rebuilt = compile_generated_lua(source.clone(), &path)?.config;
             if rebuilt != config {
                 return Err(io::Error::other(
                     "Lua migration changed the validated model",
@@ -1872,18 +1882,33 @@ impl<W: Write> linux::InputSink for RuleSink<'_, W> {
 }
 
 fn spawn_compiler(text: String, path: &std::path::Path) -> io::Result<prek::lua_compiler::Job> {
+    let sources = prek::lua::Sources::capture(text, path)?;
+    spawn_compiler_sources(sources)
+}
+
+fn spawn_compiler_sources(sources: prek::lua::Sources) -> io::Result<prek::lua_compiler::Job> {
     let executable = std::env::current_exe()?;
     // Release builds accept no environment-selected compiler executable.
     #[cfg(debug_assertions)]
     if let Some(runner) = std::env::var_os("PREK_TEST_RUNNER") {
-        return prek::lua_compiler::Job::spawn_with_runner(
+        return prek::lua_compiler::Job::spawn_sources_with_runner(
             std::path::Path::new(&runner),
             &executable,
-            text,
-            &path.to_string_lossy(),
+            sources,
         );
     }
-    prek::lua_compiler::Job::spawn(&executable, text, &path.to_string_lossy())
+    prek::lua_compiler::Job::spawn_sources(&executable, sources)
+}
+
+fn compile_generated_lua(
+    text: String,
+    path: &std::path::Path,
+) -> io::Result<prek::lua_compiler::Compiled> {
+    spawn_compiler_sources(prek::lua::Sources::single(
+        text,
+        path.to_string_lossy().into_owned(),
+    ))?
+    .wait()
 }
 
 fn compile_config(
@@ -1982,7 +2007,7 @@ fn read_system_config(path: &std::path::Path) -> io::Result<String> {
 fn export_config_file(config: &prek::config::Config, path: &std::path::Path) -> io::Result<String> {
     if path.extension().is_some_and(|extension| extension == "lua") {
         let source = prek::lua::export_config(config).map_err(io::Error::other)?;
-        if compile_config(source.clone(), path)?.config != *config {
+        if compile_generated_lua(source.clone(), path)?.config != *config {
             return Err(io::Error::other("Lua export changed the validated model"));
         }
         Ok(source)

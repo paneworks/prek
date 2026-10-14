@@ -9,6 +9,7 @@ use std::{
 
 mod export;
 mod handlers;
+mod modules;
 mod runtime;
 mod scheduler;
 #[cfg(target_os = "linux")]
@@ -16,6 +17,7 @@ pub mod session;
 pub mod source_transfer;
 pub use export::export_config;
 pub use handlers::{ActionResult, HandlerRegistration};
+pub use modules::{Module, Sources};
 pub use runtime::{Definition, EventKind, LogRecord, MAX_SNAPSHOT_BYTES, Registration, Runtime};
 pub use scheduler::TimerRegistration;
 
@@ -70,6 +72,7 @@ pub fn api() -> serde_json::Value {
         "symbols":symbols, "limits":{"source_bytes":MAX_CONFIG_BYTES,"memory_bytes":MEMORY,
         "instructions":INSTRUCTIONS,"time_ms":TIME.as_millis(),"value_depth":64},
         "runtime_limits":{"subscriptions":256,"timers":256,"handlers":256,"action_effects":32,"action_bytes":32768,"timers_per_wake":32,"callback_instructions":100000,"callback_time_ms":20,"event_bytes":65536,"log_bytes":16384,"logs_per_event":32},
+        "modules":{"root":"entry_parent/modules","path":"<identifier>/.../<identifier>.lua","count":modules::MAX_MODULES,"import_depth":modules::MAX_IMPORT_DEPTH,"source_set_bytes":MAX_CONFIG_BYTES,"owner":"entry_file_uid","group_other_writes":false,"symlinks":false,"runtime":"approved sources only; no filesystem reads"},
         "event_kinds":["matched","begin","update","end","cancel","skipped","ready","reload","stop","recovery","session_changed"],
         "runtime_requires":{"uid":"unprivileged active session","capabilities":["context","observations","lua_events"],"thread":"owning Luna arena","generation":"current broker/configuration/session fence"},
         "action_requires":{"agent_flags":["lua","commands"],"capabilities":["context","observations","lua_events","lua_actions","commands"],"implemented_effects":["commands","observations"],"grant_time_ms":250},
@@ -88,6 +91,8 @@ local timers = __prek_timers
 __prek_timers = nil
 local handlers = __prek_handlers
 __prek_handlers = nil
+local modules = __prek_modules
+__prek_modules = nil
 local handler_guard = api.actions.__guard
 api.actions.__guard = nil
 function api.actions.define(name, options, callback)
@@ -169,9 +174,25 @@ function api.units.distance(value)
     assert(type(value) == "string", "distance requires explicit units")
     return value
 end
+local loaded, values, loading, imports = {}, {}, {}, {}
+local module_assert, module_type, module_pcall, module_error, module_concat = assert, type, pcall, error, table.concat
 function require(name)
-    assert(name == "prek", "module is unavailable in configuration evaluation: " .. tostring(name))
-    return api
+    module_assert(module_type(name)=="string" and #name<=128, "require expects a bounded module name")
+    if name=="prek" then return api end
+    if loaded[name] then return values[name] end
+    local loader=modules[name]
+    module_assert(loader~=nil, "module is not in the approved source snapshot: " .. name)
+    module_assert(not loading[name], "Lua module cycle: " .. module_concat(imports," -> ") .. " -> " .. name)
+    module_assert(#imports<16, "Lua module import depth exceeded")
+    loading[name]=true
+    imports[#imports+1]=name
+    local ok, value=module_pcall(loader)
+    imports[#imports]=nil
+    loading[name]=nil
+    if not ok then module_error(value,0) end
+    if value==nil then value=true end
+    loaded[name], values[name]=true, value
+    return value
 end
 math.randomseed(0)
 print, warn, dofile, loadfile, load, collectgarbage = nil, nil, nil, nil, nil, nil
@@ -263,18 +284,17 @@ pub fn compile(source: &str, name: &str) -> Result<Config, ConfigError> {
 fn instantiate(
     source: &str,
     name: &str,
+    modules: &std::collections::BTreeMap<String, Module>,
     progress: &mut dyn FnMut() -> io::Result<()>,
 ) -> Result<Runtime, ConfigError> {
-    if source.len() > MAX_CONFIG_BYTES {
-        return Err(error("configuration exceeds 1 MiB"));
-    }
+    modules::validate(name, source, modules)?;
     let mut lua = Lua::core();
     lua.set_memory_limit(Some(MEMORY));
     let host = std::rc::Rc::new(std::cell::RefCell::new(runtime::Host {
         configuring: true,
         ..Default::default()
     }));
-    let (registry, timers, handlers) = lua
+    let (registry, timers, handlers, module_loaders) = lua
         .try_enter(|ctx| {
             ctx.set_max_call_depth(256);
             let module = Table::new(&ctx);
@@ -344,13 +364,20 @@ fn instantiate(
             ctx.globals().set(ctx, "__prek_timers", timers)?;
             let handlers = Table::new(&ctx);
             ctx.globals().set(ctx, "__prek_handlers", handlers)?;
+            let module_loaders = Table::new(&ctx);
+            ctx.globals().set(ctx, "__prek_modules", module_loaders)?;
             let actions: Table = module.get(ctx, "actions")?;
             actions.set(ctx, "__guard", handlers::guard(&ctx, host.clone()))?;
             let scheduler: Table = module.get(ctx, "scheduler")?;
             scheduler.set(ctx, "__duration", scheduler::duration(&ctx, host.clone()))?;
             let log: Table = module.get(ctx, "log")?;
             log.set(ctx, "info", runtime::logger(&ctx, host.clone()))?;
-            Ok((ctx.stash(registry), ctx.stash(timers), ctx.stash(handlers)))
+            Ok((
+                ctx.stash(registry),
+                ctx.stash(timers),
+                ctx.stash(handlers),
+                ctx.stash(module_loaders),
+            ))
         })
         .map_err(error)?;
     let bootstrap = start(&mut lua, "prek configuration API", BOOTSTRAP)?;
@@ -372,6 +399,20 @@ fn instantiate(
     })
     .map_err(error)?;
     let started = Instant::now();
+    for (module, approved) in modules {
+        if started.elapsed() >= TIME {
+            return Err(error("Lua module compilation time limit exceeded"));
+        }
+        progress().map_err(error)?;
+        lua.try_enter(|ctx| {
+            let name = format!("{name}:modules/{}.lua", module.replace('.', "/"));
+            let closure = Closure::load(ctx, Some(&name), approved.source.as_bytes())?;
+            ctx.fetch(&module_loaders)
+                .set(ctx, ctx.intern(module.as_bytes()), closure)?;
+            Ok(())
+        })
+        .map_err(error)?;
+    }
     let executor = start(&mut lua, name, source)?;
     drive_progress(&mut lua, &executor, started, TIME, INSTRUCTIONS, progress)?;
     let config = lua

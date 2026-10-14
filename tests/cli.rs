@@ -587,6 +587,111 @@ fn t85_installed_api_discovery_matches_the_configuration_manifest() {
     assert_eq!(actual["runtime_api"], "partial");
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn t84_lua_modules_compile_through_the_isolated_cli_and_preserve_snapshots() {
+    use prek::lua::{Definition, EventKind, Sources};
+    let directory = Directory::new();
+    let entry = directory.0.join("config.lua");
+    let module = directory.0.join("modules/settings.lua");
+    fs::create_dir(directory.0.join("modules")).unwrap();
+    fs::write(&entry, "return require('settings')").unwrap();
+    fs::write(&module, "local p=require('prek'); p.events.on('ready',function()p.log.info('approved-module')end); return p.config.preset('minimal')").unwrap();
+    let result = run(&["check", "--config", entry.to_str().unwrap(), "--json"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let approved = Sources::capture(fs::read_to_string(&entry).unwrap(), &entry).unwrap();
+    let definition = Definition::compile_sources(&approved).unwrap();
+    fs::write(
+        &module,
+        "error('changed file must never be reread by the approved runtime')",
+    )
+    .unwrap();
+    let mut runtime = definition.instantiate().unwrap();
+    assert_eq!(
+        runtime
+            .dispatch(EventKind::Ready, &serde_json::json!({}))
+            .unwrap()[0]
+            .message,
+        "approved-module"
+    );
+    let result = run(&["check", "--config", entry.to_str().unwrap()]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("changed file"));
+    fs::write(&module, "return require('other')").unwrap();
+    fs::write(
+        directory.0.join("modules/other.lua"),
+        "return require('settings')",
+    )
+    .unwrap();
+    let result = run(&["check", "--config", entry.to_str().unwrap()]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("module cycle"));
+    let example =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/lua/modular/config.lua");
+    let result = run(&["check", "--config", example.to_str().unwrap(), "--json"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn t89_module_capture_refuses_unsafe_files_and_permission_expansion() {
+    use prek::lua::Sources;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let directory = Directory::new();
+    let entry = directory.0.join("config.lua");
+    let tree = directory.0.join("modules");
+    let module = tree.join("settings.lua");
+    fs::create_dir(&tree).unwrap();
+    fs::write(&entry, "return require('settings')").unwrap();
+    fs::write(&module, "return {version=1}").unwrap();
+    let capture = || Sources::capture(fs::read_to_string(&entry).unwrap(), &entry);
+    assert!(capture().is_ok());
+    fs::set_permissions(&module, fs::Permissions::from_mode(0o666)).unwrap();
+    assert_eq!(
+        capture().unwrap_err().kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+    fs::set_permissions(&module, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::set_permissions(&tree, fs::Permissions::from_mode(0o777)).unwrap();
+    assert_eq!(
+        capture().unwrap_err().kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+    fs::set_permissions(&tree, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::remove_file(&module).unwrap();
+    symlink(&entry, &module).unwrap();
+    assert!(capture().is_err());
+    fs::remove_file(&module).unwrap();
+    nix::unistd::mkfifo(
+        &module,
+        nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+    )
+    .unwrap();
+    assert!(
+        capture().is_err(),
+        "special files must be refused before reading"
+    );
+    fs::remove_file(&module).unwrap();
+    let ambiguous = tree.join("bad.name.lua");
+    fs::write(&ambiguous, "return true").unwrap();
+    assert!(
+        capture().is_err(),
+        "module filename segments cannot alias nested paths"
+    );
+    fs::remove_file(&ambiguous).unwrap();
+    fs::remove_dir(&tree).unwrap();
+    symlink(&directory.0, &tree).unwrap();
+    assert!(capture().is_err(), "the module root must not be a symlink");
+}
+
 #[test]
 fn t88_isolated_lua_rejects_expansion_and_recovers_for_the_next_compile() {
     let directory = Directory::new();

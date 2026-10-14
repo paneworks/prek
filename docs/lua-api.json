@@ -40,6 +40,17 @@
     "time_ms": 250,
     "value_depth": 64
   },
+  "modules": {
+    "count": 64,
+    "group_other_writes": false,
+    "import_depth": 16,
+    "owner": "entry_file_uid",
+    "path": "<identifier>/.../<identifier>.lua",
+    "root": "entry_parent/modules",
+    "runtime": "approved sources only; no filesystem reads",
+    "source_set_bytes": 1048576,
+    "symlinks": false
+  },
   "phase": "configuration_and_session_actions",
   "runtime_api": "partial",
   "runtime_limits": {

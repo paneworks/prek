@@ -60,6 +60,8 @@ pub struct Definition {
     pub name: String,
     #[serde(with = "source_bytes")]
     pub source: String,
+    #[serde(default)]
+    pub modules: std::collections::BTreeMap<String, super::Module>,
     pub model: String,
     pub registrations: Vec<Registration>,
     #[serde(default)]
@@ -69,11 +71,21 @@ pub struct Definition {
 }
 impl Definition {
     pub fn compile(source: &str, name: &str) -> Result<Self, ConfigError> {
-        let mut runtime = Runtime::load(source, name)?;
+        Self::compile_sources(&super::Sources::single(source.into(), name.into()))
+    }
+    pub fn compile_sources(sources: &super::Sources) -> Result<Self, ConfigError> {
+        sources.validate()?;
+        let mut runtime = instantiate(
+            &sources.source,
+            &sources.name,
+            &sources.modules,
+            &mut || Ok(()),
+        )?;
         let definition = Self {
             api_version: API_VERSION,
-            name: name.into(),
-            source: source.into(),
+            name: sources.name.clone(),
+            source: sources.source.clone(),
+            modules: sources.modules.clone(),
             model: toml::to_string(&runtime.config).map_err(error)?,
             registrations: runtime.registrations()?,
             timers: runtime.timer_registrations()?,
@@ -93,6 +105,7 @@ impl Definition {
         Ok(config)
     }
     fn validate_metadata(&self) -> Result<(), ConfigError> {
+        super::modules::validate(&self.name, &self.source, &self.modules)?;
         if self.model.len() > MAX_CONFIG_BYTES {
             return Err(error("expanded Lua model exceeds 1 MiB"));
         }
@@ -126,7 +139,7 @@ impl Definition {
         progress: &mut dyn FnMut() -> io::Result<()>,
     ) -> Result<Runtime, ConfigError> {
         let expected = self.validate()?;
-        let mut runtime = instantiate(&self.source, &self.name, progress)?;
+        let mut runtime = instantiate(&self.source, &self.name, &self.modules, progress)?;
         if runtime.config != expected
             || runtime.registrations()? != self.registrations
             || runtime.timer_registrations()? != self.timers
@@ -139,7 +152,7 @@ impl Definition {
         Ok(runtime)
     }
 }
-mod source_bytes {
+pub(super) mod source_bytes {
     use super::*;
     use base64::{Engine, engine::general_purpose::STANDARD};
     use serde::{Deserializer, Serializer, de::Error};
@@ -218,7 +231,7 @@ pub struct Runtime {
 }
 impl Runtime {
     pub fn load(source: &str, name: &str) -> Result<Self, ConfigError> {
-        instantiate(source, name, &mut || Ok(()))
+        instantiate(source, name, &Default::default(), &mut || Ok(()))
     }
     pub fn registrations(&mut self) -> Result<Vec<Registration>, ConfigError> {
         self.lua

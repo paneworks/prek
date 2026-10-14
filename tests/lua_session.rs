@@ -66,6 +66,35 @@ return {version=1}
 }
 
 #[test]
+fn approved_modules_reconstruct_in_the_real_helper_without_filesystem_sources() {
+    use prek::lua::{Module, Sources};
+    let mut sources = Sources::single(
+        "local p=require('prek'); p.events.on('ready',require('counter')); return {version=1}"
+            .into(),
+        "/missing/approved/config.lua".into(),
+    );
+    sources.modules.insert("counter".into(), Module { source: "local p=require('prek'); local count=0; return function()count=count+1; p.log.info('module-callback',{count=count})end".into() });
+    let definition = Definition::compile_sources(&sources).unwrap();
+    let mut session = Session::spawn(
+        Path::new(env!("CARGO_BIN_EXE_prek")),
+        fence(1),
+        "seat0",
+        definition,
+    )
+    .unwrap();
+    let initial = drain(&mut session).unwrap();
+    assert_eq!(initial[0].fields, serde_json::json!({"count":1}));
+    for count in 2..=3 {
+        session
+            .notify(EventKind::Ready, serde_json::json!({"fence":fence(1)}))
+            .unwrap();
+        let logs = drain(&mut session).unwrap();
+        assert_eq!(logs[0].message, "module-callback");
+        assert_eq!(logs[0].fields, serde_json::json!({"count":count}));
+    }
+}
+
+#[test]
 fn named_handler_executes_exact_argv_only_after_a_current_model_grant() {
     use prek::{
         actions::Executor,

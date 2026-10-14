@@ -251,6 +251,13 @@ results are discarded, while unrelated session work continues. Commands already
 started remain owned and reaped. JSON transport preserves floating-point geometry
 exactly, and execution grants retain the context snapshot's freshness deadline.
 
+Reusable Lua files live in `modules/` beside `config.lua`, with dotted imports
+such as `require("phone.bindings")`. Protected files are captured into the
+approved generation and transferred with callbacks; the runtime loads those
+bytes without filesystem access. Imports are cached, and cycles, unsafe paths,
+permissions and source/count/depth limits are checked. See the Lua reference
+for the complete module policy.
+
 Presets are `minimal`, `desktop`, and `phone`; each round-trips through `check`.
 Explicit TOML input/output remains supported with schema version 1; no removal
 date is scheduled. `migrate --config FILE.toml --output FILE.lua` validates the

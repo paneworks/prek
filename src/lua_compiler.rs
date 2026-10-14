@@ -1,9 +1,6 @@
 //! Disposable, unprivileged Lua configuration compilation. The parent owns
 //! only nonblocking pipes and the child handle; no input descriptor is shared.
-use crate::{
-    config::{Config, MAX_CONFIG_BYTES},
-    ipc::monotonic,
-};
+use crate::{config::Config, ipc::monotonic};
 use nix::{
     libc,
     poll::{PollFd, PollFlags, PollTimeout, poll},
@@ -35,6 +32,7 @@ pub struct Job {
     output: Option<ChildStdout>,
     error: Option<ChildStderr>,
     source: Vec<u8>,
+    approved: crate::lua::Sources,
     written: usize,
     result: Vec<u8>,
     diagnostics: Vec<u8>,
@@ -110,6 +108,9 @@ impl Job {
     pub fn spawn(executable: &Path, source: String, name: &str) -> io::Result<Self> {
         Self::spawn_command(Command::new(executable), source, name)
     }
+    pub fn spawn_sources(executable: &Path, sources: crate::lua::Sources) -> io::Result<Self> {
+        Self::spawn_sources_command(Command::new(executable), sources)
+    }
     /// Explicit runner for debug integration tests on emulated architectures.
     #[cfg(debug_assertions)]
     pub fn spawn_with_runner(
@@ -122,13 +123,29 @@ impl Job {
         command.arg(executable);
         Self::spawn_command(command, source, name)
     }
-    fn spawn_command(mut command: Command, source: String, name: &str) -> io::Result<Self> {
-        if source.len() > MAX_CONFIG_BYTES {
-            return Err(io::Error::other("Lua source exceeds 1 MiB"));
-        }
+    #[cfg(debug_assertions)]
+    pub fn spawn_sources_with_runner(
+        runner: &Path,
+        executable: &Path,
+        sources: crate::lua::Sources,
+    ) -> io::Result<Self> {
+        let mut command = Command::new(runner);
+        command.arg(executable);
+        Self::spawn_sources_command(command, sources)
+    }
+    fn spawn_command(command: Command, source: String, name: &str) -> io::Result<Self> {
+        Self::spawn_sources_command(command, crate::lua::Sources::single(source, name.into()))
+    }
+    fn spawn_sources_command(
+        mut command: Command,
+        approved: crate::lua::Sources,
+    ) -> io::Result<Self> {
+        approved.validate().map_err(io::Error::other)?;
+        let source = serde_json::to_vec(&approved).map_err(io::Error::other)?;
+        let name = approved.name.clone();
         let expires = monotonic()? + TIMEOUT;
         command
-            .args(["lua-compile-worker", "--name", name])
+            .args(["lua-compile-worker", "--name", &name])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -164,11 +181,12 @@ impl Job {
             input: None,
             output: None,
             error: None,
-            source: source.into_bytes(),
+            source,
+            approved,
             written: 0,
             result: Vec::new(),
             diagnostics: Vec::new(),
-            name: name.into(),
+            name,
             expires,
             finished: false,
         };
@@ -252,7 +270,10 @@ impl Job {
             }
             let definition: crate::lua::Definition =
                 serde_json::from_slice(&self.result).map_err(io::Error::other)?;
-            if definition.source.as_bytes() != self.source || definition.name != self.name {
+            if definition.source != self.approved.source
+                || definition.name != self.name
+                || definition.modules != self.approved.modules
+            {
                 return Err(io::Error::other(
                     "Lua compiler returned a different source snapshot",
                 ));
