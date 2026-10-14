@@ -31,7 +31,7 @@ enum Command {
         #[arg(long)]
         name: String,
     },
-    /// Internal supervised, unprivileged Lua event component.
+    /// Internal supervised, unprivileged Lua callback and action component.
     #[command(hide = true)]
     LuaRuntimeWorker,
     /// Deliberately learn one shape without grabbing input or binding an action.
@@ -101,7 +101,7 @@ enum Command {
         /// a routing broker; fresh compositor context is negotiated implicitly.
         #[arg(long)]
         commands: bool,
-        /// Run approved Lua event subscriptions in a separate unprivileged VM.
+        /// Run approved Lua callbacks, timers and named handlers in a separate VM.
         #[arg(long)]
         lua: bool,
     },
@@ -170,11 +170,21 @@ enum Command {
     },
     /// Create a complete declarative preset (.lua or legacy .toml).
     Init {
-        #[arg(long)]
+        #[arg(long, default_value = "minimal")]
         preset: String,
-        #[arg(long)]
+        #[arg(long, default_value = "config.lua")]
         output: PathBuf,
         /// Atomically replace an existing configuration.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Migrate a legacy TOML configuration to validated Lua, preserving input.
+    Migrate {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long, default_value = "config.lua")]
+        output: PathBuf,
+        /// Atomically replace the destination; the input is always preserved.
         #[arg(long)]
         force: bool,
     },
@@ -253,7 +263,7 @@ fn run(command: Command) -> io::Result<()> {
             } else {
                 writeln!(
                     output,
-                    "Lua API {}: configuration and session events; runtime adapters are pending",
+                    "Lua API {}: configuration, session events and named actions; runtime adapters are pending",
                     prek::lua::API_VERSION
                 )?;
                 for symbol in api["symbols"].as_array().unwrap() {
@@ -325,7 +335,7 @@ fn run(command: Command) -> io::Result<()> {
             }
             let exported = learner.export()?;
             let stroke = learner.stroke().unwrap();
-            let text = toml::to_string_pretty(&exported).map_err(io::Error::other)?;
+            let text = export_config_file(&exported, &path)?;
             write_config(&path, &text, false)?;
             if json {
                 serde_json::to_writer(
@@ -541,6 +551,64 @@ fn run(command: Command) -> io::Result<()> {
             };
             write_config(&path, &text, force)?;
             writeln!(output, "Created {} ({preset}).", path.display())
+        }
+        Command::Migrate {
+            config: input,
+            output: path,
+            force,
+        } => {
+            if path.extension().is_none_or(|extension| extension != "lua") {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "migration output requires a .lua filename",
+                ));
+            }
+            // Canonicalize the parent even for a destination that does not yet
+            // exist. Aliases such as ./source.lua must never replace the input.
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| std::path::Path::new("."));
+            let destination = parent.canonicalize()?.join(path.file_name().unwrap());
+            let input_name = input.file_name().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "migration input requires a filename",
+                )
+            })?;
+            let input_parent = input
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| std::path::Path::new("."));
+            if input.canonicalize()? == destination
+                || input_parent.canonicalize()?.join(input_name) == destination
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "migration must preserve the input; choose a different output",
+                ));
+            }
+            let original = read_config(&input)?;
+            let config = prek::config::Config::parse(&original).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{}: {error}", input.display()),
+                )
+            })?;
+            let source = prek::lua::export_config(&config).map_err(io::Error::other)?;
+            let rebuilt = compile_config(source.clone(), &path)?.config;
+            if rebuilt != config {
+                return Err(io::Error::other(
+                    "Lua migration changed the validated model",
+                ));
+            }
+            write_config(&path, &source, force)?;
+            writeln!(
+                output,
+                "Migrated {} to {}. Input preserved.",
+                input.display(),
+                path.display()
+            )
         }
         Command::Devices { json } => linux::list(&mut output, json),
         Command::Watch {
@@ -1895,6 +1963,19 @@ fn read_system_config(path: &std::path::Path) -> io::Result<String> {
         return Err(io::Error::other("configuration exceeds size limit"));
     }
     Ok(text)
+}
+
+#[cfg(target_os = "linux")]
+fn export_config_file(config: &prek::config::Config, path: &std::path::Path) -> io::Result<String> {
+    if path.extension().is_some_and(|extension| extension == "lua") {
+        let source = prek::lua::export_config(config).map_err(io::Error::other)?;
+        if compile_config(source.clone(), path)?.config != *config {
+            return Err(io::Error::other("Lua export changed the validated model"));
+        }
+        Ok(source)
+    } else {
+        toml::to_string_pretty(config).map_err(io::Error::other)
+    }
 }
 
 #[cfg(unix)]

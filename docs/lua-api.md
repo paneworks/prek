@@ -28,7 +28,7 @@ config.rules = {
 return config
 ```
 
-Create a preset with `prek init --preset minimal --output config.lua`, validate
+Create a minimal preset with `prek init` (defaults to `config.lua`), validate
 it with `prek check --config config.lua`, and use it with `replay`, `doctor`,
 `run` or `broker`. The broker validates its protected system file and transfers
 the compiled Rust model to the device worker; that worker evaluates no Lua
@@ -40,6 +40,30 @@ transfers the exact approved source, model and registration snapshot; the agent
 starts a separate unprivileged VM and verifies its model and registrations.
 It never rereads the configuration filepath. Standalone `run` evaluates rules;
 session callbacks require the authenticated agent.
+
+`config.export(config) -> string` validates a complete declarative configuration
+and returns deterministic Lua source containing every effective model value.
+It performs no file I/O and is available during configuration evaluation only.
+Both its serialized model and generated source are bounded to 1 MiB. Unknown
+fields, invalid configurations, oversized output, runtime use and named-handler
+references without their original source are rejected. Closures, subscriptions
+and timers are not included in a declarative export; retain their source separately.
+
+```lua
+local p = require("prek")
+local config = p.config.preset("desktop")
+local source = p.config.export(config)
+assert(type(source) == "string")
+return config
+```
+
+`prek migrate --config old.toml --output config.lua` exports a validated legacy
+configuration and checks model equality through the isolated compiler before
+writing it. The input is preserved, including when accessed through an alias;
+existing output requires `--force`. Comments and unit spelling are normalized;
+values, priorities, units, rules and supported phone bindings retain their
+effective semantics. Lua shape-learning output uses this same verified export.
+Legacy TOML input/output remains supported without a scheduled removal date.
 
 ## Session callbacks
 

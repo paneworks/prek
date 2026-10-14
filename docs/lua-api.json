@@ -78,6 +78,12 @@
       "signature": "config.preset(name) -> Config"
     },
     {
+      "description": "Validate and export a complete declarative model as bounded Lua source; performs no I/O and requires original source for named handlers.",
+      "name": "config.export",
+      "phase": "configuration",
+      "signature": "config.export(config) -> string"
+    },
+    {
       "description": "Declare a rule; strict validation occurs at compilation.",
       "name": "rules.define",
       "signature": "rules.define(table) -> Rule"

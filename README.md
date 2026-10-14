@@ -76,16 +76,17 @@ Build with `cargo build --locked`, or run commands through Cargo:
 ```sh
 cargo run --locked -- devices --json
 cargo run --locked -- watch /dev/input/by-id/YOUR-DEVICE --gestures-only --json
-cargo run --locked -- init --preset desktop --output prek.toml
-cargo run --locked -- check --config prek.toml --json
-cargo run --locked -- doctor --config prek.toml --json
-cargo run --locked -- run --config prek.toml --mode observe --duration 10 --json
+cargo run --locked -- init --preset desktop
+cargo run --locked -- check --config config.lua --json
+cargo run --locked -- doctor --config config.lua --json
+cargo run --locked -- run --config config.lua --mode observe --duration 10 --json
+cargo run --locked -- migrate --config previous.toml --output migrated.lua
 cargo run --locked -- session --json
 cargo run --locked -- session --observations --json
 cargo run --locked -- session --context --observations --json
 cargo run --locked -- status --json
 sudo target/release/prek reload --json
-cargo run --locked -- learn-shape my-v --device /dev/input/by-id/YOUR-MOUSE --mouse --output my-v.toml
+cargo run --locked -- learn-shape my-v --device /dev/input/by-id/YOUR-MOUSE --mouse --output my-v.lua
 cargo run --locked --example main
 ```
 
@@ -233,8 +234,9 @@ pending. Offline replay supports reconciliation and mapping-generation changes.
 
 ## Configuration
 
-Prek now embeds onix-os/luna for Lua configuration. `init --output config.lua`
-writes a Lua preset; `.lua` files work with `check`, `doctor`, `replay`, `run`
+Prek embeds onix-os/luna for Lua configuration. `init` writes a minimal
+`config.lua` in the current directory by default; `--preset` and `--output`
+choose a different preset/path. `.lua` files work with `check`, `doctor`, `replay`, `run`
 and the protected broker configuration. `prek api --json` describes implemented
 configuration and runtime bindings; the [Lua reference](docs/lua-api.md) documents
 fields, constructors, libraries and limits. Supervised session callbacks and timers
@@ -244,9 +246,15 @@ recognizers, coroutine tasks and live adapter APIs remain required work.
 Production routing remains disabled; named-effect execution currently has model
 grant and helper-process coverage, without authenticated production routing proof.
 
-`init` also writes schema version 1 as legacy TOML. Presets are `minimal`, `desktop`, and
-`phone`; each round-trips through `check`. Existing files are preserved unless
-`--force` is supplied. New configurations and recordings use private permissions.
+Presets are `minimal`, `desktop`, and `phone`; each round-trips through `check`.
+Explicit TOML input/output remains supported with schema version 1; no removal
+date is scheduled. `migrate --config FILE.toml --output FILE.lua` validates the
+complete legacy model, emits deterministic Lua declarations and verifies the
+same model through the isolated Luna compiler before writing. It preserves the
+input and existing output; `--force` permits replacing only the destination.
+Migration preserves effective values and rule order; comments and original unit
+spelling are normalized. Named handlers require their original approved source
+and cannot be recreated from a declarative model. New files use private permissions.
 
 Shape rules name a template with `trigger = { kind = "shape", name = "v",
 fingers = 1 }`. Touch shapes follow the centroid of a fixed contact set; all
@@ -292,14 +300,15 @@ to 64 compiled recognizers and the program to 4,096. Shape sample retention
 remains globally bounded across sequence steps. These are observation/replay
 semantics; exclusive sequence routing remains pending.
 
-`learn-shape NAME --device PATH --output TEMPLATE.toml` explicitly arms one
+`learn-shape NAME --device PATH --output TEMPLATE.lua` explicitly arms one
 read-only touch capture. Use `--fingers 2` for a fixed two-contact centroid, or
 `--mouse` with optional `--button BTN_RIGHT` for relative mouse capture. Draw
 after the reader reports ready, then release. Capture uses the same size,
 identity and timeout checks as configured shapes. Rejected strokes can be retried
 within `--duration` (30 seconds by default); Ctrl-C cancels without saving.
 The first valid stroke is saved privately as a standalone schema-1 template
-file with 64 resampled points and no enabled rules. Existing output files are
+Lua file with 64 resampled points and no enabled rules. An explicit `.toml`
+output keeps the legacy format. Existing output files are
 preserved. `--json` reports units, sample count, duration and destination.
 `--from-recording RECORDING.jsonl` learns deterministically from the explicitly
 named source without opening input. Copy the resulting template into the desired

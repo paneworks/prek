@@ -7,12 +7,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod export;
 mod handlers;
 mod runtime;
 mod scheduler;
 #[cfg(target_os = "linux")]
 pub mod session;
 pub mod source_transfer;
+pub use export::export_config;
 pub use handlers::{ActionResult, HandlerRegistration};
 pub use runtime::{Definition, EventKind, LogRecord, MAX_SNAPSHOT_BYTES, Registration, Runtime};
 pub use scheduler::TimerRegistration;
@@ -24,6 +26,7 @@ pub fn api() -> serde_json::Value {
     let mut symbols = vec![
         serde_json::json!({"name":"config.new", "signature":"config.new(table) -> Config", "description":"Apply the schema version default; validate the returned model."}),
         serde_json::json!({"name":"config.preset", "signature":"config.preset(name) -> Config", "description":"Return a mutable minimal, desktop or phone preset."}),
+        serde_json::json!({"name":"config.export", "signature":"config.export(config) -> string", "phase":"configuration", "description":"Validate and export a complete declarative model as bounded Lua source; performs no I/O and requires original source for named handlers."}),
         serde_json::json!({"name":"rules.define", "signature":"rules.define(table) -> Rule", "description":"Declare a rule; strict validation occurs at compilation."}),
         serde_json::json!({"name":"units.duration", "signature":"units.duration(string) -> string", "description":"Declare an explicitly unit-qualified duration."}),
         serde_json::json!({"name":"units.distance", "signature":"units.distance(string) -> string", "description":"Declare an explicitly unit-qualified distance."}),
@@ -308,6 +311,29 @@ fn instantiate(
                     let value =
                         luna_util::serde::to_value(ctx, &preset).map_err(io::Error::other)?;
                     stack.replace(ctx, value);
+                    Ok(CallbackReturn::Return)
+                }),
+            )?;
+            let export_host = host.clone();
+            config.set(
+                ctx,
+                "export",
+                Callback::from_fn(&ctx, move |ctx, _, mut stack| {
+                    if !export_host.borrow().configuring {
+                        return Err(io::Error::other(
+                            "configuration export requires configuration evaluation",
+                        )
+                        .into());
+                    }
+                    let value: Value = stack.consume(ctx)?;
+                    let config: Config = luna_util::serde::from_value_with(
+                        ctx,
+                        value,
+                        luna_util::serde::DeOptions::default().max_depth(64),
+                    )
+                    .map_err(io::Error::other)?;
+                    let source = export_config(&config).map_err(io::Error::other)?;
+                    stack.replace(ctx, ctx.intern(source.as_bytes()));
                     Ok(CallbackReturn::Return)
                 }),
             )?;

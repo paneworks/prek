@@ -197,6 +197,28 @@ fn t33_configured_mouse_shape_cli_replay_checks_a_hand_written_outcome() {
     assert!(exported.rules.is_empty() && exported.devices.is_empty());
     assert_eq!(exported.shapes[0].name, "my-v");
     assert_eq!(exported.shapes[0].points.len(), 64);
+    let learned_lua = directory.0.join("learned.lua");
+    let lua_result = run(&[
+        "learn-shape",
+        "my-v",
+        "--device",
+        "fixture",
+        "--mouse",
+        "--from-recording",
+        path.to_str().unwrap(),
+        "--output",
+        learned_lua.to_str().unwrap(),
+        "--json",
+    ]);
+    assert!(
+        lua_result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&lua_result.stderr)
+    );
+    assert_eq!(
+        Config::parse_named(&fs::read_to_string(&learned_lua).unwrap(), "learned.lua").unwrap(),
+        exported
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -381,6 +403,146 @@ fn t42_configured_sequence_cli_replay_matches_a_hand_written_outcome() {
 }
 
 struct Directory(PathBuf);
+
+#[test]
+fn t94_migration_preserves_complete_presets_input_and_existing_destinations() {
+    let directory = Directory::new();
+    for preset in ["minimal", "desktop", "phone"] {
+        let config = Config::preset(preset).unwrap();
+        let input = directory.0.join(format!("{preset}.toml"));
+        let output = directory.0.join(format!("{preset}.lua"));
+        let legacy = toml::to_string_pretty(&config).unwrap();
+        fs::write(&input, &legacy).unwrap();
+        let result = run(&[
+            "migrate",
+            "--config",
+            input.to_str().unwrap(),
+            "--output",
+            output.to_str().unwrap(),
+        ]);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(fs::read_to_string(&input).unwrap(), legacy);
+        let source = fs::read_to_string(&output).unwrap();
+        assert_eq!(
+            Config::parse_named(&source, "migrated.lua").unwrap(),
+            config
+        );
+        assert!(
+            run(&["check", "--config", output.to_str().unwrap()])
+                .status
+                .success()
+        );
+        assert!(
+            !run(&[
+                "migrate",
+                "--config",
+                input.to_str().unwrap(),
+                "--output",
+                output.to_str().unwrap()
+            ])
+            .status
+            .success()
+        );
+        assert_eq!(fs::read_to_string(&output).unwrap(), source);
+        fs::write(&input, "version=999\n").unwrap();
+        assert!(
+            !run(&[
+                "migrate",
+                "--config",
+                input.to_str().unwrap(),
+                "--output",
+                output.to_str().unwrap(),
+                "--force"
+            ])
+            .status
+            .success()
+        );
+        assert_eq!(fs::read_to_string(&output).unwrap(), source);
+        fs::write(&input, &legacy).unwrap();
+        assert!(
+            run(&[
+                "migrate",
+                "--config",
+                input.to_str().unwrap(),
+                "--output",
+                output.to_str().unwrap(),
+                "--force"
+            ])
+            .status
+            .success()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&output).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let original = directory.0.join("minimal.toml");
+        let alias = directory.0.join("input.lua");
+        symlink(&original, &alias).unwrap();
+        assert!(
+            !run(&[
+                "migrate",
+                "--config",
+                alias.to_str().unwrap(),
+                "--output",
+                alias.to_str().unwrap(),
+                "--force"
+            ])
+            .status
+            .success()
+        );
+        assert!(
+            fs::symlink_metadata(&alias)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::read_to_string(&original).unwrap(),
+            toml::to_string_pretty(&Config::preset("minimal").unwrap()).unwrap()
+        );
+    }
+}
+
+#[test]
+fn init_defaults_to_a_private_minimal_lua_config_in_the_working_directory() {
+    let directory = Directory::new();
+    let binary = env!("CARGO_BIN_EXE_prek");
+    let mut command = if let Some(runner) = std::env::var_os("PREK_TEST_RUNNER") {
+        let mut command = Command::new(runner);
+        command.arg(binary);
+        command
+    } else {
+        Command::new(binary)
+    };
+    let result = command
+        .arg("init")
+        .current_dir(&directory.0)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let source = fs::read_to_string(directory.0.join("config.lua")).unwrap();
+    assert_eq!(
+        Config::parse_named(&source, "config.lua").unwrap(),
+        Config::preset("minimal").unwrap()
+    );
+    assert!(!directory.0.join("config.toml").exists());
+}
 #[test]
 fn t84_lua_presets_validate_through_the_real_cli_without_a_display() {
     let directory = Directory::new();
