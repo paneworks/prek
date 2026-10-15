@@ -48,3 +48,31 @@ and `morf-lock.log`. The report explicitly identifies fixture authentication
 and the absence of a root/logind execution claim. Tests use short private paths
 under `/tmp/pc-*` so native Unix sockets still fit when launched from a Nix
 development shell with a long `TMPDIR`.
+
+The companion Caelestia shell also supplies typed ordinary controller IPC,
+documented upstream in `../mold/docs/PREK_CONTROLS.md`. Prek's strict wire types
+live in `src/morf/controls.rs`: frozen output, epoch/gesture/ordinal correlation,
+discrete/continuous action validation and bounded finite motion. They provide
+no execution grant and do not enable the public `prek.morf` runtime family.
+Native controller binding, rendered context, recognizer handoff and generation
+retirement remain required before production capability negotiation.
+
+To extend the same owned Cage test to the actual shell controllers, pass the
+upstream source shell and an optimized Morf ELF containing the native lock
+provider:
+
+```sh
+nix run --no-write-lock-file .#cage-test -- --modes --input --power --windows \
+  --morf /absolute/path/to/mold/target/release/morf \
+  --morf-shell /absolute/path/to/mold/examples/shells/caelestia/shell/init.lua
+```
+
+This starts the full shell with its source library and plugins disabled inside
+the private compositor. It checks the actual shell layer and ordinary IPC
+controller state while driving panels, keyboard layout, duplicate refusal and
+workspace progress/cancellation. `morf-controls-receipts.json` and
+`morf-controls.log` record this layer. UI/layout tests upstream additionally
+cover both themes, drawer axes, workspace partial return/commit, expiry, hard
+deadline and authentication cancellation. Ordinary shell IPC success does not
+establish broker grants, recognizer ownership, rendered-region authority or
+physical application delivery; those are explicitly pending.

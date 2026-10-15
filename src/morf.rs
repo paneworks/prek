@@ -1,5 +1,7 @@
 //! Broker-only native Morf lock endpoint. Lua state and process/socket loss
 //! never establish a completed unlock transition.
+pub mod controls;
+
 use crate::{
     hyprland,
     session::{Logind, Peer, Registration},

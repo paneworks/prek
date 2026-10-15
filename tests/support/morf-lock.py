@@ -51,6 +51,7 @@ ui.Rect{color="#203040",width=morf.surface.width,height=morf.surface.height}
     assert not locked()
     reports = []
     client = None
+    endpoint = None
     with (output / "morf-lock.log").open("w") as log:
         child = subprocess.Popen([args.morf, "--clean", str(source)], env=env,
                                  stdout=log, stderr=log, start_new_session=True)
@@ -94,8 +95,10 @@ ui.Rect{color="#203040",width=morf.surface.width,height=morf.surface.height}
                 if reports:
                     assert state["epoch"] == reports[0]["state"]["epoch"]
                     assert state["revision"] >= reports[-1]["state"]["revision"]
+                queried = time.monotonic()
                 actual_lock = locked()
-                reports.append({"state": state, "compositor_locked": actual_lock, "producer_pid": producer})
+                reports.append({"state": state, "compositor_locked": actual_lock, "producer_pid": producer,
+                                "sampled_at": time.monotonic(), "query_ms": (time.monotonic() - queried) * 1000})
                 if state["phase"] == "unlock_dispatched" and not actual_lock:
                     assert any(row["state"]["phase"] == "locked" and row["compositor_locked"] for row in reports)
                     # Own-user readers can inspect evidence, but cannot release it.
@@ -116,6 +119,12 @@ ui.Rect{color="#203040",width=morf.surface.width,height=morf.surface.height}
             }) + "\n")
             print("PASS: native Morf provider reported actual owned compositor lock/unlock, retained its identity, refused unprivileged release and removed its endpoint.")
         finally:
+            if not (output / "morf-lock-receipts.json").exists():
+                (output / "morf-lock-failure.json").write_text(json.dumps({
+                    "status": "failed", "process_result": child.poll(),
+                    "endpoint_present": endpoint is not None and endpoint.exists(),
+                    "reports": reports,
+                }) + "\n")
             if client is not None:
                 client.close()
             if child.poll() is None:

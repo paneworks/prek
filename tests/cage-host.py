@@ -33,10 +33,16 @@ def main():
     parser.add_argument("--morf", type=Path, help="actual Morf ELF for the owned native lock-provider test")
     parser.add_argument("--morf-lock-check", type=Path,
                         default=Path(__file__).parent / "support/morf-lock.py")
+    parser.add_argument("--morf-shell", type=Path,
+                        help="Caelestia shell init.lua for ordinary typed Morf controller checks")
+    parser.add_argument("--morf-control-check", type=Path,
+                        default=Path(__file__).parent / "support/morf-controls.py")
     parser.add_argument("--visible", action="store_true",
                         default=os.environ.get("VISIBLE") == "1")
     parser.add_argument("--output", default="target/cage-host")
     args = parser.parse_args()
+    if args.morf_shell and not args.morf:
+        parser.error("--morf-shell requires --morf with the actual ELF")
     output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     output = Path(tempfile.mkdtemp(prefix="run-", dir=output))
@@ -287,6 +293,12 @@ def main():
                     "--hyprctl", hyprctl, "--instance", instances[0],
                     "--pid", str(report["hyprland_pid"]), "--output", str(output)],
                     env=env, check=True, timeout=30)
+                if args.morf_shell:
+                    subprocess.run([os.sys.executable, str(args.morf_control_check),
+                        "--morf", str(args.morf.resolve()), "--shell", str(args.morf_shell.resolve()),
+                        "--socket", str(socket), "--hyprctl", hyprctl,
+                        "--instance", instances[0], "--output", str(output)],
+                        env=env, check=True, timeout=90)
             session_name = "visible nested Hyprland" if args.visible else "local Cage/nested Hyprland"
             print(f"PASS: {session_name} delivered B and Shift+A, six ordered key events, "
                   f"text bA and neutral modifier cleanup. Receipts: {receipts}")
