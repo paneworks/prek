@@ -255,6 +255,9 @@ These observations do not grant input consumption or action authority.
 `devices.list/get/revision/position` expose the received permitted metadata and
 validated coordinate mapping; `seats.current` returns the fresh current session
 binding. See [device queries](docs/lua-api.md#permitted-device-and-seat-queries).
+`outputs` and `regions` query verified compositor geometry;
+`coordinates.convert` uses an exact snapshot reference for output coordinates.
+See [geometry queries](docs/lua-api.md#output-region-and-coordinate-queries).
 Production routing remains disabled; named-effect execution currently has model
 grant and helper-process coverage, without authenticated production routing proof.
 Pending effects are canceled by generation, gesture cancellation and source

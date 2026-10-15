@@ -68,6 +68,23 @@
     "context_changed",
     "rules_changed"
   ],
+  "geometry_queries": {
+    "context": "fresh owning desktop without secure overlay",
+    "conversion": "finite numeric points, no clamping; arithmetic overflow raises an error",
+    "effects": false,
+    "local": "post-transform logical units; rotation and scale applied through output logical size",
+    "lookup": "exact output name or rendered region ID",
+    "normalized": "post-transform output axes, not raw device axes",
+    "overlaps": "all matches in provider order, no target selection",
+    "references": "canonical decimal-string fence, snapshot revision and output geometry generation; copies confer no authority",
+    "region_bounds": "global logical, half-open",
+    "spaces": [
+      "normalized",
+      "local",
+      "global"
+    ],
+    "unavailable": "nil for absent/stale/inhibited context, missing name or retired reference; known empty arrays remain empty"
+  },
   "input_events": {
     "agent_flags": [
       "lua",
@@ -316,6 +333,42 @@
       "description": "Register an approved generation-scoped named handler; resolve a bounded typed effect plan in the unprivileged session after a broker execution grant.",
       "name": "actions.define",
       "signature": "actions.define(name, {requires = capabilities}, callback) -> Action"
+    },
+    {
+      "description": "Copy all outputs in the fresh owning desktop snapshot; each reference is fenced to that exact snapshot revision.",
+      "name": "outputs.list",
+      "phase": "runtime_callback",
+      "signature": "outputs.list() -> OutputView[] | nil"
+    },
+    {
+      "description": "Query one output by exact name; no discovery outside the verified snapshot.",
+      "name": "outputs.get",
+      "phase": "runtime_callback",
+      "signature": "outputs.get(name) -> OutputView | nil"
+    },
+    {
+      "description": "Copy provider-reported rendered regions with their snapshot fence/revision; no guessed geometry.",
+      "name": "regions.list",
+      "phase": "runtime_callback",
+      "signature": "regions.list() -> RegionView[] | nil"
+    },
+    {
+      "description": "Query one rendered region by exact stable ID in the fresh snapshot.",
+      "name": "regions.get",
+      "phase": "runtime_callback",
+      "signature": "regions.get(id) -> RegionView | nil"
+    },
+    {
+      "description": "Return every rendered region containing a global logical point, with half-open bounds; does not arbitrate overlapping regions.",
+      "name": "regions.at",
+      "phase": "runtime_callback",
+      "signature": "regions.at(point) -> RegionView[] | nil"
+    },
+    {
+      "description": "Convert normalized/output-local/global logical coordinates using host geometry; exact fence/revision/output generation required, stale references return nil, invalid arguments raise errors.",
+      "name": "coordinates.convert",
+      "phase": "runtime_callback",
+      "signature": "coordinates.convert(reference, point, from, to) -> Point | nil"
     },
     {
       "description": "Return owned copies of the current acknowledged rules.",

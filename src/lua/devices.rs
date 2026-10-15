@@ -120,47 +120,14 @@ impl Catalog {
     }
 }
 
-fn current(host: &runtime::Host) -> Option<&crate::context_transfer::View> {
-    let now = host.now?.checked_add(
-        host.context_clock
-            .map_or(Duration::ZERO, |clock| clock.elapsed()),
-    )?;
-    let view = host.context.as_ref()?;
-    let provided = view.context.as_ref()?;
-    (view.state == crate::context::State::Desktop
-        && now >= view.sampled_at
-        && now - view.sampled_at < crate::context_transfer::FRESHNESS
-        && crate::input_events::permitted_context(
-            provided,
-            &provided.binding.seat,
-            view.fence.session,
-            now,
-        ))
-    .then_some(view)
-}
-fn canonical(value: Value<'_>) -> Result<u64, io::Error> {
-    let Value::String(value) = value else {
-        return Err(io::Error::other(
-            "source identities require decimal strings",
-        ));
-    };
-    let text = value.to_str().map_err(io::Error::other)?;
-    let number = text.parse::<u64>().map_err(io::Error::other)?;
-    if number.to_string() != text {
-        return Err(io::Error::other(
-            "source identities require canonical decimal strings",
-        ));
-    }
-    Ok(number)
-}
 fn source<'gc>(ctx: luna::Context<'gc>, value: Value<'gc>) -> Result<Source, luna::Error<'gc>> {
     let Value::Table(table) = value else {
         return Err(io::Error::other("expected a Source table").into());
     };
     let seat: luna::String = table.get(ctx, "seat")?;
     Ok(Source {
-        device: canonical(table.get(ctx, "device")?)?,
-        generation: canonical(table.get(ctx, "generation")?)?,
+        device: values::canonical_identity(table.get(ctx, "device")?)?,
+        generation: values::canonical_identity(table.get(ctx, "generation")?)?,
         seat: seat.to_str().map_err(io::Error::other)?.into(),
     })
 }
@@ -187,7 +154,7 @@ pub(super) fn getter<'gc>(
         } else {
             None
         };
-        let Some(view) = current(&host) else {
+        let Some(view) = context::desktop(&host) else {
             stack.replace(ctx, Value::Nil);
             return Ok(CallbackReturn::Return);
         };
@@ -237,7 +204,7 @@ pub(super) fn getter<'gc>(
             "list" | "get" | "revision" | "position" => Value::Nil,
             _ => return Err(io::Error::other("unknown permitted device query").into()),
         };
-        if current(&host).is_none() {
+        if context::desktop(&host).is_none() {
             value = Value::Nil;
         }
         stack.replace(ctx, value);

@@ -283,12 +283,25 @@
 ---@field visible boolean
 ---@field focused boolean
 ---@field z_order? integer
+---@alias prek.CoordinateSpace 'normalized'|'local'|'global'
+---@class (exact) prek.OutputReference
+---@field fence prek.Fence
+---@field revision prek.Identity Exact snapshot revision; any revision change retires the reference.
+---@field name string
+---@field geometry_generation prek.Identity
+---@class (exact) prek.OutputView
+---@field reference prek.OutputReference
+---@field state prek.OutputState Owned metadata; edits never change conversions or host geometry.
 ---@class (exact) prek.Region
 ---@field id string
 ---@field scope? prek.Scope
 ---@field output string
 ---@field rect prek.Rect
 ---@field interactive boolean
+---@class (exact) prek.RegionView
+---@field fence prek.Fence
+---@field revision prek.Identity
+---@field region prek.Region
 ---@class (exact) prek.Snapshot
 ---@field generation prek.Identity
 ---@field revision prek.Identity
@@ -597,6 +610,12 @@ local ContextAPI = {}
 local DevicesAPI = {}
 ---@class prek.SeatsAPI
 local SeatsAPI = {}
+---@class prek.OutputsAPI
+local OutputsAPI = {}
+---@class prek.RegionsAPI
+local RegionsAPI = {}
+---@class prek.CoordinatesAPI
+local CoordinatesAPI = {}
 
 ---@class (exact) prek.Module
 ---@field api_version integer
@@ -614,11 +633,15 @@ local SeatsAPI = {}
 ---@field context prek.ContextAPI
 ---@field devices prek.DevicesAPI
 ---@field seats prek.SeatsAPI
+---@field outputs prek.OutputsAPI
+---@field regions prek.RegionsAPI
+---@field coordinates prek.CoordinatesAPI
 local prek = {
     api_version = 1, version = "0.1.0", api = {},
     config = ConfigAPI, rules = RulesAPI, layers = LayersAPI, triggers = TriggersAPI, actions = ActionsAPI,
     units = UnitsAPI, events = EventsAPI, log = LogAPI, scheduler = SchedulerAPI, context = ContextAPI,
     devices = DevicesAPI, seats = SeatsAPI,
+    outputs = OutputsAPI, regions = RegionsAPI, coordinates = CoordinatesAPI,
 }
 
 ---Supply version=1 if absent; validate the final model in Rust. No effects or I/O.
@@ -740,6 +763,31 @@ function DevicesAPI.position(source, x, y) error("Prek editor definition") end
 ---Owned current desktop binding/fence; no enumeration of other seats. Requires fresh context, not device access.
 ---@return prek.SeatInfo?
 function SeatsAPI.current() error("Prek editor definition") end
+
+---Runtime only; owned copies from the fresh owning desktop snapshot. Nil when unavailable.
+---@return prek.OutputView[]?
+function OutputsAPI.list() error("Prek editor definition") end
+---@param name string Exact output name, 1–256 bytes.
+---@return prek.OutputView?
+function OutputsAPI.get(name) error("Prek editor definition") end
+---Provider-reported rendered geometry; missing regions are never inferred.
+---@return prek.RegionView[]?
+function RegionsAPI.list() error("Prek editor definition") end
+---@param id string Exact rendered region ID, 1–256 bytes.
+---@return prek.RegionView?
+function RegionsAPI.get(id) error("Prek editor definition") end
+---All regions containing the global logical point; half-open bounds, provider order, no overlap arbitration.
+---@param point prek.Point Finite numeric coordinates.
+---@return prek.RegionView[]?
+function RegionsAPI.at(point) error("Prek editor definition") end
+---Uses host geometry, not edited Lua metadata. Any changed fence/revision/generation returns nil.
+---Normalized axes follow the transformed output; local/global use logical units. No clamping.
+---@param reference prek.OutputReference
+---@param point prek.Point Finite numeric coordinates; overflow raises an error.
+---@param from prek.CoordinateSpace
+---@param to prek.CoordinateSpace
+---@return prek.Point?
+function CoordinatesAPI.convert(reference, point, from, to) error("Prek editor definition") end
 
 ---@param fields prek.KeyTriggerFields
 ---@return prek.KeyTrigger

@@ -357,6 +357,72 @@ resets through worker/helper IPC alongside actual compositor context and app
 delivery. The fixture supplies synthetic device/seat authority. Add `--visible`
 for the owned visible nested-Hyprland path; it opens no host evdev devices.
 
+## Output, region and coordinate queries
+
+`outputs`, `regions` and `coordinates` are runtime-only, read-only APIs over the
+verified owning desktop snapshot. They require fresh context (250 ms), a user
+session and no secure overlay. They perform no compositor calls or host scans
+inside a Lua callback. Queries check freshness again after constructing results.
+Missing, expired or inhibited context returns nil; an available snapshot with
+no reported outputs/regions returns an empty list. Output and region names are
+exact strings of 1–256 UTF-8 bytes. Invalid argument types or values raise errors.
+
+| Function | Result |
+| --- | --- |
+| `outputs.list()` | `OutputView[]`, or nil while context is unavailable. |
+| `outputs.get(name)` | `OutputView`, or nil for an absent output/unavailable context. |
+| `regions.list()` | `RegionView[]`, or nil while context is unavailable. |
+| `regions.get(id)` | `RegionView`, or nil for an absent region/unavailable context. |
+| `regions.at(point)` | Every region containing a global logical point, or nil while unavailable. |
+| `coordinates.convert(reference, point, from, to)` | Converted `Point`, or nil for an unavailable/retired output reference. |
+
+`OutputView = {reference, state}` contains an owned `OutputState` and
+`OutputReference = {fence, revision, name, geometry_generation}`. All identities,
+including the snapshot revision and geometry generation, are canonical unsigned
+64-bit decimal strings. Coordinate conversion requires every identity to match
+the current host snapshot. **Any snapshot revision change retires a reference**,
+even if output geometry is unchanged; obtain another view explicitly. Fence
+changes, geometry-generation changes and output removal also return nil. These
+references are comparisons against host state, not authority tokens. Editing
+`state.geometry` never changes conversion geometry or an external target.
+
+`RegionView = {fence, revision, region}` contains a rendered provider-reported
+`Region`, with its ID, optional scope, output, global logical rectangle and
+interactive flag. Missing rendered regions remain absent; keyboard/output
+rectangles are not invented as shell regions. `regions.at` uses half-open bounds
+and returns all matches in provider order, including overlapping interactive
+and noninteractive regions. It does not select a target, consume input or grant
+permission to a rule.
+
+Coordinate spaces are `"normalized"`, `"local"` and `"global"`. Normalized axes
+follow the transformed output, with (0,0) at its local origin and (1,1) at its far
+corner. Local/global positions use logical units; output scale and rotated axis
+dimensions come from Rust's `Output.logical_size`. Global points include the
+output origin. These are output coordinates, not untransformed device axes:
+use `devices.position` for calibrated raw device counts and millimetres.
+Points require finite numbers. Conversion does not clamp outside points; finite
+arithmetic overflow raises an error. Metadata/query copies grant no live effect.
+
+```lua
+local p = require("prek")
+p.events.on("context_changed", function()
+    local output = p.outputs.get("eDP-1")
+    if output then
+        local center = p.coordinates.convert(output.reference,
+            {x=0.5, y=0.5}, "normalized", "global")
+        if center then p.log.info("output-center", {point=center}) end
+    end
+end)
+return p.config.new {}
+```
+
+The installed [geometry example](../examples/lua/geometry.lua) also inspects
+rendered regions. Unit tests cover reference retirement, full-width identities,
+copy isolation, rotation/scale/origin, region overlap and argument failures.
+Helper-process and local compositor tests exercise these queries through the
+same context transport used by callbacks. They do not prove physical touch
+routing, shell controller effects or authentication ownership.
+
 ## Permitted device and seat queries
 
 These runtime queries return owned copies; changing a returned table changes

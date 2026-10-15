@@ -47,6 +47,14 @@ p.events.on("ready", function(payload)
     local status = tx:status()
     p.log.info(status.state, {identity = identity, layers = p.layers.list(), revision = p.rules.revision()})
     local snapshot = p.context.snapshot()
+    local output = p.outputs.get("fixture-output")
+    if output then
+        local point = p.coordinates.convert(output.reference, {x=0.5,y=0.5}, "normalized", "global")
+        for _, view in ipairs(p.regions.at(point or {x=0,y=0}) or {}) do
+            p.log.info(view.region.id, {revision=view.revision})
+        end
+    end
+    p.outputs.list(); p.regions.list(); p.regions.get("widget")
     if snapshot then
         ---@type string
         local revision = snapshot.revision
@@ -98,6 +106,11 @@ p.events.on("ready", function(payload)
     p.layers.transaction():activate_layer(12) -- expect: param-type-mismatch
 end)
 p.events.on("bogus", function() end) -- expect: param-type-mismatch
+p.coordinates.convert({}, {x=0,y=0}, "local", "global") -- expect: missing-fields
+p.events.on("ready", function()
+    local output = p.outputs.get("x")
+    if output then p.coordinates.convert(output.reference, {x=0,y=0}, "pixels", "global") end -- expect: param-type-mismatch
+end)
 '''
 
 

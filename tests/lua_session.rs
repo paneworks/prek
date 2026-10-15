@@ -189,15 +189,27 @@ fn real_helper_receives_owned_context_and_expires_original_timestamps() {
     let definition = Definition::compile(
         r#"
 local p=require('prek')
+local saved
 p.events.on('context_changed',function(event)
   if event.available then
     local snapshot=p.context.snapshot(); local binding=p.context.binding()
     assert(snapshot.windows[1].rect.origin.x==0.1 and snapshot.outputs[1].active_workspace==3)
+    local output=p.outputs.get('fixture-output')
+    assert(#p.outputs.list()==1 and #p.regions.list()==0 and #p.regions.at({x=0,y=0})==0)
+    assert(output and output.reference.revision==snapshot.revision)
+    if saved then assert(p.coordinates.convert(saved,{x=0,y=0},'local','global')==nil) end
+    saved=output.reference
+    local position=p.coordinates.convert(output.reference,{x=0.5,y=0.5},'normalized','global')
+    assert(position and position.x==500 and position.y==400)
+    output.state.geometry.origin.x=123
+    assert(p.coordinates.convert(output.reference,{x=0,y=0},'local','global').x==0)
     snapshot.windows[1].id='forged'; binding.uid=0
     assert(p.context.snapshot().windows[1].id=='window-0' and p.context.binding().uid~=0)
     p.log.info('context',{state=p.context.state(),revision=event.revision})
   else
     assert(p.context.snapshot()==nil and p.context.state()=='unknown')
+    assert(p.outputs.list()==nil and p.regions.list()==nil)
+    assert(p.coordinates.convert(saved,{x=0,y=0},'local','global')==nil)
     p.log.info('expired-context')
   end
 end)
@@ -230,6 +242,15 @@ return {version=1}
     assert_eq!(
         logs[0].fields,
         serde_json::json!({"state":"desktop","revision":"7"})
+    );
+    view.sampled_at = monotonic().unwrap();
+    let snapshot = &mut view.context.as_mut().unwrap().snapshot;
+    snapshot.captured_at = view.sampled_at;
+    snapshot.revision += 1;
+    session.update_context(view.clone()).unwrap();
+    assert_eq!(
+        drain(&mut session).unwrap()[0].fields,
+        serde_json::json!({"state":"desktop","revision":"8"})
     );
     view.sampled_at = Duration::ZERO;
     view.context.as_mut().unwrap().snapshot.captured_at = Duration::ZERO;

@@ -13,6 +13,8 @@ mod context;
 mod devices;
 mod editor;
 mod export;
+#[cfg(target_os = "linux")]
+mod geometry;
 mod handlers;
 mod modules;
 mod rule_api;
@@ -57,6 +59,41 @@ pub fn api() -> serde_json::Value {
         serde_json::json!({"name":"Task.status", "receiver":"Task", "signature":"task:status() -> TaskState", "description":"Inspect pending, running, sleeping, completed or cancelled state in the owning generation."}),
         serde_json::json!({"name":"actions.define", "signature":"actions.define(name, {requires = capabilities}, callback) -> Action", "description":"Register an approved generation-scoped named handler; resolve a bounded typed effect plan in the unprivileged session after a broker execution grant."}),
     ];
+    #[cfg(target_os = "linux")]
+    for (name, signature, description) in [
+        (
+            "outputs.list",
+            "outputs.list() -> OutputView[] | nil",
+            "Copy all outputs in the fresh owning desktop snapshot; each reference is fenced to that exact snapshot revision.",
+        ),
+        (
+            "outputs.get",
+            "outputs.get(name) -> OutputView | nil",
+            "Query one output by exact name; no discovery outside the verified snapshot.",
+        ),
+        (
+            "regions.list",
+            "regions.list() -> RegionView[] | nil",
+            "Copy provider-reported rendered regions with their snapshot fence/revision; no guessed geometry.",
+        ),
+        (
+            "regions.get",
+            "regions.get(id) -> RegionView | nil",
+            "Query one rendered region by exact stable ID in the fresh snapshot.",
+        ),
+        (
+            "regions.at",
+            "regions.at(point) -> RegionView[] | nil",
+            "Return every rendered region containing a global logical point, with half-open bounds; does not arbitrate overlapping regions.",
+        ),
+        (
+            "coordinates.convert",
+            "coordinates.convert(reference, point, from, to) -> Point | nil",
+            "Convert normalized/output-local/global logical coordinates using host geometry; exact fence/revision/output generation required, stale references return nil, invalid arguments raise errors.",
+        ),
+    ] {
+        symbols.push(serde_json::json!({"name":name,"signature":signature,"phase":"runtime_callback","description":description}));
+    }
     for (name, signature, description) in [
         (
             "list",
@@ -242,6 +279,7 @@ pub fn api() -> serde_json::Value {
         "runtime_layers":{"declared_layers":64,"activation_values":["physical","active","inactive"],"default":"physical","queries":"acknowledged definitions and activation overrides; no physical-key state","transaction":"shared RuleTransaction revision/receipt/permissions","definitions":"immutable at runtime","activation":"fresh input only; existing candidates retired","physical_toggles":"preserved across runtime edits; reconciled on source reload","seat":"owning broker registration"},
         "input_events":{"event":"input","configuration_mode":"observe","agent_flags":["lua","input"],"capability":"input_events","system_permission":"policy.allow_input_events","production_broker":"observation_mode","sources":"explicit policy.allowed_devices selectors on the owning seat; virtual devices excluded","context":"fresh desktop without secure overlay","freshness_ms":250,"payload":"InputPayload","raw_frames":false,"input_claims":false,"delivery":"ordered, no coalescing; overflow retires the affected stream or Lua component","resets":["attached","reconciled","mapping_changed","removed","lost"],"coordinates":"device axis counts","maximum_changes":4096,"maximum_contacts":256,"identity_fields":["source.device","source.generation","sequence","contacts[].id.generation","contacts_started[].generation","contacts_ended[].generation","ended_contacts[].id.generation"],"identity_type":"decimal_string"},
         "context_limits":{"snapshot_bytes":4194304,"chunk_bytes":32768,"transfer_time_ms":1000,"freshness_ms":250,"refresh_ms":100,"queued_snapshots":2,"read_only":true},
+        "geometry_queries":{"context":"fresh owning desktop without secure overlay","lookup":"exact output name or rendered region ID","references":"canonical decimal-string fence, snapshot revision and output geometry generation; copies confer no authority","spaces":["normalized","local","global"],"normalized":"post-transform output axes, not raw device axes","local":"post-transform logical units; rotation and scale applied through output logical size","region_bounds":"global logical, half-open","overlaps":"all matches in provider order, no target selection","unavailable":"nil for absent/stale/inhibited context, missing name or retired reference; known empty arrays remain empty","conversion":"finite numeric points, no clamping; arithmetic overflow raises an error","effects":false},
         "runtime_requires":{"uid":"unprivileged active session","capabilities":["context","observations","lua_events"],"thread":"owning Luna arena","generation":"current broker/configuration/session fence"},
         "action_requires":{"agent_flags":["lua","commands"],"capabilities":["context","observations","lua_events","lua_actions","commands"],"implemented_effects":["commands","observations"],"grant_time_ms":250},
         "editor":{"format":"LuaCATS","module":"prek","cli":["prek","api","--lua"],"path":"share/prek/lua/prek.lua","scope":"implemented_configuration_and_runtime"},
@@ -519,6 +557,9 @@ fn instantiate(
                 "context",
                 "devices",
                 "seats",
+                "outputs",
+                "regions",
+                "coordinates",
             ] {
                 module.set(ctx, namespace, Table::new(&ctx))?;
             }
@@ -590,6 +631,7 @@ fn instantiate(
             log.set(ctx, "info", runtime::logger(&ctx, host.clone()))?;
             #[cfg(target_os = "linux")]
             {
+                geometry::register(&ctx, module, host.clone())?;
                 let context: Table = module.get(ctx, "context")?;
                 for field in ["snapshot", "binding", "state", "fence", "error"] {
                     context.set(ctx, field, self::context::getter(&ctx, host.clone(), field))?;

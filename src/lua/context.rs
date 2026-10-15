@@ -2,6 +2,26 @@
 use super::*;
 use std::{cell::RefCell, rc::Rc};
 
+/// Shared freshness/ownership gate for desktop-only device and geometry views.
+pub(super) fn desktop(host: &runtime::Host) -> Option<&crate::context_transfer::View> {
+    let now = host.now?.checked_add(
+        host.context_clock
+            .map_or(Duration::ZERO, |clock| clock.elapsed()),
+    )?;
+    let view = host.context.as_ref()?;
+    let provided = view.context.as_ref()?;
+    (view.state == crate::context::State::Desktop
+        && now >= view.sampled_at
+        && now - view.sampled_at < crate::context_transfer::FRESHNESS
+        && crate::input_events::permitted_context(
+            provided,
+            &provided.binding.seat,
+            view.fence.session,
+            now,
+        ))
+    .then_some(view)
+}
+
 pub(super) fn getter<'gc>(
     ctx: &luna::Context<'gc>,
     host: Rc<RefCell<runtime::Host>>,

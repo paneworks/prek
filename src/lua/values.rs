@@ -8,6 +8,20 @@ fn identity<'gc>(ctx: Context<'gc>, value: u64) -> Value<'gc> {
     Value::String(ctx.intern(value.to_string().as_bytes()))
 }
 
+pub(super) fn canonical_identity(value: Value<'_>) -> Result<u64, io::Error> {
+    let Value::String(value) = value else {
+        return Err(io::Error::other("identities require decimal strings"));
+    };
+    let text = value.to_str().map_err(io::Error::other)?;
+    let number = text.parse::<u64>().map_err(io::Error::other)?;
+    if number.to_string() != text {
+        return Err(io::Error::other(
+            "identities require canonical decimal strings",
+        ));
+    }
+    Ok(number)
+}
+
 fn fields<'gc>(
     ctx: Context<'gc>,
     table: Table<'gc>,
