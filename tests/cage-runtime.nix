@@ -1,6 +1,7 @@
 { package }:
 package.overrideAttrs (_: {
   pname = "prek-local-cage-tests";
+  outputs = [ "out" ];
   cargoBuildFlags = [ "--test" "cage_runtime" ];
   doCheck = false;
   installPhase = ''

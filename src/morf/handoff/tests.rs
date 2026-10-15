@@ -8,6 +8,8 @@ use std::{
     time::Instant,
 };
 
+mod live;
+
 fn fence(session: u64) -> Fence {
     Fence {
         broker: Epoch([1, 2]),

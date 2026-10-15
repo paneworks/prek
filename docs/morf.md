@@ -234,3 +234,41 @@ consumer neutrality, external lisgd shutdown, a safe kernel admission boundary,
 or completed physical ownership. The kernel admission boundary, finer per-seat live-worker draining,
 recovery across provider replacement and actual root/logind/phone acceptance
 remain required; production Morf action negotiation stays disabled.
+
+## User-launched root probe
+
+From your Wayland desktop terminal in this checkout, run:
+
+```sh
+./tests/run-root-handoff.sh
+```
+
+Run it as your normal desktop user. After the Nix build finishes, the runner
+prompts for your sudo password and elevates only a fixed probe from the Nix
+store. The compositor, Morf and log writer remain your user. The root probe
+clears its environment, uses the packaged libsystemd, and selects one exact
+ignored test; it cannot select an arbitrary command or test filter.
+
+The local default is the frozen verified Morf executable in
+`../mold/target/async-wallpaper-verified/morf` and the Caelestia shell in that
+checkout. Override `PREK_MORF_REPO`, `PREK_MORF_BINARY` or `PREK_MORF_SHELL` for
+another local build. The script enters the Morf development environment for its
+graphics dependencies. It uses the existing visible nested session with parent
+input isolation.
+
+`target/root-handoff/latest` points to the unique retained run directory.
+`console.log` contains build and runner output; `status.json` records running,
+passed or failed with the final exit code. Under `cage/run-*`,
+`morf-native-root.log` retains the root test's output even on timeout or failure,
+and `morf-native-root-receipts.json` exists only after a successful, correlated
+receipt. The remaining compositor, shell and cleanup logs are beside it.
+
+This probe checks actual root credentials, logind registration and the native
+quiesce → activate → restore sequence, with a genuinely supervised and reaped
+child as release evidence. It opens no evdev/uinput devices and does not test
+physical takeover, a broker admission grant or phone input. The packaged test
+executable is in the separate `nativeTests` output, outside the normal runtime
+installation. Default Cage tests never invoke sudo. To use just the packaged
+runner with explicit local paths, run `nix run --no-write-lock-file
+.#cage-root-test -- --visible --morf /absolute/path/to/morf --morf-shell
+/absolute/path/to/shell/init.lua`.

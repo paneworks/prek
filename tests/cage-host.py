@@ -37,12 +37,16 @@ def main():
                         help="Caelestia shell init.lua for ordinary typed Morf controller checks")
     parser.add_argument("--morf-control-check", type=Path,
                         default=Path(__file__).parent / "support/morf-controls.py")
+    parser.add_argument("--morf-root-probe", type=Path,
+                        help="opt-in root native probe; requires a pre-authorized sudo ticket")
     parser.add_argument("--visible", action="store_true",
                         default=os.environ.get("VISIBLE") == "1")
     parser.add_argument("--output", default="target/cage-host")
     args = parser.parse_args()
     if args.morf_shell and not args.morf:
         parser.error("--morf-shell requires --morf with the actual ELF")
+    if args.morf_root_probe and not args.morf_shell:
+        parser.error("--morf-root-probe requires the owned Morf shell")
     output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     output = Path(tempfile.mkdtemp(prefix="run-", dir=output))
@@ -298,7 +302,8 @@ def main():
                         "--morf", str(args.morf.resolve()), "--shell", str(args.morf_shell.resolve()),
                         "--pid", str(report["hyprland_pid"]),
                         "--socket", str(socket), "--hyprctl", hyprctl,
-                        "--instance", instances[0], "--output", str(output)],
+                        "--instance", instances[0], "--output", str(output)]
+                        + (["--root-probe", str(args.morf_root_probe)] if args.morf_root_probe else []),
                         env=env, check=True, timeout=90)
             session_name = "visible nested Hyprland" if args.visible else "local Cage/nested Hyprland"
             print(f"PASS: {session_name} delivered B and Shift+A, six ordered key events, "

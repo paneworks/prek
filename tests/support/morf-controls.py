@@ -10,11 +10,31 @@ import subprocess
 import time
 
 
+def native_root_receipt(stdout, *, compositor_pid, producer_pid, output):
+    """Require one complete receipt bound to the session we actually launched."""
+    prefix = "PREK_NATIVE_ROOT_RECEIPT="
+    receipts = [json.loads(line[len(prefix):]) for line in stdout.splitlines()
+                if line.startswith(prefix)]
+    if len(receipts) != 1 or not isinstance(receipts[0], dict):
+        raise ValueError("expected exactly one native root receipt")
+    receipt = receipts[0]
+    expected = dict(status="passed", uid=0, native_ui_handoff_tested=True,
+                    actual_logind_registration=True, compositor_pid=compositor_pid,
+                    producer_pid=producer_pid, output=output, worker_reaped=True,
+                    input_devices_opened=0, physical_takeover_tested=False,
+                    broker_grant_tested=False, restored=True)
+    for key, value in expected.items():
+        if type(receipt.get(key)) is not type(value) or receipt[key] != value:
+            raise ValueError(f"native root receipt mismatch: {key}")
+    return receipt
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("morf", "shell", "socket", "hyprctl", "instance", "output"):
         parser.add_argument(f"--{name}", required=True)
     parser.add_argument("--pid", required=True, type=int)
+    parser.add_argument("--root-probe", type=Path)
     args = parser.parse_args()
     assert os.environ.get("PREK_CAGE_HOST") == "1"
     runtime = Path(os.environ["XDG_RUNTIME_DIR"])
@@ -265,6 +285,20 @@ def main():
             final_state = state()
             final_path, final_native = native_state()
             assert final_native == initial_native and final_path == native_path
+            root_receipt = None
+            if args.root_probe:
+                command = ["sudo", "-n", "--", str(args.root_probe), str(runtime), str(os.getuid()),
+                           args.instance, os.readlink(f"/proc/{args.pid}/exe"), str(Path(args.morf).resolve()),
+                           str(args.pid), str(child.pid), name]
+                root_log = output / "morf-native-root.log"
+                with root_log.open("w") as log:
+                    result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT,
+                                            text=True, timeout=30)
+                assert result.returncode == 0, "native root probe failed; see morf-native-root.log"
+                root_receipt = native_root_receipt(root_log.read_text(), compositor_pid=args.pid,
+                                                  producer_pid=child.pid, output=name)
+                (output / "morf-native-root-receipts.json").write_text(json.dumps(root_receipt) + "\n")
+                assert state()["workspace_preview"] is False
             shutdown_acknowledged = True
             try:
                 rpc()
@@ -276,6 +310,8 @@ def main():
                 status="passed", producer_pid=producer, output=name, ordinary_shell_ipc=True,
                 broker_grant_tested=False, recognizer_handoff_tested=False,
                 native_root_operations_refused=True, root_grant_tested=False,
+                native_ui_handoff_tested=root_receipt is not None,
+                native_root_receipt=root_receipt,
                 native_control_capabilities=capabilities,
                 native_handoff_state=handoff, native_handoff_operations_refused=True,
                 native_reload_generation_verified=True,

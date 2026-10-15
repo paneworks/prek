@@ -17,16 +17,40 @@
       nixosModules.prek = self.nixosModules.default;
 
       packages = forSystems (system:
-        let pkgs = nixpkgs.legacyPackages.${system};
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+          nativeProbe = pkgs.writeShellScript "prek-native-root-probe" ''
+            test "$#" -eq 8 || { echo 'native probe needs its eight owned-session bindings' >&2; exit 2; }
+            exec ${pkgs.coreutils}/bin/env -i \
+              PREK_NATIVE_HANDOFF=1 PREK_NATIVE_RUNTIME="$1" PREK_NATIVE_UID="$2" \
+              PREK_NATIVE_INSTANCE="$3" PREK_NATIVE_COMPOSITOR="$4" PREK_NATIVE_MORF="$5" \
+              PREK_NATIVE_COMPOSITOR_PID="$6" PREK_NATIVE_PRODUCER_PID="$7" PREK_NATIVE_OUTPUT="$8" \
+              PREK_NATIVE_LIBRARY=${pkgs.systemd}/lib/libsystemd.so.0 \
+              ${self.packages.${system}.default.nativeTests}/libexec/prek-native-tests \
+              --exact morf::handoff::tests::live::owned_native_handoff --ignored --nocapture --test-threads=1
+          '';
         in {
           cage-touch-test = import ./tests/cage-touch.nix { inherit pkgs; };
           cage-test = import ./tests/cage-host.nix {
             inherit pkgs;
             package = self.packages.${system}.default;
           };
+          cage-root-test = pkgs.writeShellScriptBin "prek-cage-root-test" ''
+            if [ "$(${pkgs.coreutils}/bin/id -u)" -eq 0 ]; then
+              echo 'Run this from the desktop user terminal; only the native probe uses sudo.' >&2
+              exit 2
+            fi
+            sudo -v || exit $?
+            exec ${import ./tests/cage-host.nix {
+              inherit pkgs;
+              package = self.packages.${system}.default;
+              rootProbe = nativeProbe;
+            }}/bin/prek-cage-host-test "$@"
+          '';
           default = pkgs.rustPlatform.buildRustPackage {
             pname = "prek";
             version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
+            outputs = [ "out" "nativeTests" ];
             src = pkgs.lib.fileset.toSource {
               root = ./.;
               fileset = pkgs.lib.fileset.unions [
@@ -41,6 +65,16 @@
               "luna-0.5.1" = "sha256-gCdX/Ni2RbK69KMJFVzK72QSuDFVVQM2deiKXH3AvoI=";
             };
             postInstall = ''
+              mkdir -p "$nativeTests/libexec"
+              count=0
+              for candidate in target/*/release/deps/prek-* target/release/deps/prek-*; do
+                if [ -f "$candidate" ] && [ -x "$candidate" ] && \
+                  "$candidate" --list | ${pkgs.ripgrep}/bin/rg -Fx 'morf::handoff::tests::live::owned_native_handoff: test'; then
+                  install -m 755 "$candidate" "$nativeTests/libexec/prek-native-tests"
+                  count=$((count + 1))
+                fi
+              done
+              test "$count" -eq 1
               mkdir -p "$out/lib/udev/rules.d"
               substitute ${./udev/70-prek.rules} "$out/lib/udev/rules.d/70-prek.rules" \
                 --replace-fail '@prek@' "$out/bin/prek"
@@ -61,6 +95,7 @@
               done
             '';
             meta = {
+              outputsToInstall = [ "out" ];
               description = "Low-level Linux input tools and gesture recognition";
               license = pkgs.lib.licenses.mit;
               mainProgram = "prek";
@@ -82,6 +117,10 @@
           type = "app";
           program = "${self.packages.${system}.cage-test}/bin/prek-cage-host-test";
         };
+        cage-root-test = {
+          type = "app";
+          program = "${self.packages.${system}.cage-root-test}/bin/prek-cage-root-test";
+        };
       });
 
       checks = forSystems (system:
@@ -96,6 +135,14 @@
             cp ${./tests/support/wlproxy.py} proxy/wlproxy.py
             cp ${./tests/support/test_wlproxy.py} proxy/test_wlproxy.py
             python3 -m unittest discover -s proxy -p test_wlproxy.py -v > "$out" 2>&1
+          '';
+          native-root-receipts = pkgs.runCommand "prek-native-root-receipts-check" {
+            nativeBuildInputs = [ pkgs.python3 ];
+          } ''
+            mkdir receipts
+            cp ${./tests/support/morf-controls.py} receipts/morf-controls.py
+            cp ${./tests/support/test_morf_controls.py} receipts/test_morf_controls.py
+            python3 -m unittest discover -s receipts -p test_morf_controls.py -v > "$out" 2>&1
           '';
           nixos-module = import ./tests/nixos-module.nix {
             inherit pkgs package;

@@ -1,4 +1,4 @@
-{ pkgs, package }:
+{ pkgs, package, rootProbe ? null }:
 let
   receiver = import ./wayland-receiver.nix { inherit pkgs; };
   runtime = import ./cage-runtime.nix { inherit package; };
@@ -31,5 +31,6 @@ pkgs.writeShellScriptBin "prek-cage-host-test" ''
     --morf-control-check ${./support/morf-controls.py} \
     --receiver ${receiver}/bin/prek-wayland-receiver \
     --keyboard ${keyboard}/bin/prek-wayland-keyboard \
+    ${pkgs.lib.optionalString (rootProbe != null) "--morf-root-probe ${rootProbe}"} \
     --prek-fixture ${runtime}/bin/prek-local-cage-tests --prek-app ${package}/bin/prek "$@"
 ''
