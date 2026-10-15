@@ -1879,6 +1879,13 @@ fn run_session(
             executor.flush(&mut channel)?;
         }
         if drained && let Some(runtime) = lua_runtime.as_mut() {
+            let capability_now = monotonic()?;
+            let ready = executor
+                .as_ref()
+                .map_or_else(std::collections::BTreeSet::new, |executor| {
+                    executor.ready_capabilities(capability_now)
+                });
+            runtime.update_capabilities(requested.clone(), ready)?;
             match runtime.step(monotonic()?) {
                 Ok(mut logs) => {
                     if rule_mutations && lua_rule_request.is_none() {

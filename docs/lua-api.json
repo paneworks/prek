@@ -28,6 +28,22 @@
     }
   },
   "api_version": 1,
+  "capability_queries": {
+    "freshness_ms": 250,
+    "grants": false,
+    "in_flight_snapshots": 1,
+    "lifetime": "negotiated flags immutable within the owning fence; stop clears metadata",
+    "queued_snapshots": 1,
+    "ready_families": [
+      "commands",
+      "lua_actions",
+      "power_actions"
+    ],
+    "refresh_ms": 100,
+    "source": "broker-negotiated registration flags and parent executor readiness; never inferred from Lua source",
+    "unavailable": "current returns nil; has and ready return false",
+    "unknown_names": "false; names must be strings of 1 to 128 bytes"
+  },
   "context_limits": {
     "chunk_bytes": 32768,
     "freshness_ms": 250,
@@ -406,6 +422,24 @@
       "description": "Register an approved generation-scoped named handler; resolve a bounded typed effect plan in the unprivileged session after a broker execution grant.",
       "name": "actions.define",
       "signature": "actions.define(name, {requires = capabilities}, callback) -> Action"
+    },
+    {
+      "description": "Copy fresh broker-negotiated flags and parent executor readiness for this session fence; neither grants effects.",
+      "name": "capabilities.current",
+      "phase": "runtime_callback",
+      "signature": "capabilities.current() -> CapabilityView | nil"
+    },
+    {
+      "description": "Test fresh negotiated membership; unknown bounded names and unavailable snapshots return false.",
+      "name": "capabilities.has",
+      "phase": "runtime_callback",
+      "signature": "capabilities.has(name) -> boolean"
+    },
+    {
+      "description": "Test current parent executor capacity for commands, lua_actions or power_actions; every effect still requires fresh context, target checks and a broker grant.",
+      "name": "capabilities.ready",
+      "phase": "runtime_callback",
+      "signature": "capabilities.ready(name) -> boolean"
     },
     {
       "description": "Copy all outputs in the fresh owning desktop snapshot; each reference is fenced to that exact snapshot revision.",

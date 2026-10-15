@@ -58,6 +58,13 @@ p.events.on("ready", function(payload)
         end
     end
     p.outputs.list(); p.regions.list(); p.regions.get("widget")
+    local capabilities = p.capabilities.current()
+    if capabilities then
+        ---@type string
+        local generation = capabilities.fence.session
+        p.log.info(generation, {negotiated = capabilities.negotiated, ready = capabilities.ready})
+    end
+    p.capabilities.has("future_capability"); p.capabilities.ready("power_actions")
     if snapshot then
         ---@type string
         local revision = snapshot.revision

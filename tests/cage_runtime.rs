@@ -637,7 +637,14 @@ fn power_acceptance(
     let source=r#"
 local p=require('prek')
 local target=__OUTPUT__
+p.events.on('ready',function()
+ assert(p.capabilities.has('power_actions') and p.capabilities.has('lua_actions'))
+ assert(not p.capabilities.ready('power_actions'))
+end)
+p.events.on('stop',function()assert(p.capabilities.current()==nil)end)
 local handler=p.actions.define('screen',{requires={'power_actions'}},function(payload)
+ assert(p.capabilities.ready('power_actions') and p.capabilities.ready('lua_actions'))
+ assert(not p.capabilities.has('commands') and not p.capabilities.ready('commands'))
  return p.actions.power{action=payload.event.rule}
 end)
 return p.config.new{mode='route',policy={allowed_devices={'keyboard'},allow_power_actions=true},
@@ -649,6 +656,16 @@ devices={keyboard={keys={'KEY_A','KEY_B'}}},rules={
     let definition = Definition::compile(&source, "owned-power.lua").unwrap();
     let config = definition.validate().unwrap();
     let mut session = Session::spawn(app, fence, "seat0", definition).unwrap();
+    let negotiated = BTreeSet::from([
+        Capability::Context,
+        Capability::Observations,
+        Capability::LuaEvents,
+        Capability::LuaActions,
+        Capability::PowerActions,
+    ]);
+    session
+        .update_capabilities(negotiated.clone(), BTreeSet::new())
+        .unwrap();
     let mut ignored = Vec::new();
     settle(&mut session, &mut ignored);
     let mut sampler = ContextSampler::default();
@@ -694,6 +711,12 @@ devices={keyboard={keys={'KEY_A','KEY_B'}}},rules={
         let expires = snapshot.captured_at + Duration::from_millis(250);
         let fresh = view(snapshot);
         executor.update_power_context(fresh.clone()).unwrap();
+        session
+            .update_capabilities(
+                negotiated.clone(),
+                executor.ready_capabilities(monotonic().unwrap()),
+            )
+            .unwrap();
         session.update_context(fresh).unwrap();
         settle(&mut session, &mut ignored);
         let id = index as u64 + 1;
@@ -782,7 +805,7 @@ devices={keyboard={keys={'KEY_A','KEY_B'}}},rules={
         let observed = sampler.sample(checking, 1, SessionKind::User).unwrap();
         assert_eq!(observed.outputs[0].screen, screen);
         receipts.push(
-            serde_json::json!({"id":id,"completion":completion,"screen":screen,"output":name}),
+            serde_json::json!({"id":id,"completion":completion,"screen":screen,"output":name,"lua_capabilities_checked":true}),
         );
     }
     session.stop().unwrap();

@@ -1,9 +1,9 @@
 //! A separately supervised, unprivileged event VM. The session parent keeps
 //! processing broker leases and generation changes while Lua executes.
-use super::{Definition, EventKind, LogRecord, source_transfer};
+use super::{CapabilityView, Definition, EventKind, LogRecord, source_transfer};
 use crate::{
     ipc::{Channel, monotonic},
-    protocol::{self, Fence},
+    protocol::{self, Capability, Fence},
     supervisor::{Heartbeat, Supervisor},
 };
 use nix::{
@@ -12,7 +12,7 @@ use nix::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::VecDeque,
+    collections::{BTreeSet, VecDeque},
     io,
     os::fd::AsFd,
     path::Path,
@@ -61,6 +61,10 @@ impl PendingEvents {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Work {
+    Capabilities {
+        view: CapabilityView,
+        id: u64,
+    },
     RulesEnable {
         fence: Fence,
     },
@@ -98,6 +102,10 @@ enum Work {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Message {
+    Capabilities {
+        fence: Fence,
+        id: u64,
+    },
     RulesEnabled {
         fence: Fence,
     },
@@ -155,6 +163,10 @@ pub struct Session {
     fence: Fence,
     source: Vec<u8>,
     seat: String,
+    capabilities_next: Option<CapabilityView>,
+    capabilities_pending: Option<(u64, Duration)>,
+    capabilities_id: u64,
+    capabilities_last: Option<CapabilityView>,
     context_source: Vec<u8>,
     context_offset: usize,
     context_next: Option<Vec<u8>>,
@@ -237,6 +249,10 @@ impl Session {
             fence,
             source,
             seat: seat.into(),
+            capabilities_next: None,
+            capabilities_pending: None,
+            capabilities_id: 0,
+            capabilities_last: None,
             context_source: Vec::new(),
             context_offset: 0,
             context_next: None,
@@ -311,6 +327,40 @@ impl Session {
         });
         Ok(())
     }
+    /// The embedding supplies broker-negotiated flags and executor readiness.
+    /// Source declarations never grant capabilities. One queued snapshot and
+    /// one in-flight acknowledgement bound this metadata channel.
+    pub fn update_capabilities(
+        &mut self,
+        negotiated: BTreeSet<Capability>,
+        ready: BTreeSet<Capability>,
+    ) -> io::Result<()> {
+        if self.stopping {
+            return Err(protocol::invalid("Lua session is stopping"));
+        }
+        let view = CapabilityView {
+            fence: self.fence,
+            negotiated,
+            ready,
+            sampled_at: monotonic()?,
+        };
+        view.validate()?;
+        if let Some(previous) = &self.capabilities_last {
+            if previous.negotiated != view.negotiated {
+                return Err(protocol::invalid(
+                    "negotiated capabilities changed within a session",
+                ));
+            }
+            if previous.ready == view.ready
+                && view.sampled_at.saturating_sub(previous.sampled_at) < Duration::from_millis(100)
+            {
+                return Ok(());
+            }
+        }
+        self.capabilities_last = Some(view.clone());
+        self.capabilities_next = Some(view);
+        Ok(())
+    }
     pub fn deadline(&self) -> io::Result<Duration> {
         Ok(self
             .supervisor
@@ -321,6 +371,10 @@ impl Session {
                 self.expires
             })
             .min(self.context_pending.unwrap_or(Duration::MAX))
+            .min(
+                self.capabilities_pending
+                    .map_or(Duration::MAX, |(_, deadline)| deadline),
+            )
             .min(self.rules_handshake.unwrap_or(Duration::MAX))
             .min(
                 self.rule_pending
@@ -426,6 +480,8 @@ impl Session {
             && self.pending.is_none()
             && self.notices.is_empty()
             && self.actions.is_empty()
+            && self.capabilities_next.is_none()
+            && self.capabilities_pending.is_none()
             && self.context_source.is_empty()
             && self.context_pending.is_none()
             && self.rules_ready
@@ -434,6 +490,7 @@ impl Session {
     }
     pub fn stop(&mut self) -> io::Result<()> {
         self.stopping = true;
+        self.capabilities_next = None;
         self.rule_mutations = false;
         self.rules_ready = true;
         self.rules_handshake = None;
@@ -465,8 +522,18 @@ impl Session {
         ]
     }
     fn wants_write(&self) -> bool {
+        if self.capabilities_pending.is_some() {
+            return false;
+        }
         self.offset < self.source.len()
             || self.ready && !self.rules_ready && self.rules_handshake.is_none()
+            || self.ready
+                && self.rules_ready
+                && self.capabilities_next.is_some()
+                && self.pending.is_none()
+                && self.context_pending.is_none()
+                && self.context_offset == 0
+                && self.rule_pending.is_none()
             || self.rule_receipt.is_some()
                 && self.pending.is_none()
                 && self.context_pending.is_none()
@@ -491,6 +558,9 @@ impl Session {
         if !self.ready && now >= self.expires
             || self.pending.is_some_and(|(_, expiry)| now >= expiry)
             || self.context_pending.is_some_and(|expiry| now >= expiry)
+            || self
+                .capabilities_pending
+                .is_some_and(|(_, expiry)| now >= expiry)
             || self.rules_handshake.is_some_and(|expiry| now >= expiry)
             || self
                 .rule_pending
@@ -511,6 +581,14 @@ impl Session {
                 break;
             };
             match packet.message {
+                Message::Capabilities { fence, id }
+                    if fence == self.fence
+                        && self
+                            .capabilities_pending
+                            .is_some_and(|(expected, _)| id == expected) =>
+                {
+                    self.capabilities_pending = None;
+                }
                 Message::RulesEnabled { .. }
                 | Message::RuleProposal { .. }
                 | Message::RulesApplied { .. }
@@ -625,6 +703,9 @@ impl Session {
                 _ => return Err(protocol::invalid("unexpected or stale Lua worker response")),
             }
         }
+        if self.capabilities_pending.is_some() {
+            return Ok(logs);
+        }
         if self.offset < self.source.len() {
             let end = (self.offset + source_transfer::CHUNK_BYTES).min(self.source.len());
             if self.channel.send(
@@ -660,6 +741,29 @@ impl Session {
             )? {
                 self.rule_receipt = None;
                 self.rule_pending.as_mut().unwrap().sent = true;
+            }
+        } else if self.ready
+            && self.rules_ready
+            && self.pending.is_none()
+            && self.context_pending.is_none()
+            && self.context_offset == 0
+            && self.rule_pending.is_none()
+            && let Some(view) = self.capabilities_next.as_ref()
+        {
+            let id = self
+                .capabilities_id
+                .checked_add(1)
+                .ok_or_else(|| protocol::invalid("Lua capability sequence exhausted"))?;
+            if self.channel.send(
+                &Work::Capabilities {
+                    view: view.clone(),
+                    id,
+                },
+                now,
+            )? {
+                self.capabilities_next = None;
+                self.capabilities_id = id;
+                self.capabilities_pending = Some((id, now + RESPONSE_TIMEOUT));
             }
         } else if self.ready
             && self.rules_ready
@@ -758,6 +862,7 @@ pub fn worker() -> io::Result<()> {
     let mut runtime = None::<super::Runtime>;
     let mut fence = None;
     let mut sequence = 0;
+    let mut capabilities_id = 0;
     let mut outgoing = None;
     let mut timers_enabled = false;
     let mut rules_enabled = false;
@@ -788,6 +893,30 @@ pub fn worker() -> io::Result<()> {
             && let Some(packet) = channel.receive::<Work>()?
         {
             match packet.message {
+                Work::Capabilities { view, id }
+                    if fence == Some(view.fence)
+                        && runtime.is_some()
+                        && id == capabilities_id + 1 =>
+                {
+                    capabilities_id = id;
+                    let incoming = view.fence;
+                    outgoing = Some(
+                        match runtime
+                            .as_mut()
+                            .unwrap()
+                            .set_capabilities(view, monotonic()?)
+                        {
+                            Ok(()) => Message::Capabilities {
+                                fence: incoming,
+                                id,
+                            },
+                            Err(error) => Message::Failed {
+                                fence: incoming,
+                                reason: error.0.chars().take(512).collect(),
+                            },
+                        },
+                    );
+                }
                 Work::RulesEnable { fence: incoming }
                     if fence == Some(incoming)
                         && runtime.is_some()
@@ -971,6 +1100,7 @@ pub fn worker() -> io::Result<()> {
                         timers_enabled = false;
                         rules_enabled = false;
                         runtime.as_mut().unwrap().disable_rule_transactions();
+                        runtime.as_mut().unwrap().clear_capabilities();
                         context_assembly = None;
                     }
                     runtime

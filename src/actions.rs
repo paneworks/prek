@@ -627,11 +627,12 @@ impl Executor {
         }
         Ok(())
     }
-    pub fn flush(&mut self, channel: &mut Channel) -> io::Result<()> {
+    /// Current executor capacity; grants and fresh target authorization are
+    /// still required for every effect. Shared by broker and Lua availability.
+    pub fn ready_capabilities(&self, now: Duration) -> BTreeSet<Capability> {
         let available =
             self.mode == Mode::Route && self.running.len() + self.pending.len() < MAX_RUNNING;
-        let now = monotonic()?;
-        let capabilities = if available {
+        if available {
             [
                 Capability::Commands,
                 Capability::LuaActions,
@@ -647,7 +648,10 @@ impl Executor {
             .collect()
         } else {
             BTreeSet::new()
-        };
+        }
+    }
+    pub fn flush(&mut self, channel: &mut Channel) -> io::Result<()> {
+        let capabilities = self.ready_capabilities(monotonic()?);
         if self.reported_available.as_ref() != Some(&capabilities) {
             self.queue(Request::Availability {
                 fence: self.fence,

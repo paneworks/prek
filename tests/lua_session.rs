@@ -47,6 +47,142 @@ fn context_view(at: Duration, windows: usize) -> prek::context_transfer::View {
 }
 
 #[test]
+fn real_helper_reports_negotiated_capabilities_readiness_expiry_and_stop() {
+    use prek::protocol::Capability;
+    use std::collections::BTreeSet;
+    let definition = Definition::compile(
+        r#"
+local p=require('prek')
+p.events.on('ready',function()
+ local v=p.capabilities.current()
+ assert(v.fence.configuration=='1' and v.fence.session=='1')
+ assert(p.capabilities.has('commands') and p.capabilities.has('context'))
+ assert(p.capabilities.ready('commands') and not p.capabilities.ready('context'))
+ v.ready[1]='power_actions';assert(not p.capabilities.ready('power_actions'))
+ p.log.info('negotiated')
+end)
+p.events.on('matched',function(event)
+ if event.expired then
+  assert(p.capabilities.current()==nil and not p.capabilities.has('commands'))
+  assert(not p.capabilities.ready('commands'));p.log.info('expired')
+ else
+  assert(p.capabilities.has('commands') and not p.capabilities.ready('commands'))
+  assert(#p.capabilities.current().ready==0);p.log.info('withdrawn')
+ end
+end)
+p.events.on('stop',function()
+ assert(p.capabilities.current()==nil and not p.capabilities.has('context'))
+ assert(not p.capabilities.ready('commands'));p.log.info('cleared')
+end)
+return {version=1}
+"#,
+        "capability-helper.lua",
+    )
+    .unwrap();
+    let mut session = Session::spawn(
+        Path::new(env!("CARGO_BIN_EXE_prek")),
+        fence(1),
+        "seat0",
+        definition,
+    )
+    .unwrap();
+    let negotiated = BTreeSet::from([Capability::Context, Capability::Commands]);
+    session
+        .update_capabilities(negotiated.clone(), BTreeSet::from([Capability::Commands]))
+        .unwrap();
+    assert_eq!(drain(&mut session).unwrap()[0].message, "negotiated");
+    session
+        .update_capabilities(negotiated, BTreeSet::new())
+        .unwrap();
+    session
+        .notify(EventKind::Matched, serde_json::json!({"expired":false}))
+        .unwrap();
+    assert_eq!(drain(&mut session).unwrap()[0].message, "withdrawn");
+    std::thread::sleep(Duration::from_millis(260));
+    session
+        .notify(EventKind::Matched, serde_json::json!({"expired":true}))
+        .unwrap();
+    assert_eq!(drain(&mut session).unwrap()[0].message, "expired");
+    session.stop().unwrap();
+    assert!(
+        session
+            .update_capabilities(BTreeSet::new(), BTreeSet::new())
+            .is_err()
+    );
+    assert_eq!(drain(&mut session).unwrap()[0].message, "cleared");
+}
+
+#[test]
+fn real_helper_coalesces_unsent_readiness_without_changing_negotiated_flags() {
+    use prek::protocol::Capability;
+    use std::collections::BTreeSet;
+    let definition = Definition::compile(
+        r#"
+local p=require('prek')
+p.events.on('ready',function()
+ assert(p.capabilities.has('commands') and not p.capabilities.has('power_actions'))
+ assert(not p.capabilities.ready('commands'));p.log.info('latest')
+end)
+return {version=1}
+"#,
+        "capability-queue.lua",
+    )
+    .unwrap();
+    let mut session = Session::spawn(
+        Path::new(env!("CARGO_BIN_EXE_prek")),
+        fence(1),
+        "seat0",
+        definition,
+    )
+    .unwrap();
+    let negotiated = BTreeSet::from([Capability::Commands]);
+    for _ in 0..100 {
+        session
+            .update_capabilities(negotiated.clone(), negotiated.clone())
+            .unwrap();
+        session
+            .update_capabilities(negotiated.clone(), BTreeSet::new())
+            .unwrap();
+    }
+    assert!(
+        session
+            .update_capabilities(BTreeSet::from([Capability::PowerActions]), BTreeSet::new())
+            .is_err()
+    );
+    assert!(
+        session
+            .update_capabilities(negotiated, BTreeSet::from([Capability::Context]))
+            .is_err()
+    );
+    assert_eq!(drain(&mut session).unwrap()[0].message, "latest");
+}
+
+#[test]
+fn real_helper_never_infers_capabilities_from_configuration_permissions() {
+    let definition = Definition::compile(
+        r#"
+local p=require('prek')
+p.events.on('ready',function()
+ assert(p.capabilities.current()==nil)
+ assert(not p.capabilities.has('power_actions') and not p.capabilities.ready('commands'))
+ p.log.info('unavailable')
+end)
+return {version=1,policy={allow_power_actions=true}}
+"#,
+        "capability-none.lua",
+    )
+    .unwrap();
+    let mut session = Session::spawn(
+        Path::new(env!("CARGO_BIN_EXE_prek")),
+        fence(1),
+        "seat0",
+        definition,
+    )
+    .unwrap();
+    assert_eq!(drain(&mut session).unwrap()[0].message, "unavailable");
+}
+
+#[test]
 fn real_helper_preserves_maximum_identities_in_context_events_actions_and_scheduled_work() {
     use prek::{
         input::Source,

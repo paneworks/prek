@@ -18,6 +18,7 @@
 ---@alias prek.Stage 'discrete'|'begin'|'update'|'end'|'cancel'
 ---@alias prek.TaskState 'pending'|'running'|'sleeping'|'completed'|'cancelled'
 ---@alias prek.EffectKind 'observations'|'commands'|'synthetic_input'|'hyprland_actions'|'morf_actions'|'power_actions'
+---@alias prek.Capability 'context'|'observations'|'lua_events'|'input_events'|'lua_actions'|'runtime_rules'|'hyprland_actions'|'morf_actions'|'power_actions'|'commands'|'synthetic_input'
 ---@alias prek.EventKind 'input'|'matched'|'begin'|'update'|'end'|'cancel'|'skipped'|'ready'|'reload'|'stop'|'recovery'|'session_changed'|'context_changed'|'rules_changed'
 ---@alias prek.MorfAction 'dashboard'|'notifications'|'quick_settings'|'workspace_preview'|'keyboard_show'|'keyboard_hide'|'keyboard_toggle_layout'|'apps'|'web'|'reveal_clock_form'
 ---@alias prek.WindowAction 'reorder_up'|'reorder_down'|'move_left_and_follow'|'move_right_and_follow'|'close'|'scroll_stack'
@@ -613,6 +614,14 @@ local EventsAPI = {}
 local LogAPI = {}
 ---@class prek.SchedulerAPI
 local SchedulerAPI = {}
+---@class (exact) prek.CapabilityView
+---@field fence prek.Fence
+---@field negotiated prek.Capability[] Registration flags; policy and per-effect authorization still apply.
+---@field ready prek.Capability[] Current executor capacity for commands, lua_actions and power_actions only.
+---@field sampled_at prek.MonotonicTime Original parent sampling time; expires after 250ms.
+
+---@class prek.CapabilitiesAPI
+local CapabilitiesAPI = {}
 ---@class prek.ContextAPI
 local ContextAPI = {}
 ---@class prek.DevicesAPI
@@ -640,6 +649,7 @@ local CoordinatesAPI = {}
 ---@field log prek.LogAPI
 ---@field scheduler prek.SchedulerAPI
 ---@field context prek.ContextAPI
+---@field capabilities prek.CapabilitiesAPI
 ---@field devices prek.DevicesAPI
 ---@field seats prek.SeatsAPI
 ---@field outputs prek.OutputsAPI
@@ -649,6 +659,7 @@ local prek = {
     api_version = 1, version = "0.1.0", api = {},
     config = ConfigAPI, rules = RulesAPI, layers = LayersAPI, triggers = TriggersAPI, actions = ActionsAPI,
     units = UnitsAPI, events = EventsAPI, log = LogAPI, scheduler = SchedulerAPI, context = ContextAPI,
+    capabilities = CapabilitiesAPI,
     devices = DevicesAPI, seats = SeatsAPI,
     outputs = OutputsAPI, regions = RegionsAPI, coordinates = CoordinatesAPI,
 }
@@ -760,6 +771,18 @@ function ContextAPI.state() error("Prek editor definition") end
 function ContextAPI.fence() error("Prek editor definition") end
 ---@return string?
 function ContextAPI.error() error("Prek editor definition") end
+
+---Runtime only; owned snapshot of the owning registration. Nil before metadata, after 250ms or at stop.
+---@return prek.CapabilityView?
+function CapabilitiesAPI.current() error("Prek editor definition") end
+---Negotiated membership, not current permission. Unknown names or unavailable metadata return false.
+---@param name string 1–128 bytes; unknown names support forward feature detection.
+---@return boolean
+function CapabilitiesAPI.has(name) error("Prek editor definition") end
+---Executor capacity only; effects still require context, target checks and broker grants.
+---@param name string Only commands, lua_actions and power_actions can be ready.
+---@return boolean
+function CapabilitiesAPI.ready(name) error("Prek editor definition") end
 
 ---Runtime only. Owned permitted metadata received in this VM, at most 256 entries / 4 MiB.
 ---Nil before metadata arrives or when context is unavailable/stale; empty after all known sources are removed.

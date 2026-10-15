@@ -624,6 +624,47 @@ views and retire the old helper. The broker rechecks authority and lock state
 before delivering geometry. Context queries expose no setter, input stream,
 unlock operation or effect capability; effects still require broker grants.
 
+## Negotiated capabilities and executor readiness
+
+These read-only queries run in callbacks, named handlers, timers and tasks:
+
+| Function | Result |
+| --- | --- |
+| `capabilities.current()` | An owned `CapabilityView`, or `nil` without fresh metadata. |
+| `capabilities.has(name)` | Whether the fresh registration negotiated that flag. |
+| `capabilities.ready(name)` | Whether the parent executor currently reports capacity for that effect family. |
+
+`CapabilityView` contains `fence`, `negotiated`, `ready` and `sampled_at`.
+The two capability lists are ordinary one-based arrays. Fence identities are
+exact decimal strings; sampling time uses `{secs, nanos}` on the system
+monotonic clock. Editing a returned table does not change the host view.
+
+Names are `context`, `observations`, `lua_events`, `input_events`, `lua_actions`,
+`runtime_rules`, `hyprland_actions`, `morf_actions`, `power_actions`, `commands`
+and `synthetic_input`. Unknown names return `false` for forward feature
+detection. Nonstring, empty or greater-than-128-byte names raise an error.
+Configuration-time queries raise an error.
+
+The session supplies the actual broker-negotiated flags after checking the
+registration reply. Lua declarations and system policy alone do not populate
+this view. Negotiated flags remain fixed within the session fence; readiness
+can change. Only `commands`, `lua_actions` and `power_actions` can be ready.
+Observation sessions report an empty readiness list. Source loading, executor
+capacity and adapter/context expiry can withdraw readiness.
+
+These queries grant no effects. A negotiated flag is registration metadata;
+current policy, fresh owning context, exact targets and a separate broker grant
+still govern each operation. Readiness uses the same executor calculation as
+broker availability, sampled before transport to Lua. It is not an atomic
+promise that a later operation can execute.
+
+The parent refreshes unchanged metadata at 100 ms intervals and replaces an
+unsent snapshot when readiness changes. One queued snapshot and one correlated
+in-flight acknowledgement bound transport. The original sampling timestamp is
+preserved. At 250 ms, or with a mismatched context fence, `current()` returns
+`nil` and both predicates return `false`. Stop clears the view before callbacks.
+Use [the capability example](../examples/lua/capabilities.lua) for inspection.
+
 ## Callback limits
 
 Callbacks are observational: action constructors still produce declarations and

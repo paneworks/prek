@@ -8,6 +8,8 @@ use std::{
 };
 
 #[cfg(target_os = "linux")]
+mod capabilities;
+#[cfg(target_os = "linux")]
 mod context;
 #[cfg(target_os = "linux")]
 mod devices;
@@ -26,6 +28,8 @@ pub mod session;
 pub mod source_transfer;
 mod tasks;
 mod values;
+#[cfg(target_os = "linux")]
+pub use capabilities::CapabilityView;
 pub use editor::editor_definitions;
 pub use export::export_config;
 pub use handlers::{ActionResult, HandlerRegistration};
@@ -64,6 +68,21 @@ pub fn api() -> serde_json::Value {
     ];
     #[cfg(target_os = "linux")]
     for (name, signature, description) in [
+        (
+            "capabilities.current",
+            "capabilities.current() -> CapabilityView | nil",
+            "Copy fresh broker-negotiated flags and parent executor readiness for this session fence; neither grants effects.",
+        ),
+        (
+            "capabilities.has",
+            "capabilities.has(name) -> boolean",
+            "Test fresh negotiated membership; unknown bounded names and unavailable snapshots return false.",
+        ),
+        (
+            "capabilities.ready",
+            "capabilities.ready(name) -> boolean",
+            "Test current parent executor capacity for commands, lua_actions or power_actions; every effect still requires fresh context, target checks and a broker grant.",
+        ),
         (
             "outputs.list",
             "outputs.list() -> OutputView[] | nil",
@@ -283,6 +302,7 @@ pub fn api() -> serde_json::Value {
         "rule_hooks":{"registration":"configuration only; rule ID must exist in the validated initial configuration","phases":["discrete","begin","update","end","cancel"],"inline_fields":["on_discrete","on_begin","on_update","on_end","on_cancel"],"budget":"shared event subscription, fuel, time and log limits","delivery":"rule ID and phase filtered in the owning VM; registration order; updates may coalesce","effects":"observational; no returned effects, input claims or synthetic ownership","lifetime":"approved source generation; follows stable rule ID across acknowledged edits; removed rules emit no fresh matches; reload disposes the old VM","export":"callbacks require original Lua source"},
         "input_events":{"event":"input","configuration_mode":"observe","agent_flags":["lua","input"],"capability":"input_events","system_permission":"policy.allow_input_events","production_broker":"observation_mode","sources":"explicit policy.allowed_devices selectors on the owning seat; virtual devices excluded","context":"fresh desktop without secure overlay","freshness_ms":250,"payload":"InputPayload","raw_frames":false,"input_claims":false,"delivery":"ordered, no coalescing; overflow retires the affected stream or Lua component","resets":["attached","reconciled","mapping_changed","removed","lost"],"coordinates":"device axis counts","maximum_changes":4096,"maximum_contacts":256,"identity_fields":["source.device","source.generation","sequence","contacts[].id.generation","contacts_started[].generation","contacts_ended[].generation","ended_contacts[].id.generation"],"identity_type":"decimal_string"},
         "context_limits":{"snapshot_bytes":4194304,"chunk_bytes":32768,"transfer_time_ms":1000,"freshness_ms":250,"refresh_ms":100,"queued_snapshots":2,"read_only":true},
+        "capability_queries":{"source":"broker-negotiated registration flags and parent executor readiness; never inferred from Lua source","freshness_ms":250,"refresh_ms":100,"queued_snapshots":1,"in_flight_snapshots":1,"ready_families":["commands","lua_actions","power_actions"],"unavailable":"current returns nil; has and ready return false","unknown_names":"false; names must be strings of 1 to 128 bytes","grants":false,"lifetime":"negotiated flags immutable within the owning fence; stop clears metadata"},
         "geometry_queries":{"context":"fresh owning desktop without secure overlay","lookup":"exact output name or rendered region ID","references":"canonical decimal-string fence, snapshot revision and output geometry generation; copies confer no authority","spaces":["normalized","local","global"],"normalized":"post-transform output axes, not raw device axes","local":"post-transform logical units; rotation and scale applied through output logical size","region_bounds":"global logical, half-open","overlaps":"all matches in provider order, no target selection","unavailable":"nil for absent/stale/inhibited context, missing name or retired reference; known empty arrays remain empty","conversion":"finite numeric points, no clamping; arithmetic overflow raises an error","effects":false},
         "runtime_requires":{"uid":"unprivileged active session","capabilities":["context","observations","lua_events"],"thread":"owning Luna arena","generation":"current broker/configuration/session fence"},
         "action_requires":{"agent_flags":["lua","commands"],"capabilities":["context","observations","lua_events","lua_actions","commands"],"implemented_effects":["commands","observations","power_actions"],"power_alternative":{"agent_flags":["lua","power"],"system_permission":"policy.allow_power_actions","broker_mode":"route","target":"explicit frozen output"},"grant_time_ms":250},
@@ -579,6 +599,7 @@ fn instantiate(
                 "log",
                 "scheduler",
                 "context",
+                "capabilities",
                 "devices",
                 "seats",
                 "outputs",
@@ -676,6 +697,10 @@ fn instantiate(
             log.set(ctx, "info", runtime::logger(&ctx, host.clone()))?;
             #[cfg(target_os = "linux")]
             {
+                let capabilities: Table = module.get(ctx, "capabilities")?;
+                for field in ["current", "has", "ready"] {
+                    capabilities.set(ctx, field, self::capabilities::getter(&ctx, host.clone(), field))?;
+                }
                 geometry::register(&ctx, module, host.clone())?;
                 let context: Table = module.get(ctx, "context")?;
                 for field in ["snapshot", "binding", "state", "fence", "error"] {

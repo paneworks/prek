@@ -211,6 +211,8 @@ pub(super) struct Host {
     pub(super) task_clock: Option<(Duration, Instant)>,
     pub(super) rules: super::rule_api::State,
     #[cfg(target_os = "linux")]
+    pub(super) capabilities: Option<super::CapabilityView>,
+    #[cfg(target_os = "linux")]
     pub(super) context: Option<crate::context_transfer::View>,
     #[cfg(target_os = "linux")]
     pub(super) context_clock: Option<Instant>,
