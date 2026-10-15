@@ -68,6 +68,30 @@
     "context_changed",
     "rules_changed"
   ],
+  "experimental_adapters": {
+    "power": {
+      "actions": [
+        "blank",
+        "wake"
+      ],
+      "cage_flags": [
+        "layers",
+        "input",
+        "power"
+      ],
+      "completion": "accepted dispatch and observed compositor-reported DPMS state; no hardware power claim",
+      "deadline": "remaining broker grant and 200ms total IPC budget",
+      "excluded": [
+        "lock_and_blank",
+        "toggle",
+        "suspend"
+      ],
+      "host_api": "actions::Executor::set_power_adapter(PowerAdapter)",
+      "public_session_negotiation": false,
+      "target": "explicit frozen owning output, exact geometry generation and binding",
+      "uncertain": "any failure after a mutating request may have been written; never retry"
+    }
+  },
   "geometry_queries": {
     "context": "fresh owning desktop without secure overlay",
     "conversion": "finite numeric points, no clamping; arithmetic overflow raises an error",

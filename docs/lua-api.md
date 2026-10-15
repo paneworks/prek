@@ -849,6 +849,51 @@ session capability, context and ownership checks in routing mode. Functions in
 the configuration result are rejected. Named callbacks use their private
 approved registry; callable pointers are never serialized into configuration.
 
+## Experimental output-scoped DPMS adapter
+
+The Rust session executor has an explicit host opt-in for typed power plans:
+`actions::PowerAdapter::new(client, view)`,
+`Executor::set_power_adapter(adapter)` and `Executor::update_power_context(view)`.
+The host supplies a broker-approved binding/view and an already verified
+Hyprland client; these are not Lua authority setters. **Public `prek session`
+power negotiation remains disabled.** Ordinary sessions still execute only the
+command/event effects described above. This adapter foundation does not enable
+production routing or supply a user CLI permission shortcut.
+
+When a host authorizes it, existing `actions.power {action="blank"}` and
+`actions.power {action="wake"}` plans execute against the offered match's
+explicit frozen output. A named handler must declare `power_actions`; the
+executor also requires a route-mode offer, negotiated capability, its exact
+seat/fence/gesture/ordinal and a fresh execution grant. It captures output state
+at offer time, rejects missing/unsafe names, retired geometry generations and
+unusable context, and rechecks actual compositor identity/lock/geometry before
+the effect. No focused-output fallback or global DPMS command is used.
+
+The deadline is the grant's remaining time, capped at 200 ms for all adapter
+IPC. The unprivileged parent executor performs this bounded work outside the
+Lua VM and physical forwarding loop. A plan may contain at most one power
+operation. Direct power declarations run only in discrete/begin phases;
+named handlers can explicitly return an operation in their authorized phase.
+Lock-and-blank, toggles, suspend and hardware-key policy changes are unavailable.
+A witnessed lock latches adapter inhibition; a new approved generation needs
+its own adapter. Expired/unusable adapters withdraw power availability.
+
+An applied completion requires dispatch acceptance followed by a snapshot
+reporting the requested DPMS state for the same output geometry. This proves
+the compositor's DPMS state, not physical panel power or suspend wake. A failure
+before mutation is unavailable/cancelled; any failure after bytes of the
+mutation may have been written is uncertain. Effects are never retried after
+uncertainty. Existing duplicate suppression, cancellation and generation
+retirement apply. Partial composed plans retain uncertain completion semantics.
+
+`nix run .#cage-test -- --layers --input --power` executes named Lua plans through
+the actual helper and executor, with explicit model broker grants, and checks
+DPMS off/on through stock IPC on the owned nested output. Add `--visible` for
+the owned visible path. These fixtures open no host evdev devices and do not
+change host-display DPMS. Broker/logind authorization, production target
+preflight/negotiation, lock-provider integration and physical phone/power
+acceptance remain required.
+
 ## Limits, libraries and errors
 
 The configuration VM includes Luna's core libraries and the `prek` module.

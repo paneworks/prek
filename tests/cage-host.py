@@ -24,6 +24,8 @@ def main():
                         help="verify a Lua layer deactivation while its rule stays enabled")
     parser.add_argument("--input", action="store_true",
                         help="verify normalized source observations through worker IPC and Lua")
+    parser.add_argument("--power", action="store_true",
+                        help="verify Lua-planned DPMS blank/wake on the owned nested output")
     parser.add_argument("--visible", action="store_true",
                         default=os.environ.get("VISIBLE") == "1")
     parser.add_argument("--output", default="target/cage-host")
@@ -139,6 +141,7 @@ def main():
                                    PREK_LOCAL_CAGE_APP=args.prek_app,
                                    PREK_CAGE_LAYER_TEST="1" if args.layers else "0",
                                    PREK_CAGE_INPUT_TEST="1" if args.input else "0")
+                fixture_env["PREK_CAGE_POWER_TEST"] = "1" if args.power else "0"
                 instances = [path.parent.name for path in (runtime / "hypr").glob("*/.socket2.sock")]
                 if len(instances) != 1:
                     raise RuntimeError("expected one owned compositor instance")
@@ -208,6 +211,12 @@ def main():
                     fixture.wait(timeout=20)
                     if fixture.returncode != 0:
                         raise RuntimeError("Prek fixture failed after phase two")
+                    if args.power:
+                        power = json.loads((output / "power-receipts.json").read_text())
+                        assert [row["completion"] for row in power] == ["applied", "applied"]
+                        assert [row["screen"] for row in power] == ["off", "on"]
+                        assert power[0]["output"] == power[1]["output"]
+                        print("PASS: granted Lua plans blanked and woke only the owned nested output; stock IPC confirmed DPMS off/on.")
                     dispatches = json.loads((output / "dispatches.json").read_text())
                     a = [event for event in dispatches if event["rule"] == "local-a"]
                     b = [event for event in dispatches if event["rule"] == "local-b"]

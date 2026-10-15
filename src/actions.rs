@@ -17,6 +17,8 @@ use std::{
     process::{Child, Command, Stdio},
     time::Duration,
 };
+mod power;
+pub use power::PowerAdapter;
 
 pub const MAX_RUNNING: usize = 8;
 const MAX_PENDING: usize = 64;
@@ -26,6 +28,7 @@ struct Pending {
     expires: Option<Duration>,
     resolving: bool,
     resolved: Option<Vec<Action>>,
+    power_target: Option<crate::context::OutputState>,
 }
 
 struct Running {
@@ -60,10 +63,11 @@ pub struct Executor {
     pending: BTreeMap<(u64, u64), Pending>,
     running: Vec<Running>,
     outgoing: VecDeque<Request>,
-    reported_available: Option<bool>,
+    reported_available: Option<BTreeSet<Capability>>,
     lua_ready: bool,
     groups: BTreeMap<ExecutionKey, ExecutionGroup>,
     emitted: VecDeque<(Fence, u64, u64, String)>,
+    power: Option<PowerAdapter>,
 }
 impl Executor {
     pub fn new(
@@ -94,6 +98,7 @@ impl Executor {
             lua_ready: false,
             groups: BTreeMap::new(),
             emitted: VecDeque::new(),
+            power: None,
         })
     }
     pub fn transition(&mut self, fence: Fence) -> io::Result<()> {
@@ -113,6 +118,7 @@ impl Executor {
         self.reported_available = None;
         self.lua_ready = false;
         self.emitted.clear();
+        self.power = None;
         // Already dispatched commands cannot be undone. Keep reaping them,
         // counting them against the bound, and discard their old completions.
         Ok(())
@@ -151,8 +157,15 @@ impl Executor {
         };
         if fence != self.fence
             || self.mode != Mode::Route
-            || !self.capabilities.contains(&Capability::Commands)
-            || !matches!(action, Action::Command { .. } | Action::Lua { .. })
+            || !matches!(
+                action,
+                Action::Command { .. }
+                    | Action::Lua { .. }
+                    | Action::Power {
+                        action: crate::config::PowerAction::Wake
+                            | crate::config::PowerAction::Blank
+                    }
+            )
             || !protocol::action_capabilities(action).is_subset(&self.capabilities)
             || source.seat != self.seat
             || *id == 0
@@ -166,6 +179,23 @@ impl Executor {
             ));
         }
         crate::config::validate_action(action).map_err(|error| protocol::invalid(&error))?;
+        let power_target =
+            if protocol::action_capabilities(action).contains(&Capability::PowerActions) {
+                let adapter = self
+                    .power
+                    .as_ref()
+                    .ok_or_else(|| protocol::invalid("power adapter unavailable"))?;
+                let Event::Matched {
+                    output: Some(output),
+                    ..
+                } = event.as_ref()
+                else {
+                    return Err(protocol::invalid("power action requires a frozen output"));
+                };
+                Some(adapter.target(output, now)?)
+            } else {
+                None
+            };
         if self.seen.get(id).is_some_and(|old| ordinal <= old)
             || (!self.seen.contains_key(id) && self.seen.len() >= MAX_GESTURES)
             || self.pending.len() >= MAX_PENDING
@@ -184,9 +214,32 @@ impl Executor {
                 expires: None,
                 resolving: false,
                 resolved: None,
+                power_target,
             },
         );
         Ok(())
+    }
+    /// Explicit host opt-in. Public broker negotiation remains separate.
+    pub fn set_power_adapter(&mut self, adapter: PowerAdapter) -> io::Result<()> {
+        if !self.capabilities.contains(&Capability::PowerActions)
+            || self.power.is_some()
+            || adapter.fence() != self.fence
+            || adapter.seat() != Some(self.seat.as_str())
+        {
+            return Err(protocol::invalid(
+                "power adapter exceeds executor authority",
+            ));
+        }
+        self.power = Some(adapter);
+        self.reported_available = None;
+        Ok(())
+    }
+    pub fn update_power_context(&mut self, view: crate::context_transfer::View) -> io::Result<()> {
+        self.reported_available = None;
+        self.power
+            .as_mut()
+            .ok_or_else(|| protocol::invalid("power adapter unavailable"))?
+            .update_context(view)
     }
     pub fn grant(
         &mut self,
@@ -381,7 +434,7 @@ impl Executor {
                 }
                 continue;
             }
-            if matches!(action, Action::Command { .. })
+            if matches!(action, Action::Command { .. } | Action::Power { .. })
                 && !matches!(stage, Stage::Discrete | Stage::Begin)
             {
                 self.complete(id, ordinal, Completion::Cancelled)?;
@@ -397,9 +450,26 @@ impl Executor {
                 .count();
             if self.running.len() + commands > MAX_RUNNING
                 || self.emitted.len() + actions.len() > MAX_PENDING
+                || actions.iter().any(|action| {
+                    !matches!(
+                        action,
+                        Action::Command { .. }
+                            | Action::Event { .. }
+                            | Action::Power {
+                                action: crate::config::PowerAction::Wake
+                                    | crate::config::PowerAction::Blank
+                            }
+                    )
+                })
                 || actions
                     .iter()
-                    .any(|action| !matches!(action, Action::Command { .. } | Action::Event { .. }))
+                    .filter(|action| matches!(action, Action::Power { .. }))
+                    .count()
+                    > 1
+                || actions
+                    .iter()
+                    .any(|action| matches!(action, Action::Power { .. }))
+                    && (self.power.is_none() || pending.power_target.is_none())
             {
                 self.complete(id, ordinal, Completion::Unavailable)?;
                 continue;
@@ -422,6 +492,24 @@ impl Executor {
                     applied = true;
                     emitted_event = true;
                     continue;
+                }
+                if let Action::Power { action } = action {
+                    let completion = self.power.as_mut().unwrap().execute(
+                        action,
+                        pending.power_target.as_ref().unwrap(),
+                        pending.expires.unwrap(),
+                    );
+                    if completion == Completion::Applied {
+                        applied = true;
+                        emitted_event = true;
+                        continue;
+                    }
+                    result = if applied {
+                        Completion::Uncertain
+                    } else {
+                        completion
+                    };
+                    break;
                 }
                 let Action::Command { argv } = action else {
                     unreachable!()
@@ -509,22 +597,30 @@ impl Executor {
     }
     pub fn flush(&mut self, channel: &mut Channel) -> io::Result<()> {
         let available = self.running.len() + self.pending.len() < MAX_RUNNING;
-        if self.reported_available != Some(available) {
+        let now = monotonic()?;
+        let capabilities = if available {
+            [
+                Capability::Commands,
+                Capability::LuaActions,
+                Capability::PowerActions,
+            ]
+            .into_iter()
+            .filter(|capability| {
+                self.capabilities.contains(capability)
+                    && (*capability != Capability::LuaActions || self.lua_ready)
+                    && (*capability != Capability::PowerActions
+                        || self.power.as_ref().is_some_and(|power| power.ready(now)))
+            })
+            .collect()
+        } else {
+            BTreeSet::new()
+        };
+        if self.reported_available.as_ref() != Some(&capabilities) {
             self.queue(Request::Availability {
                 fence: self.fence,
-                capabilities: if available {
-                    [Capability::Commands, Capability::LuaActions]
-                        .into_iter()
-                        .filter(|capability| {
-                            self.capabilities.contains(capability)
-                                && (*capability != Capability::LuaActions || self.lua_ready)
-                        })
-                        .collect()
-                } else {
-                    BTreeSet::new()
-                },
+                capabilities: capabilities.clone(),
             })?;
-            self.reported_available = Some(available);
+            self.reported_available = Some(capabilities);
         }
         for _ in 0..8 {
             let Some(request) = self.outgoing.front() else {

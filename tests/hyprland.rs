@@ -1,6 +1,8 @@
 #![cfg(target_os = "linux")]
 
 use prek::hyprland::Client;
+#[path = "support/power_tests.rs"]
+mod power;
 use std::{
     fs,
     io::{Read, Write},

@@ -598,7 +598,185 @@ return p.config.new {
     }
     session.stop().unwrap();
     settle(&mut session, &mut logs);
+    if std::env::var("PREK_CAGE_POWER_TEST").as_deref() == Ok("1") {
+        let checking = Client::open(runtime, &instance, uid, &executable).unwrap();
+        power_acceptance(client, &checking, &binding, fence, &app, &output);
+    }
     println!(
         "Verified real Hyprland context and Luna transaction receipts, with model-routed A consumption before the edit and A/B forwarding afterward"
     );
+}
+
+fn power_acceptance(
+    client: Client,
+    checking: &Client,
+    binding: &Binding,
+    fence: Fence,
+    app: &Path,
+    output: &Path,
+) {
+    use prek::{
+        actions::{Executor, PowerAdapter},
+        config::{Action, PowerAction, Screen},
+        protocol::{Completion, Mode, Request},
+        rules::{Event, Evidence, Stage},
+    };
+    let definition = Definition::compile(
+        r#"
+local p=require('prek')
+local handler=p.actions.define('screen',{requires={'power_actions'}},function(payload)
+ return p.actions.power{action=payload.event.rule}
+end)
+return p.config.new{rules={
+ p.rules.define{id='blank',trigger=p.triggers.key{key='KEY_A'},action=handler},
+ p.rules.define{id='wake',trigger=p.triggers.key{key='KEY_B'},action=handler},
+}}
+"#,
+        "owned-power.lua",
+    )
+    .unwrap();
+    let config = definition.validate().unwrap();
+    let mut session = Session::spawn(app, fence, "seat0", definition).unwrap();
+    let mut ignored = Vec::new();
+    settle(&mut session, &mut ignored);
+    let mut sampler = ContextSampler::default();
+    let first = sampler.sample(checking, 1, SessionKind::User).unwrap();
+    assert_eq!(
+        first.outputs.len(),
+        1,
+        "power fixture must own exactly one nested output"
+    );
+    let view = |snapshot: Snapshot| View {
+        fence,
+        sampled_at: snapshot.captured_at,
+        state: snapshot.state,
+        error: None,
+        context: Some(Box::new(ProvidedContext {
+            binding: binding.clone(),
+            snapshot,
+        })),
+    };
+    let mut executor = Executor::new(
+        fence,
+        "seat0".into(),
+        Mode::Route,
+        BTreeSet::from([Capability::LuaActions, Capability::PowerActions]),
+    )
+    .unwrap();
+    executor
+        .set_power_adapter(PowerAdapter::new(client, view(first)).unwrap())
+        .unwrap();
+    executor.lua_ready(true);
+    let (mut channel, mut broker) = Channel::pair().unwrap();
+    let mut receipts = Vec::new();
+    for (index, (power, screen)) in [
+        (PowerAction::Blank, Screen::Off),
+        (PowerAction::Wake, Screen::On),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let snapshot = sampler.sample(checking, 1, SessionKind::User).unwrap();
+        let name = snapshot.outputs[0].geometry.name.clone();
+        let expires = snapshot.captured_at + Duration::from_millis(250);
+        let fresh = view(snapshot);
+        executor.update_power_context(fresh.clone()).unwrap();
+        session.update_context(fresh).unwrap();
+        settle(&mut session, &mut ignored);
+        let id = index as u64 + 1;
+        let event = Box::new(Event::Matched {
+            version: 1,
+            rule: config.rules[index].id.clone(),
+            id,
+            ordinal: 1,
+            source: Source {
+                device: 500,
+                generation: 1,
+                seat: "seat0".into(),
+            },
+            at: monotonic().unwrap(),
+            config_generation: 1,
+            session_generation: 1,
+            stage: Stage::Discrete,
+            action: config.rules[index].action.clone(),
+            evidence: Evidence::Key { down: true },
+            window: None,
+            output: Some(name.clone()),
+            workspace: None,
+        });
+        assert!(matches!(
+            event.as_ref(),
+            Event::Matched {
+                action: Action::Lua { .. },
+                ..
+            }
+        ));
+        executor.offer(fence, event, monotonic().unwrap()).unwrap();
+        executor.flush(&mut channel).unwrap();
+        let mut authorized = false;
+        while let Some(packet) = broker.receive::<Request>().unwrap() {
+            if matches!(packet.message,Request::Authorize{id:incoming,ordinal:1,..} if incoming==id)
+            {
+                authorized = true;
+            }
+        }
+        assert!(
+            authorized,
+            "effect must first request its explicit model broker grant"
+        );
+        executor
+            .grant(fence, id, 1, expires, monotonic().unwrap())
+            .unwrap();
+        let deadline = monotonic().unwrap() + Duration::from_secs(3);
+        let completion = loop {
+            executor
+                .execute_ready_with_lua(monotonic().unwrap(), Some(&mut session))
+                .unwrap();
+            assert!(session.step(monotonic().unwrap()).unwrap().is_empty());
+            for (id, ordinal, result) in session.take_actions() {
+                executor
+                    .resolve_action(id, ordinal, result, monotonic().unwrap())
+                    .unwrap();
+            }
+            executor.flush(&mut channel).unwrap();
+            let mut completed = None;
+            while let Some(packet) = broker.receive::<Request>().unwrap() {
+                if let Request::Complete {
+                    id: incoming,
+                    ordinal: 1,
+                    result,
+                    ..
+                } = packet.message
+                {
+                    assert_eq!(incoming, id);
+                    completed = Some(result);
+                }
+            }
+            if let Some(completion) = completed {
+                break completion;
+            }
+            assert!(
+                monotonic().unwrap() < deadline,
+                "power plan did not complete"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert_eq!(
+            completion,
+            Completion::Applied,
+            "DPMS plan {power:?} failed"
+        );
+        let observed = sampler.sample(checking, 1, SessionKind::User).unwrap();
+        assert_eq!(observed.outputs[0].screen, screen);
+        receipts.push(
+            serde_json::json!({"id":id,"completion":completion,"screen":screen,"output":name}),
+        );
+    }
+    session.stop().unwrap();
+    settle(&mut session, &mut ignored);
+    fs::write(
+        output.join("power-receipts.json"),
+        serde_json::to_vec(&receipts).unwrap(),
+    )
+    .unwrap();
 }

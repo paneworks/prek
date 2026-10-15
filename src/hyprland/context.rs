@@ -45,11 +45,19 @@ impl ContextSampler {
         generation: u64,
         kind: SessionKind,
     ) -> io::Result<Snapshot> {
+        self.sample_until(client, generation, kind, Instant::now() + REQUEST_TIME)
+    }
+    pub(crate) fn sample_until(
+        &mut self,
+        client: &Client,
+        generation: u64,
+        kind: SessionKind,
+        until: Instant,
+    ) -> io::Result<Snapshot> {
         if generation == 0 {
             return Err(invalid("context requires a positive session generation"));
         }
         let captured_at = crate::ipc::monotonic()?;
-        let until = Instant::now() + REQUEST_TIME;
         if self.inhibited {
             return Err(invalid("a completed lock-provider transition is required"));
         }

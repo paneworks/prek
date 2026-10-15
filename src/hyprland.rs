@@ -322,13 +322,27 @@ impl Client {
         )
     }
     fn exchange(&self, request: &str, until: Instant) -> io::Result<Vec<u8>> {
+        self.exchange_effect(request, until, &mut false)
+    }
+    pub(crate) fn exchange_effect(
+        &self,
+        request: &str,
+        until: Instant,
+        sent: &mut bool,
+    ) -> io::Result<Vec<u8>> {
         let mut stream = connect(&self.socket_path(), until)?;
         self.verify(&stream)?;
         let mut pending = request.as_bytes();
         while !pending.is_empty() {
+            if Instant::now() >= until {
+                return Err(io::ErrorKind::TimedOut.into());
+            }
             match stream.write(pending) {
                 Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
-                Ok(written) => pending = &pending[written..],
+                Ok(written) => {
+                    *sent = true;
+                    pending = &pending[written..];
+                }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     wait(stream.as_raw_fd(), libc::POLLOUT, until)?
                 }
@@ -378,6 +392,11 @@ impl Client {
     }
     pub fn uid(&self) -> u32 {
         self.uid
+    }
+    pub(crate) fn bound_to(&self, binding: &crate::context::Binding) -> bool {
+        self.uid == binding.uid
+            && self.pid == binding.compositor_pid
+            && self.start == binding.compositor_start
     }
     pub fn consumer(&self) -> Consumer {
         Consumer::Hyprland {
