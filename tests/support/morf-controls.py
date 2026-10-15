@@ -45,9 +45,12 @@ def main():
     assert len(monitors) == 1
     name = monitors[0]["name"]
     observations = []
+    rpc_timings = []
+    rpc_calls = 0
+    timing_limit = 256
     producer = None
 
-    def rpc(target=None, *values):
+    def exchange(target, *values):
         nonlocal producer
         with socket.socket(socket.AF_UNIX) as client:
             client.settimeout(3)
@@ -69,6 +72,20 @@ def main():
         results = reply["result"]
         return json.loads(results[0]) if results and isinstance(results[0], str) else (results[0] if results else None)
 
+    def rpc(target=None, *values):
+        nonlocal rpc_calls
+        started = time.monotonic_ns()
+        outcome = "error"
+        try:
+            result = exchange(target, *values)
+            outcome = "reply"
+            return result
+        finally:
+            rpc_calls += 1
+            if len(rpc_timings) < timing_limit:
+                rpc_timings.append(dict(target=target or "shutdown", outcome=outcome,
+                                        elapsed_ns=time.monotonic_ns() - started))
+
     serial = 0
 
     def request(action, phase="discrete"):
@@ -79,12 +96,12 @@ def main():
 
     def send(request, error=None):
         reply = rpc("prek-control", json.dumps(request))
+        observations.append(dict(request=dict(request), reply=reply))
         assert reply["version"] == 1 and reply["output"] == name
         for field in ("epoch", "gesture", "ordinal"):
             assert reply[field] == request[field]
         assert reply["status"] == ("rejected" if error else "accepted"), reply
         assert reply.get("error") == error, reply
-        observations.append(dict(request=dict(request), reply=reply))
 
     def state():
         value = rpc("prek-status", name)
@@ -265,16 +282,25 @@ def main():
                 native_shell_binding=final_native, native_endpoint_removed=True,
                 shutdown_acknowledged=shutdown_acknowledged,
                 actual_compositor_layers=layers, initial=initial, final=final_state,
-                settling=settling, observations=observations)) + "\n")
+                settling=settling, observations=observations,
+                rpc_calls=rpc_calls, rpc_timing_limit=timing_limit, rpc_timings=rpc_timings)) + "\n")
             print("PASS: actual Morf shell controllers handled frozen-output panels, keyboard, deduplication and workspace progress on the owned compositor.")
         finally:
-            if child.poll() is None:
+            process_before_cleanup = child.poll()
+            if process_before_cleanup is None:
                 os.killpg(child.pid, signal.SIGTERM)
                 try:
                     child.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     os.killpg(child.pid, signal.SIGKILL)
                     child.wait(timeout=3)
+            if not (output / "morf-controls-receipts.json").exists():
+                (output / "morf-controls-failure.json").write_text(json.dumps(dict(
+                    status="failed", producer_pid=producer, process_result=child.poll(),
+                    process_before_cleanup=process_before_cleanup,
+                    root_grant_tested=False, recognizer_handoff_tested=False,
+                    observations=observations, rpc_calls=rpc_calls,
+                    rpc_timing_limit=timing_limit, rpc_timings=rpc_timings)) + "\n")
 
 
 if __name__ == "__main__":
