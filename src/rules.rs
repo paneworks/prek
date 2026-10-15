@@ -342,6 +342,8 @@ pub struct Engine {
     last_at: Option<Duration>,
     capture_rule: Option<String>,
     captured: Vec<Stroke>,
+    capture_input: bool,
+    captured_input: Option<NormalizedFrame>,
     sequences: Vec<Sequence>,
     routing: bool,
 }
@@ -385,6 +387,8 @@ impl Engine {
             last_at: None,
             capture_rule: None,
             captured: Vec::new(),
+            capture_input: false,
+            captured_input: None,
             sequences,
             routing: false,
         })
@@ -575,6 +579,49 @@ impl Engine {
     }
     pub fn take_events(&mut self) -> Vec<Event> {
         std::mem::take(&mut self.events)
+    }
+    pub(crate) fn capture_input(&mut self, enabled: bool) {
+        self.capture_input = enabled;
+        self.captured_input = None;
+    }
+    pub(crate) fn take_input(&mut self) -> Option<crate::input_events::Event> {
+        let frame = self.captured_input.take()?;
+        let device = &self.devices.get(&frame.raw.source.device)?.device;
+        crate::input_events::Event::frame(&self.config, device, frame)
+    }
+    pub(crate) fn input_states(&self, at: Duration) -> Vec<crate::input_events::Event> {
+        self.devices
+            .values()
+            .filter_map(|state| {
+                crate::input_events::Event::reset(
+                    &self.config,
+                    &state.device,
+                    at,
+                    crate::input_events::ResetReason::Attached,
+                    &state.keys,
+                    &state.contacts,
+                )
+            })
+            .collect()
+    }
+    pub(crate) fn input_reset(
+        &self,
+        source: &Source,
+        at: Duration,
+        reason: crate::input_events::ResetReason,
+    ) -> Option<crate::input_events::Event> {
+        let state = self
+            .devices
+            .get(&source.device)
+            .filter(|state| &state.device.source == source)?;
+        crate::input_events::Event::reset(
+            &self.config,
+            &state.device,
+            at,
+            reason,
+            &state.keys,
+            &state.contacts,
+        )
     }
     pub fn deadline(&self) -> Option<Duration> {
         self.workers
@@ -971,6 +1018,11 @@ impl Engine {
         Ok(())
     }
     fn frame(&mut self, frame: NormalizedFrame) -> io::Result<()> {
+        if self.capture_input
+            && policy_selected(&self.config, &self.devices[&frame.raw.source.device].device)
+        {
+            self.captured_input = Some(frame.clone());
+        }
         let source = &frame.raw.source;
         let at = frame.raw.at;
         self.advance(at)?;

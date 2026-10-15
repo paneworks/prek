@@ -60,6 +60,15 @@ p.events.on("matched", function(payload)
 end)
 p.events.on("context_changed", function(payload) p.log.info(payload.state, {revision = payload.revision}) end)
 p.events.on("rules_changed", function(payload) p.log.info("receipt", {accepted = payload.accepted}) end)
+p.events.on("input", function(payload)
+    if payload.input.kind == "frame" then
+        ---@type string
+        local sequence = payload.input.sequence
+        for _, change in ipairs(payload.input.changes) do
+            if change.kind == "key" then p.log.info(sequence, {code = change.code}) end
+        end
+    else p.log.info(payload.input.reason, {keys = payload.input.keys}) end
+end)
 local timer = p.scheduler.after("1s", function(payload) p.log.info("tick", {id = payload.timer.id}) end)
 timer:cancel()
 local task = p.scheduler.spawn(function(payload)

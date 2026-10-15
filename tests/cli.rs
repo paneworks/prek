@@ -589,6 +589,9 @@ fn t85_installed_api_discovery_matches_the_configuration_manifest() {
     assert!(editor.status.success());
     assert_eq!(editor.stdout, include_bytes!("../docs/lua/prek.lua"));
     assert!(!run(&["api", "--lua", "--json"]).status.success());
+    let denied = run(&["session", "--input"]);
+    assert!(!denied.status.success());
+    assert!(String::from_utf8_lossy(&denied.stderr).contains("--lua"));
 }
 
 #[cfg(target_os = "linux")]

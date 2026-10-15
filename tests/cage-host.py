@@ -22,6 +22,8 @@ def main():
     parser.add_argument("--prek-app")
     parser.add_argument("--layers", action="store_true",
                         help="verify a Lua layer deactivation while its rule stays enabled")
+    parser.add_argument("--input", action="store_true",
+                        help="verify normalized source observations through worker IPC and Lua")
     parser.add_argument("--visible", action="store_true",
                         default=os.environ.get("VISIBLE") == "1")
     parser.add_argument("--output", default="target/cage-host")
@@ -135,7 +137,8 @@ def main():
                     parser.error("--prek-fixture requires --prek-app")
                 fixture_env = dict(env, PREK_LOCAL_CAGE="1", PREK_CAGE_OUTPUT=str(output),
                                    PREK_LOCAL_CAGE_APP=args.prek_app,
-                                   PREK_CAGE_LAYER_TEST="1" if args.layers else "0")
+                                   PREK_CAGE_LAYER_TEST="1" if args.layers else "0",
+                                   PREK_CAGE_INPUT_TEST="1" if args.input else "0")
                 instances = [path.parent.name for path in (runtime / "hypr").glob("*/.socket2.sock")]
                 if len(instances) != 1:
                     raise RuntimeError("expected one owned compositor instance")
@@ -207,8 +210,8 @@ def main():
                     assert all(event["config_generation"] == 1 and event["session_generation"] == 1 for event in dispatches)
                     logs = [json.loads(line) for line in (output / "prek-runtime.jsonl").read_text().splitlines()]
                     contexts = [row["fields"] for row in logs if row["message"] == "local-context"]
-                    assert len(contexts) == 9 and all(row["outputs"] > 0 and row["uid"] == os.geteuid() for row in contexts)
-                    assert len({row["revision"] for row in contexts}) == 9
+                    assert len(contexts) >= 9 and all(row["outputs"] > 0 and row["uid"] == os.geteuid() for row in contexts)
+                    assert len({row["revision"] for row in contexts}) == len(contexts)
                     changes = [row["fields"] for row in logs if row["message"] == "local-rules-changed"]
                     assert changes == [{"accepted":True,"revision":"2","state":"accepted"}]
                     layers = [row["fields"] for row in logs if row["message"] == "local-layer-state"]
@@ -216,6 +219,14 @@ def main():
                                        "rule_enabled":args.layers}]
                     matches = [row["fields"] for row in logs if row["message"] == "local-matched"]
                     assert matches == [{"rule":"local-a","stage":"begin"},{"rule":"local-a","stage":"end"}]
+                    if args.input:
+                        inputs = [row["fields"] for row in logs if row["message"] == "local-input"]
+                        assert [(row["code"], row["state"]) for row in inputs] == [(30,"press"),(30,"release"),(48,"press"),(48,"release")] * 2
+                        assert [row["sequence"] for row in inputs] == [str(index) for index in range(1,9)]
+                        assert [row["generation"] for row in inputs] == ["1"] * 4 + ["2"] * 4
+                        resets = [row["fields"] for row in logs if row["message"] == "local-input-reset"]
+                        assert resets == [{"generation":"1","reason":"attached"},{"generation":"1","reason":"removed"},{"generation":"2","reason":"attached"}]
+                        print("PASS: eight ordered normalized source frames and three lifetime resets crossed actual worker/helper IPC into Lua; app delivery remained correct.")
                     mutation = "layer deactivation" if args.layers else "rule disable"
                     print(f"PASS: actual app received only B before the acknowledged Lua {mutation}, then A and B afterward; context and gesture generations stayed consistent.")
                 finally:

@@ -66,6 +66,10 @@ pub enum Report {
         subscription: Subscription,
         event: Box<Event>,
     },
+    Input {
+        subscription: Subscription,
+        input: Box<crate::input_events::Event>,
+    },
     Ended {
         subscription: Subscription,
         reason: String,
@@ -109,6 +113,7 @@ impl Report {
         match self {
             Self::Ready { subscription }
             | Self::Observation { subscription, .. }
+            | Self::Input { subscription, .. }
             | Self::Ended { subscription, .. }
             | Self::ContextLost { subscription }
             | Self::Dispatch { subscription, .. } => subscription,
@@ -122,6 +127,19 @@ struct Observer {
     started: Duration,
     expires: Duration,
     engine: Engine,
+    input_enabled: bool,
+    input_started: Duration,
+}
+
+fn permits_input(config: &Config, subscription: &Subscription, now: Duration) -> bool {
+    crate::input_events::permitted_subscription(
+        config,
+        &subscription.capabilities,
+        subscription.context.as_deref(),
+        &subscription.seat,
+        subscription.fence.session,
+        now,
+    )
 }
 struct Registry {
     config: Config,
@@ -259,10 +277,11 @@ impl Registry {
             self.remove(&subscription);
         }
         self.reports.retain(|(report, _)| {
-            update
-                .seats
-                .iter()
-                .any(|subscription| subscription.same_registration(report.subscription()))
+            update.seats.iter().any(|subscription| {
+                subscription.same_registration(report.subscription())
+                    && (!matches!(report, Report::Input { .. })
+                        || permits_input(&self.config, subscription, now))
+            })
         });
         self.bytes = self.reports.iter().map(|(_, bytes)| bytes).sum();
         self.blocked.retain(|seat, fence| {
@@ -271,11 +290,23 @@ impl Registry {
                 .iter()
                 .any(|subscription| &subscription.seat == seat && &subscription.fence == fence)
         });
+        let mut initial_inputs = Vec::new();
         for subscription in update.seats {
             if self.blocked.get(&subscription.seat) == Some(&subscription.fence) {
                 continue;
             }
             if let Some(observer) = self.observers.get_mut(&subscription.seat) {
+                let input_enabled = permits_input(&self.config, &subscription, now);
+                if input_enabled && !observer.input_enabled {
+                    observer.input_started = now;
+                    initial_inputs.extend(observer.engine.input_states(now).into_iter().map(
+                        |input| Report::Input {
+                            subscription: subscription.identity(),
+                            input: Box::new(input),
+                        },
+                    ));
+                }
+                observer.input_enabled = input_enabled;
                 observer.expires = now + protocol::MAX_PACKET_AGE;
                 if let Some(authority) = authorities.remove(&subscription.seat) {
                     *observer.engine.authority_mut() = authority;
@@ -292,6 +323,15 @@ impl Registry {
             if let Some(authority) = authorities.remove(&subscription.seat) {
                 *engine.authority_mut() = authority;
             }
+            let input_enabled = permits_input(&self.config, &subscription, now);
+            if input_enabled {
+                initial_inputs.extend(engine.input_states(now).into_iter().map(|input| {
+                    Report::Input {
+                        subscription: subscription.identity(),
+                        input: Box::new(input),
+                    }
+                }));
+            }
             self.observers.insert(
                 subscription.seat.clone(),
                 Observer {
@@ -299,6 +339,8 @@ impl Registry {
                     started: now,
                     expires: now + protocol::MAX_PACKET_AGE,
                     engine,
+                    input_enabled,
+                    input_started: now,
                 },
             );
             self.queue(
@@ -307,6 +349,9 @@ impl Registry {
                 },
                 now,
             )?;
+        }
+        for report in initial_inputs {
+            self.queue(report, now)?;
         }
         self.revision = update.revision;
         Ok(())
@@ -384,7 +429,7 @@ impl Registry {
         });
         let bytes = match encoded {
             Ok(bytes) => bytes.len(),
-            Err(_) if matches!(report, Report::Observation { .. }) => {
+            Err(_) if matches!(report, Report::Observation { .. } | Report::Input { .. }) => {
                 return self.end(
                     report.subscription().clone(),
                     "worker observation exceeds packet limit",
@@ -444,6 +489,10 @@ impl Registry {
             if source.is_some_and(|source| source.seat != observer.subscription.seat) {
                 continue;
             }
+            let input_enabled = observer.input_enabled
+                && permits_input(&self.config, &observer.subscription, now)
+                && !matches!(&record,Record::Frame {frame} if frame.at<observer.input_started)
+                && !matches!(&record,Record::Mapping {at,..}|Record::Reconcile {at,..}|Record::Remove {at,..} if *at<observer.input_started);
             let record = match &record {
                 Record::Frame { frame } if frame.at < observer.started => {
                     let Some(reconcile) = self
@@ -487,7 +536,72 @@ impl Registry {
                 | Record::Remove { source, .. } => Some(source.clone()),
                 _ => None,
             };
-            observer.engine.push(record)?;
+            use crate::input_events::ResetReason;
+            let before = if input_enabled {
+                match &record {
+                    Record::Remove { source, at } => {
+                        observer
+                            .engine
+                            .input_reset(source, *at, ResetReason::Removed)
+                    }
+                    Record::Device { device, .. } => observer
+                        .engine
+                        .input_states(now)
+                        .into_iter()
+                        .find(|input| {
+                            input.source().device == device.source.device
+                                && input.source() != &device.source
+                        })
+                        .and_then(|input| {
+                            observer
+                                .engine
+                                .input_reset(input.source(), now, ResetReason::Removed)
+                        }),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            observer.engine.capture_input(input_enabled);
+            observer.engine.push(record.clone())?;
+            let mut inputs: Vec<_> = before.into_iter().collect();
+            if input_enabled {
+                match &record {
+                    Record::Device { device, .. } => inputs.extend(observer.engine.input_reset(
+                        &device.source,
+                        now,
+                        ResetReason::Attached,
+                    )),
+                    Record::Reconcile { source, at, .. } => inputs.extend(
+                        observer
+                            .engine
+                            .input_reset(source, *at, ResetReason::Reconciled),
+                    ),
+                    Record::Mapping { source, at, .. } => inputs.extend(
+                        observer
+                            .engine
+                            .input_reset(source, *at, ResetReason::MappingChanged),
+                    ),
+                    Record::Frame { frame } if frame.at >= observer.input_started => {
+                        if let Some(input) = observer.engine.take_input() {
+                            inputs.push(input);
+                        } else {
+                            inputs.extend(observer.engine.input_reset(
+                                &frame.source,
+                                frame.at,
+                                ResetReason::Lost,
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            for input in inputs {
+                reports.push(Report::Input {
+                    subscription: observer.subscription.identity(),
+                    input: Box::new(input),
+                });
+            }
             if let Some(source) = invalidated {
                 reports.push(Report::SourceInvalidated {
                     subscription: observer.subscription.identity(),
@@ -964,6 +1078,239 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+    fn input_subscription(seat: &str, at: u64) -> Subscription {
+        let mut subscription = with_context(subscription(seat, 1), 1, at);
+        subscription.capabilities = BTreeSet::from([
+            crate::protocol::Capability::InputEvents,
+            crate::protocol::Capability::LuaEvents,
+            crate::protocol::Capability::Observations,
+            crate::protocol::Capability::Context,
+        ]);
+        subscription
+    }
+    fn inputs(registry: &Registry) -> Vec<&crate::input_events::Event> {
+        registry
+            .reports
+            .iter()
+            .filter_map(|(report, _)| {
+                if let Report::Input { input, .. } = report {
+                    Some(input.as_ref())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+    #[test]
+    fn normalized_input_is_explicit_scoped_and_excludes_pre_subscription_backlog() {
+        let mut config = config();
+        config.policy.allow_input_events = true;
+        let mut registry = registry(config);
+        update(
+            &mut registry,
+            1,
+            vec![input_subscription("seat0", 100)],
+            100,
+        );
+        assert_eq!(inputs(&registry).len(), 1);
+        assert!(matches!(
+            inputs(&registry)[0],
+            crate::input_events::Event::Reset {
+                reason: crate::input_events::ResetReason::Attached,
+                ..
+            }
+        ));
+        registry.reports.clear();
+        registry.bytes = 0;
+        key(&mut registry, source(1, "seat0"), 50, 1, true, 101);
+        key(&mut registry, source(1, "seat0"), 60, 2, false, 102);
+        assert!(
+            inputs(&registry).is_empty(),
+            "old typing must not leak through reconciliation snapshots"
+        );
+        key(&mut registry, source(2, "seat1"), 103, 1, true, 103);
+        assert!(inputs(&registry).is_empty());
+        key(&mut registry, source(1, "seat0"), 104, 3, true, 104);
+        assert!(
+            matches!(inputs(&registry)[0],crate::input_events::Event::Frame {sequence:3,changes,..} if changes==&vec![crate::input::Change::Key {code:30,state:crate::input::KeyState::Press}])
+        );
+        let mut denied = input_subscription("seat0", 105);
+        denied.context.as_mut().unwrap().snapshot.revision = 2;
+        denied
+            .capabilities
+            .remove(&crate::protocol::Capability::InputEvents);
+        update(&mut registry, 2, vec![denied], 105);
+        assert!(
+            inputs(&registry).is_empty(),
+            "revocation must purge pending input"
+        );
+        key(&mut registry, source(1, "seat0"), 106, 4, false, 106);
+        assert!(inputs(&registry).is_empty());
+    }
+    #[test]
+    fn normalized_input_policy_capabilities_context_and_allowlists_fail_closed() {
+        let mut config = config();
+        let subscription = input_subscription("seat0", 100);
+        assert!(!permits_input(&config, &subscription, ms(100)));
+        config.policy.allow_input_events = true;
+        assert!(permits_input(&config, &subscription, ms(100)));
+        config.mode = crate::config::Mode::Route;
+        assert!(!permits_input(&config, &subscription, ms(100)));
+        config.mode = crate::config::Mode::Observe;
+        for capability in &subscription.capabilities {
+            let mut copy = subscription.clone();
+            copy.capabilities.remove(capability);
+            assert!(!permits_input(&config, &copy, ms(100)));
+        }
+        for state in [
+            crate::context::State::Locked,
+            crate::context::State::Locking,
+            crate::context::State::Greeter,
+            crate::context::State::Console,
+            crate::context::State::Unknown,
+        ] {
+            let mut copy = subscription.clone();
+            copy.context.as_mut().unwrap().snapshot.state = state;
+            assert!(!permits_input(&config, &copy, ms(100)));
+        }
+        let mut copy = subscription.clone();
+        copy.context.as_mut().unwrap().snapshot.secure_overlay = true;
+        assert!(!permits_input(&config, &copy, ms(100)));
+        assert!(!permits_input(&config, &subscription, ms(99)));
+        assert!(!permits_input(&config, &subscription, ms(351)));
+        config.policy.allowed_devices.clear();
+        config.rules.clear();
+        let mut registry = registry(config);
+        update(&mut registry, 1, vec![subscription], 100);
+        key(&mut registry, source(1, "seat0"), 101, 1, true, 101);
+        assert!(inputs(&registry).is_empty());
+    }
+    #[test]
+    fn normalized_input_source_removal_and_reconciliation_reset_state_without_invented_presses() {
+        let mut config = config();
+        config.policy.allow_input_events = true;
+        let mut registry = registry(config);
+        update(
+            &mut registry,
+            1,
+            vec![input_subscription("seat0", 100)],
+            100,
+        );
+        registry.reports.clear();
+        registry.bytes = 0;
+        registry
+            .push(
+                Record::Reconcile {
+                    source: source(1, "seat0"),
+                    at: ms(101),
+                    keys: BTreeSet::from([30]),
+                    contacts: vec![],
+                },
+                ms(101),
+            )
+            .unwrap();
+        assert!(
+            matches!(inputs(&registry)[0],crate::input_events::Event::Reset {reason:crate::input_events::ResetReason::Reconciled,keys,..} if keys.contains(&30))
+        );
+        registry
+            .push(
+                Record::Remove {
+                    source: source(1, "seat0"),
+                    at: ms(102),
+                },
+                ms(102),
+            )
+            .unwrap();
+        assert!(
+            matches!(inputs(&registry)[1],crate::input_events::Event::Reset {reason:crate::input_events::ResetReason::Removed,keys,contacts,..} if keys.is_empty()&&contacts.is_empty())
+        );
+    }
+    #[test]
+    fn normalized_input_late_opt_in_discards_old_frames_and_expiry_discards_pending_input() {
+        let mut config = config();
+        config.policy.allow_input_events = true;
+        let mut registry = registry(config);
+        update(
+            &mut registry,
+            1,
+            vec![with_context(subscription("seat0", 1), 1, 100)],
+            100,
+        );
+        let mut active = input_subscription("seat0", 150);
+        active.context.as_mut().unwrap().snapshot.revision = 2;
+        update(&mut registry, 2, vec![active], 150);
+        registry.reports.clear();
+        registry.bytes = 0;
+        key(&mut registry, source(1, "seat0"), 125, 1, true, 151);
+        key(&mut registry, source(1, "seat0"), 130, 2, false, 152);
+        assert!(inputs(&registry).is_empty());
+        key(&mut registry, source(1, "seat0"), 153, 3, true, 153);
+        assert_eq!(inputs(&registry).len(), 1);
+        tick(&mut registry, 401);
+        assert!(inputs(&registry).is_empty());
+        assert!(
+            registry
+                .reports
+                .iter()
+                .any(|(report, _)| matches!(report, Report::ContextLost { .. }))
+        );
+    }
+    #[test]
+    fn normalized_input_overflow_ends_stream_without_blocking_the_reader() {
+        let mut config = config();
+        config.policy.allow_input_events = true;
+        let mut registry = registry(config);
+        update(
+            &mut registry,
+            1,
+            vec![input_subscription("seat0", 100)],
+            100,
+        );
+        for sequence in 1..=u64::try_from(MAX_QUEUED_PACKETS + 4).unwrap() {
+            key(
+                &mut registry,
+                source(1, "seat0"),
+                101,
+                sequence,
+                sequence % 2 == 1,
+                101,
+            );
+        }
+        assert!(inputs(&registry).is_empty());
+        assert!(registry.observers.is_empty());
+        assert!(registry.reports.iter().any(
+            |(report, _)| matches!(report,Report::Ended {reason,..} if reason.contains("overflow"))
+        ));
+        assert!(registry.bytes <= MAX_QUEUED_BYTES);
+    }
+    #[test]
+    fn normalized_input_virtual_devices_and_unmatched_selectors_are_excluded() {
+        let mut config = config();
+        config.policy.allow_input_events = true;
+        let mut device = Device {
+            source: source(1, "seat0"),
+            identity: "test".into(),
+            name: "test".into(),
+            path: String::new(),
+            physical: String::new(),
+            unique: String::new(),
+            vendor: 1,
+            product: 1,
+            properties: vec![],
+            axes: BTreeMap::new(),
+            capabilities: BTreeMap::from([(EV_KEY, vec![30])]),
+            virtual_device: false,
+        };
+        assert_eq!(
+            crate::input_events::Event::selected(&config, &device),
+            vec!["keyboard"]
+        );
+        device.virtual_device = true;
+        assert!(crate::input_events::Event::selected(&config, &device).is_empty());
+        device.virtual_device = false;
+        device.capabilities.clear();
+        assert!(crate::input_events::Event::selected(&config, &device).is_empty());
     }
     #[test]
     fn source_invalidation_is_reported_without_an_active_candidate_or_other_seat_leak() {

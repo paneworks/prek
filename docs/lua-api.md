@@ -288,6 +288,75 @@ state and subscriptions restart. Failed configuration reloads retain the current
 source generation. Input events arriving during source loading are queued with
 byte/count bounds. Progress may be coalesced; overflow retires the Lua component.
 
+## Permitted normalized input
+
+`events.on("input", callback)` observes normalized input from the owning seat.
+It requires the protected system source to set `policy.allow_input_events=true`,
+explicit selector names in `policy.allowed_devices`, and the owning agent to use
+`prek session --lua --input`. The broker negotiates `input_events` together with
+`context`, `observations` and `lua_events`. Source registration alone grants no
+permission. This is implemented for observation brokers; routing brokers reject
+the capability while production takeover remains pending. The protected source
+must also use `mode="observe"` (the configuration default), so negotiation and
+worker delivery enforce the same mode requirement.
+
+The worker and broker require fresh desktop context from the verified session,
+with no secure overlay. Greeter, console, locked, locking, unknown, stale/future
+context, another seat, virtual devices and sources outside the protected
+allowlist do not produce input callbacks. Pending frames from before subscription
+or late opt-in are reconciled internally without exposing historical typing as
+reset snapshots. Lock/context loss retires the session fence and its old work.
+The broker rechecks lock state and registration and checks the input permit again
+at actual send time. A queued observation older than 250 ms invalidates the
+stream instead of being delivered under a refreshed context.
+
+Callbacks receive `{fence, input}`. `input.kind` is `frame` or `reset`. Every
+payload includes `source`, monotonic `at={secs,nanos}` and `selectors`, the matched
+protected allowlist names. Frames contain `sequence`, `changes`, `contacts`,
+`contacts_started`, `contacts_ended` and `ended_contacts`; no raw frame/event list
+or descriptor is exposed. Source device/generation, sequence and contact
+generation identities are exact decimal strings. Slot/tracking IDs, codes,
+coordinates, pressure and timestamps remain numeric.
+
+`changes` is an ordered array of these tagged values:
+
+| Kind | Fields |
+| --- | --- |
+| `key` | Numeric evdev `code`, `state="press"|"release"|"repeat"`. No text/layout translation. |
+| `relative` | `code`, signed `value` in device counts, without a second acceleration curve. |
+| `absolute` | `code`, signed `value` in device axis counts. |
+| `switch` | `code`, boolean `on`. |
+| `wheel` | Boolean `horizontal`, numeric `steps`, boolean `high_resolution`. Normalization avoids double-counting legacy companions. |
+
+A contact is `{id={slot,tracking,generation},x,y,pressure,fresh}`; absent pressure
+reads as nil. Positions use device axis counts. `ended_contacts` preserves the
+last position, including motion in the release frame. Reset notifications carry
+`reason="attached"|"reconciled"|"mapping_changed"|"removed"|"lost"`, a `keys`
+array of held numeric codes and `contacts`. Reset local recognizer state first;
+held state is not a new press/contact. Reset contacts have `fresh=false`.
+Removal/loss clears held state. Device connection generation distinguishes a
+replacement from the retired source, even when physical identity is unchanged.
+
+Frames are not coalesced: ordering and contact transitions are preserved within
+the existing packet and queue budgets. Each input value allows at most 4096
+changes and 256 contacts. Oversized packets or worker overflow end affected
+observation registrations; helper/source-loading overflow retires the Lua
+component. The physical input loop does not wait for callbacks. `Subscription`
+disposal and VM retirement use the ordinary event semantics and limits.
+The session agent does not automatically print normalized input to stdout.
+
+[input_events.lua](../examples/lua/input_events.lua) demonstrates counting a
+configured key without recording general typing. The editor definitions include
+`InputPayload`, the frame/reset union and each change/contact variant. This
+subscription supplies observations only: returning a value cannot claim,
+consume, remap or dispatch an action. Custom recognizer proposals under Rust
+ownership/deadline arbitration remain required work. Model permission tests and
+actual worker/helper IPC are separate from root/logind and physical acceptance.
+`nix run .#cage-test -- --layers --input` checks ordered model source frames and
+resets through worker/helper IPC alongside actual compositor context and app
+delivery. The fixture supplies synthetic device/seat authority. Add `--visible`
+for the owned visible nested-Hyprland path; it opens no host evdev devices.
+
 ## Runtime context
 
 The `context` namespace reads the broker-verified session snapshot. Queries

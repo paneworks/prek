@@ -41,6 +41,7 @@
   "engine": "onix-os/luna",
   "engine_version": "0.5.1",
   "event_kinds": [
+    "input",
     "matched",
     "begin",
     "update",
@@ -55,6 +56,44 @@
     "context_changed",
     "rules_changed"
   ],
+  "input_events": {
+    "agent_flags": [
+      "lua",
+      "input"
+    ],
+    "capability": "input_events",
+    "configuration_mode": "observe",
+    "context": "fresh desktop without secure overlay",
+    "coordinates": "device axis counts",
+    "delivery": "ordered, no coalescing; overflow retires the affected stream or Lua component",
+    "event": "input",
+    "freshness_ms": 250,
+    "identity_fields": [
+      "source.device",
+      "source.generation",
+      "sequence",
+      "contacts[].id.generation",
+      "contacts_started[].generation",
+      "contacts_ended[].generation",
+      "ended_contacts[].id.generation"
+    ],
+    "identity_type": "decimal_string",
+    "input_claims": false,
+    "maximum_changes": 4096,
+    "maximum_contacts": 256,
+    "payload": "InputPayload",
+    "production_broker": "observation_mode",
+    "raw_frames": false,
+    "resets": [
+      "attached",
+      "reconciled",
+      "mapping_changed",
+      "removed",
+      "lost"
+    ],
+    "sources": "explicit policy.allowed_devices selectors on the owning seat; virtual devices excluded",
+    "system_permission": "policy.allow_input_events"
+  },
   "limits": {
     "instructions": 1000000,
     "memory_bytes": 33554432,
@@ -111,7 +150,14 @@
       "OutputState.geometry_generation",
       "Binding.compositor_start",
       "context_changed.revision",
-      "rules.revision"
+      "rules.revision",
+      "input.source.device",
+      "input.source.generation",
+      "input.sequence",
+      "input.contacts[].id.generation",
+      "input.contacts_started[].generation",
+      "input.contacts_ended[].generation",
+      "input.ended_contacts[].id.generation"
     ],
     "protocol": "Rust transport retains u64 values",
     "range": "0..18446744073709551615",

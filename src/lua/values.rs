@@ -71,6 +71,41 @@ pub(super) fn payload<'gc>(ctx: Context<'gc>, json: &Json) -> Result<Value<'gc>,
                 )?;
             }
         }
+        if let Some(input) = json.get("input").filter(|input| {
+            matches!(
+                input.get("kind").and_then(Json::as_str),
+                Some("frame" | "reset")
+            )
+        }) {
+            let input_table: Table = table.get(ctx, "input")?;
+            fields(ctx, input_table, input, &["sequence"])?;
+            if let Some(source) = input.get("source").filter(|source| source.is_object()) {
+                fields(
+                    ctx,
+                    input_table.get(ctx, "source")?,
+                    source,
+                    &["device", "generation"],
+                )?;
+            }
+            for name in [
+                "contacts",
+                "ended_contacts",
+                "contacts_started",
+                "contacts_ended",
+            ] {
+                if let Some(contacts) = input.get(name).and_then(Json::as_array) {
+                    let list: Table = input_table.get(ctx, name)?;
+                    for (index, contact) in contacts.iter().enumerate() {
+                        let entry: Table = list.get(ctx, index + 1)?;
+                        if let Some(id) = contact.get("id") {
+                            fields(ctx, entry.get(ctx, "id")?, id, &["generation"])?;
+                        } else {
+                            fields(ctx, entry, contact, &["generation"])?;
+                        }
+                    }
+                }
+            }
+        }
     }
     Ok(value)
 }

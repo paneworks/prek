@@ -289,6 +289,8 @@ pub struct Policy {
     pub allowed_seats: Vec<String>,
     /// Root-approved permission; runtime transactions cannot edit policy.
     pub allow_runtime_rules: bool,
+    /// Root-approved, explicit opt-in to normalized desktop input observation.
+    pub allow_input_events: bool,
 }
 impl Default for Policy {
     fn default() -> Self {
@@ -296,6 +298,7 @@ impl Default for Policy {
             allowed_devices: Vec::new(),
             allowed_seats: vec!["seat0".into()],
             allow_runtime_rules: false,
+            allow_input_events: false,
         }
     }
 }

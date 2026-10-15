@@ -107,6 +107,9 @@ enum Command {
         /// Permit Lua rule transactions when the system policy grants them.
         #[arg(long, requires = "lua")]
         rule_mutations: bool,
+        /// Deliver permitted normalized input to approved Lua subscriptions.
+        #[arg(long, requires = "lua")]
+        input: bool,
     },
     /// Query broker status from a verified compositor login session.
     Status {
@@ -408,6 +411,7 @@ fn run(command: Command) -> io::Result<()> {
             commands,
             lua,
             rule_mutations,
+            input,
         } => run_session(
             &socket,
             instance,
@@ -420,6 +424,7 @@ fn run(command: Command) -> io::Result<()> {
                 commands,
                 lua,
                 rule_mutations,
+                input,
             },
             &mut output,
         ),
@@ -1158,6 +1163,7 @@ struct SessionOptions {
     commands: bool,
     lua: bool,
     rule_mutations: bool,
+    input: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -1199,6 +1205,7 @@ fn run_session(
         commands,
         lua,
         rule_mutations,
+        input,
     } = options;
     use nix::{
         libc,
@@ -1242,6 +1249,9 @@ fn run_session(
     }
     if rule_mutations {
         requested.insert(Capability::RuntimeRules);
+    }
+    if input {
+        requested.insert(Capability::InputEvents);
     }
     let registration = Request::Register {
         instance,
@@ -1587,6 +1597,30 @@ fn run_session(
                         writeln!(output, "observing fresh input on the registered seat")?;
                     }
                     output.flush()?;
+                }
+                Reply::Input {
+                    fence: observed,
+                    input: event,
+                } if input && lua && Some(observed) == fence => {
+                    if event.source().seat != lua_seat {
+                        return Err(io::Error::other(
+                            "normalized input belongs to a different seat",
+                        ));
+                    }
+                    let payload = serde_json::json!({"fence":observed,"input":event});
+                    let result = if let Some(runtime) = lua_runtime.as_mut() {
+                        runtime.notify(prek::lua::EventKind::Input, payload)
+                    } else if lua_download.is_some() {
+                        lua_pending.push(prek::lua::EventKind::Input, payload)
+                    } else {
+                        Ok(())
+                    };
+                    if let Err(error) = result {
+                        eprintln!("Lua runtime unavailable: {error}");
+                        lua_runtime = None;
+                        lua_download = None;
+                        lua_pending = Default::default();
+                    }
                 }
                 Reply::Observation {
                     fence: observed,

@@ -16,6 +16,7 @@ pub(super) const CALLBACK_INSTRUCTIONS: i32 = 100_000;
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
+    Input,
     Matched,
     Begin,
     Update,
@@ -33,6 +34,7 @@ pub enum EventKind {
 impl EventKind {
     pub fn name(self) -> &'static str {
         match self {
+            Self::Input => "input",
             Self::Matched => "matched",
             Self::Begin => "begin",
             Self::Update => "update",

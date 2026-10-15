@@ -24,6 +24,7 @@ pub mod gestures;
 #[cfg(target_os = "linux")]
 pub mod hyprland;
 pub mod input;
+pub mod input_events;
 #[cfg(target_os = "linux")]
 pub mod ipc;
 #[cfg(target_os = "linux")]

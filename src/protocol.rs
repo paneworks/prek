@@ -44,6 +44,7 @@ pub enum Capability {
     Context,
     Observations,
     LuaEvents,
+    InputEvents,
     LuaActions,
     RuntimeRules,
     HyprlandActions,
@@ -282,6 +283,10 @@ pub enum Reply {
         fence: Fence,
         event: Box<Event>,
     },
+    Input {
+        fence: Fence,
+        input: Box<crate::input_events::Event>,
+    },
     LuaSource {
         fence: Fence,
         offset: usize,
@@ -329,6 +334,7 @@ impl Reply {
             | Self::Configuration { fence }
             | Self::SessionChanged { fence, .. }
             | Self::Observation { fence, .. }
+            | Self::Input { fence, .. }
             | Self::LuaSource { fence, .. }
             | Self::ContextData { fence, .. }
             | Self::Dispatch { fence, .. }
@@ -346,6 +352,7 @@ impl Reply {
             !value.is_empty() && value.len() <= 1024 && !value.chars().any(char::is_control)
         };
         match self {
+            Self::Input { input, .. } => input.validate()?,
             Self::RulesChanged { receipt, .. }
                 if receipt.id == 0
                     || receipt.error.as_ref().is_some_and(|error| {

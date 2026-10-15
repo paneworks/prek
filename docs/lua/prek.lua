@@ -18,7 +18,7 @@
 ---@alias prek.Stage 'discrete'|'begin'|'update'|'end'|'cancel'
 ---@alias prek.TaskState 'pending'|'running'|'sleeping'|'completed'|'cancelled'
 ---@alias prek.EffectKind 'observations'|'commands'|'synthetic_input'|'hyprland_actions'|'morf_actions'|'power_actions'
----@alias prek.EventKind 'matched'|'begin'|'update'|'end'|'cancel'|'skipped'|'ready'|'reload'|'stop'|'recovery'|'session_changed'|'context_changed'|'rules_changed'
+---@alias prek.EventKind 'input'|'matched'|'begin'|'update'|'end'|'cancel'|'skipped'|'ready'|'reload'|'stop'|'recovery'|'session_changed'|'context_changed'|'rules_changed'
 ---@alias prek.MorfAction 'dashboard'|'notifications'|'quick_settings'|'workspace_preview'|'keyboard_show'|'keyboard_hide'|'keyboard_toggle_layout'|'apps'|'web'|'reveal_clock_form'
 ---@alias prek.WindowAction 'reorder_up'|'reorder_down'|'move_left_and_follow'|'move_right_and_follow'|'close'|'scroll_stack'
 ---@alias prek.PowerAction 'lock_and_blank'|'wake'|'blank'
@@ -49,6 +49,7 @@
 ---@field allowed_devices? string[]
 ---@field allowed_seats? string[]
 ---@field allow_runtime_rules? boolean Default false; only protected system policy grants permission.
+---@field allow_input_events? boolean Default false; requires protected policy, --lua --input and fresh desktop context.
 
 ---@class (exact) prek.ShapeCapture
 ---@field max_samples? integer Default 2048.
@@ -406,6 +407,59 @@
 ---@field reason string
 ---@class (exact) prek.FencedPayload
 ---@field fence prek.Fence
+---@class (exact) prek.ContactId
+---@field slot integer
+---@field tracking integer
+---@field generation prek.Identity
+---@class (exact) prek.Contact
+---@field id prek.ContactId
+---@field x integer Device axis counts.
+---@field y integer Device axis counts.
+---@field pressure? integer
+---@field fresh boolean False for contacts already held at reconciliation.
+---@class (exact) prek.KeyChange
+---@field kind 'key'
+---@field code integer Linux evdev code, without text/layout translation.
+---@field state 'press'|'release'|'repeat'
+---@class (exact) prek.RelativeChange
+---@field kind 'relative'
+---@field code integer
+---@field value integer Device counts, without a second acceleration curve.
+---@class (exact) prek.AbsoluteChange
+---@field kind 'absolute'
+---@field code integer
+---@field value integer Device axis counts.
+---@class (exact) prek.SwitchChange
+---@field kind 'switch'
+---@field code integer
+---@field on boolean
+---@class (exact) prek.WheelChange
+---@field kind 'wheel'
+---@field horizontal boolean
+---@field steps number
+---@field high_resolution boolean
+---@alias prek.InputChange prek.KeyChange|prek.RelativeChange|prek.AbsoluteChange|prek.SwitchChange|prek.WheelChange
+---@class (exact) prek.InputFrame
+---@field kind 'frame'
+---@field source prek.Source
+---@field at prek.MonotonicTime
+---@field sequence prek.Identity
+---@field selectors string[] Matched protected allowlist selector names.
+---@field changes prek.InputChange[]
+---@field contacts prek.Contact[]
+---@field contacts_started prek.ContactId[]
+---@field contacts_ended prek.ContactId[]
+---@field ended_contacts prek.Contact[] Last positions, including motion in a release frame.
+---@class (exact) prek.InputReset
+---@field kind 'reset'
+---@field source prek.Source
+---@field at prek.MonotonicTime
+---@field selectors string[]
+---@field reason 'attached'|'reconciled'|'mapping_changed'|'removed'|'lost'
+---@field keys integer[] Already held evdev codes; no invented press events.
+---@field contacts prek.Contact[] Already held contacts have fresh=false. Removal/loss clears state.
+---@class (exact) prek.InputPayload: prek.FencedPayload
+---@field input prek.InputFrame|prek.InputReset
 ---@class (exact) prek.MatchedPayload: prek.FencedPayload
 ---@field event prek.MatchedEvent
 ---@class (exact) prek.SkippedPayload: prek.FencedPayload
@@ -423,7 +477,7 @@
 ---@field accepted boolean
 ---@field revision prek.Identity
 ---@field error? string
----@alias prek.EventPayload prek.MatchedPayload|prek.SkippedPayload|prek.CancelPayload|prek.ReadyPayload|prek.SessionPayload|prek.ContextChangedPayload|prek.RulesChangedPayload|prek.FencedPayload
+---@alias prek.EventPayload prek.InputPayload|prek.MatchedPayload|prek.SkippedPayload|prek.CancelPayload|prek.ReadyPayload|prek.SessionPayload|prek.ContextChangedPayload|prek.RulesChangedPayload|prek.FencedPayload
 ---@class (exact) prek.TimerWake
 ---@field context prek.FencedPayload
 ---@field timer { id: integer, periodic: boolean }
@@ -568,6 +622,7 @@ function UnitsAPI.duration(value) error("Prek editor definition") end
 function UnitsAPI.distance(value) error("Prek editor definition") end
 
 ---Generation-scoped subscriptions; at most 256 over this VM's lifetime. No raw input.
+---@overload fun(kind: 'input', callback: fun(payload: prek.InputPayload)): prek.Subscription
 ---@overload fun(kind: 'matched'|'begin'|'update'|'end', callback: fun(payload: prek.MatchedPayload)): prek.Subscription
 ---@overload fun(kind: 'cancel', callback: fun(payload: prek.CancelPayload)): prek.Subscription
 ---@overload fun(kind: 'skipped', callback: fun(payload: prek.SkippedPayload)): prek.Subscription

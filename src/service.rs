@@ -811,7 +811,7 @@ impl Broker {
         }
         if matches!(
             &report,
-            Report::Observation { .. } | Report::Dispatch { .. }
+            Report::Observation { .. } | Report::Dispatch { .. } | Report::Input { .. }
         ) && !self.guard_observation(&mut connection, now)?
         {
             self.connections.insert(index, connection);
@@ -851,6 +851,53 @@ impl Broker {
             Report::Ready { .. } => {
                 self.connections.insert(index, connection);
                 return Ok(());
+            }
+            Report::Input { input, .. } if bound.observing => {
+                input.validate()?;
+                if !bound.capabilities.contains(&Capability::InputEvents) {
+                    self.connections.insert(index, connection);
+                    return Ok(());
+                }
+                let delivered_at = monotonic()?;
+                let permitted = self.routing.is_none()
+                    && self.rule_baseline.as_ref().is_some_and(|config| {
+                        crate::input_events::permitted_subscription(
+                            config,
+                            &bound.capabilities,
+                            bound.context.value.as_deref(),
+                            &bound.seat,
+                            fence.session,
+                            delivered_at,
+                        ) && input
+                            .selectors()
+                            .iter()
+                            .all(|id| config.policy.allowed_devices.contains(id))
+                    });
+                if !permitted {
+                    bound.context.usable = false;
+                    bound.context.value = None;
+                    bound.context.state = State::Unknown;
+                    bound.context.error = Some("normalized input permit was revoked".into());
+                    self.advance_session(&mut connection, delivered_at)?;
+                    self.connections.insert(index, connection);
+                    return Ok(());
+                }
+                if input.source().seat != bound.seat {
+                    return Err(protocol::invalid(
+                        "normalized input belongs to a different seat",
+                    ));
+                }
+                if !input.fresh(delivered_at) {
+                    bound.context.usable = false;
+                    bound.context.value = None;
+                    bound.context.state = State::Unknown;
+                    bound.context.error =
+                        Some("normalized input delivery exceeded freshness limit".into());
+                    self.advance_session(&mut connection, now)?;
+                    self.connections.insert(index, connection);
+                    return Ok(());
+                }
+                Reply::Input { fence, input }
             }
             Report::Observation { event, .. } if bound.observing => {
                 if !bound.capabilities.contains(&Capability::Observations) {
@@ -1173,6 +1220,16 @@ impl Broker {
                                 && capabilities.contains(&Capability::LuaEvents)
                                 && capabilities.contains(&Capability::Context)
                                 && capabilities.contains(&Capability::Observations)
+                            || *capability == Capability::InputEvents
+                                && self.routing.is_none()
+                                && self.lua_source.is_some()
+                                && self.rule_baseline.as_ref().is_some_and(|config| {
+                                    config.policy.allow_input_events
+                                        && config.mode == crate::config::Mode::Observe
+                                })
+                                && capabilities.contains(&Capability::LuaEvents)
+                                && capabilities.contains(&Capability::Context)
+                                && capabilities.contains(&Capability::Observations)
                             || *capability == Capability::Commands
                                 && commands
                                 && capabilities.contains(&Capability::Context))
@@ -1491,10 +1548,47 @@ impl Broker {
         if context_delivery
             || matches!(
                 connection.outgoing.front(),
-                Some(Reply::Observation { .. } | Reply::Dispatch { .. } | Reply::Execute { .. })
+                Some(
+                    Reply::Observation { .. }
+                        | Reply::Dispatch { .. }
+                        | Reply::Execute { .. }
+                        | Reply::Input { .. }
+                )
             )
         {
             self.guard_observation(connection, monotonic()?)?;
+        }
+        // Queued input must still have a live permit at the actual send time,
+        // including time spent waiting for the independent lock query above.
+        let input_expired = if let Some(Reply::Input { input, .. }) = connection.outgoing.front() {
+            let now = monotonic()?;
+            let bound = connection.bound.as_ref().unwrap();
+            !input.fresh(now)
+                || !bound.context.fresh(now)
+                || !self.rule_baseline.as_ref().is_some_and(|config| {
+                    crate::input_events::permitted_subscription(
+                        config,
+                        &bound.capabilities,
+                        bound.context.value.as_deref(),
+                        &bound.seat,
+                        bound.fence.session,
+                        now,
+                    ) && input.source().seat == bound.seat
+                        && input
+                            .selectors()
+                            .iter()
+                            .all(|id| config.policy.allowed_devices.contains(id))
+                })
+        } else {
+            false
+        };
+        if input_expired {
+            let bound = connection.bound.as_mut().unwrap();
+            bound.context.value = None;
+            bound.context.usable = false;
+            bound.context.state = State::Unknown;
+            bound.context.error = Some("normalized input permit expired before send".into());
+            self.advance_session(connection, monotonic()?)?;
         }
         connection.flush(monotonic()?)
     }

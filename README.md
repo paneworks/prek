@@ -245,6 +245,13 @@ Supervised session callbacks and timers
 are implemented. Named action handlers return bounded command/event plans under
 fresh broker grants; `session --lua --commands` opts into that executor. Custom
 recognizers and live adapter APIs remain required work.
+
+`events.on("input", callback)` receives permitted normalized input when protected
+`policy.allow_input_events` and the owning session's `--lua --input` opt-in agree.
+Only explicitly allowed devices on that seat in fresh desktop context are
+eligible. See [input subscriptions](docs/lua-api.md#permitted-normalized-input)
+and [the example](examples/lua/input_events.lua) for frame/reset types and limits.
+These observations do not grant input consumption or action authority.
 Production routing remains disabled; named-effect execution currently has model
 grant and helper-process coverage, without authenticated production routing proof.
 Pending effects are canceled by generation, gesture cancellation and source
@@ -453,6 +460,7 @@ The desktop test setup follows Mold's `tools/sandbox/nested.sh`:
 nix run .#cage-test                     # headless Cage -> nested Hyprland -> receiver
 nix run .#cage-test -- --visible        # watch the owned session as a window
 nix run .#cage-test -- --layers         # Lua layer change with its rule still enabled
+nix run .#cage-test -- --layers --input # Normalized source frames and resets reach Lua
 nix run .#cage-touch-test               # direct headless Cage touch receipts
 ```
 

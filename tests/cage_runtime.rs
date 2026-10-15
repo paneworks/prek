@@ -2,17 +2,17 @@
 //! with synthetic source/readiness authority explicitly confined to this test.
 #![cfg(target_os = "linux")]
 use prek::{
-    context::{Binding, SessionKind},
+    context::{Binding, SessionKind, Snapshot},
     context_transfer::View,
     hyprland::{Client, ContextSampler},
     input::{Device, EV_KEY, Frame, RawEvent, Source},
-    ipc::monotonic,
+    ipc::{Channel, monotonic},
     lua::{Definition, EventKind, session::Session},
     protocol::{Capability, Epoch, Fence},
     replay::Record,
     routing::Routing,
     transport::{Consumer, ConsumerEvidence, Descriptor, KernelIdentity, Readiness},
-    worker::ProvidedContext,
+    worker::{Message, ProvidedContext, Report, Stream, Subscription, Subscriptions},
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -84,7 +84,7 @@ fn context(
     client: &Client,
     binding: &Binding,
     fence: Fence,
-) {
+) -> Snapshot {
     // A compositor can miss one request budget while mapping/rendering the
     // receiver. Inject no next input until a new, independently bracketed
     // snapshot succeeds; never extend the production request/freshness limit
@@ -118,12 +118,114 @@ fn context(
             state: snapshot.state,
             context: Some(Box::new(ProvidedContext {
                 binding: binding.clone(),
-                snapshot,
+                snapshot: snapshot.clone(),
             })),
             error: None,
         })
         .unwrap();
     settle(session, logs);
+    snapshot
+}
+
+// Observation uses the real worker IPC and helper, with the same explicit
+// synthetic device/seat authority as this fixture's routing model.
+struct InputObserver {
+    parent: Channel,
+    worker: Stream,
+    revision: u64,
+    source: Option<Source>,
+}
+impl InputObserver {
+    fn new(mut config: prek::config::Config) -> Self {
+        config.mode = prek::config::Mode::Observe;
+        let (parent, child) = Channel::pair().unwrap();
+        let mut worker = Stream::new(config, child).unwrap();
+        worker.push(Record::Header { version: 1 }).unwrap();
+        Self {
+            parent,
+            worker,
+            revision: 0,
+            source: None,
+        }
+    }
+    fn context(&mut self, snapshot: Snapshot, binding: &Binding, fence: Fence, device: &Device) {
+        if self.source.is_none() {
+            self.worker
+                .push(Record::Device {
+                    device: device.clone(),
+                    keys: BTreeSet::new(),
+                    contacts: vec![],
+                })
+                .unwrap();
+            self.source = Some(device.source.clone());
+        }
+        self.revision += 1;
+        self.parent
+            .send(
+                &prek::configuration::Command::Subscriptions {
+                    update: Subscriptions {
+                        revision: self.revision,
+                        seats: vec![Subscription {
+                            seat: binding.seat.clone(),
+                            fence,
+                            capabilities: BTreeSet::from([
+                                Capability::InputEvents,
+                                Capability::LuaEvents,
+                                Capability::Context,
+                                Capability::Observations,
+                            ]),
+                            consumer: None,
+                            context: Some(Box::new(ProvidedContext {
+                                binding: binding.clone(),
+                                snapshot,
+                            })),
+                        }],
+                    },
+                },
+                monotonic().unwrap(),
+            )
+            .unwrap();
+        self.worker.service().unwrap();
+        if self.source.as_ref() != Some(&device.source) {
+            self.worker
+                .push(Record::Remove {
+                    source: self.source.take().unwrap(),
+                    at: monotonic().unwrap(),
+                })
+                .unwrap();
+            self.worker
+                .push(Record::Device {
+                    device: device.clone(),
+                    keys: BTreeSet::new(),
+                    contacts: vec![],
+                })
+                .unwrap();
+            self.source = Some(device.source.clone());
+        }
+    }
+    fn frame(&mut self, frame: Frame, session: &mut Session, logs: &mut impl Write) {
+        self.worker.push(Record::Frame { frame }).unwrap();
+        self.worker.flush().unwrap();
+        while let Some(packet) = self.parent.receive::<Message>().unwrap() {
+            if let Message::Outcome {
+                report:
+                    Report::Input {
+                        subscription,
+                        input,
+                    },
+            } = packet.message
+            {
+                input.validate().unwrap();
+                session
+                    .notify(
+                        EventKind::Input,
+                        serde_json::json!({"fence":subscription.fence,"input":input}),
+                    )
+                    .unwrap();
+                settle(session, logs);
+            }
+        }
+    }
 }
 
 #[test]
@@ -150,7 +252,19 @@ fn local_cage_lua_routing_and_context() {
         .unwrap();
     // SAFETY: read-only query of this test's owning UID.
     let uid = unsafe { nix::libc::geteuid() };
-    let client = Client::open(runtime, &instance, uid, &executable).unwrap();
+    let startup = std::time::Instant::now() + Duration::from_secs(3);
+    let client = loop {
+        match Client::open(runtime, &instance, uid, &executable) {
+            Ok(client) => break client,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::TimedOut
+                    && std::time::Instant::now() < startup =>
+            {
+                std::thread::sleep(Duration::from_millis(10))
+            }
+            Err(error) => panic!("owned compositor client did not become ready: {error}"),
+        }
+    };
     let Consumer::Hyprland { pid, start, .. } = client.consumer() else {
         panic!("wrong consumer")
     };
@@ -168,10 +282,22 @@ fn local_cage_lua_routing_and_context() {
         session: 1,
     };
     let layer_control = std::env::var("PREK_CAGE_LAYER_TEST").as_deref() == Ok("1");
+    let input_control = std::env::var("PREK_CAGE_INPUT_TEST").as_deref() == Ok("1");
     let source = r#"
 local p=require('prek')
 local layer_control=__LAYER_CONTROL__
+local input_control=__INPUT_CONTROL__
 local transaction
+if input_control then p.events.on('input',function(payload)
+  local e=payload.input
+  assert(e.source.seat=='seat0' and e.raw==nil and e.events==nil)
+  assert(e.source.generation=='1' or e.source.generation=='2')
+  assert(e.selectors[1]=='keyboard')
+  if e.kind=='frame' then
+    assert(#e.changes==1 and e.changes[1].kind=='key')
+    p.log.info('local-input',{generation=e.source.generation,sequence=e.sequence,code=e.changes[1].code,state=e.changes[1].state})
+  else p.log.info('local-input-reset',{generation=e.source.generation,reason=e.reason}) end
+end) end
 p.events.on('context_changed',function(event)
   local snapshot=p.context.snapshot(); local binding=p.context.binding()
   assert(event.available and snapshot and binding and #snapshot.outputs>0)
@@ -196,7 +322,7 @@ p.events.on('rules_changed',function(event)
   p.log.info('local-layer-state',{activation=p.layers.get('local-layer').activation,rule_enabled=p.rules.get('local-a').enabled})
 end)
 return p.config.new {
-  mode='route',policy={allowed_devices={'keyboard'},allow_runtime_rules=true},
+  mode=input_control and 'observe' or 'route',policy={allowed_devices={'keyboard'},allow_runtime_rules=true,allow_input_events=input_control},
   devices={keyboard={name='Prek local keyboard'}},
   layers={p.layers.define{id='local-layer',key='KEY_LEFTMETA',activation='active'}},
   rules={p.rules.define {id='local-a',layer='local-layer',priority=20,devices={'keyboard'},contexts={'desktop'},
@@ -205,9 +331,13 @@ return p.config.new {
     p.rules.define {id='local-b',devices={'keyboard'},contexts={'desktop'},delivery='observe',
       trigger=p.triggers.key {key='KEY_B'},action=p.actions.event {name='local-rule-disable'}}}
 }
-"#.replace("__LAYER_CONTROL__", if layer_control { "true" } else { "false" });
+"#.replace("__LAYER_CONTROL__", if layer_control { "true" } else { "false" }).replace("__INPUT_CONTROL__",if input_control {"true"}else{"false"});
     let definition = Definition::compile(&source, "local-cage.lua").unwrap();
-    let mut routing = Routing::new(toml::from_str(&definition.model).unwrap()).unwrap();
+    let config = definition.validate().unwrap();
+    let mut input_observer = input_control.then(|| InputObserver::new(config.clone()));
+    let mut route_config = config;
+    route_config.mode = prek::config::Mode::Route;
+    let mut routing = Routing::new(route_config).unwrap();
     routing
         .authority_mut()
         .bind(binding.clone(), true, false)
@@ -256,8 +386,24 @@ return p.config.new {
             .unwrap();
             fs::write(output.join("phase1-ready"), b"ready").unwrap();
             let until = monotonic().unwrap() + Duration::from_secs(3);
+            let mut refreshed = monotonic().unwrap();
             while !output.join("phase1-delivered").exists() {
                 settle(&mut session, &mut logs);
+                if monotonic().unwrap().saturating_sub(refreshed) >= Duration::from_millis(50) {
+                    let snapshot = context(
+                        &mut routing,
+                        &mut session,
+                        &mut logs,
+                        &mut sampler,
+                        &client,
+                        &binding,
+                        fence,
+                    );
+                    if let Some(observer) = input_observer.as_mut() {
+                        observer.context(snapshot, &binding, fence, &device);
+                    }
+                    refreshed = monotonic().unwrap();
+                }
                 assert!(
                     monotonic().unwrap() < until,
                     "application did not acknowledge phase one"
@@ -328,7 +474,7 @@ return p.config.new {
         for (sequence, (code, value)) in
             [(30, 1), (30, 0), (48, 1), (48, 0)].into_iter().enumerate()
         {
-            context(
+            let snapshot = context(
                 &mut routing,
                 &mut session,
                 &mut logs,
@@ -337,27 +483,34 @@ return p.config.new {
                 &binding,
                 fence,
             );
+            if let Some(observer) = input_observer.as_mut() {
+                observer.context(snapshot, &binding, fence, &device);
+            }
+            let frame = Frame {
+                source: device.source.clone(),
+                at: monotonic().unwrap(),
+                sequence: (phase * 4 + sequence + 1) as u64,
+                events: vec![
+                    RawEvent {
+                        kind: EV_KEY,
+                        code,
+                        value,
+                    },
+                    RawEvent {
+                        kind: 0,
+                        code: 0,
+                        value: 0,
+                    },
+                ],
+            };
             routing
                 .push(Record::Frame {
-                    frame: Frame {
-                        source: device.source.clone(),
-                        at: monotonic().unwrap(),
-                        sequence: (phase * 4 + sequence + 1) as u64,
-                        events: vec![
-                            RawEvent {
-                                kind: EV_KEY,
-                                code,
-                                value,
-                            },
-                            RawEvent {
-                                kind: 0,
-                                code: 0,
-                                value: 0,
-                            },
-                        ],
-                    },
+                    frame: frame.clone(),
                 })
                 .unwrap();
+            if let Some(observer) = input_observer.as_mut() {
+                observer.frame(frame, &mut session, &mut logs);
+            }
             while let Some(scheduled) = routing
                 .due(&device.source, monotonic().unwrap())
                 .unwrap()
