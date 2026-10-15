@@ -36,6 +36,7 @@ struct Seat {
 struct Output {
     fence: Fence,
     virtual_device: Virtual,
+    state_probe: Option<linux::StateProbe>,
     readiness: Option<Readiness>,
     consumer: Option<crate::transport::ConsumerEvidence>,
     offered: Duration,
@@ -385,6 +386,7 @@ impl InputSink for Stream {
                     "routing requires a verified physical feedback bridge",
                 ));
             }
+            let state_probe = linux::StateProbe::new(raw)?;
             let output = Virtual::create(
                 self.registry
                     .prepare_for_worker(descriptor.clone(), health)?,
@@ -397,6 +399,7 @@ impl InputSink for Stream {
                 Output {
                     fence: subscription.fence,
                     virtual_device: output,
+                    state_probe: Some(state_probe),
                     readiness: Some(readiness),
                     consumer: None,
                     offered: Duration::ZERO,
@@ -434,9 +437,7 @@ impl InputSink for Stream {
         if !buffer.is_drained() {
             return Ok(ReaderDisposition::Keep);
         }
-        if (raw.supported_keys().is_some() && raw.get_key_state()?.iter().next().is_some())
-            || !linux::initial_contacts(raw, device)?.is_empty()
-        {
+        if !output.state_probe.as_ref().unwrap().is_neutral(device)? {
             return Ok(ReaderDisposition::Keep);
         }
         let gate = output.readiness.as_mut().unwrap();
@@ -452,9 +453,7 @@ impl InputSink for Stream {
             .map_err(invalid)?;
         raw.grab()?;
         // A handoff cannot convert already held input into a new gesture.
-        if (raw.supported_keys().is_some() && raw.get_key_state()?.iter().next().is_some())
-            || !linux::initial_contacts(raw, device)?.is_empty()
-        {
+        if !output.state_probe.as_ref().unwrap().is_neutral(device)? {
             self.outputs.remove(&device.source);
             raw.ungrab()?;
             return Ok(ReaderDisposition::Keep);
@@ -489,6 +488,7 @@ impl InputSink for Stream {
             let _ = raw.ungrab();
             return Err(error);
         }
+        output.state_probe = None;
         self.grabbed.insert(device.source.clone());
         if !seat.reported {
             seat.reported = true;

@@ -17,7 +17,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Write},
     os::{
-        fd::{AsFd, AsRawFd},
+        fd::{AsFd, AsRawFd, BorrowedFd},
         unix::fs::{MetadataExt, OpenOptionsExt},
     },
     path::{Path, PathBuf},
@@ -26,6 +26,7 @@ use std::{
 
 nix::ioctl_write_ptr!(set_clock_id, b'E', 0xa0, libc::c_int);
 nix::ioctl_read_buf!(get_mt_slots, b'E', 0x0a, libc::c_int);
+nix::ioctl_read!(get_version, b'E', 0x01, libc::c_int);
 
 fn open(path: &Path) -> io::Result<RawDevice> {
     let file = OpenOptions::new()
@@ -33,6 +34,52 @@ fn open(path: &Path) -> io::Result<RawDevice> {
         .custom_flags(libc::O_NONBLOCK)
         .open(path)?;
     RawDevice::from_fd(file.into())
+}
+
+fn reopen_readonly(fd: BorrowedFd<'_>) -> io::Result<File> {
+    let original = nix::sys::stat::fstat(fd)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(format!("/proc/self/fd/{}", fd.as_raw_fd()))?;
+    let reopened = file.metadata()?;
+    if (original.st_dev, original.st_ino, original.st_rdev)
+        != (reopened.dev(), reopened.ino(), reopened.rdev())
+    {
+        return Err(io::Error::other("state probe reopened a different device"));
+    }
+    Ok(file)
+}
+
+/// A separate evdev client for state queries during handoff preparation.
+///
+/// EVIOCGKEY flushes key events from the queried client's queue. This client
+/// is reopened rather than duplicated so queries cannot flush the forwarding
+/// reader. See [`evdev_handle_get_val` in Linux evdev.c](https://github.com/torvalds/linux/blob/v6.12/drivers/input/evdev.c#L820-L862).
+/// A neutral result is a snapshot, not an atomic ownership boundary.
+pub struct StateProbe {
+    raw: RawDevice,
+}
+impl StateProbe {
+    /// Open the reader's node without resolving its discovery pathname again.
+    /// Failure to reopen or loss of the original connection aborts preparation.
+    pub fn new(reader: &RawDevice) -> io::Result<Self> {
+        let raw = RawDevice::from_fd(reopen_readonly(reader.as_fd())?.into())?;
+        let mut version = 0;
+        // SAFETY: a live borrowed evdev fd and a writable initialized c_int.
+        // Check after reopening: minor reuse must not bind a replacement while
+        // the original connection has become disconnected or revoked.
+        unsafe { get_version(reader.as_raw_fd(), &mut version) }.map_err(io::Error::from)?;
+        Ok(Self { raw })
+    }
+
+    /// Query held keys and contacts without changing the forwarding queue.
+    /// Key and contact snapshots are separate and can change before a grab.
+    pub fn is_neutral(&self, device: &Device) -> io::Result<bool> {
+        Ok((self.raw.supported_keys().is_none()
+            || self.raw.get_key_state()?.iter().next().is_none())
+            && initial_contacts(&self.raw, device)?.is_empty())
+    }
 }
 
 use crate::diagnostics::Entry;
@@ -952,6 +999,32 @@ fn print_observation(
 #[cfg(test)]
 mod reader_buffer_tests {
     use super::*;
+
+    #[test]
+    fn reopened_probe_has_an_independent_file_description() {
+        use std::io::{Read, Seek, SeekFrom};
+
+        let fd = nix::sys::memfd::memfd_create(
+            c"prek-state-probe",
+            nix::sys::memfd::MFdFlags::MFD_CLOEXEC,
+        )
+        .unwrap();
+        let mut reader = File::from(fd);
+        reader.write_all(b"queued").unwrap();
+        reader.seek(SeekFrom::Start(2)).unwrap();
+        let mut probe = reopen_readonly(reader.as_fd()).unwrap();
+        let mut bytes = [0; 2];
+        probe.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, b"qu");
+        assert_eq!(reader.stream_position().unwrap(), 2);
+        assert!(probe.write_all(b"x").is_err());
+        let flags = nix::fcntl::fcntl(probe.as_fd(), nix::fcntl::FcntlArg::F_GETFD).unwrap();
+        assert_ne!(flags & libc::FD_CLOEXEC, 0);
+        let flags = nix::fcntl::fcntl(probe.as_fd(), nix::fcntl::FcntlArg::F_GETFL).unwrap();
+        assert_ne!(flags & libc::O_NONBLOCK, 0);
+        // This proves independent reopening only; actual evdev queue isolation
+        // is exercised by the guarded kernel lifecycle fixture.
+    }
 
     fn source(device: u64) -> Source {
         Source {

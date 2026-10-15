@@ -64,9 +64,15 @@ impl InputSink for Sink {
         if !buffer.is_drained() {
             return Ok(ReaderDisposition::Keep);
         }
+        let state = linux::StateProbe::new(raw)?;
+        assert!(state.is_neutral(&self.device)?);
         raw.grab()?;
         self.grabbed = true;
         send(&mut self.source, 1, &[(EV_KEY, 30, 1)]);
+        // Query after injection while the press is still queued on raw. The
+        // forwarding cases below must receive it despite repeated queries.
+        assert!(!state.is_neutral(&self.device)?);
+        assert!(!state.is_neutral(&self.device)?);
         if self.exit == Exit::ReaderError {
             return Err(io::Error::other("injected reader failure after grab"));
         }
