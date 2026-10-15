@@ -1,6 +1,9 @@
 //! Broker-only native Morf lock endpoint. Lua state and process/socket loss
 //! never establish a completed unlock transition.
 pub mod controls;
+mod shell;
+pub use shell::{Phase as ShellPhase, State as ShellState};
+pub type ShellClient = Client<ShellState>;
 
 use crate::{
     hyprland,
@@ -63,13 +66,49 @@ impl State {
         Ok(())
     }
 }
+mod sealed {
+    pub trait Sealed {}
+}
+/// Implemented only by the native lock and shell wire states.
+pub trait NativeState: sealed::Sealed + serde::de::DeserializeOwned + Clone + Eq {
+    const SUFFIX: &'static str;
+    fn validate(&self) -> io::Result<()>;
+    fn compositor(&self) -> (u32, u64, u32);
+    fn epoch(&self) -> &str;
+    fn revision(&self) -> u64;
+    fn preserves(&self, old: &Self) -> bool {
+        self.epoch() == old.epoch()
+            && self.revision() >= old.revision()
+            && (self.revision() != old.revision() || self == old)
+    }
+}
+impl sealed::Sealed for State {}
+impl NativeState for State {
+    const SUFFIX: &'static str = "-lock-provider.sock";
+    fn validate(&self) -> io::Result<()> {
+        State::validate(self)
+    }
+    fn compositor(&self) -> (u32, u64, u32) {
+        (
+            self.compositor_pid,
+            self.compositor_start,
+            self.compositor_uid,
+        )
+    }
+    fn epoch(&self) -> &str {
+        &self.epoch
+    }
+    fn revision(&self) -> u64 {
+        self.revision
+    }
+}
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct Proof {
     pid: u32,
     start: u64,
     epoch: String,
 }
-pub struct Client {
+pub struct Client<S: NativeState = State> {
     directory: File,
     name: String,
     stream: UnixStream,
@@ -79,9 +118,12 @@ pub struct Client {
     start: u64,
     executable: (u64, u64),
     registration: Registration,
-    last: Option<State>,
+    last: Option<S>,
 }
-impl Client {
+impl<S: NativeState> Client<S> {
+    pub(crate) fn last_state(&self) -> Option<&S> {
+        self.last.as_ref()
+    }
     pub fn discover(
         runtime: &Path,
         uid: u32,
@@ -89,6 +131,19 @@ impl Client {
         logind: &Logind,
         compositor: &hyprland::Client,
     ) -> io::Result<Option<Self>> {
+        let mut found = Self::discover_all(runtime, uid, executable, logind, compositor)?;
+        if found.len() > 1 {
+            return Err(denied("ambiguous native providers"));
+        }
+        Ok(found.pop())
+    }
+    pub fn discover_all(
+        runtime: &Path,
+        uid: u32,
+        executable: &Path,
+        logind: &Logind,
+        compositor: &hyprland::Client,
+    ) -> io::Result<Vec<Self>> {
         let runtime = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
@@ -103,7 +158,7 @@ impl Client {
             .open(PathBuf::from(format!("/proc/self/fd/{}", runtime.as_raw_fd())).join("morf"))
         {
             Ok(directory) => directory,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(error),
         };
         let metadata = directory.metadata()?;
@@ -123,16 +178,13 @@ impl Client {
             }
             names.push(name);
         }
-        let mut result = None;
+        let mut result = Vec::new();
         let until = Instant::now() + RPC_TIME;
         for name in names {
             if Instant::now() >= until {
                 return Err(io::ErrorKind::TimedOut.into());
             }
-            let Some(name) = name
-                .to_str()
-                .filter(|name| name.ends_with("-lock-provider.sock"))
-            else {
+            let Some(name) = name.to_str().filter(|name| name.ends_with(S::SUFFIX)) else {
                 continue;
             };
             if name.len() > 128
@@ -142,11 +194,17 @@ impl Client {
             {
                 return Err(invalid("invalid native Morf provider name"));
             }
-            let stat = fs::symlink_metadata(root.join(name))?;
+            let stat = match fs::symlink_metadata(root.join(name)) {
+                Ok(stat) => stat,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
             if !stat.file_type().is_socket() || stat.uid() != uid || stat.mode() & 0o077 != 0 {
                 return Err(denied("native Morf provider endpoint is not private"));
             }
-            let stream = hyprland::connect(&root.join(name), until)?;
+            let Some(stream) = connect_provider(&root.join(name), until)? else {
+                continue;
+            };
             let peer = Peer::from_socket(&stream)?;
             if peer.uid() != uid {
                 return Err(denied("native provider peer UID differs"));
@@ -185,10 +243,7 @@ impl Client {
                 }
                 Err(error) => return Err(error),
             }
-            if result.is_some() {
-                return Err(denied("ambiguous native lock providers"));
-            }
-            result = Some(client);
+            result.push(client);
         }
         Ok(result)
     }
@@ -208,15 +263,15 @@ impl Client {
         }
         Ok(())
     }
-    pub fn sample(&mut self, logind: &Logind, compositor: &hyprland::Client) -> io::Result<State> {
+    pub fn sample(&mut self, logind: &Logind, compositor: &hyprland::Client) -> io::Result<S> {
         self.sample_until(logind, compositor, Instant::now() + RPC_TIME)
     }
-    fn sample_until(
+    pub(crate) fn sample_until(
         &mut self,
         logind: &Logind,
         compositor: &hyprland::Client,
         until: Instant,
-    ) -> io::Result<State> {
+    ) -> io::Result<S> {
         self.verify()?;
         self.registration.check(logind, compositor)?;
         self.write(b"{\"version\":1,\"op\":\"state\"}\n", until)?;
@@ -242,48 +297,27 @@ impl Client {
                 Err(error) => return Err(error),
             }
         }
-        let state: State = serde_json::from_slice(&bytes)?;
+        let state: S = serde_json::from_slice(&bytes)?;
         state.validate()?;
         self.registration.check(logind, compositor)?;
         self.verify()?;
         let binding = self.registration.binding()?;
-        if (
-            state.compositor_pid,
-            state.compositor_start,
-            state.compositor_uid,
-        ) != (
-            binding.compositor_pid,
-            binding.compositor_start,
-            binding.uid,
-        ) {
+        if state.compositor()
+            != (
+                binding.compositor_pid,
+                binding.compositor_start,
+                binding.uid,
+            )
+        {
             return Err(denied("native provider serves another compositor"));
         }
-        if self.last.as_ref().is_some_and(|old| {
-            old.epoch != state.epoch
-                || old.revision > state.revision
-                || old.revision == state.revision && old != &state
-        }) {
+        if self.last.as_ref().is_some_and(|old| !state.preserves(old)) {
             return Err(denied(
                 "native provider transition regressed or changed identity",
             ));
         }
         self.last = Some(state.clone());
         Ok(state)
-    }
-    pub(crate) fn proof(&self, state: &State) -> Proof {
-        Proof {
-            pid: self.pid,
-            start: self.start,
-            epoch: state.epoch.clone(),
-        }
-    }
-    /// Called after the broker committed the verified unlock transition. The
-    /// provider may terminate immediately; its exit is never an unlock proof.
-    pub(crate) fn release(&mut self, state: &State) -> io::Result<()> {
-        let mut bytes = serde_json::to_vec(&serde_json::json!({"version": 1, "op": "release",
-            "epoch": state.epoch, "revision": state.revision}))?;
-        bytes.push(b'\n');
-        self.write(&bytes, Instant::now() + RPC_TIME)
     }
     fn write(&mut self, bytes: &[u8], until: Instant) -> io::Result<()> {
         let mut pending = bytes;
@@ -304,9 +338,42 @@ impl Client {
         Ok(())
     }
 }
-impl AsFd for Client {
+impl Client<State> {
+    pub(crate) fn proof(&self, state: &State) -> Proof {
+        Proof {
+            pid: self.pid,
+            start: self.start,
+            epoch: state.epoch.clone(),
+        }
+    }
+    /// Called after the broker committed the verified unlock transition. The
+    /// provider may terminate immediately; its exit is never an unlock proof.
+    pub(crate) fn release(&mut self, state: &State) -> io::Result<()> {
+        let mut bytes = serde_json::to_vec(&serde_json::json!({"version": 1, "op": "release",
+            "epoch": state.epoch, "revision": state.revision}))?;
+        bytes.push(b'\n');
+        self.write(&bytes, Instant::now() + RPC_TIME)
+    }
+}
+impl<S: NativeState> AsFd for Client<S> {
     fn as_fd(&self) -> BorrowedFd<'_> {
         self.stream.as_fd()
+    }
+}
+fn connect_provider(path: &Path, until: Instant) -> io::Result<Option<UnixStream>> {
+    match hyprland::connect(path, until) {
+        Ok(stream) => Ok(Some(stream)),
+        // SIGKILL can leave an inert native socket inode. It supplies no
+        // evidence and must not hide another live provider in this registry.
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
     }
 }
 fn birth(pid: u32) -> io::Result<u64> {
@@ -353,6 +420,37 @@ fn denied(message: &str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dead_native_socket_inodes_are_skipped_without_removing_user_paths() {
+        use std::os::unix::{fs::DirBuilderExt, net::UnixListener};
+        let directory = PathBuf::from(format!("/tmp/prek-morf-dead-{}", std::process::id()));
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&directory)
+            .unwrap();
+        let dead = directory.join("dead.sock");
+        let listener = UnixListener::bind(&dead).unwrap();
+        drop(listener);
+        assert!(
+            connect_provider(&dead, Instant::now() + RPC_TIME)
+                .unwrap()
+                .is_none()
+        );
+        assert!(dead.exists());
+        let live = directory.join("live.sock");
+        let _listener = UnixListener::bind(&live).unwrap();
+        assert!(
+            connect_provider(&live, Instant::now() + RPC_TIME)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            connect_provider(&directory.join("missing.sock"), Instant::now() + RPC_TIME)
+                .unwrap()
+                .is_none()
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
     fn value() -> serde_json::Value {
         serde_json::json!({"version": 1, "role": "lock", "epoch": "a".repeat(32),
             "revision": 2, "phase": "locked", "compositor_pid": 42,

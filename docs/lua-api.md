@@ -5,11 +5,45 @@ Prek embeds [onix-os/luna](https://github.com/onix-os/luna), pinned to version
 also accepted. Configuration evaluation declares actions and does not execute
 them. Live production routing remains disabled.
 
-This reference covers configuration, rule queries and host transaction bindings, read-only session context, event subscriptions, timers, tasks and named
+This reference covers configuration, rule queries and host transaction bindings, read-only session context/native Morf connections, event subscriptions, timers, tasks and named
 action handlers producing command/event plans. Custom recognizers,
 live adapter bindings and the remaining operational APIs remain required
 work in `PLAN.md`. Discovery labels the runtime API partial.
 Run `prek api --json` for the installed manifest or inspect `prek.api` in Lua.
+
+## Native Morf connections
+
+`morf.providers() -> MorfProviderBinding[] | nil` copies the native shell
+connection bindings currently verified by the broker for this desktop. Call it
+in a runtime callback. Configuration-time calls raise an error. It returns
+`nil` for missing, stale or inhibited desktop context; an empty array means no
+native shell provider is currently verified. This uses the existing context
+capability and the protected broker `morfExecutable` policy. User Lua cannot
+register providers or populate this view.
+
+Each binding contains `version=1`, `role="shell"`, `output`, a 32-character
+native `epoch`, `revision`, `phase`, `compositor_pid`, `compositor_uid`,
+`compositor_start` and the owning `fence`. Process birth is an exact unsigned
+decimal string. Fence identities are also decimal strings. Compare them as
+strings. Returned tables are independent copies and confer no authority.
+
+`pending`/revision 1 means the native shell connection exists for that output.
+`configured`/revision 2 means the native host witnessed its primary surface
+configure. The epoch changes when the backend connection is replaced. A Lua
+configuration reload on the same connection does not by itself change this
+connection epoch. These fields prove neither compositor presentation nor
+rendered widget regions, keyboard state, authentication, recognizer ownership
+or an action grant. The other Morf runtime operations remain pending.
+
+The broker verifies the private endpoint, exact Morf executable and process
+lifetime, active logind membership and the actual bound compositor. It samples
+existing connections with a shared 200 ms IPC deadline and discovers providers
+at most once per second. The context expires after 250 ms and is limited to 64
+unique output bindings. Loss, malformed state, retargeting or ambiguity clears
+the view; it cannot establish unlock. Missing Morf does not inhibit unrelated
+generic rules. Authentication input and inactive/unrelated sessions cannot use
+this query. See [morf_providers.lua](../examples/lua/morf_providers.lua) for a
+runnable observation recipe.
 
 ## Editor definitions
 

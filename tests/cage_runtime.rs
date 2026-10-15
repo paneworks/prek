@@ -113,6 +113,7 @@ fn context(
     routing.actions_available(1, BTreeSet::from([Capability::Observations]), now);
     session
         .update_context(View {
+            morf: Vec::new(),
             fence,
             sampled_at: now,
             state: snapshot.state,
@@ -736,6 +737,7 @@ return p.config.new{mode='route',policy={allowed_devices={'keyboard'},allow_hypr
     let mut ignored = Vec::new();
     settle(&mut session, &mut ignored);
     let view = |snapshot: Snapshot| View {
+        morf: Vec::new(),
         fence,
         sampled_at: snapshot.captured_at,
         state: snapshot.state,
@@ -980,6 +982,7 @@ devices={keyboard={keys={'KEY_A','KEY_B'}}},rules={
         "power fixture must own exactly one nested output"
     );
     let view = |snapshot: Snapshot| View {
+        morf: Vec::new(),
         fence,
         sampled_at: snapshot.captured_at,
         state: snapshot.state,

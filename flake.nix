@@ -89,6 +89,14 @@
           pkgs = nixpkgs.legacyPackages.${system};
           package = self.packages.${system}.default;
         in {
+          wayland-proxy = pkgs.runCommand "prek-wayland-proxy-check" {
+            nativeBuildInputs = [ pkgs.python3 ];
+          } ''
+            mkdir proxy
+            cp ${./tests/support/wlproxy.py} proxy/wlproxy.py
+            cp ${./tests/support/test_wlproxy.py} proxy/test_wlproxy.py
+            python3 -m unittest discover -s proxy -p test_wlproxy.py -v > "$out" 2>&1
+          '';
           nixos-module = import ./tests/nixos-module.nix {
             inherit pkgs package;
             module = self.nixosModules.default;

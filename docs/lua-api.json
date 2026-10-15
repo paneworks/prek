@@ -259,6 +259,22 @@
     "source_set_bytes": 1048576,
     "symlinks": false
   },
+  "morf_provider_queries": {
+    "authority": "read-only connection/configure metadata; no presentation, rendered regions, authentication, recognizer ownership or action grant",
+    "capability": "context",
+    "discovery_ms": 1000,
+    "freshness_ms": 250,
+    "identity": "native Wayland socket credentials, exact executable/process, logind registration and bound compositor; connection epoch is independent of Lua configuration reload",
+    "integers": "compositor_start and fence identities are canonical decimal strings",
+    "ipc_budget_ms": 200,
+    "maximum_outputs": 64,
+    "phases": {
+      "configured": 2,
+      "pending": 1
+    },
+    "role": "shell",
+    "unavailable": "nil without a fresh owning desktop; empty array when no native provider is currently verified"
+  },
   "phase": "configuration_and_session_actions",
   "rule_hooks": {
     "budget": "shared event subscription, fuel, time and log limits",
@@ -496,6 +512,12 @@
       "description": "Register an approved generation-scoped named handler; resolve a bounded typed effect plan in the unprivileged session after a broker execution grant.",
       "name": "actions.define",
       "signature": "actions.define(name, {requires = capabilities}, callback) -> Action"
+    },
+    {
+      "description": "Copy fresh broker-verified native shell connection bindings for the owning desktop/output; no rendered regions, lock proof, recognizer ownership or action grant is inferred.",
+      "name": "morf.providers",
+      "phase": "runtime_callback",
+      "signature": "morf.providers() -> MorfProviderBinding[] | nil"
     },
     {
       "description": "Copy fresh broker-negotiated flags and parent executor readiness for this session fence; neither grants effects.",

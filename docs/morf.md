@@ -24,8 +24,9 @@ reader can inspect the native report without releasing it.
 
 This supplies native lock evidence. Morf shell/keyboard rendered regions,
 typed drawer/workspace actions and progress, synthetic keyboard ownership and
-the global-recognizer handoff still require implementation. The public
-`prek.morf` runtime family is not advertised as implemented. Root/logind and
+the global-recognizer handoff still require implementation. The read-only
+`prek.morf.providers()` query exposes verified native shell connection metadata;
+the other Morf runtime operations remain pending. Root/logind and
 physical authentication acceptance remain unverified by local model fixtures.
 
 The optional owned local test is:
@@ -53,7 +54,7 @@ The companion Caelestia shell also supplies typed ordinary controller IPC,
 documented upstream in `../mold/docs/PREK_CONTROLS.md`. Prek's strict wire types
 live in `src/morf/controls.rs`: frozen output, epoch/gesture/ordinal correlation,
 discrete/continuous action validation and bounded finite motion. They provide
-no execution grant and do not enable the public `prek.morf` runtime family.
+no execution grant and do not enable Morf action capability negotiation.
 Native controller binding, rendered context, recognizer handoff and generation
 retirement remain required before production capability negotiation.
 
@@ -76,3 +77,16 @@ cover both themes, drawer axes, workspace partial return/commit, expiry, hard
 deadline and authentication cancellation. Ordinary shell IPC success does not
 establish broker grants, recognizer ownership, rendered-region authority or
 physical application delivery; those are explicitly pending.
+
+Native shell bindings are separate 0600 `*-shell-provider.sock` endpoints under
+the private runtime. The real per-output Wayland client supplies compositor
+credentials, process birth and its actual output name. Only native host code
+advances pending/1 to configured/2 after the primary configure witness. Backend
+replacement removes the old endpoint and creates a new epoch; ordinary Lua
+reload on the same connection does not itself replace that epoch. No ordinary
+IPC callback can supply or advance these fields. The broker applies the same
+executable, lifetime, directory, compositor and logind checks used for native
+lock discovery, then includes matching output bindings in fresh desktop context.
+Connection metadata never supplies lock completion or rendered widget regions.
+The owned shell trial now also verifies the native endpoint identity and its
+removal after an ordinary graceful shutdown.

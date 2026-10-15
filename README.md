@@ -234,7 +234,8 @@ pending. Offline replay supports reconciliation and mapping-generation changes.
 ## Configuration
 
 The broker's native Morf lock-provider integration and its owned local test are
-described in [Morf integration](docs/morf.md). This supplies lock evidence;
+described in [Morf integration](docs/morf.md). This supplies lock evidence and
+read-only native shell bindings through `prek.morf.providers()`;
 Morf's rendered regions, typed shell actions and recognizer handoff remain work
 in progress.
 

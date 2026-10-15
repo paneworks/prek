@@ -20,6 +20,8 @@ mod geometry;
 mod handlers;
 mod hooks;
 mod modules;
+#[cfg(target_os = "linux")]
+mod morf;
 mod rule_api;
 mod runtime;
 mod scheduler;
@@ -69,6 +71,11 @@ pub fn api() -> serde_json::Value {
     ];
     #[cfg(target_os = "linux")]
     for (name, signature, description) in [
+        (
+            "morf.providers",
+            "morf.providers() -> MorfProviderBinding[] | nil",
+            "Copy fresh broker-verified native shell connection bindings for the owning desktop/output; no rendered regions, lock proof, recognizer ownership or action grant is inferred.",
+        ),
         (
             "capabilities.current",
             "capabilities.current() -> CapabilityView | nil",
@@ -351,6 +358,7 @@ pub fn api() -> serde_json::Value {
         "rule_hooks":{"registration":"configuration only; rule ID must exist in the validated initial configuration","phases":["discrete","begin","update","end","cancel"],"inline_fields":["on_discrete","on_begin","on_update","on_end","on_cancel"],"budget":"shared event subscription, fuel, time and log limits","delivery":"rule ID and phase filtered in the owning VM; registration order; updates may coalesce","effects":"observational; no returned effects, input claims or synthetic ownership","lifetime":"approved source generation; follows stable rule ID across acknowledged edits; removed rules emit no fresh matches; reload disposes the old VM","export":"callbacks require original Lua source"},
         "input_events":{"event":"input","configuration_mode":"observe","agent_flags":["lua","input"],"capability":"input_events","system_permission":"policy.allow_input_events","production_broker":"observation_mode","sources":"explicit policy.allowed_devices selectors on the owning seat; virtual devices excluded","context":"fresh desktop without secure overlay","freshness_ms":250,"payload":"InputPayload","raw_frames":false,"input_claims":false,"delivery":"ordered, no coalescing; overflow retires the affected stream or Lua component","resets":["attached","reconciled","mapping_changed","removed","lost"],"coordinates":"device axis counts","maximum_changes":4096,"maximum_contacts":256,"identity_fields":["source.device","source.generation","sequence","contacts[].id.generation","contacts_started[].generation","contacts_ended[].generation","ended_contacts[].id.generation"],"identity_type":"decimal_string"},
         "context_limits":{"snapshot_bytes":4194304,"chunk_bytes":32768,"transfer_time_ms":1000,"freshness_ms":250,"refresh_ms":100,"queued_snapshots":2,"read_only":true},
+        "morf_provider_queries":{"role":"shell","capability":"context","freshness_ms":250,"maximum_outputs":64,"discovery_ms":1000,"ipc_budget_ms":200,"phases":{"pending":1,"configured":2},"identity":"native Wayland socket credentials, exact executable/process, logind registration and bound compositor; connection epoch is independent of Lua configuration reload","integers":"compositor_start and fence identities are canonical decimal strings","unavailable":"nil without a fresh owning desktop; empty array when no native provider is currently verified","authority":"read-only connection/configure metadata; no presentation, rendered regions, authentication, recognizer ownership or action grant"},
         "capability_queries":{"source":"broker-negotiated registration flags and parent executor readiness; never inferred from Lua source","freshness_ms":250,"refresh_ms":100,"queued_snapshots":1,"in_flight_snapshots":1,"ready_families":["commands","lua_actions","power_actions","hyprland_actions"],"hyprland":"protected policy.allow_hyprland_actions and session --hyprland on a routing broker; production takeover remains unavailable","unavailable":"current returns nil; has and ready return false","unknown_names":"false; names must be strings of 1 to 128 bytes","grants":false,"lifetime":"negotiated flags immutable within the owning fence; stop clears metadata"},
         "geometry_queries":{"context":"fresh owning desktop without secure overlay","lookup":"exact output name or rendered region ID","references":"canonical decimal-string fence, snapshot revision and output geometry generation; copies confer no authority","spaces":["normalized","local","global"],"normalized":"post-transform output axes, not raw device axes","local":"post-transform logical units; rotation and scale applied through output logical size","region_bounds":"global logical, half-open","overlaps":"all matches in provider order, no target selection","unavailable":"nil for absent/stale/inhibited context, missing name or retired reference; known empty arrays remain empty","conversion":"finite numeric points, no clamping; arithmetic overflow raises an error","effects":false},
         "runtime_requires":{"uid":"unprivileged active session","capabilities":["context","observations","lua_events"],"thread":"owning Luna arena","generation":"current broker/configuration/session fence"},
@@ -660,6 +668,7 @@ fn instantiate(
                 "outputs",
                 "regions",
                 "coordinates",
+                "morf",
             ] {
                 module.set(ctx, namespace, Table::new(&ctx))?;
             }
@@ -763,6 +772,8 @@ fn instantiate(
                     capabilities.set(ctx, field, self::capabilities::getter(&ctx, host.clone(), field))?;
                 }
                 geometry::register(&ctx, module, host.clone())?;
+                let morf: Table = module.get(ctx, "morf")?;
+                morf.set(ctx, "providers", self::morf::getter(&ctx, host.clone()))?;
                 let context: Table = module.get(ctx, "context")?;
                 for field in ["snapshot", "binding", "state", "fence", "error"] {
                     context.set(ctx, field, self::context::getter(&ctx, host.clone(), field))?;

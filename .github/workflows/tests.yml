@@ -21,10 +21,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@main
-      - name: Check installed NixOS module and Lua editor artifacts
+      - name: Check installed module, Lua editor and private Wayland proxy
         run: |
           prek_system="$(nix eval --impure --raw --expr builtins.currentSystem)"
-          nix build --no-write-lock-file ".#checks.${prek_system}.nixos-module" ".#checks.${prek_system}.lua-editor"
+          nix build --no-write-lock-file ".#checks.${prek_system}.nixos-module" ".#checks.${prek_system}.lua-editor" ".#checks.${prek_system}.wayland-proxy"
 
   verify:
     env:

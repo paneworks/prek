@@ -44,7 +44,7 @@ def main():
     signal.signal(signal.SIGTERM, stopped)
     with (output / "proxy.log").open("w") as proxy_log, (output / "hyprland.log").open("w") as hypr_log:
         try:
-            proxy = subprocess.Popen([sys.executable, args.proxy, str(upstream), str(parent)],
+            proxy = subprocess.Popen([sys.executable, args.proxy, str(upstream), str(parent), "--no-parent-input"],
                                      stdout=proxy_log, stderr=proxy_log)
             children.append(proxy)
             wait_for(upstream.is_socket, proxy)

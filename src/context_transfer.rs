@@ -20,10 +20,45 @@ pub struct View {
     pub state: State,
     pub context: Option<Box<ProvidedContext>>,
     pub error: Option<String>,
+    /// Native connection bindings verified by the broker; no rendered regions
+    /// or controller authority are inferred from these role states.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub morf: Vec<crate::morf::ShellState>,
 }
 impl View {
     pub fn validate(&self) -> io::Result<()> {
         self.fence.validate()?;
+        if self.morf.len() > 64 {
+            return Err(protocol::invalid("too many native Morf shell bindings"));
+        }
+        let mut outputs = std::collections::BTreeSet::new();
+        for state in &self.morf {
+            use crate::morf::NativeState;
+            state.validate()?;
+            let Some(context) = &self.context else {
+                return Err(protocol::invalid("Morf binding lacks owning context"));
+            };
+            let binding = &context.binding;
+            if self.state != State::Desktop
+                || context.snapshot.secure_overlay
+                || state.compositor()
+                    != (
+                        binding.compositor_pid,
+                        binding.compositor_start,
+                        binding.uid,
+                    )
+                || !outputs.insert(&state.output)
+                || !context
+                    .snapshot
+                    .outputs
+                    .iter()
+                    .any(|output| output.geometry.name == state.output)
+            {
+                return Err(protocol::invalid(
+                    "Morf binding differs from owning desktop/output",
+                ));
+            }
+        }
         if self
             .error
             .as_ref()
@@ -190,6 +225,39 @@ impl Assembly {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    #[test]
+    fn native_morf_metadata_cannot_cross_compositor_output_or_secure_context() {
+        let mut original = view(Duration::from_secs(1));
+        let binding = &original.context.as_ref().unwrap().binding;
+        original.morf.push(crate::morf::ShellState {
+            version: 1,
+            role: "shell".into(),
+            epoch: "a".repeat(32),
+            revision: 2,
+            phase: crate::morf::ShellPhase::Configured,
+            compositor_pid: binding.compositor_pid,
+            compositor_start: binding.compositor_start,
+            compositor_uid: binding.uid,
+            output: "fixture-output".into(),
+        });
+        original.validate().unwrap();
+        let decoded: View = serde_json::from_slice(&original.encode().unwrap()).unwrap();
+        assert_eq!(decoded, original);
+        for change in 0..8 {
+            let mut changed = original.clone();
+            match change {
+                0 => changed.morf[0].output = "other-output".into(),
+                1 => changed.morf[0].compositor_start += 1,
+                2 => changed.morf[0].compositor_uid += 1,
+                3 => changed.morf.push(changed.morf[0].clone()),
+                4 => changed.context = None,
+                5 => changed.context.as_mut().unwrap().snapshot.secure_overlay = true,
+                6 => changed.state = State::Locked,
+                _ => changed.morf = vec![changed.morf[0].clone(); 65],
+            }
+            assert!(changed.validate().is_err(), "tampering case {change}");
+        }
+    }
     pub(crate) fn view(at: Duration) -> View {
         use crate::{
             config::Screen,
@@ -206,6 +274,7 @@ pub(crate) mod tests {
             size: Point { x: 100.0, y: 120.0 },
         };
         View {
+            morf: Vec::new(),
             fence: fence(),
             sampled_at: at,
             state: State::Desktop,
@@ -274,6 +343,7 @@ pub(crate) mod tests {
     #[test]
     fn context_transfer_preserves_full_metadata_and_rejects_stale_or_reordered_chunks() {
         let view = View {
+            morf: Vec::new(),
             fence: fence(),
             sampled_at: Duration::ZERO,
             state: State::Unknown,

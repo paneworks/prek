@@ -397,6 +397,66 @@ return {version=1}
 }
 
 #[test]
+fn real_helper_receives_native_morf_bindings_and_retires_them_with_context() {
+    let definition = Definition::compile(
+        r#"
+local p=require('prek')
+p.events.on('context_changed',function()
+  local providers=p.morf.providers()
+  if providers==nil then p.log.info('unavailable');return end
+  if #providers==0 then p.log.info('empty');return end
+  local provider=providers[1]
+  assert(provider.phase=='configured' and provider.output=='fixture-output')
+  assert(provider.compositor_start=='18446744073709551615')
+  assert(provider.fence.session==p.context.fence().session)
+  p.log.info('native-binding',{epoch=provider.epoch,birth=provider.compositor_start})
+end)
+return {version=1}
+"#,
+        "native-morf.lua",
+    )
+    .unwrap();
+    let mut session = Session::spawn(
+        Path::new(env!("CARGO_BIN_EXE_prek")),
+        fence(1),
+        "seat0",
+        definition,
+    )
+    .unwrap();
+    drain(&mut session).unwrap();
+    let mut view = context_view(monotonic().unwrap(), 0);
+    let binding = &mut view.context.as_mut().unwrap().binding;
+    binding.compositor_start = u64::MAX;
+    view.morf.push(prek::morf::ShellState {
+        version: 1,
+        role: "shell".into(),
+        epoch: "a".repeat(32),
+        revision: 2,
+        phase: prek::morf::ShellPhase::Configured,
+        compositor_pid: binding.compositor_pid,
+        compositor_start: binding.compositor_start,
+        compositor_uid: binding.uid,
+        output: "fixture-output".into(),
+    });
+    session.update_context(view.clone()).unwrap();
+    assert_eq!(
+        drain(&mut session).unwrap()[0].fields,
+        serde_json::json!({"epoch":"a".repeat(32),"birth":u64::MAX.to_string()})
+    );
+    view.morf.clear();
+    view.sampled_at = monotonic().unwrap();
+    view.context.as_mut().unwrap().snapshot.captured_at = view.sampled_at;
+    session.update_context(view.clone()).unwrap();
+    assert_eq!(drain(&mut session).unwrap()[0].message, "empty");
+    view.sampled_at = Duration::ZERO;
+    view.context.as_mut().unwrap().snapshot.captured_at = Duration::ZERO;
+    session.update_context(view).unwrap();
+    assert_eq!(drain(&mut session).unwrap()[0].message, "unavailable");
+    session.stop().unwrap();
+    drain(&mut session).unwrap();
+}
+
+#[test]
 fn real_helper_assembles_multiple_context_chunks_and_replaces_unsent_updates() {
     let definition = Definition::compile(
         r#"

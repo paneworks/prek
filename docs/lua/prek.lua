@@ -635,6 +635,23 @@ local SchedulerAPI = {}
 
 ---@class prek.CapabilitiesAPI
 local CapabilitiesAPI = {}
+---@class (exact) prek.MorfProviderBinding
+---@field version integer Native wire version, currently 1.
+---@field role 'shell'
+---@field epoch string Exact native connection epoch; no action authority.
+---@field revision integer Native phase revision, 1 or 2.
+---@field phase 'pending'|'configured' Configured is a native configure witness, not rendered-region evidence.
+---@field output string Actual named output of this native connection.
+---@field compositor_pid integer
+---@field compositor_uid integer
+---@field compositor_start prek.Identity Exact compositor process birth.
+---@field fence prek.Fence Owning broker/configuration/session fence.
+---@class prek.MorfAPI
+local MorfAPI = {}
+---Read-only native bindings in the fresh owning desktop. Known absence is an empty array.
+---Nil for stale, missing or inhibited context. No geometry, handoff, lock proof or effect grant.
+---@return prek.MorfProviderBinding[]|nil
+function MorfAPI.providers() error("Prek editor definition") end
 ---@class prek.ContextAPI
 local ContextAPI = {}
 ---@class prek.DevicesAPI
@@ -664,6 +681,7 @@ local CoordinatesAPI = {}
 ---@field scheduler prek.SchedulerAPI
 ---@field context prek.ContextAPI
 ---@field capabilities prek.CapabilitiesAPI
+---@field morf prek.MorfAPI
 ---@field devices prek.DevicesAPI
 ---@field seats prek.SeatsAPI
 ---@field outputs prek.OutputsAPI
@@ -674,6 +692,7 @@ local prek = {
     config = ConfigAPI, rules = RulesAPI, layers = LayersAPI, modes = ModesAPI, triggers = TriggersAPI, actions = ActionsAPI,
     units = UnitsAPI, events = EventsAPI, log = LogAPI, scheduler = SchedulerAPI, context = ContextAPI,
     capabilities = CapabilitiesAPI,
+    morf = MorfAPI,
     devices = DevicesAPI, seats = SeatsAPI,
     outputs = OutputsAPI, regions = RegionsAPI, coordinates = CoordinatesAPI,
 }

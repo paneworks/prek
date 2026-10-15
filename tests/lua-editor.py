@@ -62,6 +62,11 @@ p.events.on("ready", function(payload)
         end
     end
     p.outputs.list(); p.regions.list(); p.regions.get("widget")
+    for _, provider in ipairs(p.morf.providers() or {}) do
+        ---@type string
+        local birth = provider.compositor_start
+        p.log.info(provider.output, {birth = birth, epoch = provider.epoch, fence = provider.fence})
+    end
     local capabilities = p.capabilities.current()
     if capabilities then
         ---@type string

@@ -162,10 +162,86 @@ struct Bound {
     context: ContextFeed,
     compositor: (u32, u64),
     native: Option<crate::morf::Client>,
+    native_shells: Vec<crate::morf::ShellClient>,
+    shell_states: Vec<crate::morf::ShellState>,
+    shell_discovered: Duration,
     actions: ActionLedger,
     available_actions: BTreeSet<Capability>,
     context_export: Option<crate::context_transfer::Export>,
     rules: rule_control::Rules,
+}
+
+fn refresh_native_shells(bound: &mut Bound, policy: &Policy, logind: &Logind, now: Duration) {
+    let Some(executable) = policy.morf_executable.as_ref().filter(|_| {
+        bound.context.fresh(now)
+            && bound.context.state == State::Desktop
+            && bound
+                .context
+                .value
+                .as_ref()
+                .is_some_and(|context| !context.snapshot.secure_overlay)
+    }) else {
+        bound.native_shells.clear();
+        bound.shell_states.clear();
+        bound.shell_discovered = Duration::ZERO;
+        return;
+    };
+    let until = std::time::Instant::now() + Duration::from_millis(200);
+    let result = (|| {
+        let states = if now.saturating_sub(bound.shell_discovered) >= Duration::from_secs(1) {
+            bound.native_shells = crate::morf::ShellClient::discover_all(
+                &policy
+                    .runtime_root
+                    .join(bound.registration.binding()?.uid.to_string()),
+                bound.registration.binding()?.uid,
+                executable,
+                logind,
+                &bound.client,
+            )?;
+            bound.shell_discovered = now;
+            bound
+                .native_shells
+                .iter()
+                .map(|client| {
+                    client
+                        .last_state()
+                        .cloned()
+                        .ok_or_else(|| protocol::invalid("native shell lacks sampled state"))
+                })
+                .collect::<io::Result<Vec<_>>>()?
+        } else {
+            bound
+                .native_shells
+                .iter_mut()
+                .map(|client| client.sample_until(logind, &bound.client, until))
+                .collect::<io::Result<Vec<_>>>()?
+        };
+        let mut outputs = BTreeSet::new();
+        let snapshot = &bound.context.value.as_ref().unwrap().snapshot;
+        let mut visible = Vec::new();
+        for state in states {
+            if !outputs.insert(state.output.clone()) {
+                return Err(protocol::invalid("ambiguous native Morf output providers"));
+            }
+            if snapshot
+                .outputs
+                .iter()
+                .any(|output| output.geometry.name == state.output)
+            {
+                visible.push(state);
+            }
+        }
+        Ok(visible)
+    })();
+    match result {
+        Ok(states) => bound.shell_states = states,
+        Err(_) => {
+            // Optional shell identity loss never fabricates a region, action
+            // grant or unlock, and does not inhibit unrelated generic rules.
+            bound.native_shells.clear();
+            bound.shell_states.clear();
+        }
+    }
 }
 
 fn registration_capabilities(
@@ -1410,6 +1486,9 @@ impl Broker {
                         context,
                         compositor,
                         native: None,
+                        native_shells: Vec::new(),
+                        shell_states: Vec::new(),
+                        shell_discovered: Duration::ZERO,
                         context_export: None,
                         rules: rule_control::Rules::new(self.rule_baseline.clone()),
                         actions: ActionLedger::default(),
@@ -1503,6 +1582,13 @@ impl Broker {
                                     sampled_at: now,
                                     state: bound.context.state(now),
                                     context,
+                                    morf: if bound.context.fresh(now)
+                                        && bound.context.state(now) == State::Desktop
+                                    {
+                                        bound.shell_states.clone()
+                                    } else {
+                                        Vec::new()
+                                    },
                                     error: bound.context.error.as_ref().map(|error| {
                                         error
                                             .chars()
@@ -1887,7 +1973,7 @@ impl Broker {
                 .map(|_| None)
         };
         bound.registration.check(&self.logind, &bound.client)?;
-        let checked = monotonic()?;
+        let mut checked = monotonic()?;
         bound.context.checked = checked;
         if matches!(bound.context.state, State::Locking | State::Locked)
             || bound.context.sampler.inhibited()
@@ -1925,6 +2011,9 @@ impl Broker {
                 }
             }
         }
+        refresh_native_shells(bound, &self.policy, &self.logind, checked);
+        checked = monotonic()?;
+        bound.context.checked = checked;
         if bound.context.value.as_ref().is_some_and(|value| {
             checked.saturating_sub(value.snapshot.captured_at) > SNAPSHOT_MAX_AGE
         }) {

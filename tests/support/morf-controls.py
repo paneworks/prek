@@ -14,6 +14,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("morf", "shell", "socket", "hyprctl", "instance", "output"):
         parser.add_argument(f"--{name}", required=True)
+    parser.add_argument("--pid", required=True, type=int)
     args = parser.parse_args()
     assert os.environ.get("PREK_CAGE_HOST") == "1"
     runtime = Path(os.environ["XDG_RUNTIME_DIR"])
@@ -46,7 +47,7 @@ def main():
     observations = []
     producer = None
 
-    def rpc(target, *values):
+    def rpc(target=None, *values):
         nonlocal producer
         with socket.socket(socket.AF_UNIX) as client:
             client.settimeout(3)
@@ -56,7 +57,8 @@ def main():
             actual, expected = os.stat(f"/proc/{pid}/exe"), os.stat(args.morf)
             assert (actual.st_dev, actual.st_ino) == (expected.st_dev, expected.st_ino)
             producer = pid
-            client.sendall((json.dumps({"op": "call", "target": target, "args": values}) + "\n").encode())
+            message = {"op": "kill"} if target is None else {"op": "call", "target": target, "args": values}
+            client.sendall((json.dumps(message) + "\n").encode())
             raw = b""
             while not raw.endswith(b"\n"):
                 part = client.recv(4096)
@@ -90,6 +92,34 @@ def main():
         assert value["recognizer_ownership"] is False and value["blocked"] is False
         return value
 
+    def native_state():
+        endpoints = list((runtime / "morf").glob("*-shell-provider.sock"))
+        assert len(endpoints) == 1, "expected one actual native shell connection"
+        path = endpoints[0]
+        metadata = path.stat()
+        assert metadata.st_uid == os.geteuid() and metadata.st_mode & 0o077 == 0
+        with socket.socket(socket.AF_UNIX) as client:
+            client.settimeout(1)
+            client.connect(str(path))
+            pid, uid, _ = struct.unpack("3i", client.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+            assert pid == producer and uid == os.geteuid()
+            client.sendall(b'{"version":1,"op":"state"}\n')
+            raw = b""
+            while not raw.endswith(b"\n"):
+                part = client.recv(2048)
+                assert part and len(raw) + len(part) <= 2048
+                raw += part
+        value = json.loads(raw)
+        assert set(value) == {"version", "role", "epoch", "revision", "phase", "output",
+                              "compositor_pid", "compositor_start", "compositor_uid"}
+        assert value["version"] == 1 and value["role"] == "shell"
+        assert value["output"] == name and value["phase"] == "configured" and value["revision"] == 2
+        assert value["compositor_pid"] == args.pid and value["compositor_uid"] == os.geteuid()
+        birth = Path(f"/proc/{args.pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+        assert value["compositor_start"] == int(birth)
+        assert len(value["epoch"]) == 32 and all(c in "0123456789abcdef" for c in value["epoch"])
+        return path, value
+
     with (output / "morf-controls.log").open("w") as log:
         child = subprocess.Popen([args.morf, "--no-plugin", str(shell)], env=env,
                                  stdout=log, stderr=log, start_new_session=True)
@@ -108,6 +138,7 @@ def main():
                 raise RuntimeError("Morf controller startup timed out")
             layers = stock("layers")
             assert "caelestia-drawers" in json.dumps(layers)
+            native_path, initial_native = native_state()
             for action in ("dashboard", "notifications", "quick_settings", "apps", "web"):
                 send(request(action))
                 value = state()
@@ -146,10 +177,22 @@ def main():
                     break
                 assert time.monotonic() < until, "workspace cancellation did not settle"
                 time.sleep(.05)
+            final_state = state()
+            final_path, final_native = native_state()
+            assert final_native == initial_native and final_path == native_path
+            shutdown_acknowledged = True
+            try:
+                rpc()
+            except (ConnectionError, AssertionError):
+                shutdown_acknowledged = False
+            child.wait(timeout=5)
+            assert child.returncode == 0 and not native_path.exists(), "native binding survived orderly shell shutdown"
             (output / "morf-controls-receipts.json").write_text(json.dumps(dict(
                 status="passed", producer_pid=producer, output=name, ordinary_shell_ipc=True,
                 broker_grant_tested=False, recognizer_handoff_tested=False,
-                actual_compositor_layers=layers, initial=initial, final=state(),
+                native_shell_binding=final_native, native_endpoint_removed=True,
+                shutdown_acknowledged=shutdown_acknowledged,
+                actual_compositor_layers=layers, initial=initial, final=final_state,
                 settling=settling, observations=observations)) + "\n")
             print("PASS: actual Morf shell controllers handled frozen-output panels, keyboard, deduplication and workspace progress on the owned compositor.")
         finally:

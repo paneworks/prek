@@ -104,8 +104,8 @@ def main():
                                         stdout=subprocess.PIPE, stderr=log, text=True)
             if not select.select([keyboard.stdout], [], [], 5)[0] or keyboard.stdout.readline() != "ready\n":
                 raise RuntimeError("keyboard creation handshake failed")
-            # A visible nested session can lose its host keyboard enter while
-            # still running. Focus only its owned receiver via private IPC.
+            # Parent seat input is masked by the private proxy. Focus only
+            # the owned receiver for the prepared synthetic keyboard.
             instances = [path.parent.name for path in (runtime / "hypr").glob("*/.socket2.sock")]
             if len(instances) != 1:
                 raise RuntimeError("expected one owned compositor instance")
@@ -296,6 +296,7 @@ def main():
                 if args.morf_shell:
                     subprocess.run([os.sys.executable, str(args.morf_control_check),
                         "--morf", str(args.morf.resolve()), "--shell", str(args.morf_shell.resolve()),
+                        "--pid", str(report["hyprland_pid"]),
                         "--socket", str(socket), "--hyprctl", hyprctl,
                         "--instance", instances[0], "--output", str(output)],
                         env=env, check=True, timeout=90)

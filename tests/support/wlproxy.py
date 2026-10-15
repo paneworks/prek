@@ -2,13 +2,16 @@
 """A Wayland proxy that lets a client bind a newer xdg_wm_base than the
 compositor offers.
 
-    wlproxy.py LISTEN_SOCKET UPSTREAM_SOCKET [INTERFACE=VERSION ...]
+    wlproxy.py LISTEN_SOCKET UPSTREAM_SOCKET [--no-parent-input] [INTERFACE=VERSION ...]
 
 cage 0.3 offers xdg_wm_base v5 and Hyprland's Wayland backend (aquamarine)
 binds v6, so a nested Hyprland aborts on start. v6 only adds a toplevel
 state (suspended) a compositor may simply never send, so advertising v6 to
 the client and binding v5 upstream is sound. Everything else passes through
-untouched, file descriptors included.
+untouched, file descriptors included. With --no-parent-input, parent seats
+retain keyboard focus/keymap metadata needed by the nested backend, while
+interaction events are suppressed. Only sources created inside the owned
+nested compositor participate in automated input receipts.
 
 The rewrite needs two messages: wl_registry.global (event 0) carries the
 advertised version, and wl_registry.bind (request 0) the requested one.
@@ -35,11 +38,15 @@ def parse_string(data, offset):
 
 
 class Connection:
-    def __init__(self, client, upstream, advertise):
+    def __init__(self, client, upstream, advertise, no_parent_input=False):
         self.client = client
         self.upstream = upstream
         self.advertise = advertise  # interface -> version the client sees
         self.registries = set()
+        self.seats = set()
+        self.keyboards = set()
+        self.suppressed = set()
+        self.no_parent_input = no_parent_input
         # name -> (interface, real version), per connection
         self.globals = {}
         self.buffers = {client: b"", upstream: b""}
@@ -56,17 +63,47 @@ class Connection:
             if object_id == 1 and opcode == 1:
                 (registry,) = struct.unpack_from("<I", message, 8)
                 self.registries.add(registry)
+            elif object_id in self.seats and opcode in (0, 1, 2):
+                (device,) = struct.unpack_from("<I", message, 8)
+                (self.keyboards if opcode == 1 else self.suppressed).add(device)
             # wl_registry.bind(name, interface, version, new_id)
             elif object_id in self.registries and opcode == 0:
                 (name,) = struct.unpack_from("<I", message, 8)
                 interface, offset = parse_string(message, 12)
                 real = self.globals.get(name, (None, None))[1]
                 (version,) = struct.unpack_from("<I", message, offset)
+                if interface == "wl_seat":
+                    (seat,) = struct.unpack_from("<I", message, offset + 4)
+                    self.seats.add(seat)
                 if interface in self.advertise and real is not None and version > real:
                     message = bytearray(message)
                     struct.pack_into("<I", message, offset, real)
                     message = bytes(message)
         else:
+            # Release IDs before their eventual reuse by another interface.
+            if object_id == 1 and opcode == 1:
+                (deleted,) = struct.unpack_from("<I", message, 8)
+                self.seats.discard(deleted)
+                self.keyboards.discard(deleted)
+                self.suppressed.discard(deleted)
+                self.registries.discard(deleted)
+            # wl_seat.capabilities has no descriptors and is a single uint.
+            if self.no_parent_input and object_id in self.seats and opcode == 0:
+                message = bytearray(message)
+                capabilities = struct.unpack_from("<I", message, 8)[0]
+                struct.pack_into("<I", message, 8, capabilities & 2)
+                message = bytes(message)
+            elif self.no_parent_input and object_id in self.suppressed:
+                return b""
+            elif self.no_parent_input and object_id in self.keyboards:
+                if opcode == 3:  # wl_keyboard.key; no descriptors
+                    return b""
+                if opcode == 1:  # enter: preserve focus, discard held keys
+                    message = bytearray(message[:16] + struct.pack("<I", 0))
+                    struct.pack_into("<I", message, 4, (len(message) << 16) | opcode)
+                    message = bytes(message)
+                elif opcode == 4:  # modifiers: preserve serial, neutral state
+                    message = message[:12] + struct.pack("<4I", 0, 0, 0, 0)
             # wl_registry.global(name, interface, version)
             if object_id in self.registries and opcode == 0:
                 (name,) = struct.unpack_from("<I", message, 8)
@@ -117,7 +154,10 @@ class Connection:
 def main():
     listen_path, upstream_path = sys.argv[1], sys.argv[2]
     advertise = {"xdg_wm_base": 6}
+    no_parent_input = "--no-parent-input" in sys.argv[3:]
     for spec in sys.argv[3:]:
+        if spec == "--no-parent-input":
+            continue
         interface, version = spec.split("=")
         advertise[interface] = int(version)
     if os.path.exists(listen_path):
@@ -133,7 +173,7 @@ def main():
                 client, _ = server.accept()
                 upstream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                 upstream.connect(upstream_path)
-                connection = Connection(client, upstream, advertise)
+                connection = Connection(client, upstream, advertise, no_parent_input)
                 connections[client] = connection
                 connections[upstream] = connection
                 continue
