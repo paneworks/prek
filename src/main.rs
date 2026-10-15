@@ -168,8 +168,11 @@ enum Command {
     },
     /// Describe the implemented Lua exports without accessing devices.
     Api {
-        #[arg(long)]
+        #[arg(long, conflicts_with = "lua")]
         json: bool,
+        /// Print Lua Language Server definitions for the implemented API.
+        #[arg(long)]
+        lua: bool,
     },
     /// Create a complete declarative preset (.lua or legacy .toml).
     Init {
@@ -268,7 +271,10 @@ fn run(command: Command) -> io::Result<()> {
                 prek::lua::Definition::compile_sources(&sources).map_err(io::Error::other)?;
             serde_json::to_writer(&mut output, &definition).map_err(io::Error::other)
         }
-        Command::Api { json } => {
+        Command::Api { json, lua } => {
+            if lua {
+                return write!(output, "{}", prek::lua::editor_definitions());
+            }
             let api = prek::lua::api();
             if json {
                 serde_json::to_writer(&mut output, &api).map_err(io::Error::other)?;

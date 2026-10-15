@@ -1,7 +1,7 @@
 local p = require("prek")
 
 p.events.on("ready", function()
-    local rule = p.rules.get("example-a")
+    local rule = assert(p.rules.get("example-a"), "example-a is unavailable")
     p.log.info("rule-state", {
         id = rule.id,
         enabled = rule.enabled,
@@ -9,7 +9,8 @@ p.events.on("ready", function()
     })
     local copy = p.rules.list()
     copy[1].enabled = true
-    assert(not p.rules.get("example-a").enabled)
+    local current = assert(p.rules.get("example-a"), "example-a is unavailable")
+    assert(not current.enabled)
 end)
 
 return p.config.new {

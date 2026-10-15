@@ -11,6 +11,38 @@ live adapter bindings and the remaining operational APIs remain required
 work in `PLAN.md`. Discovery labels the runtime API partial.
 Run `prek api --json` for the installed manifest or inspect `prek.api` in Lua.
 
+## Editor definitions
+
+`prek api --lua` prints the same `prek.lua` installed at `share/prek/lua/prek.lua`.
+The checkout copy is [docs/lua/prek.lua](lua/prek.lua). It uses
+[Lua Language Server annotations](https://luals.github.io/wiki/annotations/)
+for constructor fields and defaults, trigger/action variants, lossless host
+identities, typed callbacks, context geometry, timers/tasks and transaction
+handles. Overloads narrow callback payloads according to the event kind.
+Definitions cover implemented bindings; pending adapter execution and operational
+APIs remain pending. Rust schema validation and broker permissions are authoritative.
+
+Point your project's `.luarc.json` at the installed directory:
+
+```json
+{
+  "workspace.library": ["/path/to/prek/share/prek/lua"],
+  "workspace.checkThirdParty": false
+}
+```
+
+Without an installation, save `prek api --lua` as `.editor/prek.lua` and use
+`"workspace.library": [".editor"]`. Keep definitions outside the approved
+`modules/` tree: these files describe the embedded host for tooling. Their
+functions raise errors if executed. They provide no standalone implementation,
+ambient I/O or extra broker permissions. Unit tests compare exports and model
+fields with Rust, and parse the complete file using pinned Luna. Run
+`nix build .#checks.x86_64-linux.lua-editor` (or `aarch64-linux` on native ARM)
+to check installed artifact parity, all shipped examples and positive/negative
+type diagnostics with the pinned Lua Language Server package.
+
+## Runtime rules
+
 `rules.list()`, `rules.get(id)` and `rules.revision()` are available inside runtime
 callbacks. Queries return owned copies of the current acknowledged rule view;
 editing those tables has no effect. A missing ID returns nil. Revisions are
@@ -455,7 +487,7 @@ The returned configuration accepts `version`, `mode`, `timing`, `shape_capture`,
 `policy`, `devices`, `layers`, `shapes` and `rules`. Rust schema validation remains
 authoritative, including unknown fields, references, priorities, resource bounds,
 activation keys, permitted seats and source selectors. A rule accepts `id`,
-`enabled`, `priority`, `devices`, `contexts`, `app`, `scope`, `screen`,
+`enabled`, `priority`, `devices`, `seats`, `contexts`, `scope`, `screen`,
 `keyboard_visible`, `require_keys`, `keys_throughout`, `layer`, `delivery`,
 `trigger` and `action`. Existing defaults and exact units remain in effect.
 

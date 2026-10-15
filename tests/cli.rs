@@ -585,6 +585,10 @@ fn t85_installed_api_discovery_matches_the_configuration_manifest() {
         serde_json::from_str(include_str!("../docs/lua-api.json")).unwrap();
     assert_eq!(actual, documented);
     assert_eq!(actual["runtime_api"], "partial");
+    let editor = run(&["api", "--lua"]);
+    assert!(editor.status.success());
+    assert_eq!(editor.stdout, include_bytes!("../docs/lua/prek.lua"));
+    assert!(!run(&["api", "--lua", "--json"]).status.success());
 }
 
 #[cfg(target_os = "linux")]

@@ -238,7 +238,10 @@ Prek embeds onix-os/luna for Lua configuration. `init` writes a minimal
 choose a different preset/path. `.lua` files work with `check`, `doctor`, `replay`, `run`
 and the protected broker configuration. `prek api --json` describes implemented
 configuration and runtime bindings; the [Lua reference](docs/lua-api.md) documents
-fields, constructors, libraries and limits. Supervised session callbacks and timers
+fields, constructors, libraries and limits. `prek api --lua` exports the shipped
+[Lua Language Server definitions](docs/lua/prek.lua); point `workspace.library`
+at the installed `share/prek/lua` directory for completion and type checking.
+Supervised session callbacks and timers
 are implemented. Named action handlers return bounded command/event plans under
 fresh broker grants; `session --lua --commands` opts into that executor. Custom
 recognizers and live adapter APIs remain required work.

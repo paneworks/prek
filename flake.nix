@@ -41,6 +41,8 @@
               mkdir -p "$out/share/doc/prek"
               cp ${./docs/lua-api.md} "$out/share/doc/prek/lua-api.md"
               cp ${./docs/lua-api.json} "$out/share/doc/prek/lua-api.json"
+              mkdir -p "$out/share/prek/lua"
+              cp ${./docs/lua/prek.lua} "$out/share/prek/lua/prek.lua"
               mkdir -p "$out/share/prek/examples"
               cp -r ${./examples/lua} "$out/share/prek/examples/lua"
             '';
@@ -67,6 +69,23 @@
           program = "${self.packages.${system}.cage-test}/bin/prek-cage-host-test";
         };
       });
+
+      checks = forSystems (system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+          package = self.packages.${system}.default;
+        in {
+          lua-editor = pkgs.runCommand "prek-lua-editor-check" {
+            nativeBuildInputs = [ pkgs.python3 pkgs.lua-language-server ];
+          } ''
+            python3 ${./tests/lua-editor.py} \
+              --binary ${package}/bin/prek \
+              --definitions ${package}/share/prek/lua/prek.lua \
+              --examples ${package}/share/prek/examples/lua \
+              --language-server ${pkgs.lua-language-server}/bin/lua-language-server \
+              --workdir "$TMPDIR/editor" > "$out"
+          '';
+        });
 
       devShells = forSystems (system:
         let

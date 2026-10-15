@@ -27,6 +27,17 @@
     "snapshot_bytes": 4194304,
     "transfer_time_ms": 1000
   },
+  "editor": {
+    "cli": [
+      "prek",
+      "api",
+      "--lua"
+    ],
+    "format": "LuaCATS",
+    "module": "prek",
+    "path": "share/prek/lua/prek.lua",
+    "scope": "implemented_configuration_and_runtime"
+  },
   "engine": "onix-os/luna",
   "engine_version": "0.5.1",
   "event_kinds": [

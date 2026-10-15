@@ -9,6 +9,7 @@ use std::{
 
 #[cfg(target_os = "linux")]
 mod context;
+mod editor;
 mod export;
 mod handlers;
 mod modules;
@@ -20,6 +21,7 @@ pub mod session;
 pub mod source_transfer;
 mod tasks;
 mod values;
+pub use editor::editor_definitions;
 pub use export::export_config;
 pub use handlers::{ActionResult, HandlerRegistration};
 pub use modules::{Module, Sources};
@@ -209,6 +211,7 @@ pub fn api() -> serde_json::Value {
         "context_limits":{"snapshot_bytes":4194304,"chunk_bytes":32768,"transfer_time_ms":1000,"freshness_ms":250,"refresh_ms":100,"queued_snapshots":2,"read_only":true},
         "runtime_requires":{"uid":"unprivileged active session","capabilities":["context","observations","lua_events"],"thread":"owning Luna arena","generation":"current broker/configuration/session fence"},
         "action_requires":{"agent_flags":["lua","commands"],"capabilities":["context","observations","lua_events","lua_actions","commands"],"implemented_effects":["commands","observations"],"grant_time_ms":250},
+        "editor":{"format":"LuaCATS","module":"prek","cli":["prek","api","--lua"],"path":"share/prek/lua/prek.lua","scope":"implemented_configuration_and_runtime"},
         "runtime_api":"partial"})
 }
 const MEMORY: usize = 32 * 1024 * 1024;
