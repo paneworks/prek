@@ -629,6 +629,13 @@ impl FrameAssembler {
         }
     }
 
+    /// True only between complete frames, outside synchronization-loss drain.
+    /// This describes our software buffer, not the kernel queue or ownership.
+    /// After `Assembly::Lost`, callers must still retire/reconcile the source.
+    pub fn at_boundary(&self) -> bool {
+        self.pending.is_empty() && !self.dropping
+    }
+
     pub fn push(&mut self, event: RawEvent, at: Duration) -> Assembly {
         if event.kind == EV_SYN && event.code == SYN_DROPPED {
             self.pending.clear();

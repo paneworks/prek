@@ -4,7 +4,7 @@ use evdev::raw_stream::RawDevice;
 use prek::{
     input::{Device, EV_KEY, EV_SYN, Frame, RawEvent, SYN_REPORT},
     kernel::{Flush, Virtual},
-    linux::{self, InputSink, ReaderDisposition},
+    linux::{self, InputSink, ReaderBuffer, ReaderDisposition},
     replay::Record,
     supervisor::Heartbeat,
 };
@@ -51,6 +51,7 @@ impl InputSink for Sink {
         &mut self,
         raw: &mut RawDevice,
         _device: &Device,
+        buffer: ReaderBuffer,
         _health: Option<&Heartbeat>,
     ) -> io::Result<ReaderDisposition> {
         if self.grabbed {
@@ -59,6 +60,9 @@ impl InputSink for Sink {
             } else {
                 ReaderDisposition::Keep
             });
+        }
+        if !buffer.is_drained() {
+            return Ok(ReaderDisposition::Keep);
         }
         raw.grab()?;
         self.grabbed = true;

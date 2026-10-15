@@ -9,7 +9,7 @@ use crate::{
     input::{Device, Frame, Source},
     ipc::{Channel, monotonic},
     kernel::{Flush, Registry, Virtual},
-    linux::{self, InputSink, ReaderDisposition},
+    linux::{self, InputSink, ReaderBuffer, ReaderDisposition},
     protocol::{self, Fence},
     replay::Record,
     routing::Routing,
@@ -335,6 +335,7 @@ impl InputSink for Stream {
         &mut self,
         raw: &mut RawDevice,
         device: &Device,
+        buffer: ReaderBuffer,
         health: Option<&Heartbeat>,
     ) -> io::Result<ReaderDisposition> {
         let now = monotonic()?;
@@ -428,6 +429,11 @@ impl InputSink for Stream {
         if !output.virtual_device.processed_metadata()? {
             return Ok(ReaderDisposition::Keep);
         }
+        // Complete frames awaiting the watermark and partial assembler state
+        // belong to observation. Let the sole loop deliver them before grab.
+        if !buffer.is_drained() {
+            return Ok(ReaderDisposition::Keep);
+        }
         if (raw.supported_keys().is_some() && raw.get_key_state()?.iter().next().is_some())
             || !linux::initial_contacts(raw, device)?.is_empty()
         {
@@ -453,8 +459,10 @@ impl InputSink for Stream {
             raw.ungrab()?;
             return Ok(ReaderDisposition::Keep);
         }
-        // Discard unread pre-grab input; only fresh complete frames start the
-        // virtual epoch. No output was injected during preparation.
+        // TODO: this drain cannot distinguish pre-grab backlog from events
+        // arriving after grab. The software-buffer gate above does not solve
+        // that kernel race. CLI routing must remain disabled until consumer
+        // acknowledgement establishes the complete ownership boundary.
         let mut discarded = 0usize;
         loop {
             let fetched = raw.fetch_events().map(|events| events.count());

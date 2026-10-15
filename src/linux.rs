@@ -413,11 +413,14 @@ pub fn watch(
 /// stay in this loop; supervised ownership is available through `reader`.
 pub trait InputSink {
     /// Runs only in the sole device-owning worker. A ready transport can take
-    /// ownership here; the original descriptor never crosses IPC.
+    /// ownership here; the original descriptor never crosses IPC. `buffer`
+    /// describes frames already read by this loop. A transition into ownership
+    /// must wait until it is drained; this does not establish a kernel boundary.
     fn reader(
         &mut self,
         _raw: &mut RawDevice,
         _device: &Device,
+        _buffer: ReaderBuffer,
         _health: Option<&crate::supervisor::Heartbeat>,
     ) -> io::Result<ReaderDisposition> {
         Ok(ReaderDisposition::Keep)
@@ -440,6 +443,37 @@ pub trait InputSink {
     fn device_policy(&self) -> Option<(&crate::config::Config, u64)> {
         None
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReaderBuffer {
+    frames: usize,
+    incomplete: bool,
+}
+impl ReaderBuffer {
+    fn inspect(
+        source: &Source,
+        assembler: &FrameAssembler,
+        pending: &BTreeMap<&Source, usize>,
+    ) -> Self {
+        Self {
+            frames: pending.get(source).copied().unwrap_or(0),
+            incomplete: !assembler.at_boundary(),
+        }
+    }
+    /// No complete or partial frame read before the hook remains in this loop.
+    /// New kernel input may still arrive; this grants no takeover authority.
+    pub fn is_drained(self) -> bool {
+        self.frames == 0 && !self.incomplete
+    }
+}
+
+fn buffered_sources(pending: &[Frame]) -> BTreeMap<&Source, usize> {
+    let mut counts = BTreeMap::new();
+    for frame in pending {
+        *counts.entry(&frame.source).or_insert(0) += 1;
+    }
+    counts
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -603,13 +637,16 @@ fn observe_loop(
         }
         sink.flush()?;
         let mut reopen = Vec::new();
+        let buffered = buffered_sources(&pending);
         for (index, reader) in readers.iter_mut().enumerate() {
-            if sink.reader(&mut reader.raw, &reader.device, health.as_deref())?
+            let buffer = ReaderBuffer::inspect(&reader.device.source, &reader.assembler, &buffered);
+            if sink.reader(&mut reader.raw, &reader.device, buffer, health.as_deref())?
                 == ReaderDisposition::Reopen
             {
                 reopen.push(index);
             }
         }
+        drop(buffered);
         for index in reopen.into_iter().rev() {
             let source = readers[index].device.source.clone();
             pending.retain(|frame| frame.source != source);
@@ -909,5 +946,101 @@ fn print_observation(
             }
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod reader_buffer_tests {
+    use super::*;
+
+    fn source(device: u64) -> Source {
+        Source {
+            device,
+            generation: 1,
+            seat: "seat0".into(),
+        }
+    }
+    fn event(kind: u16, code: u16, value: i32) -> RawEvent {
+        RawEvent { kind, code, value }
+    }
+    fn buffer(source: &Source, assembler: &FrameAssembler, pending: &[Frame]) -> ReaderBuffer {
+        ReaderBuffer::inspect(source, assembler, &buffered_sources(pending))
+    }
+
+    #[test]
+    fn buffered_source_waits_for_its_complete_and_partial_frames_without_blocking_other_sources() {
+        let source = source(1);
+        let other = self::source(2);
+        let mut assembler = FrameAssembler::new(source.clone());
+        let mut pending = Vec::new();
+        assert!(buffer(&source, &assembler, &pending).is_drained());
+        assert!(matches!(
+            assembler.push(event(input::EV_KEY, 30, 1), Duration::ZERO),
+            Assembly::Pending
+        ));
+        assert!(!buffer(&source, &assembler, &pending).is_drained());
+        let Assembly::Frame(frame) = assembler.push(
+            event(input::EV_SYN, input::SYN_REPORT, 0),
+            Duration::from_millis(2),
+        ) else {
+            panic!("complete input frame missing")
+        };
+        pending.push(frame);
+        assert!(assembler.at_boundary());
+        assert!(!buffer(&source, &assembler, &pending).is_drained());
+        assert!(buffer(&other, &FrameAssembler::new(other.clone()), &pending).is_drained());
+        // A future timestamp keeps a complete frame pending across a loop turn.
+        let watermark = Duration::from_millis(1);
+        let future = pending.partition_point(|frame| frame.at <= watermark);
+        pending.drain(..future);
+        assert!(!buffer(&source, &assembler, &pending).is_drained());
+        let delivered = pending.remove(0);
+        assert_eq!(delivered.sequence, 1);
+        assert_eq!(delivered.events[0], event(input::EV_KEY, 30, 1));
+        assert!(buffer(&source, &assembler, &pending).is_drained());
+        assembler.push(event(input::EV_KEY, 30, 0), Duration::from_millis(3));
+        assert!(!buffer(&source, &assembler, &pending).is_drained());
+        let Assembly::Frame(release) = assembler.push(
+            event(input::EV_SYN, input::SYN_REPORT, 0),
+            Duration::from_millis(3),
+        ) else {
+            panic!("release missing")
+        };
+        assert_eq!(release.sequence, 2);
+        assert_eq!(release.events[0], event(input::EV_KEY, 30, 0));
+    }
+
+    #[test]
+    fn synchronization_loss_cannot_appear_as_an_empty_handoff_buffer() {
+        let source = source(1);
+        let mut assembler = FrameAssembler::new(source.clone());
+        assembler.push(event(input::EV_SYN, input::SYN_DROPPED, 0), Duration::ZERO);
+        assert!(!buffer(&source, &assembler, &[]).is_drained());
+        assembler.push(event(input::EV_KEY, 30, 1), Duration::ZERO);
+        assert!(!buffer(&source, &assembler, &[]).is_drained());
+        assert!(matches!(
+            assembler.push(event(input::EV_SYN, input::SYN_REPORT, 0), Duration::ZERO),
+            Assembly::Lost
+        ));
+        // Reader::drain turns Lost into removal/reconciliation, not readiness.
+        let mut pending = vec![Frame {
+            source: source.clone(),
+            at: Duration::ZERO,
+            sequence: 1,
+            events: vec![],
+        }];
+        let replacement = Source {
+            generation: 2,
+            ..source.clone()
+        };
+        pending.retain(|frame| frame.source != source);
+        assert!(
+            buffer(
+                &replacement,
+                &FrameAssembler::new(replacement.clone()),
+                &pending
+            )
+            .is_drained()
+        );
     }
 }
