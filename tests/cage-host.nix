@@ -27,7 +27,7 @@ pkgs.writeShellScriptBin "prek-cage-host-test" ''
     ${pkgs.python3}/bin/python3 ${./cage-host.py} \
     --cage ${pkgs.cage}/bin/cage \
     --hyprland ${pkgs.hyprland}/bin/Hyprland \
-    --inner ${./cage-inner.py} --proxy ${./support/wlproxy.py} \
+    --inner ${./cage-inner.py} --proxy ${./support/wlproxy.py} --morf-lock-check ${./support/morf-lock.py} \
     --receiver ${receiver}/bin/prek-wayland-receiver \
     --keyboard ${keyboard}/bin/prek-wayland-keyboard \
     --prek-fixture ${runtime}/bin/prek-local-cage-tests --prek-app ${package}/bin/prek "$@"

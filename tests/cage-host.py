@@ -30,6 +30,9 @@ def main():
                         help="verify Lua-planned DPMS blank/wake on the owned nested output")
     parser.add_argument("--windows", action="store_true",
                         help="verify Lua-planned close and adjacent workspace moves on owned test windows")
+    parser.add_argument("--morf", type=Path, help="actual Morf ELF for the owned native lock-provider test")
+    parser.add_argument("--morf-lock-check", type=Path,
+                        default=Path(__file__).parent / "support/morf-lock.py")
     parser.add_argument("--visible", action="store_true",
                         default=os.environ.get("VISIBLE") == "1")
     parser.add_argument("--output", default="target/cage-host")
@@ -37,7 +40,9 @@ def main():
     output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     output = Path(tempfile.mkdtemp(prefix="run-", dir=output))
-    scratch = tempfile.TemporaryDirectory(prefix="pc-")
+    # Nix development shells can set a long TMPDIR; Hyprland's instance plus
+    # socket names must still fit sockaddr_un's 107-byte path limit.
+    scratch = tempfile.TemporaryDirectory(prefix="pc-", dir="/tmp")
     runtime = Path(scratch.name) / "r"
     runtime.mkdir(mode=0o700)
     home = Path(scratch.name) / "home"
@@ -275,6 +280,13 @@ def main():
                     if fixture.poll() is None:
                         fixture.kill()
                     fixture.wait(timeout=3)
+            if args.morf:
+                report = json.loads((output / "nested.json").read_text())
+                subprocess.run([os.sys.executable, str(args.morf_lock_check),
+                    "--morf", str(args.morf.resolve()), "--socket", str(socket),
+                    "--hyprctl", hyprctl, "--instance", instances[0],
+                    "--pid", str(report["hyprland_pid"]), "--output", str(output)],
+                    env=env, check=True, timeout=30)
             session_name = "visible nested Hyprland" if args.visible else "local Cage/nested Hyprland"
             print(f"PASS: {session_name} delivered B and Shift+A, six ordered key events, "
                   f"text bA and neutral modifier cleanup. Receipts: {receipts}")

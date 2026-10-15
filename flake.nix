@@ -54,6 +54,7 @@
               mkdir -p "$out/share/prek/nixos" "$out/share/prek/presets"
               cp ${./nix/module.nix} "$out/share/prek/nixos/module.nix"
               cp ${./docs/nixos.md} "$out/share/doc/prek/nixos.md"
+              cp ${./docs/morf.md} "$out/share/doc/prek/morf.md"
               for preset in minimal desktop phone; do
                 "$out/bin/prek" init --preset "$preset" \
                   --output "$out/share/prek/presets/$preset.lua"

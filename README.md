@@ -233,6 +233,11 @@ pending. Offline replay supports reconciliation and mapping-generation changes.
 
 ## Configuration
 
+The broker's native Morf lock-provider integration and its owned local test are
+described in [Morf integration](docs/morf.md). This supplies lock evidence;
+Morf's rendered regions, typed shell actions and recognizer handoff remain work
+in progress.
+
 NixOS users can import `nixosModules.default` from this flake. It provides the
 supervised observation broker, build-checked Lua/modules and a `prek-session`
 launcher for the compositor's login-session startup hook. Defaults select no
