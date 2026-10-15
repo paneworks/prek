@@ -90,3 +90,19 @@ lock discovery, then includes matching output bindings in fresh desktop context.
 Connection metadata never supplies lock completion or rendered widget regions.
 The owned shell trial now also verifies the native endpoint identity and its
 removal after an ordinary graceful shutdown.
+
+Upstream Morf also implements bounded native root controller leases, queued
+requests, read-only receipts and revocation on that shell endpoint. A real
+SO_PEERCRED root identity, pidfd lifetime, session/configuration fence, native
+connection epoch and Lua VM generation bound each lease. Leases last at most
+one second; each queued request expires within 250 ms. Expiry, revocation,
+issuer death and VM replacement retire authorization. Workspace completion
+checks the live token after animation before issuing its command. These are
+upstream receiver foundations; Prek's production action negotiation remains
+disabled pending its executor, rendered context and neutral recognizer handoff.
+
+The owned Cage helper queries the native limits and confirms that actual
+unprivileged lease/submit/revoke attempts are refused. Its receipt records
+`native_root_operations_refused=true` and `root_grant_tested=false`. Positive
+grant tests upstream model root credentials around real pidfds; they do not
+establish actual root/logind acceptance. No VM or host device is used.

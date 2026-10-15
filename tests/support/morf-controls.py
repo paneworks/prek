@@ -139,6 +139,39 @@ def main():
             layers = stock("layers")
             assert "caelestia-drawers" in json.dumps(layers)
             native_path, initial_native = native_state()
+            def native_rpc(message):
+                with socket.socket(socket.AF_UNIX) as client:
+                    client.settimeout(1)
+                    client.connect(str(native_path))
+                    client.sendall((json.dumps(message) + "\n").encode())
+                    raw = b""
+                    while not raw.endswith(b"\n"):
+                        part = client.recv(4096)
+                        if not part:
+                            assert not raw, "partial native response"
+                            return None
+                        assert len(raw) + len(part) <= 4096
+                        raw += part
+                    return json.loads(raw)
+
+            capabilities = native_rpc(dict(version=1, op="control-capabilities"))
+            assert capabilities["epoch"] == initial_native["epoch"]
+            assert capabilities["root_only"] is True
+            assert capabilities["recognizer_ownership"] is False
+            assert capabilities["ui_generation"] == "1"
+            assert (capabilities["queue"], capabilities["receipts"], capabilities["lease_ms"],
+                    capabilities["grant_ms"]) == (8, 64, 1000, 250)
+            assert os.geteuid() != 0, "this fixture exercises real unprivileged refusal"
+            for operation in ("lease", "submit", "revoke"):
+                message = dict(version=1, op=operation, epoch=initial_native["epoch"],
+                               ui_generation="1", fence=dict(broker=[1, 2], configuration=1, session=1))
+                if operation == "lease":
+                    message["expires_ns"] = str(time.monotonic_ns() + 500_000_000)
+                elif operation == "submit":
+                    message.update(id="1", deadline_ns=str(time.monotonic_ns() + 100_000_000),
+                                   request=request("apps"))
+                assert native_rpc(message) is None, "unprivileged native mutation was accepted"
+            assert native_state()[1] == initial_native
             for action in ("dashboard", "notifications", "quick_settings", "apps", "web"):
                 send(request(action))
                 value = state()
@@ -190,6 +223,8 @@ def main():
             (output / "morf-controls-receipts.json").write_text(json.dumps(dict(
                 status="passed", producer_pid=producer, output=name, ordinary_shell_ipc=True,
                 broker_grant_tested=False, recognizer_handoff_tested=False,
+                native_root_operations_refused=True, root_grant_tested=False,
+                native_control_capabilities=capabilities,
                 native_shell_binding=final_native, native_endpoint_removed=True,
                 shutdown_acknowledged=shutdown_acknowledged,
                 actual_compositor_layers=layers, initial=initial, final=final_state,
