@@ -106,3 +106,30 @@ unprivileged lease/submit/revoke attempts are refused. Its receipt records
 `native_root_operations_refused=true` and `root_grant_tested=false`. Positive
 grant tests upstream model root credentials around real pidfds; they do not
 establish actual root/logind acceptance. No VM or host device is used.
+
+Prek's typed native transport is in `src/morf/native.rs`. A discovered
+`ShellClient` negotiates read-only limits with `control_capabilities`; its
+`lease_control`, `submit_control`, `control_receipt` and `revoke_control` methods
+require the actual root broker. The negotiated endpoint/VM and broker fence
+form a `Scope`; a submission contains a positive request ID, absolute monotonic
+deadline and the existing typed controller payload. Payload output must match
+the native provider. Decimal identities/deadlines retain all u64 bits.
+
+Each operation rechecks the protected endpoint, exact Morf executable/process,
+active logind registration and actual compositor before and after its exchange.
+Sampling and exchange share 200 ms; earlier lease/grant deadlines shorten that
+budget. Future/regressed generations, mismatched IDs/epochs, unknown statuses,
+fields or errors, oversized replies and incomplete frames fail closed. Failed
+streams are shut down so a late response cannot become the next request's
+reply. A `ui_replaced` refusal can report a newer generation, requiring fresh
+negotiation. Native connection state remains distinct from Lua VM generation.
+
+A returned `queued` receipt means admitted work; `dispatched` means controller
+acceptance, not observed animation/compositor completion. `Error.uncertain`
+means mutation bytes were sent and an effect cannot be excluded. No mutation is
+automatically retried. A newly verified connection may query the same receipt;
+missing/evicted receipts cannot justify repeating a mutation. Read-only receipt
+errors and local refusals have `uncertain=false`. Socket-pair tests exercise
+the real framing/typed operation code with modeled replies, not root/logind
+acceptance. This transport does not yet connect production Morf action offers
+or enable action/recognizer ownership negotiation.

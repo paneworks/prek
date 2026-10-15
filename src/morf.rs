@@ -1,6 +1,7 @@
 //! Broker-only native Morf lock endpoint. Lua state and process/socket loss
 //! never establish a completed unlock transition.
 pub mod controls;
+pub mod native;
 mod shell;
 pub use shell::{Phase as ShellPhase, State as ShellState};
 pub type ShellClient = Client<ShellState>;
@@ -111,7 +112,7 @@ pub(crate) struct Proof {
 pub struct Client<S: NativeState = State> {
     directory: File,
     name: String,
-    stream: UnixStream,
+    transport: Transport,
     inode: u64,
     uid: u32,
     pid: u32,
@@ -119,6 +120,7 @@ pub struct Client<S: NativeState = State> {
     executable: (u64, u64),
     registration: Registration,
     last: Option<S>,
+    control_generation: Option<u64>,
 }
 impl<S: NativeState> Client<S> {
     pub(crate) fn last_state(&self) -> Option<&S> {
@@ -224,7 +226,10 @@ impl<S: NativeState> Client<S> {
             let mut client = Self {
                 directory: directory.try_clone()?,
                 name: name.into(),
-                stream,
+                transport: Transport {
+                    stream,
+                    failed: false,
+                },
                 inode: stat.ino(),
                 uid,
                 pid,
@@ -232,6 +237,7 @@ impl<S: NativeState> Client<S> {
                 executable: (actual.dev(), actual.ino()),
                 registration,
                 last: None,
+                control_generation: None,
             };
             match client.sample_until(logind, compositor, until) {
                 Ok(_) => {}
@@ -248,6 +254,9 @@ impl<S: NativeState> Client<S> {
         Ok(result)
     }
     fn verify(&self) -> io::Result<()> {
+        if self.transport.failed {
+            return Err(denied("native provider connection has been retired"));
+        }
         let path =
             PathBuf::from(format!("/proc/self/fd/{}", self.directory.as_raw_fd())).join(&self.name);
         let stat = fs::symlink_metadata(path)?;
@@ -274,52 +283,98 @@ impl<S: NativeState> Client<S> {
     ) -> io::Result<S> {
         self.verify()?;
         self.registration.check(logind, compositor)?;
-        self.write(b"{\"version\":1,\"op\":\"state\"}\n", until)?;
-        let mut bytes = Vec::new();
-        let mut byte = [0u8; 1];
-        loop {
+        let bytes =
+            self.transport
+                .exchange(b"{\"version\":1,\"op\":\"state\"}\n", until, &mut false)?;
+        let result = (|| {
+            let state: S = serde_json::from_slice(&bytes)?;
+            state.validate()?;
+            self.registration.check(logind, compositor)?;
+            self.verify()?;
+            let binding = self.registration.binding()?;
+            if state.compositor()
+                != (
+                    binding.compositor_pid,
+                    binding.compositor_start,
+                    binding.uid,
+                )
+            {
+                return Err(denied("native provider serves another compositor"));
+            }
+            if self.last.as_ref().is_some_and(|old| !state.preserves(old)) {
+                return Err(denied(
+                    "native provider transition regressed or changed identity",
+                ));
+            }
             if Instant::now() >= until {
                 return Err(io::ErrorKind::TimedOut.into());
             }
-            match self.stream.read(&mut byte) {
-                Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
-                Ok(_) if byte[0] == b'\n' => break,
-                Ok(_) => {
-                    if bytes.len() >= MAX_REPLY {
-                        return Err(invalid("native provider reply exceeds limit"));
+            self.last = Some(state.clone());
+            Ok(state)
+        })();
+        if result.is_err() {
+            self.transport.retire();
+        }
+        result
+    }
+}
+
+/// One request at a time; a failed frame permanently retires this stream.
+struct Transport {
+    stream: UnixStream,
+    failed: bool,
+}
+impl Transport {
+    fn retire(&mut self) {
+        self.failed = true;
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
+    }
+    fn exchange(&mut self, bytes: &[u8], until: Instant, sent: &mut bool) -> io::Result<Vec<u8>> {
+        if self.failed {
+            return Err(denied("native provider connection has been retired"));
+        }
+        let result = (|| {
+            self.write_tracked(bytes, until, sent)?;
+            let mut bytes = Vec::new();
+            let mut byte = [0u8; 1];
+            loop {
+                if Instant::now() >= until {
+                    return Err(io::ErrorKind::TimedOut.into());
+                }
+                match self.stream.read(&mut byte) {
+                    Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+                    Ok(_) if byte[0] == b'\n' => break,
+                    Ok(_) => {
+                        if bytes.len() >= MAX_REPLY {
+                            return Err(invalid("native provider reply exceeds limit"));
+                        }
+                        bytes.push(byte[0]);
                     }
-                    bytes.push(byte[0]);
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        wait(self.stream.as_raw_fd(), libc::POLLIN, until)?
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                    Err(error) => return Err(error),
                 }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    wait(self.stream.as_raw_fd(), libc::POLLIN, until)?
-                }
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                Err(error) => return Err(error),
             }
+            Ok(bytes)
+        })();
+        if result.is_err() {
+            self.retire();
         }
-        let state: S = serde_json::from_slice(&bytes)?;
-        state.validate()?;
-        self.registration.check(logind, compositor)?;
-        self.verify()?;
-        let binding = self.registration.binding()?;
-        if state.compositor()
-            != (
-                binding.compositor_pid,
-                binding.compositor_start,
-                binding.uid,
-            )
-        {
-            return Err(denied("native provider serves another compositor"));
-        }
-        if self.last.as_ref().is_some_and(|old| !state.preserves(old)) {
-            return Err(denied(
-                "native provider transition regressed or changed identity",
-            ));
-        }
-        self.last = Some(state.clone());
-        Ok(state)
+        result
     }
     fn write(&mut self, bytes: &[u8], until: Instant) -> io::Result<()> {
+        if self.failed {
+            return Err(denied("native provider connection has been retired"));
+        }
+        let result = self.write_tracked(bytes, until, &mut false);
+        if result.is_err() {
+            self.retire();
+        }
+        result
+    }
+    fn write_tracked(&mut self, bytes: &[u8], until: Instant, sent: &mut bool) -> io::Result<()> {
         let mut pending = bytes;
         while !pending.is_empty() {
             if Instant::now() >= until {
@@ -327,7 +382,10 @@ impl<S: NativeState> Client<S> {
             }
             match self.stream.write(pending) {
                 Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
-                Ok(count) => pending = &pending[count..],
+                Ok(count) => {
+                    *sent = true;
+                    pending = &pending[count..];
+                }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     wait(self.stream.as_raw_fd(), libc::POLLOUT, until)?
                 }
@@ -352,12 +410,12 @@ impl Client<State> {
         let mut bytes = serde_json::to_vec(&serde_json::json!({"version": 1, "op": "release",
             "epoch": state.epoch, "revision": state.revision}))?;
         bytes.push(b'\n');
-        self.write(&bytes, Instant::now() + RPC_TIME)
+        self.transport.write(&bytes, Instant::now() + RPC_TIME)
     }
 }
 impl<S: NativeState> AsFd for Client<S> {
     fn as_fd(&self) -> BorrowedFd<'_> {
-        self.stream.as_fd()
+        self.transport.stream.as_fd()
     }
 }
 fn connect_provider(path: &Path, until: Instant) -> io::Result<Option<UnixStream>> {
