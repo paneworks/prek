@@ -10,6 +10,12 @@
       forSystems = nixpkgs.lib.genAttrs [ "x86_64-linux" "aarch64-linux" ];
     in
     {
+      nixosModules.default = { pkgs, lib, ... }: {
+        imports = [ ./nix/module.nix ];
+        services.prek.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+      };
+      nixosModules.prek = self.nixosModules.default;
+
       packages = forSystems (system:
         let pkgs = nixpkgs.legacyPackages.${system};
         in {
@@ -24,7 +30,7 @@
             src = pkgs.lib.fileset.toSource {
               root = ./.;
               fileset = pkgs.lib.fileset.unions [
-                ./Cargo.toml ./Cargo.lock ./src ./examples ./docs ./udev ./README.md ./LICENSE
+                ./Cargo.toml ./Cargo.lock ./src ./examples ./docs ./udev ./nix ./README.md ./LICENSE
                 # Desktop test controllers and the C receiver are separate
                 # derivations; changing them must not recompile Rust packages.
                 (pkgs.lib.fileset.fileFilter (file: file.hasExt "rs") ./tests)
@@ -45,6 +51,13 @@
               cp ${./docs/lua/prek.lua} "$out/share/prek/lua/prek.lua"
               mkdir -p "$out/share/prek/examples"
               cp -r ${./examples/lua} "$out/share/prek/examples/lua"
+              mkdir -p "$out/share/prek/nixos" "$out/share/prek/presets"
+              cp ${./nix/module.nix} "$out/share/prek/nixos/module.nix"
+              cp ${./docs/nixos.md} "$out/share/doc/prek/nixos.md"
+              for preset in minimal desktop phone; do
+                "$out/bin/prek" init --preset "$preset" \
+                  --output "$out/share/prek/presets/$preset.lua"
+              done
             '';
             meta = {
               description = "Low-level Linux input tools and gesture recognition";
@@ -75,6 +88,10 @@
           pkgs = nixpkgs.legacyPackages.${system};
           package = self.packages.${system}.default;
         in {
+          nixos-module = import ./tests/nixos-module.nix {
+            inherit pkgs package;
+            module = self.nixosModules.default;
+          };
           lua-editor = pkgs.runCommand "prek-lua-editor-check" {
             nativeBuildInputs = [ pkgs.python3 pkgs.lua-language-server ];
           } ''

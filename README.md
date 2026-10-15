@@ -233,6 +233,12 @@ pending. Offline replay supports reconciliation and mapping-generation changes.
 
 ## Configuration
 
+NixOS users can import `nixosModules.default` from this flake. It provides the
+supervised observation broker, build-checked Lua/modules and a `prek-session`
+launcher for the compositor's login-session startup hook. Defaults select no
+devices or rules. See [NixOS setup](docs/nixos.md) for configuration, permissions,
+installed presets and start/stop/recovery. Production routing remains gated.
+
 Prek embeds onix-os/luna for Lua configuration. `init` writes a minimal
 `config.lua` in the current directory by default; `--preset` and `--output`
 choose a different preset/path. `.lua` files work with `check`, `doctor`, `replay`, `run`

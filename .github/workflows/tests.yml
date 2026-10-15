@@ -9,6 +9,23 @@ permissions:
   contents: read
 
 jobs:
+  nixos-module:
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - name: Check installed NixOS module and Lua editor artifacts
+        run: |
+          prek_system="$(nix eval --impure --raw --expr builtins.currentSystem)"
+          nix build --no-write-lock-file ".#checks.${prek_system}.nixos-module" ".#checks.${prek_system}.lua-editor"
+
   verify:
     env:
       RUST_TEST_THREADS: '1'
