@@ -246,6 +246,14 @@ are implemented. Named action handlers return bounded command/event plans under
 fresh broker grants; `session --lua --commands` opts into that executor. Custom
 recognizers and live adapter APIs remain required work.
 
+Named operating modes use `modes.define {id, active=false}` and `Rule.when_mode`.
+`modes.list/get/current/revision` inspect the acknowledged selection;
+`modes.transaction():select_mode(id)` stages a seat-local change that becomes
+active after commit and the worker receipt. Rule/layer/mode edits can share one
+atomic batch. See [the mode recipe](examples/lua/mode_transactions.lua) and
+[reference](docs/lua-api.md#named-operating-modes). Mode selection preserves
+Observe/Route authority and protected permissions.
+
 `events.on("input", callback)` receives permitted normalized input when protected
 `policy.allow_input_events` and the owning session's `--lua --input` opt-in agree.
 Only explicitly allowed devices on that seat in fresh desktop context are
@@ -479,6 +487,7 @@ The desktop test setup follows Mold's `tools/sandbox/nested.sh`:
 nix run .#cage-test                     # headless Cage -> nested Hyprland -> receiver
 nix run .#cage-test -- --visible        # watch the owned session as a window
 nix run .#cage-test -- --layers         # Lua layer change with its rule still enabled
+nix run .#cage-test -- --modes          # Lua mode switch with its rule and layer still enabled
 nix run .#cage-test -- --layers --input # Normalized source frames and resets reach Lua
 nix run .#cage-test -- --layers --input --power --windows # Lua DPMS and targeted window actions
 nix run .#cage-touch-test               # direct headless Cage touch receipts
@@ -511,6 +520,12 @@ actual compositor snapshots and the correlated Lua receipt are checked.
 while keeping A's rule enabled. The receiver must then get A and B. This tests
 acknowledged Lua layer control through the routing model and actual nested app;
 source ownership/readiness remain model fixtures.
+
+`--modes` runs that sequence by switching A out of its named mode while its rule
+and layer remain enabled. The accepted selection and shared revision must agree
+with Lua queries before the receiver gets A and B. It can be combined with the
+input, power and window checks; `--modes` takes precedence over `--layers` for
+the mutation exercised in that run.
 
 `--windows` creates two additional owned receivers. Granted Lua plans move the
 starting receiver to the adjacent numeric workspace and back, following it,

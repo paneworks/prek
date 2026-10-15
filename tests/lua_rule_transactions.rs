@@ -114,14 +114,8 @@ fn apply(parent: &mut Channel, worker: &mut Stream, proposal: RuleProposal) -> R
 }
 #[test]
 fn real_helper_layer_receipts_change_recognition_only_in_the_owning_seat() {
-    use prek::{
-        input::{Device, EV_KEY, EV_SYN, Frame, RawEvent, SYN_REPORT, Source},
-        replay::Record,
-        rules::Event,
-        worker::Report,
-    };
-    use std::collections::BTreeMap;
-    let definition=Definition::compile(r#"
+    exercise_seat_activation(
+        r#"
 local p=require('prek')
 local tx
 local phase=0
@@ -146,7 +140,54 @@ return p.config.new{
  devices={keyboard={name='owned model keyboard'}},
  layers={p.layers.define{id='touch',key='KEY_LEFTMETA'}},
  rules={p.rules.define{id='a',layer='touch',trigger=p.triggers.key{key='KEY_A'},action=p.actions.event{name='a'}}}}
-"#, "live-layers.lua").unwrap();
+"#,
+        ["active", "inactive", "physical"],
+    );
+}
+
+#[test]
+fn real_helper_mode_receipts_change_recognition_only_in_the_owning_seat() {
+    exercise_seat_activation(
+        r#"
+local p=require('prek')
+local tx
+local phase=0
+p.events.on('ready',function()
+ tx=p.modes.transaction();tx:select_mode('navigate');tx:commit()
+ assert(p.modes.current().id=='normal')
+end)
+p.events.on('rules_changed',function(event)
+ assert(event.accepted and tx:status().state=='accepted')
+ phase=phase+1
+ local current=p.modes.current()
+ local expected=({'navigate','normal','none'})[phase]
+ assert((current and current.id or 'none')==expected and p.modes.revision()==event.revision)
+ p.log.info('mode-receipt',{activation=expected,revision=event.revision})
+end)
+p.events.on('reload',function()
+ tx=p.modes.transaction()
+ if phase==1 then tx:select_mode('normal') else tx:reset_mode() end
+ tx:commit()
+end)
+return p.config.new{
+ policy={allowed_seats={'seat0','seat1'},allowed_devices={'keyboard'}},
+ devices={keyboard={name='owned model keyboard'}},
+ modes={p.modes.define{id='normal',active=true},p.modes.define{id='navigate'}},
+ rules={p.rules.define{id='a',when_mode='navigate',trigger=p.triggers.key{key='KEY_A'},action=p.actions.event{name='a'}}}}
+"#,
+        ["navigate", "normal", "none"],
+    );
+}
+
+fn exercise_seat_activation(source: &str, activations: [&str; 3]) {
+    use prek::{
+        input::{Device, EV_KEY, EV_SYN, Frame, RawEvent, SYN_REPORT, Source},
+        replay::Record,
+        rules::Event,
+        worker::Report,
+    };
+    use std::collections::BTreeMap;
+    let definition = Definition::compile(source, "live-activation.lua").unwrap();
     let mut session = Session::spawn_with_rule_transactions(
         Path::new(env!("CARGO_BIN_EXE_prek")),
         fence(),
@@ -214,7 +255,7 @@ return p.config.new{
             .unwrap();
     }
     let mut sequence = 0;
-    for (index, activation) in ["active", "inactive", "physical"].into_iter().enumerate() {
+    for (index, activation) in activations.into_iter().enumerate() {
         if index > 0 {
             session
                 .notify(EventKind::Reload, serde_json::json!({}))
@@ -272,7 +313,7 @@ return p.config.new{
         }
         assert_eq!(
             seats,
-            if activation == "active" {
+            if matches!(activation, "active" | "navigate") {
                 vec!["seat0", "seat0"]
             } else {
                 vec![]

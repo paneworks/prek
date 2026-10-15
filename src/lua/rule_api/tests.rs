@@ -264,3 +264,66 @@ fn revisions_remain_exact_above_lua_numeric_precision() {
     runtime.host.borrow_mut().rules.revision = u64::MAX - 1;
     ready(&mut runtime).unwrap();
 }
+
+#[test]
+fn named_modes_are_owned_acknowledged_and_share_atomic_rule_layer_transactions() {
+    let source = format!(
+        r#"{BASE}
+local tx
+p.events.on('ready',function()
+ assert(p.modes.current().id=='normal' and p.modes.get('missing')==nil)
+ assert(p.modes.revision()==p.rules.revision())
+ local copy=p.modes.list();copy[1].active=false;assert(p.modes.current().id=='normal')
+ local missing=p.modes.transaction();missing:select_mode('missing')
+ assert(not pcall(function()missing:commit()end));missing:cancel()
+ tx=p.modes.transaction();tx:select_mode('navigate');tx:disable('a');tx:activate_layer('touch');tx:commit()
+ assert(p.modes.current().id=='normal' and p.rules.get('a').enabled)
+end)
+p.events.on('rules_changed',function()
+ assert(tx:status().state=='accepted' and p.modes.current().id=='navigate')
+ assert(p.modes.revision()=='2' and not p.rules.get('a').enabled)
+ assert(p.layers.get('touch').activation=='active')
+ tx=p.modes.transaction();tx:reset_mode();tx:commit()
+end)
+p.events.on('reload',function()assert(p.modes.current()==nil and p.modes.revision()=='3')end)
+return p.config.new{{modes={{p.modes.define{{id='normal',active=true}},p.modes.define{{id='navigate'}}}},layers={{p.layers.define{{id='touch',key='KEY_LEFTMETA'}}}},rules={{rule}}}}
+"#
+    );
+    let mut runtime = Runtime::load(&source, "modes.lua").unwrap();
+    let mut engine = crate::rules::Engine::new(runtime.config.clone()).unwrap();
+    runtime.enable_rule_transactions();
+    ready(&mut runtime).unwrap();
+    for event in [EventKind::RulesChanged, EventKind::Reload] {
+        let proposal = runtime.take_rule_proposal().unwrap();
+        let revision = engine
+            .transact_rules(&proposal.transaction, Duration::ZERO)
+            .unwrap();
+        runtime
+            .acknowledge_rules(RuleReceipt {
+                id: proposal.id,
+                revision,
+                error: None,
+            })
+            .unwrap();
+        runtime.dispatch(event, &serde_json::json!({})).unwrap();
+    }
+    for query in [
+        "list()",
+        "get('normal')",
+        "current()",
+        "revision()",
+        "transaction()",
+    ] {
+        assert!(
+            Definition::compile(
+                &format!("local p=require('prek');p.modes.{query};return {{version=1}}"),
+                "phase.lua"
+            )
+            .is_err()
+        );
+    }
+    let mut unavailable = load(
+        "p.events.on('ready',function()assert(p.modes.current()==nil and #p.modes.list()==0);assert(not pcall(p.modes.transaction))end)",
+    );
+    ready(&mut unavailable).unwrap();
+}

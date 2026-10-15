@@ -10,11 +10,13 @@ import urllib.parse
 
 POSITIVE = '''local p = require("prek")
 local preset = p.config.preset("minimal")
+preset.modes = {p.modes.define {id = "normal", active = true}, p.modes.define {id = "navigate"}}
 preset.rules[1] = p.rules.define {
     id = "editor-example", trigger = p.triggers.key {kind = "key", key = "KEY_A"},
     action = p.actions.event {name = "example"},
     on_begin = function(payload) p.log.info(payload.event.rule) end,
     output = "eDP-1",
+    when_mode = "normal",
 }
 local triggers = {
     p.triggers.button_taps {key = "KEY_A", count = 2},
@@ -45,6 +47,8 @@ p.events.on("ready", function(payload)
     local identity = payload.fence.configuration
     local tx = p.layers.transaction()
     tx:activate_layer("navigation"); tx:deactivate_layer("navigation"); tx:reset_layer("navigation")
+    tx:select_mode("navigate"); tx:reset_mode()
+    p.modes.list(); p.modes.get("normal"); p.modes.current(); p.modes.revision(); p.modes.transaction():cancel()
     tx:enable("editor-example"); tx:disable("editor-example"); tx:replace(preset.rules[1]); tx:remove("editor-example")
     tx:commit()
     local status = tx:status()
@@ -114,8 +118,10 @@ p.events.on("ready", function(payload)
     ---@type integer
     local wrong = payload.fence.configuration -- expect: assign-type-mismatch
     p.layers.transaction():activate_layer(12) -- expect: param-type-mismatch
+    p.modes.transaction():select_mode(false) -- expect: param-type-mismatch
 end)
 p.events.on("bogus", function() end) -- expect: param-type-mismatch
+p.modes.define {id = "bad", active = "yes"} -- expect: assign-type-mismatch
 p.rules.on("editor-example", "ready", function() end) -- expect: param-type-mismatch
 p.rules.on("editor-example", "begin", false) -- expect: param-type-mismatch
 p.coordinates.convert({}, {x=0,y=0}, "local", "global") -- expect: missing-fields

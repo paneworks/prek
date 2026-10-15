@@ -603,6 +603,9 @@ pub struct Rule {
     pub keys_throughout: bool,
     #[serde(default)]
     pub layer: Option<String>,
+    /// Optional named operating mode; unrelated to Observe/Route authority.
+    #[serde(default)]
+    pub when_mode: Option<String>,
     #[serde(default)]
     pub delivery: Delivery,
     pub trigger: Trigger,
@@ -618,6 +621,15 @@ pub struct Layer {
     pub toggle: bool,
     #[serde(default)]
     pub activation: LayerActivation,
+}
+
+/// An approved named operating mode. At most one is selected per seat.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NamedMode {
+    pub id: String,
+    #[serde(default)]
+    pub active: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -706,6 +718,8 @@ pub struct Config {
     pub devices: BTreeMap<String, Selector>,
     #[serde(default)]
     pub layers: Vec<Layer>,
+    #[serde(default)]
+    pub modes: Vec<NamedMode>,
     #[serde(default)]
     pub shapes: Vec<ShapeTemplate>,
     #[serde(default)]
@@ -851,6 +865,19 @@ impl Config {
                 return fail(format!("duplicate/invalid layer {}", layer.id));
             }
         }
+        let mut modes = BTreeSet::new();
+        if self.modes.len() > 64 || self.modes.iter().filter(|mode| mode.active).count() > 1 {
+            return fail("modes: at most 64 declarations and one selected mode".into());
+        }
+        for mode in &self.modes {
+            if mode.id.is_empty()
+                || mode.id.len() > 256
+                || mode.id.chars().any(char::is_control)
+                || !modes.insert(&mode.id)
+            {
+                return fail(format!("duplicate/invalid mode {}", mode.id));
+            }
+        }
         let mut shapes = BTreeSet::new();
         for shape in &self.shapes {
             if !shapes.insert(&shape.name) || crate::paths::validate_template(shape).is_err() {
@@ -913,6 +940,13 @@ impl Config {
             if rule.layer.as_ref().is_some_and(|id| !layers.contains(id)) {
                 return fail(format!("{prefix}.layer: unknown layer"));
             }
+            if rule
+                .when_mode
+                .as_ref()
+                .is_some_and(|id| !modes.contains(id))
+            {
+                return fail(format!("{prefix}.when_mode: unknown mode"));
+            }
             if rule.delivery == Delivery::Reserve
                 && matches!(
                     rule.scope,
@@ -955,6 +989,7 @@ impl Config {
             .collect();
         let exclusive = |rule: &Rule| {
             rule.enabled
+                && self.mode_active(rule)
                 && rule.delivery != Delivery::Observe
                 && rule
                     .layer
@@ -980,6 +1015,12 @@ impl Config {
             }
         }
         Ok(())
+    }
+
+    pub fn mode_active(&self, rule: &Rule) -> bool {
+        rule.when_mode
+            .as_ref()
+            .is_none_or(|id| self.modes.iter().any(|mode| mode.id == *id && mode.active))
     }
 
     pub fn merge(&self, overlay: Overlay) -> Result<Self, ConfigError> {
@@ -1015,6 +1056,7 @@ impl Config {
             policy: Policy::default(),
             devices: BTreeMap::new(),
             layers: vec![],
+            modes: vec![],
             shapes: vec![],
             rules: vec![],
         };
@@ -1044,6 +1086,7 @@ impl Config {
                     require_keys: vec![],
                     keys_throughout: false,
                     layer: None,
+                    when_mode: None,
                     delivery: Delivery::Observe,
                     trigger: Trigger::ButtonTaps {
                         key: Key(115),
@@ -1250,6 +1293,7 @@ impl Config {
                         require_keys: vec![],
                         keys_throughout: false,
                         layer: None,
+                        when_mode: None,
                         delivery: Delivery::Buffer,
                         trigger: Trigger::Swipe {
                             fingers,
@@ -1284,6 +1328,7 @@ impl Config {
                         require_keys: vec![],
                         keys_throughout: false,
                         layer: None,
+                        when_mode: None,
                         delivery: Delivery::Reserve,
                         trigger: Trigger::TouchTaps {
                             fingers: 1,

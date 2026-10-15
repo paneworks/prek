@@ -139,11 +139,12 @@ session; a user-owned example file grants no broker authority.
 
 An enabled host provides a generation-scoped `RuleTransaction` with
 `:enable(id)`, `:disable(id)`, `:replace(rule)` (also adds a new ID), `:remove(id)`,
-`:activate_layer(id)`, `:deactivate_layer(id)`, `:reset_layer(id)`, `:commit()`,
+`:activate_layer(id)`, `:deactivate_layer(id)`, `:reset_layer(id)`,
+`:select_mode(id)`, `:reset_mode()`, `:commit()`,
 `:cancel()` and `:status()`. Edit methods return nil. Each batch
 contains 1–64 operations and at most 32 KiB of encoded changes. Commit validates
 the complete resulting configuration and approved named-handler references before
-submitting. It cannot change system policy, selectors, physical layer definitions or mode. At most
+submitting. It cannot change system policy, selectors, layer/mode definitions or Observe/Route authority. At most
 64 open builders and one pending proposal are permitted per helper generation.
 An old builder retains its original revision and fails after another batch is accepted.
 
@@ -216,6 +217,51 @@ mutation in observation mode only. Actual routing-mode transitions remain pendin
 
 `examples/lua/layer_transactions.lua` activates a layer after permission is
 granted, then restores physical control after its configured key rule ends.
+
+### Named operating modes
+
+`modes.define {id, active=false}` declares a mode in the configuration's `modes`
+array. There are at most 64 declarations, with unique nonempty IDs of at most
+256 bytes without control characters. At most one mode is active; the default
+is no selection. `Rule.when_mode` names a declared mode and makes that rule
+eligible only while it is selected. Rules without `when_mode` remain eligible
+in every mode and with no selection. Key/layer/context/device conditions still
+apply. These named modes do not change the configuration's `mode="observe"`
+or `mode="route"`, protected policy or negotiated capabilities.
+
+| Operation | Result |
+| --- | --- |
+| `modes.list()` | Owned copies of acknowledged `{id, active}` declarations. |
+| `modes.get(id)` | Owned declaration, or nil for an unknown ID. |
+| `modes.current()` | Owned selected declaration, or nil if none is selected. |
+| `modes.revision()` | Exact decimal shared rule/layer/mode revision. |
+| `modes.transaction()` | The same authorized `RuleTransaction` as `rules.transaction()`. |
+| `transaction:select_mode(id)` | Stage selection of one declared mode, deactivating the previous selection. |
+| `transaction:reset_mode()` | Stage clearing the selection. |
+
+Queries require a runtime callback/task and return historical copies. Changes
+become visible only after the correlated accepted worker receipt and emit
+`rules_changed`; rejected or stale proposals do not invent an active selection.
+Mixed rule/layer/mode batches share one revision, pending slot, deadline and
+builder/resource limits. Only the owning seat registration changes. Runtime
+requests cannot add or redefine modes, grant another seat, or activate action
+capabilities the session has not negotiated. The broker currently authorizes
+these changes in observation mode with protected `allow_runtime_rules` and
+`session --lua --rule-mutations`.
+
+Selection validates the complete resulting configuration, including exclusive
+rule conflicts. An unconditional rule can conflict with a newly selected mode;
+disable it in the same transaction when appropriate. A successful transaction
+retires pending and active candidates, including sequences; it never reuses a
+previously held key/contact as a fresh activation. Reload restores the approved
+initial selection with ordinary held-state reconciliation. Routing embeddings
+must complete neutral transport recovery before accepting new input. Production
+routing remains unavailable.
+
+`examples/lua/mode_transactions.lua` uses F9 to switch between normal/navigation
+and shares A between the two declared modes. The local `cage-test -- --modes`
+fixture switches modes while the original rule and its layer stay enabled,
+then checks actual application delivery through the owned compositor.
 
 Lua modules live in `modules/` beside the entry configuration. For example,
 `require("phone.bindings")` loads `modules/phone/bindings.lua`. Names use ASCII
@@ -782,7 +828,7 @@ return p.config.preset("minimal")
   explicit units; model validation checks its unit and range.
 
 The returned configuration accepts `version`, `mode`, `timing`, `shape_capture`,
-`policy`, `devices`, `layers`, `shapes` and `rules`. Rust schema validation remains
+`policy`, `devices`, `layers`, `modes`, `shapes` and `rules`. Rust schema validation remains
 authoritative, including unknown fields, references, priorities, resource bounds,
 activation keys, permitted seats and source selectors. A rule accepts `id`,
 `enabled`, `priority`, `devices`, `seats`, `contexts`, `scope`, `output`, `screen`,

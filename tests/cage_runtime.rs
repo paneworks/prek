@@ -282,10 +282,12 @@ fn local_cage_lua_routing_and_context() {
         session: 1,
     };
     let layer_control = std::env::var("PREK_CAGE_LAYER_TEST").as_deref() == Ok("1");
+    let mode_control = std::env::var("PREK_CAGE_MODE_TEST").as_deref() == Ok("1");
     let input_control = std::env::var("PREK_CAGE_INPUT_TEST").as_deref() == Ok("1");
     let source = r#"
 local p=require('prek')
 local layer_control=__LAYER_CONTROL__
+local mode_control=__MODE_CONTROL__
 local input_control=__INPUT_CONTROL__
 local transaction
 if input_control then p.events.on('input',function(payload)
@@ -328,22 +330,26 @@ p.events.on('matched',function(event)
     p.log.info('local-matched',{rule=event.event.rule,stage=event.event.stage})
   elseif event.event.rule=='local-b' and event.event.stage=='end' and not transaction then
     transaction=p.rules.transaction()
-    if layer_control then transaction:deactivate_layer('local-layer') else transaction:disable('local-a') end
+    if mode_control then transaction:select_mode('ordinary')
+    elseif layer_control then transaction:deactivate_layer('local-layer') else transaction:disable('local-a') end
     transaction:commit()
   end
 end)
 p.events.on('rules_changed',function(event)
-  assert(event.accepted and event.revision=='2' and p.rules.get('local-a').enabled==layer_control)
-  assert(p.layers.get('local-layer').activation==(layer_control and 'inactive' or 'active'))
+  assert(event.accepted and event.revision=='2' and p.rules.get('local-a').enabled==(layer_control or mode_control))
+  assert(p.layers.get('local-layer').activation==((layer_control and not mode_control) and 'inactive' or 'active'))
+  assert(p.modes.current().id==(mode_control and 'ordinary' or 'capture'))
   assert(transaction:status().state=='accepted' and p.rules.revision()=='2')
   p.log.info('local-rules-changed',{accepted=event.accepted,revision=event.revision,state=transaction:status().state})
   p.log.info('local-layer-state',{activation=p.layers.get('local-layer').activation,rule_enabled=p.rules.get('local-a').enabled})
+  p.log.info('local-mode-state',{selected=p.modes.current().id,revision=p.modes.revision(),rule_enabled=p.rules.get('local-a').enabled})
 end)
 return p.config.new {
   mode=input_control and 'observe' or 'route',policy={allowed_devices={'keyboard'},allow_runtime_rules=true,allow_input_events=input_control},
   devices={keyboard={name='Prek local keyboard'}},
   layers={p.layers.define{id='local-layer',key='KEY_LEFTMETA',activation='active'}},
-  rules={p.rules.define {id='local-a',layer='local-layer',priority=20,devices={'keyboard'},contexts={'desktop'},
+  modes={p.modes.define{id='capture',active=true},p.modes.define{id='ordinary'}},
+  rules={p.rules.define {id='local-a',layer='local-layer',when_mode='capture',priority=20,devices={'keyboard'},contexts={'desktop'},
     delivery='reserve',trigger=p.triggers.key {key='KEY_A'},
     action=p.actions.event {name='local-a-claimed'}},
     p.rules.define {id='local-b',devices={'keyboard'},contexts={'desktop'},delivery='observe',
@@ -351,7 +357,7 @@ return p.config.new {
       on_begin=function(event)p.log.info('local-rule-hook',{rule=event.event.rule,stage=event.event.stage,ordinal=event.event.ordinal})end,
       on_end=function(event)p.log.info('local-rule-hook',{rule=event.event.rule,stage=event.event.stage,ordinal=event.event.ordinal})end}}
 }
-"#.replace("__LAYER_CONTROL__", if layer_control { "true" } else { "false" }).replace("__INPUT_CONTROL__",if input_control {"true"}else{"false"});
+"#.replace("__LAYER_CONTROL__", if layer_control { "true" } else { "false" }).replace("__MODE_CONTROL__", if mode_control { "true" } else { "false" }).replace("__INPUT_CONTROL__",if input_control {"true"}else{"false"});
     let definition = Definition::compile(&source, "local-cage.lua").unwrap();
     let config = definition.validate().unwrap();
     let mut input_observer = input_control.then(|| InputObserver::new(config.clone()));

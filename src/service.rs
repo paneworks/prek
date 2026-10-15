@@ -1077,7 +1077,10 @@ impl Broker {
                     .rules
                     .iter()
                     .find(|configured| {
-                        configured.id == *rule && configured.enabled && configured.action == *action
+                        configured.id == *rule
+                            && configured.enabled
+                            && config.mode_active(configured)
+                            && configured.action == *action
                     })
                     .ok_or_else(|| {
                         protocol::invalid("worker action differs from root configuration")

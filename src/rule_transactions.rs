@@ -1,4 +1,4 @@
-//! Atomic runtime rule and layer-activation edits. Policy, selectors, layer
+//! Atomic runtime rule, layer-activation and named-mode edits. Policy, selectors, layer
 //! definitions and engine mode remain
 //! owned by the approved configuration; caller authorization is separate.
 use crate::config::{Config, ConfigError, LayerActivation, Rule};
@@ -24,6 +24,9 @@ pub enum Change {
         id: String,
         activation: LayerActivation,
     },
+    Mode {
+        id: Option<String>,
+    },
 }
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -42,6 +45,8 @@ impl Transaction {
             let id = match change {
                 Change::Enabled { id, .. } | Change::Remove { id } | Change::Layer { id, .. } => id,
                 Change::Replace { rule } => &rule.id,
+                Change::Mode { id: Some(id) } => id,
+                Change::Mode { id: None } => continue,
             };
             if id.is_empty() || id.len() > 256 || id.chars().any(char::is_control) {
                 return Err(ConfigError("invalid runtime rule identity".into()));
@@ -96,6 +101,17 @@ impl Transaction {
                         .position(|rule| &rule.id == id)
                         .ok_or_else(|| ConfigError(format!("unknown runtime rule {id}")))?;
                     next.rules.remove(position);
+                }
+                Change::Mode { id } => {
+                    if id
+                        .as_ref()
+                        .is_some_and(|id| !next.modes.iter().any(|mode| mode.id == *id))
+                    {
+                        return Err(ConfigError("unknown runtime mode".into()));
+                    }
+                    for mode in &mut next.modes {
+                        mode.active = id.as_ref() == Some(&mode.id);
+                    }
                 }
                 Change::Layer { id, activation } => {
                     let layer = next
@@ -342,5 +358,80 @@ mod tests {
             }],
         };
         assert!(oversized.validate().unwrap_err().0.contains("byte limit"));
+    }
+
+    #[test]
+    fn named_mode_selection_is_atomic_validated_and_does_not_change_routing_authority() {
+        use crate::config::NamedMode;
+        let mut current = config();
+        current.modes = vec![
+            NamedMode {
+                id: "normal".into(),
+                active: true,
+            },
+            NamedMode {
+                id: "navigate".into(),
+                active: false,
+            },
+        ];
+        current.rules[0].when_mode = Some("normal".into());
+        let mut other = current.rules[0].clone();
+        other.id = "b".into();
+        other.when_mode = Some("navigate".into());
+        current.rules.push(other);
+        current.validate().unwrap();
+        let select = |id: Option<&str>| Transaction {
+            revision: 1,
+            changes: vec![Change::Mode {
+                id: id.map(str::to_owned),
+            }],
+        };
+        let next = select(Some("navigate")).prepare(&current, 1).unwrap();
+        assert!(!next.mode_active(&next.rules[0]) && next.mode_active(&next.rules[1]));
+        assert_eq!(next.mode, current.mode);
+        assert_eq!(next.policy, current.policy);
+        assert_eq!(next.devices, current.devices);
+        assert!(current.modes[0].active && !current.modes[1].active);
+        let reset = select(None).prepare(&current, 1).unwrap();
+        assert!(reset.modes.iter().all(|mode| !mode.active));
+        assert!(select(Some("missing")).prepare(&current, 1).is_err());
+        assert!(select(Some("navigate")).prepare(&current, 2).is_err());
+        let mut invalid = current.clone();
+        invalid.modes[1].active = true;
+        assert!(invalid.validate().is_err());
+        invalid.modes[1].active = false;
+        invalid.modes[1].id = "normal".into();
+        assert!(invalid.validate().is_err());
+        invalid.modes[1].id = "\n".into();
+        assert!(invalid.validate().is_err());
+        invalid.modes.clear();
+        assert!(invalid.validate().is_err());
+        invalid = current.clone();
+        invalid.modes = (0..65)
+            .map(|n| NamedMode {
+                id: n.to_string(),
+                active: false,
+            })
+            .collect();
+        assert!(invalid.validate().is_err());
+        invalid = current.clone();
+        invalid.rules[1].when_mode = None;
+        invalid.validate().unwrap_err();
+        // A conflicting activation can be made valid only by a full atomic edit.
+        let mut conflict = current.clone();
+        conflict.rules[0].when_mode = None;
+        assert!(select(Some("navigate")).prepare(&conflict, 1).is_err());
+        let mut batch = select(Some("navigate"));
+        batch.changes.push(Change::Enabled {
+            id: "a".into(),
+            enabled: false,
+        });
+        assert!(batch.prepare(&conflict, 1).is_ok());
+        assert!(
+            serde_json::from_str::<Transaction>(
+                r#"{"revision":1,"changes":[{"operation":"mode","id":"normal","route":true}]}"#
+            )
+            .is_err()
+        );
     }
 }

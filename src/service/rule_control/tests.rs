@@ -105,6 +105,60 @@ fn public_power_registration_requires_route_policy_declared_effects_and_context(
     config.mode = crate::config::Mode::Observe;
     assert!(accepted(Some(&config), true, &caps).is_err());
 }
+
+#[test]
+fn mode_selection_cannot_activate_actions_beyond_negotiated_capabilities() {
+    use crate::{config::NamedMode, rule_transactions::Change};
+    let mut config = Config::preset("desktop").unwrap();
+    config.policy.allow_runtime_rules = true;
+    config.rules.truncate(1);
+    config.modes = vec![NamedMode {
+        id: "commands".into(),
+        active: false,
+    }];
+    config.rules[0].enabled = true;
+    config.rules[0].when_mode = Some("commands".into());
+    config.rules[0].action = Action::Command {
+        argv: vec!["true".into()],
+    };
+    config.validate().unwrap();
+    let proposal = crate::lua::RuleProposal {
+        id: 1,
+        transaction: Transaction {
+            revision: 1,
+            changes: vec![Change::Mode {
+                id: Some("commands".into()),
+            }],
+        },
+    };
+    let mut rules = Rules::new(Some(Arc::new(config.clone())));
+    assert!(
+        rules
+            .prepare(
+                proposal.clone(),
+                &BTreeSet::from([Capability::Observations, Capability::RuntimeRules]),
+                &[],
+                Duration::ZERO
+            )
+            .is_err()
+    );
+    assert!(rules.pending.is_none() && !rules.config.as_ref().unwrap().modes[0].active);
+    let mut rules = Rules::new(Some(Arc::new(config)));
+    rules
+        .prepare(
+            proposal,
+            &BTreeSet::from([
+                Capability::Observations,
+                Capability::RuntimeRules,
+                Capability::Commands,
+            ]),
+            &[],
+            Duration::ZERO,
+        )
+        .unwrap();
+    assert!(!rules.config.as_ref().unwrap().modes[0].active);
+    assert!(rules.pending.as_ref().unwrap().config.modes[0].active);
+}
 #[test]
 fn power_offer_capabilities_are_rechecked_before_a_grant() {
     let snapshot = crate::context_transfer::tests::view(Duration::ZERO)

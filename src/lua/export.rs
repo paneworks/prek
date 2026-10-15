@@ -124,7 +124,12 @@ mod tests {
         let mut config = Config::preset("desktop").unwrap();
         config.policy.allow_power_actions = true;
         config.policy.allow_hyprland_actions = true;
+        config.modes.push(crate::config::NamedMode {
+            id: "normal".into(),
+            active: true,
+        });
         config.rules[0].output = Some("eDP-1".into());
+        config.rules[0].when_mode = Some("normal".into());
         let base = config.rules[0].clone();
         config.rules.clear();
         for (index, action) in [

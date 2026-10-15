@@ -47,7 +47,7 @@ mod tests {
 
     #[test]
     fn editor_configuration_fields_match_serialized_rust_models() {
-        use crate::config::{Config, Key, Layer, LayerActivation, Selector};
+        use crate::config::{Config, Key, Layer, LayerActivation, NamedMode, Selector};
 
         fn fields(class: &str) -> BTreeSet<String> {
             let declaration = format!("---@class (exact) prek.{class}");
@@ -78,6 +78,14 @@ mod tests {
             ("Config", serde_json::to_value(&config).unwrap()),
             ("Rule", serde_json::to_value(&config.rules[0]).unwrap()),
             ("Layer", serde_json::to_value(layer).unwrap()),
+            (
+                "NamedMode",
+                serde_json::to_value(NamedMode {
+                    id: "navigate".into(),
+                    active: false,
+                })
+                .unwrap(),
+            ),
             ("Timings", serde_json::to_value(config.timing).unwrap()),
             (
                 "ShapeCapture",

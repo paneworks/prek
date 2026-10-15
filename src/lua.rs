@@ -51,6 +51,7 @@ pub fn api() -> serde_json::Value {
         serde_json::json!({"name":"rules.define", "signature":"rules.define(table) -> Rule", "description":"Declare a rule; strict validation occurs at compilation."}),
         serde_json::json!({"name":"rules.on", "signature":"rules.on(id, phase, callback) -> Subscription", "phase":"configuration", "description":"Register a generation-scoped observational rule-phase callback for an existing configured rule; phases are discrete, begin, update, end and cancel; dispose with Subscription.dispose."}),
         serde_json::json!({"name":"layers.define", "signature":"layers.define(table) -> Layer", "description":"Declare a physical-key layer with physical, active or inactive activation; strict validation occurs at compilation."}),
+        serde_json::json!({"name":"modes.define", "signature":"modes.define(table) -> NamedMode", "description":"Declare a named operating mode with optional initial active selection; at most one mode is selected per owning seat."}),
         serde_json::json!({"name":"units.duration", "signature":"units.duration(string) -> string", "description":"Declare an explicitly unit-qualified duration."}),
         serde_json::json!({"name":"units.distance", "signature":"units.distance(string) -> string", "description":"Declare an explicitly unit-qualified distance."}),
         serde_json::json!({"name":"events.on", "signature":"events.on(kind, callback) -> Subscription", "description":"Subscribe to approved semantic or lifecycle events in this session generation; registration has no evaluation effects."}),
@@ -202,6 +203,29 @@ pub fn api() -> serde_json::Value {
     ] {
         symbols.push(serde_json::json!({"name":format!("layers.{name}"),"signature":signature,"phase":"runtime_callback","description":"Query acknowledged layer definitions/activation overrides or open the shared rule/layer transaction; physical key state is not exposed."}));
     }
+    for (name, signature) in [
+        ("list", "modes.list() -> NamedMode[]"),
+        ("get", "modes.get(id) -> NamedMode | nil"),
+        ("current", "modes.current() -> NamedMode | nil"),
+        ("revision", "modes.revision() -> string"),
+        ("transaction", "modes.transaction() -> RuleTransaction"),
+    ] {
+        symbols.push(serde_json::json!({"name":format!("modes.{name}"),"signature":signature,"phase":"runtime_callback","description":"Query copied acknowledged named modes or open the shared seat-local rule/layer/mode transaction; mode selection does not change Observe/Route authority."}));
+    }
+    for (name, signature, description) in [
+        (
+            "select_mode",
+            "transaction:select_mode(id) -> nil",
+            "Stage selecting one approved named mode and deactivating all others; fresh input is required after acknowledgement.",
+        ),
+        (
+            "reset_mode",
+            "transaction:reset_mode() -> nil",
+            "Stage clearing the named mode selection; unconditional rules remain eligible.",
+        ),
+    ] {
+        symbols.push(serde_json::json!({"name":format!("RuleTransaction.{name}"),"receiver":"RuleTransaction","signature":signature,"phase":"runtime_callback","description":description}));
+    }
     #[cfg(target_os = "linux")]
     for (name, result, description) in [
         (
@@ -323,6 +347,7 @@ pub fn api() -> serde_json::Value {
         "runtime_identities":{"type":"decimal_string","range":"0..18446744073709551615","fields":["fence.broker[]","fence.configuration","fence.session","event.id","event.ordinal","event.source.device","event.source.generation","event.config_generation","event.session_generation","Snapshot.generation","Snapshot.revision","OutputState.geometry_generation","Binding.compositor_start","context_changed.revision","rules.revision","input.source.device","input.source.generation","input.sequence","input.contacts[].id.generation","input.contacts_started[].generation","input.contacts_ended[].generation","input.ended_contacts[].id.generation"],"comparison":"exact string equality; no numeric conversion","bounded_handles":"subscription/timer/task IDs remain Lua integers","protocol":"Rust transport retains u64 values"},
         "rule_transactions":{"builders":64,"operations":64,"transaction_bytes":32768,"pending_proposals":1,"receipt_time_ms":250,"revision_type":"decimal_string","transport":"explicit authorized host opt-in","production_broker":"observation_mode","system_permission":"policy.allow_runtime_rules","agent_flags":["lua","rule-mutations"],"capability":"runtime_rules","context":"fresh owning desktop","routing":"unavailable"},
         "runtime_layers":{"declared_layers":64,"activation_values":["physical","active","inactive"],"default":"physical","queries":"acknowledged definitions and activation overrides; no physical-key state","transaction":"shared RuleTransaction revision/receipt/permissions","definitions":"immutable at runtime","activation":"fresh input only; existing candidates retired","physical_toggles":"preserved across runtime edits; reconciled on source reload","seat":"owning broker registration"},
+        "runtime_modes":{"declared_modes":64,"selected_modes":1,"default":"no selection","rule_condition":"when_mode","queries":"owned acknowledged definitions and active selection","transaction":"shared RuleTransaction revision/receipt/permissions","definitions":"immutable at runtime","activation":"fresh input only; pending and active candidates retired","authority":"does not alter Observe/Route, policy or capability grants","lifetime":"owning seat registration; source reload restores declared initial selection"},
         "rule_hooks":{"registration":"configuration only; rule ID must exist in the validated initial configuration","phases":["discrete","begin","update","end","cancel"],"inline_fields":["on_discrete","on_begin","on_update","on_end","on_cancel"],"budget":"shared event subscription, fuel, time and log limits","delivery":"rule ID and phase filtered in the owning VM; registration order; updates may coalesce","effects":"observational; no returned effects, input claims or synthetic ownership","lifetime":"approved source generation; follows stable rule ID across acknowledged edits; removed rules emit no fresh matches; reload disposes the old VM","export":"callbacks require original Lua source"},
         "input_events":{"event":"input","configuration_mode":"observe","agent_flags":["lua","input"],"capability":"input_events","system_permission":"policy.allow_input_events","production_broker":"observation_mode","sources":"explicit policy.allowed_devices selectors on the owning seat; virtual devices excluded","context":"fresh desktop without secure overlay","freshness_ms":250,"payload":"InputPayload","raw_frames":false,"input_claims":false,"delivery":"ordered, no coalescing; overflow retires the affected stream or Lua component","resets":["attached","reconciled","mapping_changed","removed","lost"],"coordinates":"device axis counts","maximum_changes":4096,"maximum_contacts":256,"identity_fields":["source.device","source.generation","sequence","contacts[].id.generation","contacts_started[].generation","contacts_ended[].generation","ended_contacts[].id.generation"],"identity_type":"decimal_string"},
         "context_limits":{"snapshot_bytes":4194304,"chunk_bytes":32768,"transfer_time_ms":1000,"freshness_ms":250,"refresh_ms":100,"queued_snapshots":2,"read_only":true},
@@ -450,6 +475,10 @@ function api.rules.define(value)
 end
 function api.layers.define(value)
     assert(type(value) == "table", "layers.define expects a table")
+    return value
+end
+function api.modes.define(value)
+    assert(type(value) == "table", "modes.define expects a table")
     return value
 end
 local function constructor(kind)
@@ -617,6 +646,7 @@ fn instantiate(
                 "config",
                 "rules",
                 "layers",
+                "modes",
                 "triggers",
                 "actions",
                 "units",
@@ -710,6 +740,12 @@ fn instantiate(
             rule_api::register_layers(
                 &ctx,
                 module.get(ctx, "layers")?,
+                module.get(ctx, "rules")?,
+                host.clone(),
+            )?;
+            rule_api::register_modes(
+                &ctx,
+                module.get(ctx, "modes")?,
                 module.get(ctx, "rules")?,
                 host.clone(),
             )?;

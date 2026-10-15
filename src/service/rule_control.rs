@@ -82,6 +82,13 @@ impl Rules {
                         .filter(|rule| rule.enabled && rule.layer.as_ref() == Some(id))
                         .collect()
                 }
+                crate::rule_transactions::Change::Mode { .. } => next
+                    .rules
+                    .iter()
+                    .filter(|rule| {
+                        rule.enabled && rule.when_mode.is_some() && next.mode_active(rule)
+                    })
+                    .collect(),
                 _ => Vec::new(),
             };
             for rule in edited {

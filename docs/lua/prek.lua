@@ -78,6 +78,10 @@
 ---@field toggle? boolean Default false.
 ---@field activation? prek.LayerActivation Default physical; this is an override, not physical key state.
 
+---@class (exact) prek.NamedMode
+---@field id string Nonempty, at most 256 bytes, no control characters.
+---@field active? boolean Default false; at most one mode selected per seat.
+
 ---@class (exact) prek.Repeat
 ---@field delay prek.Duration
 ---@field interval prek.Duration
@@ -219,6 +223,7 @@
 ---@field require_keys? prek.Key[]
 ---@field keys_throughout? boolean Default false.
 ---@field layer? string Declared layer ID.
+---@field when_mode? string Rule is eligible only while this declared named mode is selected.
 ---@field delivery? prek.Delivery Default observe.
 ---@field trigger prek.Trigger
 ---@field action prek.Action
@@ -238,6 +243,7 @@
 ---@field policy? prek.Policy
 ---@field devices? table<string, prek.Selector>
 ---@field layers? prek.Layer[] At most 64 declarations.
+---@field modes? prek.NamedMode[] At most 64 declarations and one active selection.
 ---@field shapes? prek.ShapeTemplate[]
 ---@field rules? prek.Rule[]
 ---@class (exact) prek.Preset: prek.Config
@@ -588,6 +594,10 @@ function RuleTransaction:activate_layer(id) error("Prek editor definition") end
 function RuleTransaction:deactivate_layer(id) error("Prek editor definition") end
 ---@param id string
 function RuleTransaction:reset_layer(id) error("Prek editor definition") end
+---@param id string Declared named mode; deactivates the previous selection in this batch.
+function RuleTransaction:select_mode(id) error("Prek editor definition") end
+---Clear named mode selection. Unconditional rules remain eligible.
+function RuleTransaction:reset_mode() error("Prek editor definition") end
 ---Submit 1–64 operations, at most 32 KiB. Queries change only after acknowledgement.
 ---Requires protected allow_runtime_rules policy, --lua --rule-mutations and owning desktop context.
 ---At most one pending proposal per generation; host receipt deadline 250ms.
@@ -603,6 +613,8 @@ local ConfigAPI = {}
 local RulesAPI = {}
 ---@class prek.LayersAPI
 local LayersAPI = {}
+---@class prek.ModesAPI
+local ModesAPI = {}
 ---@class prek.TriggersAPI
 local TriggersAPI = {}
 ---@class prek.ActionsAPI
@@ -643,6 +655,7 @@ local CoordinatesAPI = {}
 ---@field config prek.ConfigAPI
 ---@field rules prek.RulesAPI
 ---@field layers prek.LayersAPI
+---@field modes prek.ModesAPI
 ---@field triggers prek.TriggersAPI
 ---@field actions prek.ActionsAPI
 ---@field units prek.UnitsAPI
@@ -658,7 +671,7 @@ local CoordinatesAPI = {}
 ---@field coordinates prek.CoordinatesAPI
 local prek = {
     api_version = 1, version = "0.1.0", api = {},
-    config = ConfigAPI, rules = RulesAPI, layers = LayersAPI, triggers = TriggersAPI, actions = ActionsAPI,
+    config = ConfigAPI, rules = RulesAPI, layers = LayersAPI, modes = ModesAPI, triggers = TriggersAPI, actions = ActionsAPI,
     units = UnitsAPI, events = EventsAPI, log = LogAPI, scheduler = SchedulerAPI, context = ContextAPI,
     capabilities = CapabilitiesAPI,
     devices = DevicesAPI, seats = SeatsAPI,
@@ -713,6 +726,22 @@ function LayersAPI.revision() error("Prek editor definition") end
 ---Shares rules.transaction permissions, revision, builder limit and pending slot.
 ---@return prek.RuleTransaction
 function LayersAPI.transaction() error("Prek editor definition") end
+---@param fields prek.NamedMode
+---@return prek.NamedMode
+function ModesAPI.define(fields) error("Prek editor definition") end
+---Runtime callback/task only. Returns owned copies of acknowledged named modes.
+---@return prek.NamedMode[]
+function ModesAPI.list() error("Prek editor definition") end
+---@param id string
+---@return prek.NamedMode?
+function ModesAPI.get(id) error("Prek editor definition") end
+---@return prek.NamedMode? Nil if no mode is selected.
+function ModesAPI.current() error("Prek editor definition") end
+---@return prek.Identity Shared rule/layer/mode revision.
+function ModesAPI.revision() error("Prek editor definition") end
+---Shares rules.transaction permissions, revision, builder limit and pending slot.
+---@return prek.RuleTransaction
+function ModesAPI.transaction() error("Prek editor definition") end
 ---@param value string
 ---@return prek.Duration
 function UnitsAPI.duration(value) error("Prek editor definition") end

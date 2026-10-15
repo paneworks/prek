@@ -362,6 +362,18 @@
     "timers": 256,
     "timers_per_wake": 32
   },
+  "runtime_modes": {
+    "activation": "fresh input only; pending and active candidates retired",
+    "authority": "does not alter Observe/Route, policy or capability grants",
+    "declared_modes": 64,
+    "default": "no selection",
+    "definitions": "immutable at runtime",
+    "lifetime": "owning seat registration; source reload restores declared initial selection",
+    "queries": "owned acknowledged definitions and active selection",
+    "rule_condition": "when_mode",
+    "selected_modes": 1,
+    "transaction": "shared RuleTransaction revision/receipt/permissions"
+  },
   "runtime_requires": {
     "capabilities": [
       "context",
@@ -405,6 +417,11 @@
       "description": "Declare a physical-key layer with physical, active or inactive activation; strict validation occurs at compilation.",
       "name": "layers.define",
       "signature": "layers.define(table) -> Layer"
+    },
+    {
+      "description": "Declare a named operating mode with optional initial active selection; at most one mode is selected per owning seat.",
+      "name": "modes.define",
+      "signature": "modes.define(table) -> NamedMode"
     },
     {
       "description": "Declare an explicitly unit-qualified duration.",
@@ -651,6 +668,50 @@
       "name": "layers.transaction",
       "phase": "runtime_callback",
       "signature": "layers.transaction() -> RuleTransaction"
+    },
+    {
+      "description": "Query copied acknowledged named modes or open the shared seat-local rule/layer/mode transaction; mode selection does not change Observe/Route authority.",
+      "name": "modes.list",
+      "phase": "runtime_callback",
+      "signature": "modes.list() -> NamedMode[]"
+    },
+    {
+      "description": "Query copied acknowledged named modes or open the shared seat-local rule/layer/mode transaction; mode selection does not change Observe/Route authority.",
+      "name": "modes.get",
+      "phase": "runtime_callback",
+      "signature": "modes.get(id) -> NamedMode | nil"
+    },
+    {
+      "description": "Query copied acknowledged named modes or open the shared seat-local rule/layer/mode transaction; mode selection does not change Observe/Route authority.",
+      "name": "modes.current",
+      "phase": "runtime_callback",
+      "signature": "modes.current() -> NamedMode | nil"
+    },
+    {
+      "description": "Query copied acknowledged named modes or open the shared seat-local rule/layer/mode transaction; mode selection does not change Observe/Route authority.",
+      "name": "modes.revision",
+      "phase": "runtime_callback",
+      "signature": "modes.revision() -> string"
+    },
+    {
+      "description": "Query copied acknowledged named modes or open the shared seat-local rule/layer/mode transaction; mode selection does not change Observe/Route authority.",
+      "name": "modes.transaction",
+      "phase": "runtime_callback",
+      "signature": "modes.transaction() -> RuleTransaction"
+    },
+    {
+      "description": "Stage selecting one approved named mode and deactivating all others; fresh input is required after acknowledgement.",
+      "name": "RuleTransaction.select_mode",
+      "phase": "runtime_callback",
+      "receiver": "RuleTransaction",
+      "signature": "transaction:select_mode(id) -> nil"
+    },
+    {
+      "description": "Stage clearing the named mode selection; unconditional rules remain eligible.",
+      "name": "RuleTransaction.reset_mode",
+      "phase": "runtime_callback",
+      "receiver": "RuleTransaction",
+      "signature": "transaction:reset_mode() -> nil"
     },
     {
       "description": "Return an owned copy of the complete fresh broker snapshot, including outputs, windows, regions and keyboard geometry; generations/revisions are decimal strings; nil when unavailable or expired.",

@@ -377,7 +377,7 @@ impl Engine {
         let mut workers = config
             .rules
             .iter()
-            .filter(|r| r.enabled)
+            .filter(|r| r.enabled && config.mode_active(r))
             .filter(|rule| !matches!(rule.trigger, Trigger::Sequence { .. }))
             .cloned()
             .map(|r| Worker::new(r, &config))
@@ -393,7 +393,11 @@ impl Engine {
         let sequences = config
             .rules
             .iter()
-            .filter(|rule| rule.enabled && matches!(rule.trigger, Trigger::Sequence { .. }))
+            .filter(|rule| {
+                rule.enabled
+                    && config.mode_active(rule)
+                    && matches!(rule.trigger, Trigger::Sequence { .. })
+            })
             .map(|rule| Sequence::new(rule.clone(), &config))
             .collect::<io::Result<Vec<_>>>()?;
         Ok(Self {
@@ -3434,6 +3438,120 @@ mod tests {
         key(&mut engine, 1, 1360, 5, 115, true);
         tick(&mut engine, 2000);
         assert!(matches(&engine.events).is_empty());
+    }
+    #[test]
+    fn named_mode_transitions_require_fresh_input_and_cancel_pending_and_active_rules() {
+        use crate::{
+            config::NamedMode,
+            rule_transactions::{Change, Transaction},
+        };
+        let mut config = config(hold(600));
+        config.modes = vec![NamedMode {
+            id: "navigate".into(),
+            active: false,
+        }];
+        config.rules[0].when_mode = Some("navigate".into());
+        let mut engine = engine(config);
+        key(&mut engine, 1, 0, 1, 115, true);
+        let select = |revision, selected: bool| Transaction {
+            revision,
+            changes: vec![Change::Mode {
+                id: selected.then(|| "navigate".into()),
+            }],
+        };
+        engine.transact_rules(&select(1, true), ms(100)).unwrap();
+        tick(&mut engine, 700);
+        assert!(
+            matches(&engine.events).is_empty(),
+            "mode selection reused a held key"
+        );
+        key(&mut engine, 1, 710, 2, 115, false);
+        key(&mut engine, 1, 720, 3, 115, true);
+        engine.transact_rules(&select(2, false), ms(900)).unwrap();
+        tick(&mut engine, 1400);
+        assert!(
+            matches(&engine.events).is_empty(),
+            "retired mode completed a pending hold"
+        );
+        key(&mut engine, 1, 1410, 4, 115, false);
+        engine.transact_rules(&select(3, true), ms(1420)).unwrap();
+        key(&mut engine, 1, 1430, 5, 115, true);
+        tick(&mut engine, 2030);
+        let matched = engine
+            .take_events()
+            .into_iter()
+            .find_map(|event| match event {
+                Event::Matched { id, .. } => Some(id),
+                _ => None,
+            })
+            .unwrap();
+        engine.transact_rules(&select(4, false), ms(2040)).unwrap();
+        assert!(
+            engine
+                .take_events()
+                .iter()
+                .any(|event| matches!(event,Event::Cancelled{id,..} if *id==matched))
+        );
+        assert_eq!(engine.generation(), 1);
+        assert_eq!(engine.config().mode, crate::config::Mode::Observe);
+    }
+    #[test]
+    fn named_modes_gate_sequences_and_do_not_reuse_steps_across_transitions() {
+        use crate::{
+            config::NamedMode,
+            rule_transactions::{Change, Transaction},
+        };
+        let mut config = config(Trigger::Sequence {
+            steps: vec![
+                Trigger::Key { key: Key(115) },
+                Trigger::Key { key: Key(30) },
+            ],
+            timeout: Millis(1000),
+        });
+        config.modes = vec![NamedMode {
+            id: "navigate".into(),
+            active: false,
+        }];
+        config.rules[0].when_mode = Some("navigate".into());
+        let mut engine = engine(config);
+        for (at, sequence, code, down) in [
+            (0, 1, 115, true),
+            (10, 2, 115, false),
+            (20, 3, 30, true),
+            (30, 4, 30, false),
+        ] {
+            key(&mut engine, 1, at, sequence, code, down);
+        }
+        assert!(matches(&engine.events).is_empty());
+        let select = |revision, active: bool| Transaction {
+            revision,
+            changes: vec![Change::Mode {
+                id: active.then(|| "navigate".into()),
+            }],
+        };
+        engine.transact_rules(&select(1, true), ms(40)).unwrap();
+        key(&mut engine, 1, 50, 5, 115, true);
+        key(&mut engine, 1, 60, 6, 115, false);
+        engine.transact_rules(&select(2, false), ms(70)).unwrap();
+        assert!(
+            engine
+                .events
+                .iter()
+                .any(|event| matches!(event, Event::Cancelled { .. }))
+        );
+        engine.transact_rules(&select(3, true), ms(80)).unwrap();
+        key(&mut engine, 1, 90, 7, 30, true);
+        key(&mut engine, 1, 100, 8, 30, false);
+        assert!(matches(&engine.events).is_empty());
+        for (at, sequence, code, down) in [
+            (110, 9, 115, true),
+            (120, 10, 115, false),
+            (130, 11, 30, true),
+            (140, 12, 30, false),
+        ] {
+            key(&mut engine, 1, at, sequence, code, down);
+        }
+        assert_eq!(matches(&engine.events).len(), 1);
     }
     #[test]
     fn t17_wheel_high_resolution_is_counted_once_with_modifier_conditions() {

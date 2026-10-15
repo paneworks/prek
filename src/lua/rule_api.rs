@@ -140,7 +140,7 @@ pub(super) fn register<'gc>(
         state.rules.builders.push(Rc::downgrade(&builder));
         drop(state);
         let handle = Table::new(&ctx);
-        for operation in ["enable", "disable", "replace", "remove", "activate_layer", "deactivate_layer", "reset_layer", "commit", "cancel", "status"] {
+        for operation in ["enable", "disable", "replace", "remove", "activate_layer", "deactivate_layer", "reset_layer", "select_mode", "reset_mode", "commit", "cancel", "status"] {
             let host = host.clone();
             let builder = builder.clone();
             handle.set(ctx, operation, Callback::from_fn(&ctx, move |ctx, _, mut stack| {
@@ -177,7 +177,9 @@ pub(super) fn register<'gc>(
                     }
                     _ => {
                         if builder.state != "open" { return Err(io::Error::other("rule transaction is closed").into()); }
-                        let change = if operation == "replace" {
+                        let change = if operation == "reset_mode" {
+                            Change::Mode { id: None }
+                        } else if operation == "replace" {
                             let (_, value): (Value, Value) = stack.consume(ctx)?;
                             let rule = luna_util::serde::from_value_with(ctx, value, luna_util::serde::DeOptions::default().max_depth(64)).map_err(io::Error::other)?;
                             Change::Replace { rule: Box::new(rule) }
@@ -186,6 +188,7 @@ pub(super) fn register<'gc>(
                             let id = id.to_str().map_err(io::Error::other)?.to_owned();
                             match operation {
                                 "remove" => Change::Remove { id },
+                                "select_mode" => Change::Mode { id: Some(id) },
                                 "activate_layer" | "deactivate_layer" | "reset_layer" => Change::Layer {
                                     id, activation: match operation {
                                         "activate_layer" => crate::config::LayerActivation::Active,
@@ -247,6 +250,52 @@ pub(super) fn register_layers<'gc>(
                         .iter()
                         .find(|layer| layer.id == id)
                         .map(|layer| luna_util::serde::to_value(ctx, layer))
+                        .transpose()
+                        .map_err(io::Error::other)?
+                        .unwrap_or(Value::Nil)
+                };
+                stack.replace(ctx, value);
+                Ok(CallbackReturn::Return)
+            }),
+        )?;
+    }
+    Ok(())
+}
+
+pub(super) fn register_modes<'gc>(
+    ctx: &luna::Context<'gc>,
+    modes: Table<'gc>,
+    rules: Table<'gc>,
+    host: Rc<RefCell<runtime::Host>>,
+) -> Result<(), luna::Error<'gc>> {
+    for field in ["transaction", "revision"] {
+        modes.set(*ctx, field, rules.get::<_, Value>(*ctx, field)?)?;
+    }
+    for field in ["list", "get", "current"] {
+        let host = host.clone();
+        modes.set(
+            *ctx,
+            field,
+            Callback::from_fn(ctx, move |ctx, _, mut stack| {
+                let host = host.borrow();
+                phase(&host)?;
+                let config = host
+                    .rules
+                    .config
+                    .as_ref()
+                    .ok_or_else(|| io::Error::other("runtime mode view unavailable"))?;
+                let value = if field == "list" {
+                    luna_util::serde::to_value(ctx, &config.modes).map_err(io::Error::other)?
+                } else {
+                    let selected = if field == "current" {
+                        config.modes.iter().find(|mode| mode.active)
+                    } else {
+                        let id: luna::String = stack.consume(ctx)?;
+                        let id = id.to_str().map_err(io::Error::other)?;
+                        config.modes.iter().find(|mode| mode.id == id)
+                    };
+                    selected
+                        .map(|mode| luna_util::serde::to_value(ctx, mode))
                         .transpose()
                         .map_err(io::Error::other)?
                         .unwrap_or(Value::Nil)
