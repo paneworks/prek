@@ -1,5 +1,5 @@
--- Offline declaration; live execution currently requires an authorized host
--- embedding to install the verified Hyprland adapter. Public routing is gated.
+-- Protected declaration for session --lua --hyprland. Offline checks have no
+-- effects; production input takeover remains gated.
 local p = require("prek")
 local window = p.actions.define("window", {requires={"hyprland_actions"}}, function(payload)
     if payload.event.stage ~= "begin" and payload.event.stage ~= "discrete" then return end
@@ -7,7 +7,7 @@ local window = p.actions.define("window", {requires={"hyprland_actions"}}, funct
 end)
 return p.config.new {
     mode="route",
-    policy={allowed_devices={"touchscreen"}},
+    policy={allowed_devices={"touchscreen"}, allow_hyprland_actions=true},
     devices={touchscreen={name="Example touchscreen", absolute_axes={53,54,57}}},
     rules={
         p.rules.define {id="move_left_and_follow", priority=10, devices={"touchscreen"}, contexts={"desktop"}, scope="app_content", delivery="buffer",

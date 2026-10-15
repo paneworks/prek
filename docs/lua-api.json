@@ -12,10 +12,20 @@
       "commands"
     ],
     "grant_time_ms": 250,
+    "hyprland_alternative": {
+      "agent_flags": [
+        "lua",
+        "hyprland"
+      ],
+      "broker_mode": "route",
+      "system_permission": "policy.allow_hyprland_actions",
+      "target": "frozen window/output/workspace"
+    },
     "implemented_effects": [
       "commands",
       "observations",
-      "power_actions"
+      "power_actions",
+      "hyprland_actions"
     ],
     "power_alternative": {
       "agent_flags": [
@@ -31,7 +41,7 @@
   "capability_queries": {
     "freshness_ms": 250,
     "grants": false,
-    "hyprland": "explicit authorized host installation; public session negotiation unavailable",
+    "hyprland": "protected policy.allow_hyprland_actions and session --hyprland on a routing broker; production takeover remains unavailable",
     "in_flight_snapshots": 1,
     "lifetime": "negotiated flags immutable within the owning fence; stop clears metadata",
     "queued_snapshots": 1,
@@ -154,6 +164,10 @@
       "move_left_and_follow",
       "move_right_and_follow"
     ],
+    "agent_flags": [
+      "hyprland"
+    ],
+    "broker_mode": "route",
     "cage_flags": [
       "layers",
       "input",
@@ -174,9 +188,14 @@
       "scroll_stack"
     ],
     "host_api": "actions::Executor::set_hyprland_adapter(HyprlandAdapter)",
+    "named_handler_flags": [
+      "lua",
+      "hyprland"
+    ],
     "production_routing_available": false,
-    "public_session_negotiation": false,
+    "public_session_negotiation": true,
     "race": "stock address selectors cannot atomically test stableId; replacement after preflight can affect another window",
+    "system_permission": "policy.allow_hyprland_actions",
     "target": "explicit frozen window address plus stableId, output, geometry generation and workspace; focus never selects a target",
     "uncertain": "any failure after mutation bytes were written; never retry",
     "version": "0.54.3",
@@ -474,7 +493,7 @@
       "signature": "capabilities.has(name) -> boolean"
     },
     {
-      "description": "Test current parent executor capacity for commands, lua_actions, power_actions or a host-installed hyprland_actions adapter; every effect still requires fresh context, target checks and a broker grant.",
+      "description": "Test current parent executor capacity for commands, lua_actions, power_actions or hyprland_actions; every effect still requires fresh context, target checks and a broker grant.",
       "name": "capabilities.ready",
       "phase": "runtime_callback",
       "signature": "capabilities.ready(name) -> boolean"

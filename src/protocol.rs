@@ -73,6 +73,11 @@ pub fn supported_session_action(action: &crate::config::Action) -> bool {
         action,
         crate::config::Action::Command { .. }
             | crate::config::Action::Lua { .. }
+            | crate::config::Action::Hyprland {
+                action: crate::config::WindowAction::Close
+                    | crate::config::WindowAction::MoveLeftAndFollow
+                    | crate::config::WindowAction::MoveRightAndFollow
+            }
             | crate::config::Action::Power {
                 action: crate::config::PowerAction::Wake | crate::config::PowerAction::Blank
             }

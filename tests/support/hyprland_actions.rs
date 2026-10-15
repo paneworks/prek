@@ -22,6 +22,67 @@ struct Fixture {
     behavior: Arc<AtomicU64>,
     dispatches: Arc<AtomicU64>,
 }
+#[test]
+fn public_window_factory_uses_only_the_broker_instance_seat_process_and_fence() {
+    let fixture = Fixture::new(Mode::Route);
+    let mut executor = Executor::new(
+        fixture.view.fence,
+        "seat0".into(),
+        Mode::Route,
+        BTreeSet::from([Capability::HyprlandActions]),
+    )
+    .unwrap();
+    assert!(
+        executor
+            .sync_hyprland_context(&fixture.server.directory, "other", fixture.view.clone())
+            .is_err()
+    );
+    let mut wrong = fixture.view.clone();
+    wrong.context.as_mut().unwrap().binding.seat = "seat1".into();
+    assert!(
+        executor
+            .sync_hyprland_context(&fixture.server.directory, "test", wrong)
+            .is_err()
+    );
+    let mut wrong = fixture.view.clone();
+    wrong.context.as_mut().unwrap().binding.compositor_start += 1;
+    assert!(
+        executor
+            .sync_hyprland_context(&fixture.server.directory, "test", wrong)
+            .is_err()
+    );
+    let mut wrong = fixture.view.clone();
+    wrong.fence.configuration += 1;
+    assert!(
+        executor
+            .sync_hyprland_context(&fixture.server.directory, "test", wrong)
+            .is_err()
+    );
+    executor
+        .sync_hyprland_context(&fixture.server.directory, "test", fixture.view.clone())
+        .unwrap();
+    executor
+        .offer(
+            fixture.view.fence,
+            fixture.event(1, WindowAction::Close),
+            monotonic().unwrap(),
+        )
+        .unwrap();
+    let now = monotonic().unwrap();
+    executor
+        .grant(
+            fixture.view.fence,
+            1,
+            1,
+            now + Duration::from_millis(250),
+            now,
+        )
+        .unwrap();
+    executor
+        .execute_ready_with_lua(monotonic().unwrap(), None)
+        .unwrap();
+    assert_eq!(fixture.dispatches.load(Ordering::Relaxed), 1);
+}
 impl Fixture {
     fn new(mode: Mode) -> Self {
         let behavior = Arc::new(AtomicU64::new(0));

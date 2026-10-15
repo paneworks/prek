@@ -194,6 +194,15 @@ fn registration_capabilities(
                     && protocol::supported_session_action(&rule.action)
             })
     });
+    let hyprland = routing.is_some_and(|config| {
+        config.mode == crate::config::Mode::Route
+            && config.policy.allow_hyprland_actions
+            && config.rules.iter().any(|rule| {
+                rule.enabled
+                    && rule.action.requires_hyprland()
+                    && protocol::supported_session_action(&rule.action)
+            })
+    });
     if capabilities.iter().any(|capability| {
         !(matches!(capability, Capability::Observations | Capability::Context)
             || *capability == Capability::LuaEvents
@@ -205,7 +214,11 @@ fn registration_capabilities(
                 && lua
                 && capabilities.contains(&Capability::LuaEvents)
                 && (capabilities.contains(&Capability::Commands)
-                    || capabilities.contains(&Capability::PowerActions))
+                    || capabilities.contains(&Capability::PowerActions)
+                    || capabilities.contains(&Capability::HyprlandActions))
+            || *capability == Capability::HyprlandActions
+                && hyprland
+                && capabilities.contains(&Capability::Context)
             || *capability == Capability::PowerActions
                 && power
                 && capabilities.contains(&Capability::Context)
@@ -809,6 +822,14 @@ impl Broker {
                     .capabilities
                     .iter()
                     .filter(|capability| {
+                        if **capability == Capability::HyprlandActions
+                            && !self
+                                .routing
+                                .as_ref()
+                                .is_some_and(|config| config.policy.allow_hyprland_actions)
+                        {
+                            return false;
+                        }
                         if **capability == Capability::PowerActions
                             && !self
                                 .routing
@@ -1046,6 +1067,7 @@ impl Broker {
                     action,
                     window,
                     output,
+                    workspace,
                     ..
                 } = event.as_ref()
                 else {
@@ -1073,6 +1095,15 @@ impl Broker {
                                 && !bound.available_actions.contains(capability)
                         })
                     || !protocol::supported_session_action(action)
+                    || action.requires_hyprland()
+                        && (!config.policy.allow_hyprland_actions
+                            || !context.snapshot.hyprland_target_available(
+                                action,
+                                configured.scope,
+                                window.as_deref(),
+                                output.as_deref(),
+                                *workspace,
+                            ))
                     || action.requires_power()
                         && (!config.policy.allow_power_actions
                             || output
@@ -1100,11 +1131,12 @@ impl Broker {
                             .any(|output| output.geometry.name == *name)
                     })
                     || window.as_ref().is_some_and(|id| {
-                        !context
-                            .snapshot
-                            .windows
-                            .iter()
-                            .any(|window| window.id == *id && window.visible)
+                        !context.snapshot.windows.iter().any(|window| {
+                            window.id == *id
+                                && window.mapped
+                                && (window.visible
+                                    || configured.scope == crate::config::Scope::Everywhere)
+                        })
                     })
                 {
                     return Err(protocol::invalid(
@@ -1318,6 +1350,17 @@ impl Broker {
                         peer.uid(),
                         &self.policy.compositor_executable,
                     )?;
+                    if capabilities.contains(&Capability::HyprlandActions)
+                        && (
+                            client.version().major,
+                            client.version().minor,
+                            client.version().patch,
+                        ) != (0, 54, 3)
+                    {
+                        return Err(protocol::invalid(
+                            "window actions require verified stock Hyprland 0.54.3",
+                        ));
+                    }
                     let registration = self.logind.register(peer, &client)?;
                     self.verify_agent(connection.channel.peer().pid)?;
                     let binding = registration.binding()?;

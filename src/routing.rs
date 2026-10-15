@@ -208,6 +208,9 @@ impl Routing {
     }
     fn available(&self, intent: &RouteIntent, at: Duration) -> bool {
         self.capability_generation == self.authority_generation
+            && (!intent.rule.action.requires_hyprland()
+                || self.engine.config().policy.allow_hyprland_actions
+                    && intent.hyprland_target_available(self.engine.authority(), at))
             && (!intent.rule.action.requires_power()
                 || self.engine.config().policy.allow_power_actions
                     && intent.power_target_available()
@@ -1180,6 +1183,176 @@ mod tests {
             } else {
                 assert_eq!(forwarded.len(), 1, "{case} must preserve ordinary input");
                 assert!(dispatches.is_empty());
+            }
+        }
+    }
+    #[test]
+    fn keyboard_window_actions_require_policy_frozen_target_workspace_and_consumer_before_claim() {
+        use crate::config::{EffectKind, Key, WindowAction};
+        for case in [
+            "allowed",
+            "stock",
+            "stock-unfocused",
+            "move",
+            "lua",
+            "close-multi",
+            "policy",
+            "consumer",
+            "window",
+            "output",
+            "identity",
+            "workspace",
+            "left-bound",
+            "right-bound",
+            "multi-output",
+            "unsupported",
+            "locked",
+            "overlay",
+            "screen",
+        ] {
+            let mut device = device();
+            device.axes.clear();
+            device.properties.clear();
+            device.capabilities = BTreeMap::from([(EV_SYN, vec![SYN_REPORT]), (EV_KEY, vec![30])]);
+            let mut config = config();
+            config.policy.allow_hyprland_actions = case != "policy";
+            let rule = &mut config.rules[0];
+            rule.trigger = Trigger::Key { key: Key(30) };
+            rule.delivery = Delivery::Reserve;
+            rule.output = (case != "output").then(|| "test".into());
+            rule.action = if case == "lua" {
+                Action::Lua {
+                    handler: "window".into(),
+                    requires: BTreeSet::from([EffectKind::HyprlandActions]),
+                }
+            } else {
+                Action::Hyprland {
+                    action: match case {
+                        "move" | "multi-output" | "right-bound" => WindowAction::MoveRightAndFollow,
+                        "left-bound" => WindowAction::MoveLeftAndFollow,
+                        "unsupported" => WindowAction::ReorderUp,
+                        _ => WindowAction::Close,
+                    },
+                }
+            };
+            if case == "locked" {
+                rule.contexts.push(Context::Locked);
+            }
+            if case == "screen" {
+                rule.screen = Some(Screen::Off);
+            }
+            let mut routing = Routing::new(config).unwrap();
+            context(&mut routing, 0);
+            if case == "locked" {
+                routing.authority_mut().lock_requested();
+                let generation = routing.authority_mut().generation();
+                routing.authority_mut().lock_confirmed(generation).unwrap();
+            }
+            let workspace = match case {
+                "left-bound" => 1,
+                "right-bound" => i64::from(i32::MAX),
+                _ => 2,
+            };
+            let geometry = output();
+            let rect = crate::context::Rect {
+                origin: geometry.origin,
+                size: geometry.logical_size(),
+            };
+            let mut snapshot = Snapshot {
+                generation: routing.authority_mut().generation(),
+                revision: 2,
+                captured_at: ms(0),
+                state: if case == "locked" {
+                    State::Locked
+                } else {
+                    State::Desktop
+                },
+                secure_overlay: case == "overlay",
+                outputs: vec![OutputState {
+                    geometry,
+                    geometry_generation: 2,
+                    active_workspace: Some(if case == "workspace" { 3 } else { workspace }),
+                    screen: if case == "screen" {
+                        Screen::Off
+                    } else {
+                        Screen::On
+                    },
+                    keyboard: None,
+                }],
+                windows: vec![crate::context::Window {
+                    id: if case == "identity" {
+                        "invalid"
+                    } else {
+                        "0x1234:abc"
+                    }
+                    .into(),
+                    output: "test".into(),
+                    workspace,
+                    rect,
+                    content: rect,
+                    mapped: true,
+                    visible: !matches!(case, "stock" | "stock-unfocused"),
+                    focused: case != "stock-unfocused",
+                    z_order: Some(1),
+                }],
+                regions: vec![],
+            };
+            if case == "window" {
+                snapshot.windows.clear();
+            }
+            if matches!(case, "close-multi" | "multi-output") {
+                let mut other = snapshot.outputs[0].clone();
+                other.geometry.name = "other".into();
+                other.geometry.origin.x = 600.0;
+                other.active_workspace = Some(77);
+                snapshot.outputs.push(other);
+            }
+            routing.authority_mut().update(snapshot, ms(0)).unwrap();
+            routing
+                .attach(device.clone(), &ready(&device), None, ms(0))
+                .unwrap();
+            let generation = routing.authority_mut().generation();
+            routing.actions_available(
+                generation,
+                if case == "consumer" {
+                    BTreeSet::new()
+                } else {
+                    BTreeSet::from([Capability::HyprlandActions, Capability::LuaActions])
+                },
+                ms(0),
+            );
+            routing
+                .push(Record::Frame {
+                    frame: Frame {
+                        source: device.source.clone(),
+                        at: ms(0),
+                        sequence: 1,
+                        events: vec![
+                            RawEvent {
+                                kind: EV_KEY,
+                                code: 30,
+                                value: 1,
+                            },
+                            RawEvent {
+                                kind: EV_SYN,
+                                code: SYN_REPORT,
+                                value: 0,
+                            },
+                        ],
+                    },
+                })
+                .unwrap();
+            let forwarded = drain(&mut routing, 0);
+            let dispatches = routing.take_dispatches(ms(0));
+            if matches!(case, "allowed" | "stock" | "move" | "lua" | "close-multi") {
+                assert!(forwarded.is_empty(), "{case}: input was not claimed");
+                assert_eq!(dispatches.len(), 1, "{case}");
+                assert!(
+                    matches!(&dispatches[0],Event::Matched {window:Some(window),output:Some(output),workspace:Some(2),..} if window=="0x1234:abc" && output=="test")
+                );
+            } else {
+                assert_eq!(forwarded.len(), 1, "{case} must preserve ordinary input");
+                assert!(dispatches.is_empty(), "{case}");
             }
         }
     }

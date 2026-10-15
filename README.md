@@ -266,6 +266,11 @@ outputs with a routing broker; `--lua --power` also enables approved Lua plans.
 Production takeover remains gated. `nix run .#cage-test -- --layers --input --power`
 verifies the owned nested output; see
 [adapter scope and requirements](docs/lua-api.md#experimental-output-scoped-dpms-adapter).
+`session --hyprland` negotiates protected `allow_hyprland_actions` permission for
+targeted close and adjacent workspace move/follow; add `--lua` for named plans.
+The agent installs only the broker-bound compositor, and routing checks target
+eligibility before claiming input. See
+[window adapter requirements](docs/lua-api.md#experimental-targeted-hyprland-window-adapter).
 Production routing remains disabled; named-effect execution currently has model
 grant and helper-process coverage, without authenticated production routing proof.
 Pending effects are canceled by generation, gesture cancellation and source
@@ -512,9 +517,9 @@ starting receiver to the adjacent numeric workspace and back, following it,
 then close it after focus switches to the guard receiver. Stock IPC must confirm
 the exact window/workspace/focus, the target must acknowledge close, and the
 guard must remain alive. The adapter currently supports stock Hyprland 0.54.3
-and single-output workspace moves through explicit authorized host installation.
-Public action negotiation, production takeover, reorder and scrolling-layout
-effects remain pending. [The reference](docs/lua-api.md#experimental-targeted-hyprland-window-adapter)
+and single-output workspace moves through protected `session --hyprland` opt-in.
+Production takeover, reorder and scrolling-layout effects remain pending.
+[The reference](docs/lua-api.md#experimental-targeted-hyprland-window-adapter)
 documents the stock address-selector race between lifetime preflight and dispatch.
 
 The separate touch runner uses a test-only Cage build with a private inherited

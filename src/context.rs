@@ -143,6 +143,57 @@ pub struct Snapshot {
     pub secure_overlay: bool,
 }
 impl Snapshot {
+    /// Pure eligibility check shared by routing preclaim and broker dispatch.
+    /// Spatial scopes require provider-proven rendered visibility. Everywhere
+    /// rules retain the mapped window selected by focus when their permit began.
+    pub(crate) fn hyprland_target_available(
+        &self,
+        action: &Action,
+        scope: Scope,
+        window: Option<&str>,
+        output: Option<&str>,
+        workspace: Option<i64>,
+    ) -> bool {
+        if !action.requires_hyprland()
+            || self.state != State::Desktop
+            || self.secure_overlay
+            || matches!(action, Action::Hyprland { action } if !action.supported_session())
+        {
+            return false;
+        }
+        let Some(window) = self
+            .windows
+            .iter()
+            .find(|candidate| Some(candidate.id.as_str()) == window)
+        else {
+            return false;
+        };
+        if !window.mapped
+            || scope != Scope::Everywhere && !window.visible
+            || window.workspace <= 0
+            || workspace != Some(window.workspace)
+            || crate::config::hyprland_window_address(&window.id).is_none()
+            || output != Some(window.output.as_str())
+        {
+            return false;
+        }
+        let Some(output) = self
+            .outputs
+            .iter()
+            .find(|candidate| candidate.geometry.name == window.output)
+        else {
+            return false;
+        };
+        if output.screen != Screen::On || output.active_workspace != Some(window.workspace) {
+            return false;
+        }
+        match action {
+            Action::Hyprland { action } if *action != crate::config::WindowAction::Close => {
+                self.outputs.len() == 1 && action.workspace_destination(window.workspace).is_some()
+            }
+            _ => true,
+        }
+    }
     pub fn validate(&self) -> Result<(), Rejection> {
         if self.outputs.len() > 256 || self.windows.len() > 4096 || self.regions.len() > 4096 {
             return Err(Rejection::InvalidGeometry);
@@ -519,7 +570,7 @@ impl Authority {
                 .map_or(State::Unknown, |snapshot| snapshot.state)
         }
     }
-    fn fresh(&self, at: Duration) -> Result<&Snapshot, Rejection> {
+    pub(crate) fn fresh(&self, at: Duration) -> Result<&Snapshot, Rejection> {
         if !self.active {
             return Err(Rejection::Inactive);
         }
@@ -758,14 +809,18 @@ impl Authority {
             }
             region = Some(target.clone());
         }
-        if matches!(rule.action, Action::Hyprland { .. })
+        if rule.action.requires_hyprland()
             && window.is_none()
             && !matches!(rule.scope, Scope::SideLeft | Scope::SideRight)
         {
-            let mut focused = snapshot
-                .windows
-                .iter()
-                .filter(|window| window.mapped && window.visible && window.focused);
+            let mut focused = snapshot.windows.iter().filter(|window| {
+                window.mapped
+                    && (window.visible || rule.scope == Scope::Everywhere)
+                    && window.focused
+                    && output
+                        .as_ref()
+                        .is_none_or(|output| window.output == output.geometry.name)
+            });
             window = Some(focused.next().ok_or(Rejection::TargetMissing)?.clone());
             if focused.next().is_some() {
                 return Err(Rejection::MixedTargets);
@@ -844,7 +899,11 @@ impl Authority {
             let current = snapshot
                 .windows
                 .iter()
-                .find(|current| current.id == window.id && current.mapped && current.visible)
+                .find(|current| {
+                    current.id == window.id
+                        && current.mapped
+                        && (current.visible || permit.scope == Scope::Everywhere)
+                })
                 .ok_or(Rejection::TargetMissing)?;
             if current.output != window.output
                 || current.workspace != window.workspace
@@ -1238,6 +1297,69 @@ mod tests {
             .validate(&permit, input(&source, &map, 100))
             .unwrap();
         assert_eq!(permit.window().unwrap().id, "a");
+    }
+    #[test]
+    fn global_named_window_rules_freeze_stock_focus_without_inventing_spatial_visibility() {
+        let mut authority = authority();
+        let source = source();
+        let mut next = snapshot(authority.generation(), 2, 0);
+        next.windows[0].id = "0x1234:abc".into();
+        next.windows[1].id = "0x5678:def".into();
+        for window in &mut next.windows {
+            window.visible = false;
+        }
+        authority.update(next.clone(), ms(0)).unwrap();
+        let mut rule = rule("G08_up");
+        rule.scope = Scope::Everywhere;
+        rule.output = Some("phone".into());
+        rule.trigger = crate::config::Trigger::Key {
+            key: crate::config::Key(30),
+        };
+        rule.action = Action::Lua {
+            handler: "window".into(),
+            requires: BTreeSet::from([crate::config::EffectKind::HyprlandActions]),
+        };
+        let permit = authority
+            .start(
+                &rule,
+                InputContext {
+                    source: &source,
+                    mapping: None,
+                    at: ms(0),
+                },
+                &[],
+            )
+            .unwrap();
+        assert_eq!(permit.window().unwrap().id, "0x1234:abc");
+        next.revision = 3;
+        next.captured_at = ms(100);
+        next.windows[0].focused = false;
+        next.windows[1].focused = true;
+        authority.update(next.clone(), ms(100)).unwrap();
+        authority
+            .validate(
+                &permit,
+                InputContext {
+                    source: &source,
+                    mapping: None,
+                    at: ms(100),
+                },
+            )
+            .unwrap();
+        assert!(next.hyprland_target_available(
+            &rule.action,
+            Scope::Everywhere,
+            Some("0x1234:abc"),
+            Some("phone"),
+            Some(1)
+        ));
+        assert!(!next.hyprland_target_available(
+            &rule.action,
+            Scope::AppContent,
+            Some("0x1234:abc"),
+            Some("phone"),
+            Some(1)
+        ));
     }
     #[test]
     fn t58_window_geometry_workspace_and_removal_cancel() {

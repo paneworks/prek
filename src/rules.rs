@@ -134,6 +134,23 @@ pub(crate) struct RouteIntent {
     candidate: Candidate,
 }
 impl RouteIntent {
+    pub fn hyprland_target_available(&self, authority: &Authority, at: Duration) -> bool {
+        let Some(permit) = self.candidate.permit.as_ref() else {
+            return false;
+        };
+        let (Some(window), Some(output)) = (permit.window(), permit.desktop_output()) else {
+            return false;
+        };
+        authority.fresh(at).is_ok_and(|snapshot| {
+            snapshot.hyprland_target_available(
+                &self.rule.action,
+                self.rule.scope,
+                Some(&window.id),
+                Some(&output.geometry.name),
+                Some(window.workspace),
+            )
+        })
+    }
     pub fn power_target_available(&self) -> bool {
         self.candidate
             .permit

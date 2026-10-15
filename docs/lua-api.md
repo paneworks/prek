@@ -648,9 +648,9 @@ Configuration-time queries raise an error.
 The session supplies the actual broker-negotiated flags after checking the
 registration reply. Lua declarations and system policy alone do not populate
 this view. Negotiated flags remain fixed within the session fence; readiness
-can change. `commands`, `lua_actions`, `power_actions` and an explicitly
-host-installed `hyprland_actions` adapter can be ready. Public Hyprland action
-negotiation remains unavailable; declarations alone do not install an adapter.
+can change. `commands`, `lua_actions`, `power_actions` and `hyprland_actions`
+can be ready. Window effects require protected `policy.allow_hyprland_actions`
+and `session --hyprland` on a routing broker; declarations alone grant nothing.
 Observation sessions report an empty readiness list. Source loading, executor
 capacity and adapter/context expiry can withdraw readiness.
 
@@ -894,16 +894,25 @@ approved registry; callable pointers are never serialized into configuration.
 
 ## Experimental targeted Hyprland window adapter
 
-Approved named handlers can return `actions.hyprland {action=...}` plans for
-`close`, `move_left_and_follow` and `move_right_and_follow` when an authorized
-embedding explicitly installs `actions::HyprlandAdapter` into the unprivileged
-executor. The host supplies a verified client and broker-approved binding/view
-to `HyprlandAdapter::new(client, view)`, then uses
-`Executor::set_hyprland_adapter(adapter)` and
-`Executor::update_hyprland_context(view)`. These are Rust host APIs, not Lua
-authority setters. Public broker/session negotiation and production routing
-remain unavailable. [The declaration example](../examples/lua/window_actions.lua)
-compiles offline without executing any operation.
+`prek session --hyprland` opts into protected-policy `close`,
+`move_left_and_follow` and `move_right_and_follow` actions on a routing broker.
+Use `--lua --hyprland` for approved named handlers returning
+`actions.hyprland {action=...}`. `--commands` and `--power` are independent
+permissions and are required only for their effect families. The protected
+system configuration must set `policy.allow_hyprland_actions=true` (default
+false) and declare an enabled supported window action or approved handler
+requiring `hyprland_actions`. User overlays cannot grant this permission;
+observe brokers and inspector registrations refuse it. **Production takeover
+remains disabled; the flag does not bypass the routing gate.**
+
+The session opens only the compositor matching its broker-provided
+PID/start/executable/UID/seat binding and refreshes the adapter from that context.
+The Rust host equivalents remain `HyprlandAdapter::new(client, view)`,
+`Executor::set_hyprland_adapter(adapter)`,
+`Executor::update_hyprland_context(view)` and
+`Executor::sync_hyprland_context(runtime, instance, view)`. These are not Lua
+authority setters. [The example](../examples/lua/window_actions.lua) declares
+protected touchscreen actions; offline compilation executes no effect.
 
 The adapter currently supports verified stock **Hyprland 0.54.3**. The exact
 window address **and stableId**, output/geometry generation, positive numeric
@@ -916,6 +925,23 @@ a single-output desktop; cross-output workspace-rule topology remains pending.
 Numeric destinations must fit stock Hyprland's positive 32-bit workspace parser
 (`1..2147483647`); moving left from 1 or right from 2147483647 is unavailable.
 Reorder and scrolling-layout actions remain unavailable.
+
+Routing checks protected policy, current negotiated availability and a valid
+frozen target before claiming input. Missing/unsafe targets, a different active
+workspace, screen-off/locked/secure-overlay state, unsupported direct operations,
+invalid adjacent destinations and multiple outputs for direct moves preserve
+ordinary input. Broker dispatch repeats target/policy checks. A handler's
+declared family must have an eligible frozen target; its returned plan is
+validated after the grant and may still be refused.
+
+`scope="everywhere"` keyboard rules can set an explicit output and freeze its
+mapped focused window at the initial key event. They do not perform spatial
+hit testing or infer rendered geometry; a later focus change does not retarget
+them. App-content and other spatial scopes still require provider-proven
+rendered visibility and correct starting geometry. Stock IPC animation goals
+alone do not authorize app-content touch consumption.
+See [the keyboard recipe](../examples/lua/window_keys.lua) for exact-output
+global key rules; the touchscreen example uses app-content targeting.
 
 Each effect requires a separate current broker grant. Direct declarations act
 only on discrete/begin; named handlers choose their phases explicitly. The

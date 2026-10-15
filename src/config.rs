@@ -293,6 +293,8 @@ pub struct Policy {
     pub allow_input_events: bool,
     /// Protected system permission for output-scoped user-session DPMS effects.
     pub allow_power_actions: bool,
+    /// Protected system permission for targeted stock Hyprland window effects.
+    pub allow_hyprland_actions: bool,
 }
 impl Default for Policy {
     fn default() -> Self {
@@ -302,6 +304,7 @@ impl Default for Policy {
             allow_runtime_rules: false,
             allow_input_events: false,
             allow_power_actions: false,
+            allow_hyprland_actions: false,
         }
     }
 }
@@ -482,6 +485,10 @@ pub enum EffectKind {
     PowerActions,
 }
 impl Action {
+    pub fn requires_hyprland(&self) -> bool {
+        matches!(self, Self::Hyprland { .. })
+            || matches!(self, Self::Lua { requires, .. } if requires.contains(&EffectKind::HyprlandActions))
+    }
     pub fn requires_power(&self) -> bool {
         matches!(self, Self::Power { .. })
             || matches!(self,Self::Lua {requires,..} if requires.contains(&EffectKind::PowerActions))
@@ -521,6 +528,34 @@ pub enum WindowAction {
     MoveRightAndFollow,
     Close,
     ScrollStack,
+}
+impl WindowAction {
+    pub fn supported_session(self) -> bool {
+        matches!(
+            self,
+            Self::Close | Self::MoveLeftAndFollow | Self::MoveRightAndFollow
+        )
+    }
+    pub fn workspace_destination(self, from: i64) -> Option<i64> {
+        let delta = match self {
+            Self::MoveLeftAndFollow => -1,
+            Self::MoveRightAndFollow => 1,
+            _ => return None,
+        };
+        from.checked_add(delta)
+            .filter(|id| (1..=i64::from(i32::MAX)).contains(id))
+    }
+}
+/// Exact bounded stock address plus lifetime identity; never a dispatcher selector.
+pub fn hyprland_window_address(id: &str) -> Option<&str> {
+    let (address, stable) = id.split_once(':')?;
+    let hex = |value: &str| {
+        !value.is_empty()
+            && value.len() <= 16
+            && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && u64::from_str_radix(value, 16).is_ok_and(|value| value != 0)
+    };
+    (address.starts_with("0x") && hex(&address[2..]) && hex(stable)).then_some(address)
 }
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1562,6 +1597,7 @@ mod tests {
     fn output_names_and_power_policy_round_trip_without_user_policy_expansion() {
         let mut system = Config::preset("desktop").unwrap();
         system.policy.allow_power_actions = true;
+        system.policy.allow_hyprland_actions = true;
         system.rules[0].output = Some("panel".into());
         assert_eq!(
             Config::parse(&toml::to_string(&system).unwrap()).unwrap(),
@@ -1569,6 +1605,9 @@ mod tests {
         );
         assert!(
             toml::from_str::<Overlay>("version=1\n[policy]\nallow_power_actions=true").is_err()
+        );
+        assert!(
+            toml::from_str::<Overlay>("version=1\n[policy]\nallow_hyprland_actions=true").is_err()
         );
         for bad in ["".to_owned(), "bad\noutput".to_owned(), "x".repeat(257)] {
             let mut config = system.clone();

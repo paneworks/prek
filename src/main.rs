@@ -105,6 +105,10 @@ enum Command {
         /// Requires a routing broker and verified desktop context.
         #[arg(long)]
         power: bool,
+        /// Execute protected-policy targeted Hyprland close and workspace moves.
+        /// Requires a routing broker and verified stock compositor context.
+        #[arg(long)]
+        hyprland: bool,
         /// Run approved Lua callbacks, timers and named handlers in a separate VM.
         #[arg(long)]
         lua: bool,
@@ -414,6 +418,7 @@ fn run(command: Command) -> io::Result<()> {
             context,
             commands,
             power,
+            hyprland,
             lua,
             rule_mutations,
             input,
@@ -428,6 +433,7 @@ fn run(command: Command) -> io::Result<()> {
                 context,
                 commands,
                 power,
+                hyprland,
                 lua,
                 rule_mutations,
                 input,
@@ -1168,6 +1174,7 @@ struct SessionOptions {
     context: bool,
     commands: bool,
     power: bool,
+    hyprland: bool,
     lua: bool,
     rule_mutations: bool,
     input: bool,
@@ -1211,11 +1218,12 @@ fn run_session(
         context,
         commands,
         power,
+        hyprland,
         lua,
         rule_mutations,
         input,
     } = options;
-    let effects = commands || power;
+    let effects = commands || power || hyprland;
     use nix::{
         libc,
         poll::{PollFd, PollFlags, PollTimeout, poll},
@@ -1252,6 +1260,9 @@ fn run_session(
     }
     if power {
         requested.insert(Capability::PowerActions);
+    }
+    if hyprland {
+        requested.insert(Capability::HyprlandActions);
     }
     if lua {
         requested.insert(Capability::LuaEvents);
@@ -1424,7 +1435,9 @@ fn run_session(
                         let _ = channel.send(&Request::Disconnect { fence: observed }, now);
                         return Ok(());
                     }
-                    if (power || lua && (lua_runtime.is_some() || lua_download.is_some()))
+                    if (power
+                        || hyprland
+                        || lua && (lua_runtime.is_some() || lua_download.is_some()))
                         && context_download.is_none()
                     {
                         context_download =
@@ -1445,25 +1458,40 @@ fn run_session(
                     offset,
                     bytes,
                     data,
-                } if (lua || power) && Some(incoming) == fence => {
+                } if (lua || power || hyprland) && Some(incoming) == fence => {
                     let now = monotonic()?;
                     let download = context_download
                         .as_mut()
                         .ok_or_else(|| io::Error::other("unsolicited broker context"))?;
                     match download.push(incoming, offset, bytes, &data, now)? {
                         Some(view) => {
-                            if power && let Some(executor) = executor.as_mut() {
+                            if (power || hyprland)
+                                && let Some(executor) = executor.as_mut()
+                            {
                                 let runtime = std::env::var_os("XDG_RUNTIME_DIR")
                                     .map(PathBuf::from)
                                     .ok_or_else(|| {
                                         io::Error::other(
-                                            "power adapter requires the owning XDG_RUNTIME_DIR",
+                                            "desktop adapters require the owning XDG_RUNTIME_DIR",
                                         )
                                     })?;
-                                if let Err(error) =
-                                    executor.sync_power_context(&runtime, &instance, view.clone())
+                                if power
+                                    && let Err(error) = executor.sync_power_context(
+                                        &runtime,
+                                        &instance,
+                                        view.clone(),
+                                    )
                                 {
                                     eprintln!("Power adapter unavailable: {error}");
+                                }
+                                if hyprland
+                                    && let Err(error) = executor.sync_hyprland_context(
+                                        &runtime,
+                                        &instance,
+                                        view.clone(),
+                                    )
+                                {
+                                    eprintln!("Hyprland adapter unavailable: {error}");
                                 }
                             }
                             if let Some(runtime) = lua_runtime.as_mut() {
@@ -1971,7 +1999,8 @@ fn run_session(
                 "broker context transfer timed out",
             ));
         }
-        let context_active = power || lua && (lua_runtime.is_some() || lua_download.is_some());
+        let context_active =
+            power || hyprland || lua && (lua_runtime.is_some() || lua_download.is_some());
         if context_active
             && context_download.is_none()
             && now >= next_context

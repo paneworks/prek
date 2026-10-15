@@ -4,6 +4,61 @@ use crate::{
     rule_transactions::{Change, Transaction},
 };
 #[test]
+fn public_hyprland_registration_requires_protected_route_policy_declared_effects_and_context() {
+    use crate::config::{EffectKind, Mode, WindowAction};
+    let mut config = Config::preset("desktop").unwrap();
+    config.mode = Mode::Route;
+    config.rules[0].enabled = true;
+    config.rules[0].action = Action::Hyprland {
+        action: WindowAction::Close,
+    };
+    let caps = BTreeSet::from([Capability::Context, Capability::HyprlandActions]);
+    let accepted = |config: Option<&Config>, lua, caps: &BTreeSet<Capability>| {
+        registration_capabilities(config, None, lua, true, Role::Agent, caps)
+    };
+    assert!(accepted(Some(&config), false, &caps).is_err());
+    config.policy.allow_hyprland_actions = true;
+    assert!(accepted(Some(&config), false, &caps).is_ok());
+    assert!(accepted(None, false, &caps).is_err());
+    assert!(
+        accepted(
+            Some(&config),
+            false,
+            &BTreeSet::from([Capability::HyprlandActions])
+        )
+        .is_err()
+    );
+    assert!(
+        registration_capabilities(Some(&config), None, false, true, Role::Inspect, &caps).is_err()
+    );
+    for action in [
+        WindowAction::ReorderUp,
+        WindowAction::ReorderDown,
+        WindowAction::ScrollStack,
+    ] {
+        config.rules[0].action = Action::Hyprland { action };
+        assert!(accepted(Some(&config), false, &caps).is_err());
+    }
+    config.rules[0].action = Action::Lua {
+        handler: "window".into(),
+        requires: BTreeSet::from([EffectKind::HyprlandActions]),
+    };
+    let caps = BTreeSet::from([
+        Capability::Context,
+        Capability::Observations,
+        Capability::LuaEvents,
+        Capability::LuaActions,
+        Capability::HyprlandActions,
+    ]);
+    assert!(accepted(Some(&config), true, &caps).is_ok());
+    assert!(accepted(Some(&config), false, &caps).is_err());
+    config.rules[0].enabled = false;
+    assert!(accepted(Some(&config), true, &caps).is_err());
+    config.rules[0].enabled = true;
+    config.mode = Mode::Observe;
+    assert!(accepted(Some(&config), true, &caps).is_err());
+}
+#[test]
 fn public_power_registration_requires_route_policy_declared_effects_and_context() {
     let mut config = Config::preset("desktop").unwrap();
     config.mode = crate::config::Mode::Route;

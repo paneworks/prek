@@ -635,7 +635,7 @@ fn window_acceptance(
     socket: &Path,
 ) {
     use prek::{
-        actions::{Executor, HyprlandAdapter},
+        actions::Executor,
         config::WindowAction,
         protocol::{Completion, Mode, Request},
         rules::{Event, Evidence, Stage},
@@ -669,24 +669,52 @@ fn window_acceptance(
     };
     let (mut target_child, target_id) = spawn("hyprland-target");
     let (mut guard_child, guard_id) = spawn("hyprland-guard");
+    let runtime = socket.parent().unwrap();
+    let Consumer::Hyprland { instance, .. } = checking.consumer() else {
+        panic!()
+    };
+    let target_address = target_id.split_once(':').unwrap().0;
+    assert!(
+        std::process::Command::new(std::env::var_os("PREK_CAGE_HYPRCTL").unwrap())
+            .args([
+                "dispatch",
+                "focuswindow",
+                &format!("address:{target_address}")
+            ])
+            .env("HYPRLAND_INSTANCE_SIGNATURE", &instance)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    );
+    let initial = sampler.sample(checking, 1, SessionKind::User).unwrap();
+    let initial_window = initial
+        .windows
+        .iter()
+        .find(|window| window.id == target_id)
+        .unwrap();
+    assert!(initial_window.focused);
+    let target_output = initial_window.output.clone();
     let source = r#"
 local p=require('prek')
+local output=__OUTPUT__
 p.events.on('ready',function()
  assert(p.capabilities.has('hyprland_actions') and not p.capabilities.ready('hyprland_actions'))
 end)
 p.events.on('stop',function()assert(p.capabilities.current()==nil)end)
 local handler=p.actions.define('window',{requires={'hyprland_actions'}},function(payload)
+ if payload.event.stage~='begin' then return end
  assert(p.capabilities.ready('hyprland_actions') and p.capabilities.ready('lua_actions'))
  assert(payload.event.window~=nil)
  return p.actions.hyprland{action=payload.event.rule}
 end)
-return p.config.new{mode='route',policy={allowed_devices={'keyboard'}},devices={keyboard={keys={'KEY_A','KEY_B','KEY_C'}}},rules={
- p.rules.define{id='move_right_and_follow',devices={'keyboard'},trigger=p.triggers.key{key='KEY_A'},action=handler},
- p.rules.define{id='move_left_and_follow',devices={'keyboard'},trigger=p.triggers.key{key='KEY_B'},action=handler},
- p.rules.define{id='close',devices={'keyboard'},trigger=p.triggers.key{key='KEY_C'},action=handler},
+return p.config.new{mode='route',policy={allowed_devices={'keyboard'},allow_hyprland_actions=true},devices={keyboard={keys={'KEY_A','KEY_B','KEY_C'}}},rules={
+ p.rules.define{id='move_right_and_follow',devices={'keyboard'},contexts={'desktop'},output=output,trigger=p.triggers.key{key='KEY_A'},action=handler},
+ p.rules.define{id='move_left_and_follow',devices={'keyboard'},contexts={'desktop'},output=output,trigger=p.triggers.key{key='KEY_B'},action=handler},
+ p.rules.define{id='close',devices={'keyboard'},contexts={'desktop'},output=output,trigger=p.triggers.key{key='KEY_C'},action=handler},
 }}
-"#;
-    let definition = Definition::compile(source, "owned-windows.lua").unwrap();
+"#.replace("__OUTPUT__", &serde_json::to_string(&target_output).unwrap());
+    let definition = Definition::compile(&source, "owned-windows.lua").unwrap();
     let config = definition.validate().unwrap();
     let negotiated = BTreeSet::from([
         Capability::Context,
@@ -712,16 +740,10 @@ return p.config.new{mode='route',policy={allowed_devices={'keyboard'}},devices={
         })),
     };
     let first = sampler.sample(checking, 1, SessionKind::User).unwrap();
-    let runtime = socket.parent().unwrap();
-    let Consumer::Hyprland { instance, .. } = checking.consumer() else {
-        panic!()
-    };
-    let executable = fs::read_link(format!("/proc/{}/exe", binding.compositor_pid)).unwrap();
-    let client = Client::open(runtime, &instance, binding.uid, &executable).unwrap();
     let mut executor =
         Executor::new(fence, "seat0".into(), Mode::Route, negotiated.clone()).unwrap();
     executor
-        .set_hyprland_adapter(HyprlandAdapter::new(client, view(first)).unwrap())
+        .sync_hyprland_context(runtime, &instance, view(first))
         .unwrap();
     executor.lua_ready(true);
     let (mut channel, mut broker) = Channel::pair().unwrap();
@@ -741,6 +763,7 @@ return p.config.new{mode='route',policy={allowed_devices={'keyboard'}},devices={
             .find(|window| window.id == target_id)
             .unwrap()
             .clone();
+        assert_eq!(config.rules[index].output.as_ref(), Some(&window.output));
         let expires = snapshot.captured_at + Duration::from_millis(250);
         let fresh = view(snapshot);
         executor.update_hyprland_context(fresh.clone()).unwrap();
@@ -766,7 +789,7 @@ return p.config.new{mode='route',policy={allowed_devices={'keyboard'}},devices={
             at: monotonic().unwrap(),
             config_generation: 1,
             session_generation: 1,
-            stage: Stage::Discrete,
+            stage: Stage::Begin,
             action: config.rules[index].action.clone(),
             evidence: Evidence::Key { down: true },
             window: Some(target_id.clone()),

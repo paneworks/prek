@@ -19,11 +19,12 @@ use std::{
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[test]
-fn session_help_documents_explicit_power_opt_in_without_enabling_routing() {
+fn session_help_documents_explicit_desktop_opt_ins_without_enabling_routing() {
     let output = run(&["session", "--help"]);
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
     assert!(help.contains("--power") && help.contains("protected-policy DPMS"));
+    assert!(help.contains("--hyprland") && help.contains("protected-policy targeted Hyprland"));
 }
 
 #[test]

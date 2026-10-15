@@ -52,6 +52,7 @@
 ---@field allow_runtime_rules? boolean Default false; only protected system policy grants permission.
 ---@field allow_input_events? boolean Default false; requires protected policy, --lua --input and fresh desktop context.
 ---@field allow_power_actions? boolean Default false; protected permission for --power on a routing broker.
+---@field allow_hyprland_actions? boolean Default false; protected permission for --hyprland on a routing broker.
 
 ---@class (exact) prek.ShapeCapture
 ---@field max_samples? integer Default 2048.
@@ -617,7 +618,7 @@ local SchedulerAPI = {}
 ---@class (exact) prek.CapabilityView
 ---@field fence prek.Fence
 ---@field negotiated prek.Capability[] Registration flags; policy and per-effect authorization still apply.
----@field ready prek.Capability[] Current executor capacity for commands, lua_actions, power_actions and host-installed hyprland_actions.
+---@field ready prek.Capability[] Current executor capacity for commands, lua_actions, power_actions and hyprland_actions.
 ---@field sampled_at prek.MonotonicTime Original parent sampling time; expires after 250ms.
 
 ---@class prek.CapabilitiesAPI
@@ -780,7 +781,7 @@ function CapabilitiesAPI.current() error("Prek editor definition") end
 ---@return boolean
 function CapabilitiesAPI.has(name) error("Prek editor definition") end
 ---Executor capacity only; effects still require context, target checks and broker grants.
----@param name string commands, lua_actions, power_actions or explicitly host-installed hyprland_actions.
+---@param name string commands, lua_actions, power_actions or hyprland_actions.
 ---@return boolean
 function CapabilitiesAPI.ready(name) error("Prek editor definition") end
 
@@ -895,7 +896,7 @@ function ActionsAPI.command(fields) error("Prek editor definition") end
 ---@param fields prek.MorfFields
 ---@return prek.MorfActionDeclaration
 function ActionsAPI.morf(fields) error("Prek editor definition") end
----Typed close/adjacent moves require explicit host adapter installation and grants; public session negotiation is pending.
+---Typed close/adjacent moves require protected policy, --hyprland and per-effect grants; production routing remains gated.
 ---@param fields prek.HyprlandFields
 ---@return prek.HyprlandAction
 function ActionsAPI.hyprland(fields) error("Prek editor definition") end

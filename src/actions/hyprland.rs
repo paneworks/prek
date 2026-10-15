@@ -21,28 +21,12 @@ pub(super) struct Target {
 }
 
 pub(super) fn supported(action: WindowAction) -> bool {
-    matches!(
-        action,
-        WindowAction::Close | WindowAction::MoveLeftAndFollow | WindowAction::MoveRightAndFollow
-    )
+    action.supported_session()
 }
 
 fn address(id: &str) -> io::Result<&str> {
-    let Some((address, stable)) = id.split_once(':') else {
-        return Err(io::Error::other(
-            "window requires a stock lifetime identity",
-        ));
-    };
-    let hex = |value: &str| {
-        !value.is_empty()
-            && value.len() <= 16
-            && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-            && u64::from_str_radix(value, 16).is_ok_and(|value| value != 0)
-    };
-    if !address.starts_with("0x") || !hex(&address[2..]) || !hex(stable) {
-        return Err(io::Error::other("invalid stock window lifetime identity"));
-    }
-    Ok(address)
+    crate::config::hyprland_window_address(id)
+        .ok_or_else(|| io::Error::other("invalid stock window lifetime identity"))
 }
 
 pub struct HyprlandAdapter {
@@ -179,12 +163,7 @@ impl HyprlandAdapter {
             if current.output != target.output || !same_window(&current.window, &target.window) {
                 return Ok(Completion::Unavailable);
             }
-            let destination = match action {
-                WindowAction::MoveLeftAndFollow => target.window.workspace.checked_sub(1),
-                WindowAction::MoveRightAndFollow => target.window.workspace.checked_add(1),
-                _ => None,
-            }
-            .filter(|id| (1..=i64::from(i32::MAX)).contains(id));
+            let destination = action.workspace_destination(target.window.workspace);
             if action != WindowAction::Close && destination.is_none() {
                 return Ok(Completion::Unavailable);
             }

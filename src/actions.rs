@@ -163,8 +163,7 @@ impl Executor {
         };
         if fence != self.fence
             || self.mode != Mode::Route
-            || !(protocol::supported_session_action(action)
-                || matches!(action, Action::Hyprland { action } if hyprland::supported(*action)))
+            || !protocol::supported_session_action(action)
             || !protocol::action_capabilities(action).is_subset(&self.capabilities)
             || source.seat != self.seat
             || *id == 0
@@ -287,6 +286,23 @@ impl Executor {
             .ok_or_else(|| protocol::invalid("power adapter unavailable"))?
             .update_context(view)
     }
+    /// Install from the exact broker-owned compositor binding, never ambient focus.
+    pub fn sync_hyprland_context(
+        &mut self,
+        runtime: &std::path::Path,
+        instance: &str,
+        view: crate::context_transfer::View,
+    ) -> io::Result<()> {
+        if self.hyprland.is_some() {
+            return self.update_hyprland_context(view);
+        }
+        let Some(client) =
+            self.compositor_client(runtime, instance, &view, Capability::HyprlandActions)?
+        else {
+            return Ok(());
+        };
+        self.set_hyprland_adapter(HyprlandAdapter::new(client, view)?)
+    }
     /// Install only from a fresh broker-owned binding; never trust a Lua target
     /// or discover a compositor independently of that binding.
     pub fn sync_power_context(
@@ -298,14 +314,28 @@ impl Executor {
         if self.power.is_some() {
             return self.update_power_context(view);
         }
+        let Some(client) =
+            self.compositor_client(runtime, instance, &view, Capability::PowerActions)?
+        else {
+            return Ok(());
+        };
+        self.set_power_adapter(PowerAdapter::new(client, view)?)
+    }
+    fn compositor_client(
+        &self,
+        runtime: &std::path::Path,
+        instance: &str,
+        view: &crate::context_transfer::View,
+        capability: Capability,
+    ) -> io::Result<Option<crate::hyprland::Client>> {
         view.validate()?;
-        if view.fence != self.fence || !self.capabilities.contains(&Capability::PowerActions) {
+        if view.fence != self.fence || !self.capabilities.contains(&capability) {
             return Err(protocol::invalid(
-                "power context exceeds current executor authority",
+                "compositor context exceeds current executor authority",
             ));
         }
         let Some(context) = view.context.as_ref() else {
-            return Ok(());
+            return Ok(None);
         };
         let now = monotonic()?;
         if view.state != crate::context::State::Desktop
@@ -315,17 +345,19 @@ impl Executor {
             || now < context.snapshot.captured_at
             || now - context.snapshot.captured_at >= crate::context_transfer::FRESHNESS
         {
-            return Ok(());
+            return Ok(None);
         }
         // SAFETY: read-only current process credential query.
         if context.binding.seat != self.seat || context.binding.uid != unsafe { libc::geteuid() } {
-            return Err(protocol::invalid("power context belongs to another owner"));
+            return Err(protocol::invalid(
+                "compositor context belongs to another owner",
+            ));
         }
         let executable =
             std::path::PathBuf::from(format!("/proc/{}/exe", context.binding.compositor_pid));
         let client =
             crate::hyprland::Client::open(runtime, instance, context.binding.uid, &executable)?;
-        self.set_power_adapter(PowerAdapter::new(client, view)?)
+        Ok(Some(client))
     }
     pub fn grant(
         &mut self,
