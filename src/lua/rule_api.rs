@@ -9,13 +9,13 @@ use std::{
 };
 
 const MAX_BUILDERS: usize = 64;
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuleProposal {
     pub id: u64,
     pub transaction: Transaction,
 }
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuleReceipt {
     pub id: u64,

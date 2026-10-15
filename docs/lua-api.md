@@ -17,9 +17,29 @@ editing those tables has no effect. A missing ID returns nil. Revisions are
 decimal strings, preserving all 64 bits without Lua numeric rounding.
 
 `rules.transaction()` requires an explicitly enabled, authorized hosting transport.
-**Mutation is currently unavailable in production broker sessions.** The host
-bindings and supervised helper transport work; broker permission negotiation,
-action retirement and production routing integration remain required.
+The observation broker transport requires `policy.allow_runtime_rules = true`
+in its protected system configuration and `prek session --lua --rule-mutations`.
+The permission defaults to false. The broker negotiates `runtime_rules` only
+with the owning agent, verifies current logind/compositor identity and unlocked
+desktop context, and rejects work during configuration installation. A mutable
+user rule cannot change policy, selectors, layers or mode. Every replacement
+or enabled action must fit negotiated capabilities; named Lua handler identity
+and declared effects must match the approved source exactly.
+
+The session starts its rule-enabled helper after the actual worker subscription
+acknowledgement. The broker retires old queued matches and action offers before
+activation, correlates the private worker receipt, and verifies identity, lock,
+freshness and receipt time again before publishing acceptance. Source/session
+changes discard unsent requests and reset registration-scoped rule state.
+Routing-mode mutation remains unavailable pending production transport/handoff
+integration. Broker policy/protocol checks and helper/worker model IPC are tested;
+real login, kernel routing and phone acceptance remain required.
+
+`examples/lua/rule_transactions.lua` demonstrates an acknowledged disable
+transaction and reports unavailable permission explicitly. Validate it with
+`prek check --config examples/lua/rule_transactions.lua --json`. Install it as
+the protected system source before requesting mutation from an owning desktop
+session; a user-owned example file grants no broker authority.
 
 An enabled host provides a generation-scoped `RuleTransaction` with
 `:enable(id)`, `:disable(id)`, `:replace(rule)` (also adds a new ID), `:remove(id)`,

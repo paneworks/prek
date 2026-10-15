@@ -104,6 +104,9 @@ enum Command {
         /// Run approved Lua callbacks, timers and named handlers in a separate VM.
         #[arg(long)]
         lua: bool,
+        /// Permit Lua rule transactions when the system policy grants them.
+        #[arg(long, requires = "lua")]
+        rule_mutations: bool,
     },
     /// Query broker status from a verified compositor login session.
     Status {
@@ -398,6 +401,7 @@ fn run(command: Command) -> io::Result<()> {
             context,
             commands,
             lua,
+            rule_mutations,
         } => run_session(
             &socket,
             instance,
@@ -409,6 +413,7 @@ fn run(command: Command) -> io::Result<()> {
                 context,
                 commands,
                 lua,
+                rule_mutations,
             },
             &mut output,
         ),
@@ -822,7 +827,7 @@ fn run_broker(
             ));
         }
         if broker.take_reload_request() {
-            if installation.is_some() || compiler.is_some() {
+            if installation.is_some() || compiler.is_some() || broker.rules_busy() {
                 broker.finish_reload(
                     Err("configuration compilation or installation is in progress".into()),
                     now,
@@ -914,6 +919,18 @@ fn run_broker(
             refresh = now + prek::service::CONTEXT_REFRESH;
         }
         if !control_closed
+            && !startup
+            && transfer.is_none()
+            && installation.is_none()
+            && let Some(command) = broker.rule_command(monotonic()?)?
+            && control.send(&command, monotonic()?)?
+            && let prek::configuration::Command::Rules {
+                seat, fence, id, ..
+            } = command
+        {
+            broker.rule_command_sent(&seat, fence, id)?;
+        }
+        if !control_closed
             && (!startup || transfer.is_none())
             && let Some(update) = subscriptions.as_ref()
         {
@@ -940,8 +957,23 @@ fn run_broker(
             }
             match control.receive::<prek::worker::Message>() {
                 Ok(Some(packet)) => match packet.message {
-                    prek::worker::Message::RulesChanged { .. } => {
-                        return Err(io::Error::other("unsolicited runtime rule receipt"));
+                    prek::worker::Message::RulesChanged {
+                        seat,
+                        fence,
+                        id,
+                        revision,
+                        error,
+                    } => {
+                        broker.rule_receipt(
+                            &seat,
+                            fence,
+                            prek::lua::RuleReceipt {
+                                id,
+                                revision,
+                                error,
+                            },
+                            monotonic()?,
+                        )?;
                     }
                     prek::worker::Message::Outcome { report } => {
                         broker.report(report, monotonic()?)?
@@ -1010,7 +1042,8 @@ fn run_broker(
             fds.push(PollFd::new(
                 control.as_fd(),
                 PollFlags::POLLIN
-                    | if subscriptions.is_some() || transfer.is_some() {
+                    | if subscriptions.is_some() || transfer.is_some() || broker.rules_wants_write()
+                    {
                         PollFlags::POLLOUT
                     } else {
                         PollFlags::empty()
@@ -1118,6 +1151,30 @@ struct SessionOptions {
     context: bool,
     commands: bool,
     lua: bool,
+    rule_mutations: bool,
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_lua_session(
+    executable: &std::path::Path,
+    fence: prek::protocol::Fence,
+    seat: &str,
+    definition: prek::lua::Definition,
+    rule_mutations: bool,
+) -> io::Result<prek::lua::session::Session> {
+    let allowed = rule_mutations
+        && definition
+            .validate()
+            .map_err(io::Error::other)?
+            .policy
+            .allow_runtime_rules;
+    if allowed {
+        prek::lua::session::Session::spawn_with_rule_transactions(
+            executable, fence, seat, definition,
+        )
+    } else {
+        prek::lua::session::Session::spawn(executable, fence, seat, definition)
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1135,6 +1192,7 @@ fn run_session(
         context,
         commands,
         lua,
+        rule_mutations,
     } = options;
     use nix::{
         libc,
@@ -1176,6 +1234,9 @@ fn run_session(
             requested.insert(Capability::LuaActions);
         }
     }
+    if rule_mutations {
+        requested.insert(Capability::RuntimeRules);
+    }
     let registration = Request::Register {
         instance,
         role: if inspect { Role::Inspect } else { Role::Agent },
@@ -1202,6 +1263,9 @@ fn run_session(
     let mut executor = None::<prek::actions::Executor>;
     let mut lua_download = None::<prek::lua::source_transfer::Assembly>;
     let mut lua_runtime = None::<prek::lua::session::Session>;
+    let mut lua_waiting_definition = None::<prek::lua::Definition>;
+    let mut lua_rules_subscribed = false;
+    let mut lua_rule_request = None::<prek::lua::RuleProposal>;
     let mut lua_seat = String::new();
     let mut lua_pending = prek::lua::session::PendingEvents::default();
     let mut lua_lifecycle = None;
@@ -1395,6 +1459,9 @@ fn run_session(
                         executor.transition(next_fence)?;
                     }
                     fence = Some(next_fence);
+                    lua_rules_subscribed = false;
+                    lua_waiting_definition = None;
+                    lua_rule_request = None;
                     context_download = None;
                     context_view = None;
                     next_context = now;
@@ -1452,6 +1519,9 @@ fn run_session(
                         executor.transition(next_fence)?;
                     }
                     fence = Some(next_fence);
+                    lua_rules_subscribed = false;
+                    lua_waiting_definition = None;
+                    lua_rule_request = None;
                     context_download = None;
                     context_view = None;
                     next_context = now;
@@ -1500,6 +1570,7 @@ fn run_session(
                 Reply::Subscribed { fence: subscribed }
                     if (observations || commands) && Some(subscribed) == fence =>
                 {
+                    lua_rules_subscribed = true;
                     if json {
                         serde_json::to_writer(
                             &mut *output,
@@ -1591,13 +1662,18 @@ fn run_session(
                     match download.push(incoming, offset, bytes, &data, now)? {
                         Some(definition) => {
                             lua_download = None;
+                            if rule_mutations && !lua_rules_subscribed {
+                                lua_waiting_definition = definition;
+                                continue;
+                            }
                             let loaded = definition
                                 .map(|definition| {
-                                    prek::lua::session::Session::spawn(
+                                    spawn_lua_session(
                                         &std::env::current_exe()?,
                                         incoming,
                                         &lua_seat,
                                         definition,
+                                        rule_mutations,
                                     )
                                 })
                                 .transpose();
@@ -1679,11 +1755,50 @@ fn run_session(
                 Reply::Rejected { reason } | Reply::Revoked { reason, .. } => {
                     return Err(io::Error::other(reason));
                 }
+                Reply::RulesChanged {
+                    fence: incoming,
+                    receipt,
+                } if rule_mutations && Some(incoming) == fence => {
+                    if let Some(runtime) = lua_runtime.as_mut() {
+                        runtime.acknowledge_rules(incoming, receipt)?;
+                    }
+                }
                 _ => {
                     return Err(io::Error::other(
                         "unexpected broker message or stale session generation",
                     ));
                 }
+            }
+        }
+        if lua_rules_subscribed && let Some(definition) = lua_waiting_definition.take() {
+            match spawn_lua_session(
+                &std::env::current_exe()?,
+                fence.unwrap(),
+                &lua_seat,
+                definition,
+                rule_mutations,
+            ) {
+                Ok(mut runtime) => {
+                    if let Some((kind, payload)) = lua_lifecycle.take() {
+                        runtime.notify(kind, payload.clone())?;
+                        if kind == prek::lua::EventKind::SessionChanged
+                            && payload["state"] != "desktop"
+                        {
+                            runtime.notify(prek::lua::EventKind::Recovery, payload)?;
+                        }
+                    }
+                    if let Some(view) = context_view
+                        .as_ref()
+                        .filter(|view| Some(view.fence) == fence)
+                    {
+                        runtime.update_context(view.clone())?;
+                    }
+                    match std::mem::take(&mut lua_pending).drain_into(&mut runtime) {
+                        Ok(()) => lua_runtime = Some(runtime),
+                        Err(error) => eprintln!("Lua runtime unavailable: {error}"),
+                    }
+                }
+                Err(error) => eprintln!("Lua runtime unavailable: {error}"),
             }
         }
         if let Some(executor) = executor.as_mut() {
@@ -1701,6 +1816,13 @@ fn run_session(
         if drained && let Some(runtime) = lua_runtime.as_mut() {
             match runtime.step(monotonic()?) {
                 Ok(mut logs) => {
+                    if rule_mutations && lua_rule_request.is_none() {
+                        let proposals = runtime.take_rule_proposals();
+                        if proposals.len() > 1 {
+                            return Err(io::Error::other("Lua rule proposal queue overflow"));
+                        }
+                        lua_rule_request = proposals.into_iter().next();
+                    }
                     if let Some(executor) = executor.as_mut() {
                         for (id, ordinal, result) in runtime.take_actions() {
                             logs.extend(executor.resolve_action(
@@ -1727,11 +1849,23 @@ fn run_session(
                 Err(error) => {
                     eprintln!("Lua runtime unavailable: {error}");
                     lua_runtime = None;
+                    lua_rule_request = None;
                     if let Some(executor) = executor.as_mut() {
                         executor.cancel_lua()?;
                     }
                 }
             }
+        }
+        if let Some(proposal) = lua_rule_request.as_ref()
+            && channel.send(
+                &Request::Rules {
+                    fence: fence.unwrap(),
+                    proposal: proposal.clone(),
+                },
+                monotonic()?,
+            )?
+        {
+            lua_rule_request = None;
         }
         if let Some(executor) = executor.as_mut() {
             for (event_fence, id, ordinal, name) in executor.take_events() {
@@ -1820,9 +1954,10 @@ fn run_session(
         let mut sources = vec![PollFd::new(
             channel.as_fd(),
             PollFlags::POLLIN
-                | if executor
-                    .as_ref()
-                    .is_some_and(|executor| executor.wants_write())
+                | if lua_rule_request.is_some()
+                    || executor
+                        .as_ref()
+                        .is_some_and(|executor| executor.wants_write())
                 {
                     PollFlags::POLLOUT
                 } else {

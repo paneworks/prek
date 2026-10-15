@@ -300,6 +300,8 @@ impl Registry {
         let name = filename(&metadata.marker)?;
         let _mutation = self.directory.lock()?;
         static NEXT: AtomicU64 = AtomicU64::new(0);
+        // Keep the Rust 1.88 API; newer toolchains renamed this operation.
+        #[allow(deprecated)]
         let nonce = NEXT
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
                 next.checked_add(1)

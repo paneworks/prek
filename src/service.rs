@@ -15,6 +15,7 @@ use nix::{
     libc,
     poll::{PollFd, PollFlags},
 };
+mod rule_control;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs, io,
@@ -164,6 +165,7 @@ struct Bound {
     actions: ActionLedger,
     available_actions: BTreeSet<Capability>,
     context_export: Option<crate::context_transfer::Export>,
+    rules: rule_control::Rules,
 }
 
 #[derive(Default)]
@@ -472,6 +474,8 @@ pub struct Broker {
     completed_providers: BTreeSet<crate::morf::Proof>,
     routing: Option<crate::config::Config>,
     lua_source: Option<Vec<u8>>,
+    rule_baseline: Option<std::sync::Arc<crate::config::Config>>,
+    rule_handlers: Vec<crate::lua::HandlerRegistration>,
 }
 impl Broker {
     /// Context is sampled directly from a verified compositor. Action dispatch
@@ -508,6 +512,8 @@ impl Broker {
             completed_providers: BTreeSet::new(),
             routing: None,
             lua_source: None,
+            rule_baseline: None,
+            rule_handlers: Vec::new(),
         })
     }
     pub fn clients(&self) -> usize {
@@ -547,9 +553,16 @@ impl Broker {
         &mut self,
         definition: Option<&crate::lua::Definition>,
     ) -> io::Result<()> {
-        self.lua_source = definition
+        let baseline = definition
             .map(|definition| {
-                definition.validate().map_err(io::Error::other)?;
+                definition
+                    .validate()
+                    .map(std::sync::Arc::new)
+                    .map_err(io::Error::other)
+            })
+            .transpose()?;
+        let source = definition
+            .map(|definition| {
                 let bytes = serde_json::to_vec(definition).map_err(io::Error::other)?;
                 if bytes.len() > crate::lua::MAX_SNAPSHOT_BYTES {
                     return Err(protocol::invalid(
@@ -559,6 +572,15 @@ impl Broker {
                 Ok(bytes)
             })
             .transpose()?;
+        self.rule_baseline = baseline;
+        self.lua_source = source;
+        self.rule_handlers =
+            definition.map_or_else(Vec::new, |definition| definition.handlers.clone());
+        for connection in &mut self.connections {
+            if let Some(bound) = connection.bound.as_mut() {
+                bound.rules = rule_control::Rules::new(self.rule_baseline.clone());
+            }
+        }
         Ok(())
     }
     pub fn take_reload_request(&mut self) -> bool {
@@ -797,7 +819,15 @@ impl Broker {
         }
         let bound = connection.bound.as_mut().unwrap();
         let fence = bound.fence;
+        if bound.rules.busy()
+            && (matches!(&report, Report::Dispatch { .. })
+                || matches!(&report,Report::Observation {event,..} if matches!(event.as_ref(),crate::rules::Event::Matched {..})))
+        {
+            self.connections.insert(index, connection);
+            return Ok(());
+        }
         if matches!(report, Report::ContextLost { .. }) {
+            // Context loss also retires pending rule edits.
             if matches!(bound.context.state, State::Locking | State::Locked)
                 || !bound.capabilities.contains(&Capability::Context)
             {
@@ -840,6 +870,10 @@ impl Broker {
                 Reply::Observation { fence, event }
             }
             Report::Dispatch { event, .. } if bound.observing => {
+                if bound.rules.busy() {
+                    self.connections.insert(index, connection);
+                    return Ok(());
+                }
                 if !bound.available_actions.contains(&Capability::Commands)
                     && !bound.available_actions.contains(&Capability::LuaActions)
                     || bound.actions.pending.len() >= crate::actions::MAX_RUNNING
@@ -1130,6 +1164,15 @@ impl Broker {
                                 && self.lua_source.is_some()
                                 && capabilities.contains(&Capability::LuaEvents)
                                 && capabilities.contains(&Capability::Commands)
+                            || *capability == Capability::RuntimeRules
+                                && self.routing.is_none()
+                                && self
+                                    .rule_baseline
+                                    .as_ref()
+                                    .is_some_and(|config| config.policy.allow_runtime_rules)
+                                && capabilities.contains(&Capability::LuaEvents)
+                                && capabilities.contains(&Capability::Context)
+                                && capabilities.contains(&Capability::Observations)
                             || *capability == Capability::Commands
                                 && commands
                                 && capabilities.contains(&Capability::Context))
@@ -1194,6 +1237,7 @@ impl Broker {
                         compositor,
                         native: None,
                         context_export: None,
+                        rules: rule_control::Rules::new(self.rule_baseline.clone()),
                         actions: ActionLedger::default(),
                         available_actions: capabilities
                             .iter()
@@ -1222,7 +1266,7 @@ impl Broker {
                     // An in-flight status read may precede a transition notice.
                     // Discard it without acting on stale authority or closing
                     // the agent before that notice can reach it.
-                    let old_status = matches!(&request, Request::Status { fence } | Request::LuaSource { fence, .. } | Request::ContextRead { fence, .. }
+                    let old_status = matches!(&request, Request::Status { fence } | Request::LuaSource { fence, .. } | Request::ContextRead { fence, .. } | Request::Rules {fence,..}
                         if now < bound.previous.expires && bound.previous.fences.contains(fence));
                     if !current && !old_heartbeat && !old_status {
                         return Err(protocol::invalid(
@@ -1237,6 +1281,13 @@ impl Broker {
                     }
                     let fence = bound.fence;
                     match request {
+                        Request::Rules { .. } if !current => {}
+                        Request::Rules {
+                            fence: incoming,
+                            proposal,
+                        } => {
+                            self.prepare_rules(connection, incoming, proposal, now)?;
+                        }
                         Request::LuaSource { .. } if !current => {}
                         Request::ContextRead { .. } if !current => {}
                         Request::LuaSource { offset, .. }
@@ -1499,6 +1550,7 @@ impl Broker {
         }
         bound.observing = false;
         bound.actions = ActionLedger::default();
+        bound.rules = rule_control::Rules::new(self.rule_baseline.clone());
         bound.context_export = None;
         let fence = bound.fence;
         let state = bound.context.state;

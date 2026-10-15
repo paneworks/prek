@@ -45,6 +45,7 @@ pub enum Capability {
     Observations,
     LuaEvents,
     LuaActions,
+    RuntimeRules,
     HyprlandActions,
     MorfActions,
     PowerActions,
@@ -124,6 +125,10 @@ pub enum Request {
         fence: Fence,
         offset: usize,
     },
+    Rules {
+        fence: Fence,
+        proposal: crate::lua::RuleProposal,
+    },
     Context {
         fence: Fence,
         snapshot: Box<Snapshot>,
@@ -163,6 +168,7 @@ impl Request {
             Self::Heartbeat { fence }
             | Self::LuaSource { fence, .. }
             | Self::ContextRead { fence, .. }
+            | Self::Rules { fence, .. }
             | Self::Context { fence, .. }
             | Self::LockRequested { fence }
             | Self::Authorize { fence, .. }
@@ -177,6 +183,12 @@ impl Request {
             fence.validate()?;
         }
         match self {
+            Self::Rules { proposal, .. } => {
+                if proposal.id == 0 {
+                    return Err(invalid("invalid runtime rule proposal identity"));
+                }
+                proposal.transaction.validate().map_err(io::Error::other)?;
+            }
             Self::ContextRead { offset, .. }
                 if *offset >= crate::context_transfer::MAX_BYTES
                     || !offset.is_multiple_of(crate::context_transfer::CHUNK_BYTES) =>
@@ -219,6 +231,10 @@ impl Request {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Reply {
+    RulesChanged {
+        fence: Fence,
+        receipt: crate::lua::RuleReceipt,
+    },
     ContextData {
         fence: Fence,
         offset: usize,
@@ -318,6 +334,7 @@ impl Reply {
             | Self::Dispatch { fence, .. }
             | Self::Execute { fence, .. }
             | Self::ActionCancelled { fence, .. }
+            | Self::RulesChanged { fence, .. }
             | Self::Revoked { fence, .. } => Some(*fence),
         }
     }
@@ -329,6 +346,15 @@ impl Reply {
             !value.is_empty() && value.len() <= 1024 && !value.chars().any(char::is_control)
         };
         match self {
+            Self::RulesChanged { receipt, .. }
+                if receipt.id == 0
+                    || receipt.error.as_ref().is_some_and(|error| {
+                        error.len() > 512 || error.chars().any(char::is_control)
+                    })
+                    || receipt.error.is_none() && receipt.revision == 0 =>
+            {
+                return Err(invalid("invalid runtime rule receipt"));
+            }
             Self::ContextData {
                 offset,
                 bytes,

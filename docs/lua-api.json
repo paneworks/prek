@@ -64,12 +64,20 @@
   },
   "phase": "configuration_and_session_actions",
   "rule_transactions": {
+    "agent_flags": [
+      "lua",
+      "rule-mutations"
+    ],
     "builders": 64,
+    "capability": "runtime_rules",
+    "context": "fresh owning desktop",
     "operations": 64,
     "pending_proposals": 1,
-    "production_broker": "unavailable",
+    "production_broker": "observation_mode",
     "receipt_time_ms": 250,
     "revision_type": "decimal_string",
+    "routing": "unavailable",
+    "system_permission": "policy.allow_runtime_rules",
     "transaction_bytes": 32768,
     "transport": "explicit authorized host opt-in"
   },
@@ -215,7 +223,7 @@
       "signature": "rules.revision() -> string"
     },
     {
-      "description": "Create a private revision-scoped builder; requires explicit authorized host transport and is unavailable in current broker sessions.",
+      "description": "Create a private revision-scoped builder; requires an observation broker, system allow_runtime_rules permission and the negotiated runtime_rules capability.",
       "name": "rules.transaction",
       "phase": "runtime_callback",
       "signature": "rules.transaction() -> RuleTransaction"

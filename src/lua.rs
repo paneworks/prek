@@ -70,7 +70,7 @@ pub fn api() -> serde_json::Value {
         (
             "transaction",
             "rules.transaction() -> RuleTransaction",
-            "Create a private revision-scoped builder; requires explicit authorized host transport and is unavailable in current broker sessions.",
+            "Create a private revision-scoped builder; requires an observation broker, system allow_runtime_rules permission and the negotiated runtime_rules capability.",
         ),
     ] {
         symbols.push(serde_json::json!({"name":format!("rules.{name}"),"signature":signature,"phase":"runtime_callback","description":description}));
@@ -178,7 +178,7 @@ pub fn api() -> serde_json::Value {
         "runtime_limits":{"subscriptions":256,"timers":256,"tasks":tasks::MAX_TASKS,"tasks_per_wake":tasks::TASKS_PER_WAKE,"handlers":256,"action_effects":32,"action_bytes":32768,"timers_per_wake":32,"callback_instructions":100000,"callback_time_ms":20,"event_bytes":65536,"log_bytes":16384,"logs_per_event":32},
         "modules":{"root":"entry_parent/modules","path":"<identifier>/.../<identifier>.lua","count":modules::MAX_MODULES,"import_depth":modules::MAX_IMPORT_DEPTH,"source_set_bytes":MAX_CONFIG_BYTES,"owner":"entry_file_uid","group_other_writes":false,"symlinks":false,"runtime":"approved sources only; no filesystem reads"},
         "event_kinds":["matched","begin","update","end","cancel","skipped","ready","reload","stop","recovery","session_changed","context_changed","rules_changed"],
-        "rule_transactions":{"builders":64,"operations":64,"transaction_bytes":32768,"pending_proposals":1,"receipt_time_ms":250,"revision_type":"decimal_string","transport":"explicit authorized host opt-in","production_broker":"unavailable"},
+        "rule_transactions":{"builders":64,"operations":64,"transaction_bytes":32768,"pending_proposals":1,"receipt_time_ms":250,"revision_type":"decimal_string","transport":"explicit authorized host opt-in","production_broker":"observation_mode","system_permission":"policy.allow_runtime_rules","agent_flags":["lua","rule-mutations"],"capability":"runtime_rules","context":"fresh owning desktop","routing":"unavailable"},
         "context_limits":{"snapshot_bytes":4194304,"chunk_bytes":32768,"transfer_time_ms":1000,"freshness_ms":250,"refresh_ms":100,"queued_snapshots":2,"read_only":true},
         "runtime_requires":{"uid":"unprivileged active session","capabilities":["context","observations","lua_events"],"thread":"owning Luna arena","generation":"current broker/configuration/session fence"},
         "action_requires":{"agent_flags":["lua","commands"],"capabilities":["context","observations","lua_events","lua_actions","commands"],"implemented_effects":["commands","observations"],"grant_time_ms":250},

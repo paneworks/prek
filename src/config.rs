@@ -287,12 +287,15 @@ impl Selector {
 pub struct Policy {
     pub allowed_devices: Vec<String>,
     pub allowed_seats: Vec<String>,
+    /// Root-approved permission; runtime transactions cannot edit policy.
+    pub allow_runtime_rules: bool,
 }
 impl Default for Policy {
     fn default() -> Self {
         Self {
             allowed_devices: Vec::new(),
             allowed_seats: vec!["seat0".into()],
+            allow_runtime_rules: false,
         }
     }
 }
