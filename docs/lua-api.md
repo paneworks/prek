@@ -185,6 +185,15 @@ Supported kinds are `matched` (all matching phases), `begin`, `update`, `end`,
 Rule callbacks receive `{fence, event}`; `event` is the existing typed rule
 outcome, including its source, monotonic time and applicable gesture identity,
 ordinal, stage, action declaration and frozen target. No raw input is supplied.
+Host identities are lossless decimal strings, including both words in
+`fence.broker`, `fence.configuration`, `fence.session`, rule `event.id` and
+`event.ordinal`, `event.source.device`/`generation`, and rule
+`config_generation`/`session_generation`. This representation is consistent for
+small and large values, up to `"18446744073709551615"`. Compare identities with
+string equality; `tonumber` can lose precision. Timer/task/subscription handle
+IDs remain bounded Lua integers. Coordinates, counts, UID/PID, workspaces and
+timestamps retain their documented numeric types. The Rust control protocol
+continues to carry exact unsigned integers.
 The fence contains broker, configuration and session generations. `ready`
 receives `{fence, seat}`; reload/stop receive `{fence}` and session/recovery
 receive `{fence, state}`. Recovery here describes session inhibition, not all
@@ -231,6 +240,12 @@ window; use a new query before making a decision.
 | `Region` | `id`, `scope` (or `nil` for a local widget/overlay), `output`, `rect`, `interactive`. |
 | `Keyboard` | `rect`, `layout`. |
 | `Rect` | `origin={x,y}`, `size={x,y}` in logical desktop coordinates. |
+
+`Snapshot.generation`, `Snapshot.revision`, `OutputState.geometry_generation`
+and `Binding.compositor_start` use the same decimal-string identity type.
+`context_changed.revision` matches the snapshot revision, or is `"0"` when
+no snapshot is available. Fences have identical field types in lifecycle/rule
+callbacks, named action handlers, timer/task contexts and `context.fence()`.
 
 Arrays have ordinary one-based Lua indices. Optional fields are `nil`; getters
 do not invent workspaces, regions, keyboard bounds, visibility or stacking order

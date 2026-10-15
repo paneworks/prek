@@ -39,14 +39,12 @@ pub(super) fn getter<'gc>(
             });
         let mut value = match field {
             "snapshot" => provided
-                .map(|context| luna_util::serde::to_value(ctx, &context.snapshot))
-                .transpose()
-                .map_err(io::Error::other)?
+                .map(|context| values::snapshot(ctx, &context.snapshot))
+                .transpose()?
                 .unwrap_or(Value::Nil),
             "binding" => provided
-                .map(|context| luna_util::serde::to_value(ctx, &context.binding))
-                .transpose()
-                .map_err(io::Error::other)?
+                .map(|context| values::binding(ctx, &context.binding))
+                .transpose()?
                 .unwrap_or(Value::Nil),
             "state" => luna_util::serde::to_value(
                 ctx,
@@ -54,9 +52,8 @@ pub(super) fn getter<'gc>(
             )
             .map_err(io::Error::other)?,
             "fence" => current
-                .map(|view| luna_util::serde::to_value(ctx, &view.fence))
-                .transpose()
-                .map_err(io::Error::other)?
+                .map(|view| values::context_fence(ctx, &view.fence))
+                .transpose()?
                 .unwrap_or(Value::Nil),
             "error" => current
                 .and_then(|view| view.error.as_ref())
@@ -126,6 +123,53 @@ mod tests {
     }
 
     #[test]
+    fn context_identities_preserve_all_unsigned_bits() {
+        let definition = Definition::compile(
+            r#"
+local p=require('prek')
+p.events.on('context_changed',function(event)
+  local fence=p.context.fence(); local snapshot=p.context.snapshot(); local binding=p.context.binding()
+  assert(fence.broker[1]=='18446744073709551615' and fence.broker[2]=='9223372036854775808')
+  assert(fence.configuration=='18446744073709551614' and fence.session=='18446744073709551615')
+  assert(snapshot.generation==fence.session and snapshot.revision=='18446744073709551614')
+  assert(event.revision==snapshot.revision)
+  assert(snapshot.outputs[1].geometry_generation=='18446744073709551615')
+  assert(binding.compositor_start=='18446744073709551615' and type(binding.uid)=='number')
+  assert(snapshot.windows[1].rect.origin.x==0.1 and snapshot.outputs[1].active_workspace==3)
+  fence.broker[1]='forged'; snapshot.revision='forged'; binding.compositor_start='forged'
+  assert(p.context.fence().broker[1]=='18446744073709551615')
+  assert(p.context.snapshot().revision=='18446744073709551614')
+  assert(p.context.binding().compositor_start=='18446744073709551615')
+  p.log.info('exact-identities')
+end)
+return {version=1}
+"#,
+            "exact-context.lua",
+        ).unwrap();
+        let mut view = view(Duration::ZERO);
+        view.fence.broker = crate::protocol::Epoch([u64::MAX, 1 << 63]);
+        view.fence.configuration = u64::MAX - 1;
+        view.fence.session = u64::MAX;
+        let context = view.context.as_mut().unwrap();
+        context.snapshot.generation = u64::MAX;
+        context.snapshot.revision = u64::MAX - 1;
+        context.snapshot.outputs[0].geometry_generation = u64::MAX;
+        context.binding.compositor_start = u64::MAX;
+        let mut runtime = definition.instantiate().unwrap();
+        runtime.set_context(view, Duration::ZERO).unwrap();
+        assert_eq!(
+            runtime
+                .dispatch(
+                    EventKind::ContextChanged,
+                    &serde_json::json!({"revision":u64::MAX-1})
+                )
+                .unwrap()[0]
+                .message,
+            "exact-identities"
+        );
+    }
+
+    #[test]
     fn context_queries_return_full_owned_copies_and_expire_at_the_original_timestamp() {
         let definition = Definition::compile(
             r#"
@@ -137,7 +181,7 @@ p.events.on('matched',function(event)
     p.log.info('expired')
   else
     local snapshot=p.context.snapshot()
-    assert(snapshot.revision==7 and #snapshot.windows==1 and #snapshot.outputs==1)
+    assert(snapshot.revision=='7' and #snapshot.windows==1 and #snapshot.outputs==1)
     assert(snapshot.outputs[1].active_workspace==3)
     assert(snapshot.outputs[1].keyboard.layout=='us' and snapshot.regions[1].id=='widget-1')
     assert(snapshot.windows[1].rect.origin.x==0.1)
@@ -145,8 +189,8 @@ p.events.on('matched',function(event)
     local binding=p.context.binding(); binding.uid=0
     local fence=p.context.fence(); fence.configuration=999
     local again=p.context.snapshot()
-    assert(again.windows[1].id=='window-1' and again.revision==7)
-    assert(p.context.binding().uid==1000 and p.context.fence().configuration==1)
+    assert(again.windows[1].id=='window-1' and again.revision=='7')
+    assert(p.context.binding().uid==1000 and p.context.fence().configuration=='1')
     assert(p.context.state()=='desktop' and p.context.error()==nil)
     p.log.info('fresh')
   end

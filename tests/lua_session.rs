@@ -47,6 +47,144 @@ fn context_view(at: Duration, windows: usize) -> prek::context_transfer::View {
 }
 
 #[test]
+fn real_helper_preserves_maximum_identities_in_context_events_actions_and_scheduled_work() {
+    use prek::{
+        input::Source,
+        rules::{Event, Evidence, Stage},
+    };
+    let definition = Definition::compile(r#"
+local p=require('prek')
+local function check(fence)
+  assert(fence.broker[1]=='18446744073709551615' and fence.broker[2]=='9223372036854775808')
+  assert(fence.configuration=='18446744073709551614' and fence.session=='18446744073709551615')
+end
+p.events.on('ready',function(event)
+  check(event.fence);p.log.info('exact-ready')
+  p.scheduler.after('1ms',function(wake)check(wake.context.fence);p.log.info('exact-timer')end)
+  p.scheduler.spawn(function(wake)
+    check(wake.context.fence);p.log.info('exact-task')
+    local next=p.scheduler.sleep('1ms');check(next.context.fence);p.log.info('exact-resume')
+  end)
+end)
+p.events.on('context_changed',function(event)
+  check(event.fence)
+  local snapshot=p.context.snapshot();local binding=p.context.binding()
+  assert(snapshot.generation==event.fence.session and snapshot.revision==event.revision)
+  assert(snapshot.revision=='18446744073709551615')
+  assert(snapshot.outputs[1].geometry_generation=='18446744073709551614')
+  assert(binding.compositor_start=='18446744073709551615')
+  check(p.context.fence());p.log.info('exact-context',{revision=event.revision})
+end)
+local function matched(payload)
+  check(payload.fence)
+  local e=payload.event
+  assert(e.id=='18446744073709551615' and e.ordinal=='18446744073709551614')
+  assert(e.source.device=='9223372036854775808' and e.source.generation=='18446744073709551615')
+  assert(e.config_generation==payload.fence.configuration and e.session_generation==payload.fence.session)
+  assert(e.evidence.count==3);p.log.info('exact-match',{id=e.id})
+end
+p.events.on('matched',matched)
+p.events.on('stop',function(event)check(event.fence);p.log.info('exact-stop')end)
+local action=p.actions.define('exact',{requires={'observations'}},matched)
+return p.config.new{rules={p.rules.define{id='exact',trigger=p.triggers.key{key='KEY_A'},action=action}}}
+"#, "exact-helper.lua").unwrap();
+    let action = definition.validate().unwrap().rules[0].action.clone();
+    let fence = Fence {
+        broker: Epoch([u64::MAX, 1 << 63]),
+        configuration: u64::MAX - 1,
+        session: u64::MAX,
+    };
+    let mut session = Session::spawn(
+        Path::new(env!("CARGO_BIN_EXE_prek")),
+        fence,
+        "seat0",
+        definition,
+    )
+    .unwrap();
+    let deadline = monotonic().unwrap() + Duration::from_secs(5);
+    let mut logs = Vec::new();
+    while logs.len() < 4 {
+        logs.extend(session.step(monotonic().unwrap()).unwrap());
+        assert!(
+            monotonic().unwrap() < deadline,
+            "scheduled helper work did not settle"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(logs[0].message, "exact-ready");
+    let mut messages = logs
+        .iter()
+        .map(|log| log.message.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        messages.iter().position(|message| *message == "exact-task")
+            < messages
+                .iter()
+                .position(|message| *message == "exact-resume")
+    );
+    messages.sort_unstable();
+    assert_eq!(
+        messages,
+        vec!["exact-ready", "exact-resume", "exact-task", "exact-timer"]
+    );
+    let mut view = context_view(monotonic().unwrap(), 1);
+    view.fence = fence;
+    let context = view.context.as_mut().unwrap();
+    context.snapshot.generation = fence.session;
+    context.snapshot.revision = u64::MAX;
+    context.snapshot.outputs[0].geometry_generation = u64::MAX - 1;
+    context.binding.compositor_start = u64::MAX;
+    session.update_context(view).unwrap();
+    let logs = drain(&mut session).unwrap();
+    assert_eq!(
+        logs[0].fields,
+        serde_json::json!({"revision":u64::MAX.to_string()})
+    );
+    let event = Box::new(Event::Matched {
+        version: 1,
+        rule: "exact".into(),
+        id: u64::MAX,
+        ordinal: u64::MAX - 1,
+        source: Source {
+            device: 1 << 63,
+            generation: u64::MAX,
+            seat: "seat0".into(),
+        },
+        at: monotonic().unwrap(),
+        config_generation: fence.configuration,
+        session_generation: fence.session,
+        stage: Stage::Discrete,
+        action,
+        evidence: Evidence::Taps { count: 3 },
+        window: None,
+        output: None,
+        workspace: None,
+    });
+    session
+        .notify(
+            EventKind::Matched,
+            serde_json::json!({"fence":fence,"event":event}),
+        )
+        .unwrap();
+    assert_eq!(
+        drain(&mut session).unwrap()[0].fields,
+        serde_json::json!({"id":u64::MAX.to_string()})
+    );
+    session
+        .request_action(event, monotonic().unwrap() + Duration::from_millis(250))
+        .unwrap();
+    drain(&mut session).unwrap();
+    let actions = session.take_actions();
+    assert_eq!((actions[0].0, actions[0].1), (u64::MAX, u64::MAX - 1));
+    assert_eq!(
+        actions[0].2.as_ref().unwrap().logs[0].fields,
+        serde_json::json!({"id":u64::MAX.to_string()})
+    );
+    session.stop().unwrap();
+    assert_eq!(drain(&mut session).unwrap()[0].message, "exact-stop");
+}
+
+#[test]
 fn real_helper_receives_owned_context_and_expires_original_timestamps() {
     let definition = Definition::compile(
         r#"
@@ -91,7 +229,7 @@ return {version=1}
     let logs = drain(&mut session).unwrap();
     assert_eq!(
         logs[0].fields,
-        serde_json::json!({"state":"desktop","revision":7})
+        serde_json::json!({"state":"desktop","revision":"7"})
     );
     view.sampled_at = Duration::ZERO;
     view.context.as_mut().unwrap().snapshot.captured_at = Duration::ZERO;
@@ -133,9 +271,9 @@ return {version=1}
     let logs = drain(&mut session).unwrap();
     assert_eq!(
         logs.iter()
-            .map(|log| log.fields["revision"].as_u64().unwrap())
+            .map(|log| log.fields["revision"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        vec![7, 9]
+        vec!["7", "9"]
     );
 }
 #[test]
@@ -443,7 +581,7 @@ return {version=1}
             .collect::<Vec<_>>(),
         vec!["periodic", "after"]
     );
-    assert_eq!(logs[0].fields["generation"], 1);
+    assert_eq!(logs[0].fields["generation"], "1");
     for _ in 0..40 {
         assert!(session.step(monotonic().unwrap()).unwrap().is_empty());
         std::thread::sleep(Duration::from_millis(1));
@@ -465,7 +603,7 @@ fn replacing_a_vm_retires_its_pending_timer_generation() {
         if !logs.is_empty() {
             assert_eq!(logs.len(), 1);
             assert_eq!(logs[0].message, "new generation");
-            assert_eq!(logs[0].fields["generation"], 2);
+            assert_eq!(logs[0].fields["generation"], "2");
             break;
         }
         assert!(monotonic().unwrap() < end);
@@ -508,8 +646,8 @@ return {version=1}
             .collect::<Vec<_>>(),
         vec!["task-start", "task-resumed", "cancelled"]
     );
-    assert_eq!(logs[0].fields["generation"], 1);
-    assert_eq!(logs[1].fields["generation"], 1);
+    assert_eq!(logs[0].fields["generation"], "1");
+    assert_eq!(logs[1].fields["generation"], "1");
 }
 
 #[test]
@@ -536,7 +674,7 @@ fn replacing_a_vm_retires_its_sleeping_task_generation() {
         if !logs.is_empty() {
             assert_eq!(logs.len(), 1);
             assert_eq!(logs[0].message, "new-task");
-            assert_eq!(logs[0].fields["generation"], 2);
+            assert_eq!(logs[0].fields["generation"], "2");
             break;
         }
         assert!(monotonic().unwrap() < end);

@@ -82,6 +82,30 @@
     "transport": "explicit authorized host opt-in"
   },
   "runtime_api": "partial",
+  "runtime_identities": {
+    "bounded_handles": "subscription/timer/task IDs remain Lua integers",
+    "comparison": "exact string equality; no numeric conversion",
+    "fields": [
+      "fence.broker[]",
+      "fence.configuration",
+      "fence.session",
+      "event.id",
+      "event.ordinal",
+      "event.source.device",
+      "event.source.generation",
+      "event.config_generation",
+      "event.session_generation",
+      "Snapshot.generation",
+      "Snapshot.revision",
+      "OutputState.geometry_generation",
+      "Binding.compositor_start",
+      "context_changed.revision",
+      "rules.revision"
+    ],
+    "protocol": "Rust transport retains u64 values",
+    "range": "0..18446744073709551615",
+    "type": "decimal_string"
+  },
   "runtime_limits": {
     "action_bytes": 32768,
     "action_effects": 32,
@@ -278,13 +302,13 @@
       "signature": "transaction:status() -> RuleTransactionStatus"
     },
     {
-      "description": "Return an owned copy of the complete fresh broker snapshot, including outputs, windows, regions and keyboard geometry; nil when unavailable or expired.",
+      "description": "Return an owned copy of the complete fresh broker snapshot, including outputs, windows, regions and keyboard geometry; generations/revisions are decimal strings; nil when unavailable or expired.",
       "name": "context.snapshot",
       "phase": "runtime",
       "signature": "context.snapshot() -> Snapshot | nil"
     },
     {
-      "description": "Return an owned copy of the verified session/compositor binding for a fresh snapshot; conveys no authority.",
+      "description": "Return an owned copy of the verified session/compositor binding for a fresh snapshot; compositor_start is a decimal string; conveys no authority.",
       "name": "context.binding",
       "phase": "runtime",
       "signature": "context.binding() -> Binding | nil"
@@ -296,7 +320,7 @@
       "signature": "context.state() -> State"
     },
     {
-      "description": "Return the current broker/configuration/session fence while the context view is fresh.",
+      "description": "Return the current broker/configuration/session fence with lossless decimal-string identities while the context view is fresh.",
       "name": "context.fence",
       "phase": "runtime",
       "signature": "context.fence() -> Fence | nil"

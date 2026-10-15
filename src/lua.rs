@@ -19,6 +19,7 @@ mod scheduler;
 pub mod session;
 pub mod source_transfer;
 mod tasks;
+mod values;
 pub use export::export_config;
 pub use handlers::{ActionResult, HandlerRegistration};
 pub use modules::{Module, Sources};
@@ -119,12 +120,12 @@ pub fn api() -> serde_json::Value {
         (
             "snapshot",
             "Snapshot | nil",
-            "Return an owned copy of the complete fresh broker snapshot, including outputs, windows, regions and keyboard geometry; nil when unavailable or expired.",
+            "Return an owned copy of the complete fresh broker snapshot, including outputs, windows, regions and keyboard geometry; generations/revisions are decimal strings; nil when unavailable or expired.",
         ),
         (
             "binding",
             "Binding | nil",
-            "Return an owned copy of the verified session/compositor binding for a fresh snapshot; conveys no authority.",
+            "Return an owned copy of the verified session/compositor binding for a fresh snapshot; compositor_start is a decimal string; conveys no authority.",
         ),
         (
             "state",
@@ -134,7 +135,7 @@ pub fn api() -> serde_json::Value {
         (
             "fence",
             "Fence | nil",
-            "Return the current broker/configuration/session fence while the context view is fresh.",
+            "Return the current broker/configuration/session fence with lossless decimal-string identities while the context view is fresh.",
         ),
         (
             "error",
@@ -178,6 +179,7 @@ pub fn api() -> serde_json::Value {
         "runtime_limits":{"subscriptions":256,"timers":256,"tasks":tasks::MAX_TASKS,"tasks_per_wake":tasks::TASKS_PER_WAKE,"handlers":256,"action_effects":32,"action_bytes":32768,"timers_per_wake":32,"callback_instructions":100000,"callback_time_ms":20,"event_bytes":65536,"log_bytes":16384,"logs_per_event":32},
         "modules":{"root":"entry_parent/modules","path":"<identifier>/.../<identifier>.lua","count":modules::MAX_MODULES,"import_depth":modules::MAX_IMPORT_DEPTH,"source_set_bytes":MAX_CONFIG_BYTES,"owner":"entry_file_uid","group_other_writes":false,"symlinks":false,"runtime":"approved sources only; no filesystem reads"},
         "event_kinds":["matched","begin","update","end","cancel","skipped","ready","reload","stop","recovery","session_changed","context_changed","rules_changed"],
+        "runtime_identities":{"type":"decimal_string","range":"0..18446744073709551615","fields":["fence.broker[]","fence.configuration","fence.session","event.id","event.ordinal","event.source.device","event.source.generation","event.config_generation","event.session_generation","Snapshot.generation","Snapshot.revision","OutputState.geometry_generation","Binding.compositor_start","context_changed.revision","rules.revision"],"comparison":"exact string equality; no numeric conversion","bounded_handles":"subscription/timer/task IDs remain Lua integers","protocol":"Rust transport retains u64 values"},
         "rule_transactions":{"builders":64,"operations":64,"transaction_bytes":32768,"pending_proposals":1,"receipt_time_ms":250,"revision_type":"decimal_string","transport":"explicit authorized host opt-in","production_broker":"observation_mode","system_permission":"policy.allow_runtime_rules","agent_flags":["lua","rule-mutations"],"capability":"runtime_rules","context":"fresh owning desktop","routing":"unavailable"},
         "context_limits":{"snapshot_bytes":4194304,"chunk_bytes":32768,"transfer_time_ms":1000,"freshness_ms":250,"refresh_ms":100,"queued_snapshots":2,"read_only":true},
         "runtime_requires":{"uid":"unprivileged active session","capabilities":["context","observations","lua_events"],"thread":"owning Luna arena","generation":"current broker/configuration/session fence"},

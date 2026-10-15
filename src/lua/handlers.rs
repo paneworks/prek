@@ -86,7 +86,7 @@ impl Runtime {
             .try_enter(|ctx| {
                 let entry: Table = ctx.fetch(&self.handlers).get(ctx, registration.id)?;
                 let callback: Function = entry.get(ctx, "callback")?;
-                let value = luna_util::serde::to_value(ctx, payload).map_err(io::Error::other)?;
+                let value = values::payload(ctx, payload)?;
                 Ok(ctx.stash(Executor::start(ctx, callback, (value,))))
             })
             .map_err(error)?;

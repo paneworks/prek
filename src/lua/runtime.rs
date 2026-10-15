@@ -324,8 +324,7 @@ impl Runtime {
                         return Ok(None);
                     }
                     let callback: Function = entry.get(ctx, "callback")?;
-                    let value =
-                        luna_util::serde::to_value(ctx, payload).map_err(io::Error::other)?;
+                    let value = values::event_payload(ctx, kind, payload)?;
                     Ok(Some(ctx.stash(Executor::start(ctx, callback, (value,)))))
                 })
                 .map_err(error)?;

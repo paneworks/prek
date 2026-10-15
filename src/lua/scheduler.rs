@@ -153,7 +153,7 @@ impl Runtime {
                     } else {entry.set(ctx,"active",false)?;}
                     let callback:Function=entry.get(ctx,"callback")?;
                     let payload=serde_json::json!({"context":context,"timer":{"id":id,"periodic":periodic},"at":now});
-                    let value=luna_util::serde::to_value(ctx,&payload).map_err(io::Error::other)?;
+                    let value=values::payload(ctx,&payload)?;
                     Ok(Some(ctx.stash(Executor::start(ctx,callback,(value,)))))
                 }).map_err(error)?;
                 if let Some(executor) = executor {
