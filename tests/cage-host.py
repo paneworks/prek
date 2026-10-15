@@ -61,9 +61,13 @@ def main():
                 if line.endswith("\n")]
 
     with (output / "cage.log").open("w") as log:
-        cage = subprocess.Popen([args.cage, "--", os.sys.executable, args.inner,
-                                 "--hyprland", args.hyprland, "--receiver", args.receiver,
-                                 "--proxy", args.proxy, "--output", str(output)],
+        command = [os.sys.executable, args.inner, "--hyprland", args.hyprland,
+                   "--receiver", args.receiver, "--proxy", args.proxy, "--output", str(output)]
+        # Mold's visible path connects nested Hyprland through the private proxy
+        # directly to the host display; only the headless path needs outer Cage.
+        if not args.visible:
+            command = [args.cage, "--"] + command
+        cage = subprocess.Popen(command,
                                 env=env, stdout=log, stderr=log, start_new_session=True)
         keyboard = None
         try:
@@ -86,6 +90,18 @@ def main():
                 raise RuntimeError("expected one owned compositor instance")
             control_env = dict(env,HYPRLAND_INSTANCE_SIGNATURE=instances[0])
             hyprctl = str(Path(args.hyprland).parent / "hyprctl")
+            deadline = time.monotonic() + 5
+            while True:
+                clients = subprocess.run([hyprctl,"-j","clients"],env=control_env,
+                                         capture_output=True,text=True,check=True,timeout=3)
+                (output / "focus-clients.json").write_text(clients.stdout)
+                mapped = [client for client in json.loads(clients.stdout)
+                          if client.get("class") == "prek-cage-receiver" and client.get("mapped")]
+                if len(mapped) == 1:
+                    break
+                if cage.poll() is not None or time.monotonic() >= deadline:
+                    raise RuntimeError("owned receiver did not map before keyboard focus")
+                time.sleep(0.02)
             subprocess.run([hyprctl,"dispatch","focuswindow","class:^(prek-cage-receiver)$"],
                            env=control_env,stdout=log,stderr=log,check=True,timeout=3)
             deadline = time.monotonic() + 5
@@ -126,45 +142,81 @@ def main():
                     with (output / f"hyprland-{query}.json").open("w") as data:
                         subprocess.run([hyprctl,"-j",query],env=diagnostic_env,
                                        stdout=data,stderr=log,check=True,timeout=3)
-                subprocess.run([args.prek_fixture,"--ignored","--exact",
-                                "local_cage_lua_routing_and_context","--nocapture"],
-                               env=fixture_env,stdout=log,stderr=log,check=True,timeout=20)
-                routed = json.loads((output / "routed-keys.json").read_text())
-                assert [(event["code"],event["value"]) for event in routed] == [(48,1),(48,0)]
-                dispatches = json.loads((output / "dispatches.json").read_text())
-                assert [event["stage"] for event in dispatches] == ["begin","end"]
-                assert [event["ordinal"] for event in dispatches] == [1,2]
-                assert len({event["id"] for event in dispatches}) == 1
-                assert all(event["rule"] == "local-a" and event["config_generation"] == 1
-                           and event["session_generation"] == 1 for event in dispatches)
-                logs = [json.loads(line) for line in (output / "prek-runtime.jsonl").read_text().splitlines()]
-                contexts = [row["fields"] for row in logs if row["message"] == "local-context"]
-                assert len(contexts) == 4 and all(row["outputs"] > 0 and row["uid"] == os.geteuid() for row in contexts)
-                assert len({row["revision"] for row in contexts}) == 4
-                matches = [row["fields"] for row in logs if row["message"] == "local-matched"]
-                assert matches == [{"rule":"local-a","stage":"begin"},{"rule":"local-a","stage":"end"}]
-                keys_file = output / "routed-keys.txt"
-                keys_file.write_text("".join(f"{event['code']} {event['value']}\n" for event in routed))
-                start = len(rows())
-                keyboard = subprocess.Popen([args.keyboard,str(socket),str(keys_file)],
-                                            stdin=subprocess.PIPE,stdout=subprocess.PIPE,
-                                            stderr=log,text=True)
-                if not select.select([keyboard.stdout], [], [], 5)[0] or keyboard.stdout.readline() != "ready\n":
-                    raise RuntimeError("routed keyboard handshake failed")
-                keyboard.communicate("\n",timeout=5)
-                if keyboard.returncode != 0:
-                    raise RuntimeError("routed keyboard failed")
-                deadline = time.monotonic() + 3
-                while len([row for row in rows()[start:] if row["event"] == "key"]) < 2:
-                    if time.monotonic() >= deadline:
-                        raise RuntimeError("routed application receipt timeout")
-                    time.sleep(0.02)
-                received = rows()
-                events = [row for row in received[start:] if row["event"] == "key"]
-                assert [(row["code"],row["state"]) for row in events] == [(48,1),(48,0)]
-                assert received[-1]["text"] == "bAb" and not received[-1]["keys"]
-                print("PASS: Prek model consumed A, delivered B to the actual app, and ran Lua callbacks with verified compositor geometry.")
-            print(f"PASS: local Cage/nested Hyprland delivered B and Shift+A, six ordered key events, "
+                fixture = subprocess.Popen([args.prek_fixture,"--ignored","--exact",
+                                            "local_cage_lua_routing_and_context","--nocapture"],
+                                           env=fixture_env,stdout=log,stderr=log)
+                try:
+                    deadline = time.monotonic() + 20
+                    while not (output / "phase1-ready").exists():
+                        if fixture.poll() is not None or time.monotonic() >= deadline:
+                            raise RuntimeError("Prek fixture did not prepare phase one")
+                        time.sleep(0.01)
+
+                    def inject_phase(path, expected, text):
+                        nonlocal keyboard
+                        keys = json.loads(path.read_text())
+                        assert [(event["code"], event["value"]) for event in keys] == expected
+                        keys_file = output / "phase-keys.txt"
+                        keys_file.write_text("".join(f"{event['code']} {event['value']}\n" for event in keys))
+                        start = len(rows())
+                        keyboard = subprocess.Popen([args.keyboard,str(socket),str(keys_file)],
+                                                    stdin=subprocess.PIPE,stdout=subprocess.PIPE,
+                                                    stderr=log,text=True)
+                        if not select.select([keyboard.stdout], [], [], 5)[0] or keyboard.stdout.readline() != "ready\n":
+                            raise RuntimeError("routed keyboard handshake failed")
+                        keyboard.communicate("\n",timeout=5)
+                        if keyboard.returncode != 0:
+                            raise RuntimeError("routed keyboard failed")
+                        deadline = time.monotonic() + 3
+                        while len([row for row in rows()[start:] if row["event"] == "key"]) < len(expected):
+                            if time.monotonic() >= deadline:
+                                raise RuntimeError("routed application receipt timeout")
+                            time.sleep(0.01)
+                        received = rows()
+                        events = [row for row in received[start:] if row["event"] == "key"]
+                        assert [(row["code"],row["state"]) for row in events] == expected
+                        assert received[-1]["text"] == text and not received[-1]["keys"]
+                        modifiers = [row for row in received[start:] if row["event"] == "modifiers"]
+                        assert modifiers and all(row["modifiers"]["depressed"] == 0 and row["modifiers"]["latched"] == 0 and row["modifiers"]["locked"] == 0 for row in modifiers)
+
+                    inject_phase(output / "routed-keys.json", [(48,1),(48,0)], "bAb")
+                    (output / "phase1-delivered").write_text("application receipt verified\n")
+                    deadline = time.monotonic() + 20
+                    while not (output / "phase2-ready").exists():
+                        if fixture.poll() is not None or time.monotonic() >= deadline:
+                            raise RuntimeError("Prek rule-change fixture failed")
+                        time.sleep(0.01)
+                    receipt = json.loads((output / "rule-receipt.json").read_text())
+                    assert receipt == {"id":1,"revision":2,"configuration":1,"session":1}
+                    inject_phase(output / "changed-keys.json", [(30,1),(30,0),(48,1),(48,0)], "bAbab")
+                    (output / "phase2-delivered").write_text("application receipt verified\n")
+                    fixture.wait(timeout=20)
+                    if fixture.returncode != 0:
+                        raise RuntimeError("Prek fixture failed after phase two")
+                    dispatches = json.loads((output / "dispatches.json").read_text())
+                    a = [event for event in dispatches if event["rule"] == "local-a"]
+                    b = [event for event in dispatches if event["rule"] == "local-b"]
+                    assert [event["stage"] for event in a] == ["begin","end"]
+                    assert [event["ordinal"] for event in a] == [1,2] and a[0]["id"] == a[1]["id"]
+                    assert [event["stage"] for event in b] == ["begin","end","begin","end"]
+                    assert b[0]["id"] == b[1]["id"] and b[2]["id"] == b[3]["id"] > b[0]["id"]
+                    assert [event["source"]["generation"] for event in b] == [1,1,2,2]
+                    assert all(event["config_generation"] == 1 and event["session_generation"] == 1 for event in dispatches)
+                    logs = [json.loads(line) for line in (output / "prek-runtime.jsonl").read_text().splitlines()]
+                    contexts = [row["fields"] for row in logs if row["message"] == "local-context"]
+                    assert len(contexts) == 9 and all(row["outputs"] > 0 and row["uid"] == os.geteuid() for row in contexts)
+                    assert len({row["revision"] for row in contexts}) == 9
+                    changes = [row["fields"] for row in logs if row["message"] == "local-rules-changed"]
+                    assert changes == [{"accepted":True,"revision":"2","state":"accepted"}]
+                    matches = [row["fields"] for row in logs if row["message"] == "local-matched"]
+                    assert matches == [{"rule":"local-a","stage":"begin"},{"rule":"local-a","stage":"end"}]
+                    print("PASS: actual app received only B before the acknowledged Lua disable, then A and B afterward; context and gesture generations stayed consistent.")
+                finally:
+                    if fixture.poll() is None:
+                        fixture.kill()
+                    fixture.wait(timeout=3)
+            session_name = "visible nested Hyprland" if args.visible else "local Cage/nested Hyprland"
+            print(f"PASS: {session_name} delivered B and Shift+A, six ordered key events, "
                   f"text bA and neutral modifier cleanup. Receipts: {receipts}")
         finally:
             if keyboard is not None:
@@ -181,9 +233,9 @@ def main():
                 os.killpg(cage.pid, signal.SIGKILL)
                 cage.wait(timeout=3)
             if cage.poll() is None:
-                raise RuntimeError("owned Cage process was not reaped")
+                raise RuntimeError("owned local test session was not reaped")
             scratch.cleanup()
-    print("Owned Cage, nested Hyprland and receiver stopped; no host evdev devices opened.")
+    print("Owned local compositor session and receiver stopped; no host evdev devices opened.")
 
 
 if __name__ == "__main__":

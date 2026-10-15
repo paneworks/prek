@@ -594,6 +594,33 @@ impl Routing {
     pub fn take_events(&mut self) -> Vec<Event> {
         std::mem::take(&mut self.events)
     }
+    pub fn rule_revision(&self) -> u64 {
+        self.engine.rule_revision()
+    }
+    /// Trusted embeddings authorize the transaction before calling this.
+    /// Valid edits retire every transport and queued dispatch; callers must
+    /// consume recovery and establish fresh neutral readiness with a newer
+    /// source incarnation before reattach.
+    pub fn transact_rules(
+        &mut self,
+        transaction: &crate::rule_transactions::Transaction,
+        at: Duration,
+    ) -> io::Result<u64> {
+        let config = transaction
+            .prepare(self.engine.config(), self.engine.rule_revision())
+            .map_err(io::Error::other)?;
+        // Includes the transport-specific timing checks before any retirement.
+        Self::new(config)?;
+        let revision = self.engine.transact_rules(transaction, at)?;
+        let sources: Vec<_> = self.routes.keys().cloned().collect();
+        for source in sources {
+            self.recover(&source);
+        }
+        self.events
+            .retain(|event| !matches!(event, Event::Matched { .. }));
+        self.events.extend(self.engine.take_events());
+        Ok(revision)
+    }
     pub fn reload(&mut self, config: Config, at: Duration) -> io::Result<()> {
         // Compile/validate first. An invalid replacement preserves both the
         // old model and every transport's pending/claimed ownership.
@@ -1063,6 +1090,51 @@ mod tests {
         assert_eq!(routing.take_dispatches(ms(200)).len(), 1);
         routing.reload(config(), ms(210)).unwrap();
         assert_eq!(routing.take_recoveries().len(), 1);
+    }
+    #[test]
+    fn rule_transaction_retains_invalid_claims_then_retires_transports_and_old_dispatches() {
+        use crate::rule_transactions::{Change, Transaction};
+        let config = config();
+        let id = config.rules[0].id.clone();
+        let mut routing = routing(config.clone(), true);
+        down(&mut routing, 2);
+        movement(&mut routing, 2, 140, 1500, 2);
+        let invalid = Transaction {
+            revision: 1,
+            changes: vec![
+                Change::Enabled {
+                    id: id.clone(),
+                    enabled: false,
+                },
+                Change::Remove {
+                    id: "missing".into(),
+                },
+            ],
+        };
+        assert!(routing.transact_rules(&invalid, ms(150)).is_err());
+        assert!(routing.take_recoveries().is_empty());
+        assert_eq!(routing.rule_revision(), 1);
+        movement(&mut routing, 3, 180, 2000, 2);
+        up(&mut routing, 4, 200, 2);
+        assert!(!routing.dispatches.is_empty());
+        let valid = Transaction {
+            revision: 1,
+            changes: vec![Change::Enabled { id, enabled: false }],
+        };
+        assert_eq!(routing.transact_rules(&valid, ms(210)).unwrap(), 2);
+        assert_eq!(routing.engine.generation(), 1);
+        assert!(
+            routing.routes.is_empty() && routing.won.is_empty() && routing.dispatches.is_empty()
+        );
+        assert!(
+            routing
+                .take_events()
+                .iter()
+                .all(|event| !matches!(event, Event::Matched { .. }))
+        );
+        assert_eq!(routing.take_recoveries().len(), 1);
+        assert!(routing.transact_rules(&valid, ms(220)).is_err());
+        assert_eq!(routing.rule_revision(), 2);
     }
     #[test]
     fn decision_timeout_commits_once_and_later_motion_cannot_claim() {

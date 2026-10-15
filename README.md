@@ -467,6 +467,13 @@ receive only B from that phase; A must produce its semantic callback without
 appearing in the receiver. These source/readiness/session authorities are model
 fixtures. They do not establish production kernel takeover or logind registration.
 
+The app receipt for that phase now precedes a Lua disable transaction. The
+coordinator retires its transports and queued matches, the fixture establishes a
+fresh neutral model source incarnation, and Lua receives revision 2 while the
+file/session fences stay at 1. A second phase must deliver A and B to the same
+real receiver, with neutral keys/modifiers and increasing gesture IDs. Nine
+actual compositor snapshots and the correlated Lua receipt are checked.
+
 This local check currently proves keyboard delivery and model-routed consumption. Touch,
 remapping/repeats, broker/lock integration and handoff races retain their own
 required acceptance gates. The old NixOS/QEMU test drivers are retired; ARM

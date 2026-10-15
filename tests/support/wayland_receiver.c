@@ -95,7 +95,10 @@ static void label(cairo_t *cr,int y,const char *text) {
 }
 static void draw(struct app *app) {
     if (!app->configured || !app->dirty || app->touch_pending || app->buffers>=3) return;
-    if (app->width<1 || app->height<1 || app->width>2048 || app->height>2048) abort();
+    /* Visible desktop windows can exceed 2048 logical pixels. Keep both the
+       dimensions and total allocation bounded: at most 64 MiB per buffer. */
+    if (app->width<1 || app->height<1 || app->width>8192 || app->height>8192
+        || (size_t)app->width*app->height>16*1024*1024) abort();
     size_t bytes=(size_t)app->width*app->height*4;
     int fd=memfd_create("prek-wayland-receiver",MFD_CLOEXEC);
     if(fd<0 || ftruncate(fd,(off_t)bytes)) abort();

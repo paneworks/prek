@@ -38,6 +38,76 @@ fn settle(session: &mut Session, output: &mut impl Write) {
     }
 }
 
+fn attach(routing: &mut Routing, device: &Device, pid: u32, start: u64) {
+    let descriptor = Descriptor::mirror(
+        device,
+        KernelIdentity {
+            bus: 3,
+            vendor: device.vendor,
+            product: device.product,
+            version: 1,
+        },
+        None,
+        &BTreeMap::new(),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    // Model readiness: no kernel device exists and no production grab is made.
+    let consumer = Consumer::IsolatedReceiver { pid, start };
+    let now = monotonic().unwrap();
+    let mut gate = Readiness::new(descriptor.clone(), consumer.clone(), now).unwrap();
+    gate.metadata(&descriptor, now).unwrap();
+    gate.consumer(
+        &ConsumerEvidence {
+            consumer,
+            marker: descriptor.marker,
+            name: descriptor.name,
+            class: descriptor.class,
+            seat: "seat0".into(),
+            settings: BTreeMap::new(),
+            at: now,
+        },
+        now,
+    )
+    .unwrap();
+    gate.neutral(true, now).unwrap();
+    routing
+        .attach(device.clone(), &gate.finish(now).unwrap(), None, now)
+        .unwrap();
+}
+
+fn context(
+    routing: &mut Routing,
+    session: &mut Session,
+    logs: &mut impl Write,
+    sampler: &mut ContextSampler,
+    client: &Client,
+    binding: &Binding,
+    fence: Fence,
+) {
+    let snapshot = sampler.sample(client, 1, SessionKind::User).unwrap();
+    assert!(!snapshot.outputs.is_empty());
+    let now = monotonic().unwrap();
+    routing
+        .authority_mut()
+        .update(snapshot.clone(), now)
+        .unwrap();
+    routing.actions_available(1, BTreeSet::from([Capability::Observations]), now);
+    session
+        .update_context(View {
+            fence,
+            sampled_at: now,
+            state: snapshot.state,
+            context: Some(Box::new(ProvidedContext {
+                binding: binding.clone(),
+                snapshot,
+            })),
+            error: None,
+        })
+        .unwrap();
+    settle(session, logs);
+}
+
 #[test]
 #[ignore = "owned local Cage/nested Hyprland runner only"]
 fn local_cage_lua_routing_and_context() {
@@ -82,6 +152,7 @@ fn local_cage_lua_routing_and_context() {
     let definition = Definition::compile(
         r#"
 local p=require('prek')
+local transaction
 p.events.on('context_changed',function(event)
   local snapshot=p.context.snapshot(); local binding=p.context.binding()
   assert(event.available and snapshot and binding and #snapshot.outputs>0)
@@ -90,14 +161,25 @@ p.events.on('context_changed',function(event)
 end)
 p.events.on('matched',function(event)
   assert(p.context.snapshot() and p.context.state()=='desktop')
-  p.log.info('local-matched',{rule=event.event.rule,stage=event.event.stage})
+  if event.event.rule=='local-a' then
+    p.log.info('local-matched',{rule=event.event.rule,stage=event.event.stage})
+  elseif event.event.rule=='local-b' and event.event.stage=='end' and not transaction then
+    transaction=p.rules.transaction(); transaction:disable('local-a'); transaction:commit()
+  end
+end)
+p.events.on('rules_changed',function(event)
+  assert(event.accepted and event.revision=='2' and not p.rules.get('local-a').enabled)
+  assert(transaction:status().state=='accepted' and p.rules.revision()=='2')
+  p.log.info('local-rules-changed',{accepted=event.accepted,revision=event.revision,state=transaction:status().state})
 end)
 return p.config.new {
-  mode='route',policy={allowed_devices={'keyboard'}},
+  mode='route',policy={allowed_devices={'keyboard'},allow_runtime_rules=true},
   devices={keyboard={name='Prek local keyboard'}},
   rules={p.rules.define {id='local-a',priority=20,devices={'keyboard'},contexts={'desktop'},
     delivery='reserve',trigger=p.triggers.key {key='KEY_A'},
-    action=p.actions.event {name='local-a-claimed'}}}
+    action=p.actions.event {name='local-a-claimed'}},
+    p.rules.define {id='local-b',devices={'keyboard'},contexts={'desktop'},delivery='observe',
+      trigger=p.triggers.key {key='KEY_B'},action=p.actions.event {name='local-rule-disable'}}}
 }
 "#,
         "local-cage.lua",
@@ -109,10 +191,11 @@ return p.config.new {
         .bind(binding.clone(), true, false)
         .unwrap();
     let app = PathBuf::from(std::env::var_os("PREK_LOCAL_CAGE_APP").unwrap());
-    let mut session = Session::spawn(&app, fence, "seat0", definition).unwrap();
+    let mut session =
+        Session::spawn_with_rule_transactions(&app, fence, "seat0", definition).unwrap();
     let mut logs = fs::File::create(output.join("prek-runtime.jsonl")).unwrap();
     settle(&mut session, &mut logs);
-    let device = Device {
+    let mut device = Device {
         identity: "test:local-cage".into(),
         source: Source {
             device: 1,
@@ -130,137 +213,197 @@ return p.config.new {
         capabilities: BTreeMap::from([(0, vec![0]), (EV_KEY, vec![30, 48])]),
         virtual_device: false,
     };
-    let descriptor = Descriptor::mirror(
-        &device,
-        KernelIdentity {
-            bus: 3,
-            vendor: device.vendor,
-            product: device.product,
-            version: 1,
-        },
-        None,
-        &BTreeMap::new(),
-        BTreeMap::new(),
-    )
-    .unwrap();
-    // Model readiness: no kernel device exists and no production grab is made.
-    let consumer = Consumer::IsolatedReceiver { pid, start };
-    let now = monotonic().unwrap();
-    let mut gate = Readiness::new(descriptor.clone(), consumer.clone(), now).unwrap();
-    gate.metadata(&descriptor, now).unwrap();
-    gate.consumer(
-        &ConsumerEvidence {
-            consumer,
-            marker: descriptor.marker,
-            name: descriptor.name,
-            class: descriptor.class,
-            seat: "seat0".into(),
-            settings: BTreeMap::new(),
-            at: now,
-        },
-        now,
-    )
-    .unwrap();
-    gate.neutral(true, now).unwrap();
-    routing
-        .attach(device.clone(), &gate.finish(now).unwrap(), None, now)
-        .unwrap();
+    attach(&mut routing, &device, pid, start);
     let mut sampler = ContextSampler::default();
     let mut forwarded = Vec::new();
     let mut dispatches = Vec::new();
-    for (sequence, (code, value)) in [(30, 1), (30, 0), (48, 1), (48, 0)].into_iter().enumerate() {
-        let snapshot = sampler.sample(&client, 1, SessionKind::User).unwrap();
-        assert!(!snapshot.outputs.is_empty());
-        let now = monotonic().unwrap();
-        routing
-            .authority_mut()
-            .update(snapshot.clone(), now)
+    let mut deferred = None;
+    for phase in 0..2 {
+        if phase == 1 {
+            assert_eq!(
+                forwarded
+                    .iter()
+                    .map(|event: &RawEvent| (event.code, event.value))
+                    .collect::<Vec<_>>(),
+                vec![(48, 1), (48, 0)]
+            );
+            fs::write(
+                output.join("routed-keys.json"),
+                serde_json::to_vec(&forwarded).unwrap(),
+            )
             .unwrap();
-        routing.actions_available(1, BTreeSet::from([Capability::Observations]), now);
-        session
-            .update_context(View {
+            fs::write(output.join("phase1-ready"), b"ready").unwrap();
+            let until = monotonic().unwrap() + Duration::from_secs(3);
+            while !output.join("phase1-delivered").exists() {
+                settle(&mut session, &mut logs);
+                assert!(
+                    monotonic().unwrap() < until,
+                    "application did not acknowledge phase one"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            context(
+                &mut routing,
+                &mut session,
+                &mut logs,
+                &mut sampler,
+                &client,
+                &binding,
                 fence,
-                sampled_at: now,
-                state: snapshot.state,
-                context: Some(Box::new(ProvidedContext {
-                    binding: binding.clone(),
-                    snapshot,
-                })),
-                error: None,
-            })
-            .unwrap();
-        settle(&mut session, &mut logs);
-        let now = monotonic().unwrap();
-        routing
-            .push(Record::Frame {
-                frame: Frame {
-                    source: device.source.clone(),
-                    at: now,
-                    sequence: sequence as u64 + 1,
-                    events: vec![
-                        RawEvent {
-                            kind: EV_KEY,
-                            code,
-                            value,
-                        },
-                        RawEvent {
-                            kind: 0,
-                            code: 0,
-                            value: 0,
-                        },
-                    ],
-                },
-            })
-            .unwrap();
-        while let Some(scheduled) = routing
-            .due(&device.source, monotonic().unwrap())
-            .unwrap()
-            .cloned()
+            );
+            session
+                .notify(
+                    EventKind::Matched,
+                    serde_json::json!({"fence":fence,"event":deferred.take().unwrap()}),
+                )
+                .unwrap();
+            let until = monotonic().unwrap() + Duration::from_secs(3);
+            let proposal = loop {
+                for log in session.step(monotonic().unwrap()).unwrap() {
+                    serde_json::to_writer(&mut logs, &log).unwrap();
+                    writeln!(logs).unwrap();
+                }
+                let mut proposals = session.take_rule_proposals();
+                if !proposals.is_empty() {
+                    assert_eq!(proposals.len(), 1);
+                    break proposals.remove(0);
+                }
+                assert!(
+                    monotonic().unwrap() < until,
+                    "Lua rule proposal did not arrive"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            };
+            assert_eq!(proposal.transaction.revision, 1);
+            let revision = routing
+                .transact_rules(&proposal.transaction, monotonic().unwrap())
+                .unwrap();
+            assert_eq!(revision, 2);
+            let recoveries = routing.take_recoveries();
+            assert_eq!(recoveries.len(), 1);
+            assert!(
+                recoveries[0].neutral_events.is_empty(),
+                "phase one must finish neutral"
+            );
+            // Recreated transports use a new source incarnation; old handles
+            // remain stale while file/session fences and gesture IDs persist.
+            device.source.generation += 1;
+            attach(&mut routing, &device, pid, start);
+            session
+                .acknowledge_rules(
+                    fence,
+                    prek::lua::RuleReceipt {
+                        id: proposal.id,
+                        revision,
+                        error: None,
+                    },
+                )
+                .unwrap();
+            settle(&mut session, &mut logs);
+            fs::write(output.join("rule-receipt.json"),serde_json::to_vec(&serde_json::json!({"id":proposal.id,"revision":revision,"configuration":fence.configuration,"session":fence.session})).unwrap()).unwrap();
+        }
+        let mut phase_keys = Vec::new();
+        for (sequence, (code, value)) in
+            [(30, 1), (30, 0), (48, 1), (48, 0)].into_iter().enumerate()
         {
-            forwarded.extend(
-                scheduled
+            context(
+                &mut routing,
+                &mut session,
+                &mut logs,
+                &mut sampler,
+                &client,
+                &binding,
+                fence,
+            );
+            routing
+                .push(Record::Frame {
+                    frame: Frame {
+                        source: device.source.clone(),
+                        at: monotonic().unwrap(),
+                        sequence: (phase * 4 + sequence + 1) as u64,
+                        events: vec![
+                            RawEvent {
+                                kind: EV_KEY,
+                                code,
+                                value,
+                            },
+                            RawEvent {
+                                kind: 0,
+                                code: 0,
+                                value: 0,
+                            },
+                        ],
+                    },
+                })
+                .unwrap();
+            while let Some(scheduled) = routing
+                .due(&device.source, monotonic().unwrap())
+                .unwrap()
+                .cloned()
+            {
+                let keys = scheduled
                     .frame
                     .events
                     .iter()
                     .filter(|event| event.kind == EV_KEY)
-                    .cloned(),
+                    .cloned();
+                phase_keys.extend(keys.clone());
+                forwarded.extend(keys);
+                routing
+                    .delivered(&device.source, scheduled.ticket, monotonic().unwrap())
+                    .unwrap();
+            }
+            for event in routing.take_dispatches(monotonic().unwrap()) {
+                if phase == 0
+                    && matches!(&event,prek::rules::Event::Matched {rule,stage:prek::rules::Stage::End,..} if rule=="local-b")
+                {
+                    deferred = Some(event.clone());
+                } else {
+                    session
+                        .notify(
+                            EventKind::Matched,
+                            serde_json::json!({"fence":fence,"event":event}),
+                        )
+                        .unwrap();
+                }
+                dispatches.push(event);
+            }
+            settle(&mut session, &mut logs);
+        }
+        if phase == 1 {
+            assert_eq!(
+                phase_keys
+                    .iter()
+                    .map(|event| (event.code, event.value))
+                    .collect::<Vec<_>>(),
+                vec![(30, 1), (30, 0), (48, 1), (48, 0)]
             );
-            routing
-                .delivered(&device.source, scheduled.ticket, monotonic().unwrap())
-                .unwrap();
+            fs::write(
+                output.join("changed-keys.json"),
+                serde_json::to_vec(&phase_keys).unwrap(),
+            )
+            .unwrap();
         }
-        for event in routing.take_dispatches(monotonic().unwrap()) {
-            session
-                .notify(
-                    EventKind::Matched,
-                    serde_json::json!({"fence":fence,"event":event}),
-                )
-                .unwrap();
-            dispatches.push(event);
-        }
-        settle(&mut session, &mut logs);
     }
-    assert_eq!(
-        forwarded
-            .iter()
-            .map(|event| (event.code, event.value))
-            .collect::<Vec<_>>(),
-        vec![(48, 1), (48, 0)]
-    );
-    assert!(!dispatches.is_empty());
-    fs::write(
-        output.join("routed-keys.json"),
-        serde_json::to_vec(&forwarded).unwrap(),
-    )
-    .unwrap();
+    assert_eq!(dispatches.len(), 6);
     fs::write(
         output.join("dispatches.json"),
         serde_json::to_vec(&dispatches).unwrap(),
     )
     .unwrap();
+    fs::write(output.join("phase2-ready"), b"ready").unwrap();
+    let until = monotonic().unwrap() + Duration::from_secs(3);
+    while !output.join("phase2-delivered").exists() {
+        settle(&mut session, &mut logs);
+        assert!(
+            monotonic().unwrap() < until,
+            "application did not acknowledge phase two"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
     session.stop().unwrap();
     settle(&mut session, &mut logs);
     println!(
-        "Verified selected Hyprland IPC, complete context in the real Luna helper, and model-routed A consumption/B delivery"
+        "Verified real Hyprland context and Luna rule receipts, with model-routed A consumption before disable and A/B forwarding after disable"
     );
 }

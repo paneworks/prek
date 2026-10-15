@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import subprocess
 import sys
 import time
@@ -84,9 +85,12 @@ def main():
             children.append(receiver)
             while receiver.poll() is None and hyprland.poll() is None:
                 time.sleep(0.05)
+            (output / "process-exits.json").write_text(json.dumps({"receiver":receiver.poll(),"hyprland":hyprland.poll()}))
         except InterruptedError:
             pass
         finally:
+            for path in (runtime / "hypr").glob("*/hyprland.log"):
+                shutil.copyfile(path,output / "hyprland-runtime.log")
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
             for child in reversed(children):
                 if child.poll() is None:
