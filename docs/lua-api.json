@@ -31,13 +31,15 @@
   "capability_queries": {
     "freshness_ms": 250,
     "grants": false,
+    "hyprland": "explicit authorized host installation; public session negotiation unavailable",
     "in_flight_snapshots": 1,
     "lifetime": "negotiated flags immutable within the owning fence; stop clears metadata",
     "queued_snapshots": 1,
     "ready_families": [
       "commands",
       "lua_actions",
-      "power_actions"
+      "power_actions",
+      "hyprland_actions"
     ],
     "refresh_ms": 100,
     "source": "broker-negotiated registration flags and parent executor readiness; never inferred from Lua source",
@@ -145,6 +147,42 @@
       "global"
     ],
     "unavailable": "nil for absent/stale/inhibited context, missing name or retired reference; known empty arrays remain empty"
+  },
+  "hyprland_adapter": {
+    "actions": [
+      "close",
+      "move_left_and_follow",
+      "move_right_and_follow"
+    ],
+    "cage_flags": [
+      "layers",
+      "input",
+      "power",
+      "windows"
+    ],
+    "capability": "hyprland_actions",
+    "completion": "accepted dispatch plus observed target disappearance or exact workspace/output/focus",
+    "deadline": "remaining broker grant and 200ms total IPC budget",
+    "desktop_operations_per_plan": 1,
+    "direct_phases": [
+      "discrete",
+      "begin"
+    ],
+    "excluded": [
+      "reorder_up",
+      "reorder_down",
+      "scroll_stack"
+    ],
+    "host_api": "actions::Executor::set_hyprland_adapter(HyprlandAdapter)",
+    "production_routing_available": false,
+    "public_session_negotiation": false,
+    "race": "stock address selectors cannot atomically test stableId; replacement after preflight can affect another window",
+    "target": "explicit frozen window address plus stableId, output, geometry generation and workspace; focus never selects a target",
+    "uncertain": "any failure after mutation bytes were written; never retry",
+    "version": "0.54.3",
+    "workspace_id_max": 2147483647,
+    "workspace_id_min": 1,
+    "workspace_moves": "adjacent positive numeric workspace on a single-output desktop"
   },
   "input_events": {
     "agent_flags": [
@@ -436,7 +474,7 @@
       "signature": "capabilities.has(name) -> boolean"
     },
     {
-      "description": "Test current parent executor capacity for commands, lua_actions or power_actions; every effect still requires fresh context, target checks and a broker grant.",
+      "description": "Test current parent executor capacity for commands, lua_actions, power_actions or a host-installed hyprland_actions adapter; every effect still requires fresh context, target checks and a broker grant.",
       "name": "capabilities.ready",
       "phase": "runtime_callback",
       "signature": "capabilities.ready(name) -> boolean"

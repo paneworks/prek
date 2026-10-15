@@ -475,6 +475,7 @@ nix run .#cage-test                     # headless Cage -> nested Hyprland -> re
 nix run .#cage-test -- --visible        # watch the owned session as a window
 nix run .#cage-test -- --layers         # Lua layer change with its rule still enabled
 nix run .#cage-test -- --layers --input # Normalized source frames and resets reach Lua
+nix run .#cage-test -- --layers --input --power --windows # Lua DPMS and targeted window actions
 nix run .#cage-touch-test               # direct headless Cage touch receipts
 ```
 
@@ -505,6 +506,16 @@ actual compositor snapshots and the correlated Lua receipt are checked.
 while keeping A's rule enabled. The receiver must then get A and B. This tests
 acknowledged Lua layer control through the routing model and actual nested app;
 source ownership/readiness remain model fixtures.
+
+`--windows` creates two additional owned receivers. Granted Lua plans move the
+starting receiver to the adjacent numeric workspace and back, following it,
+then close it after focus switches to the guard receiver. Stock IPC must confirm
+the exact window/workspace/focus, the target must acknowledge close, and the
+guard must remain alive. The adapter currently supports stock Hyprland 0.54.3
+and single-output workspace moves through explicit authorized host installation.
+Public action negotiation, production takeover, reorder and scrolling-layout
+effects remain pending. [The reference](docs/lua-api.md#experimental-targeted-hyprland-window-adapter)
+documents the stock address-selector race between lifetime preflight and dispatch.
 
 The separate touch runner uses a test-only Cage build with a private inherited
 socketpair and a wlroots touch device. Its events use Cage's ordinary touch

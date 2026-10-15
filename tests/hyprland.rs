@@ -3,6 +3,8 @@
 use prek::hyprland::Client;
 #[path = "support/power_tests.rs"]
 mod power;
+#[path = "support/hyprland_actions.rs"]
+mod window_actions;
 use std::{
     fs,
     io::{Read, Write},
@@ -26,6 +28,13 @@ impl Server {
         Self::with_reply(move |_| reply.into(), delay)
     }
     fn with_reply(reply: impl Fn(&[u8]) -> String + Send + 'static, delay: Duration) -> Self {
+        Self::with_version(reply, delay, "0.55.4")
+    }
+    fn with_version(
+        reply: impl Fn(&[u8]) -> String + Send + 'static,
+        delay: Duration,
+        version: &'static str,
+    ) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let directory = std::env::temp_dir().join(format!(
             "prek-ipc-{}-{}",
@@ -57,7 +66,11 @@ impl Server {
                         continue;
                     }
                     if bytes[..length] == *b"j/version" {
-                        let _ = stream.write_all(b"{\"version\":\"0.55.4\"}");
+                        let _ = stream.write_all(
+                            serde_json::json!({"version":version})
+                                .to_string()
+                                .as_bytes(),
+                        );
                     } else {
                         thread::sleep(delay);
                         let request = &bytes[..length];

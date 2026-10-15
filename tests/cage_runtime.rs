@@ -609,9 +609,284 @@ return p.config.new {
             (runtime, &instance),
         );
     }
+    if std::env::var("PREK_CAGE_WINDOW_TEST").as_deref() == Ok("1") {
+        let checking = Client::open(runtime, &instance, uid, &executable).unwrap();
+        window_acceptance(&checking, &binding, fence, &app, &output, socket);
+    }
     println!(
         "Verified real Hyprland context and Luna transaction receipts, with model-routed A consumption before the edit and A/B forwarding afterward"
     );
+}
+
+struct OwnedReceiver(std::process::Child);
+impl Drop for OwnedReceiver {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn window_acceptance(
+    checking: &Client,
+    binding: &Binding,
+    fence: Fence,
+    app: &Path,
+    output: &Path,
+    socket: &Path,
+) {
+    use prek::{
+        actions::{Executor, HyprlandAdapter},
+        config::WindowAction,
+        protocol::{Completion, Mode, Request},
+        rules::{Event, Evidence, Stage},
+    };
+    let mut sampler = ContextSampler::default();
+    let mut spawn = |name: &str| {
+        let previous = sampler.sample(checking, 1, SessionKind::User).unwrap();
+        let child = OwnedReceiver(
+            std::process::Command::new(std::env::var_os("PREK_CAGE_RECEIVER").unwrap())
+                .arg(output.join(format!("{name}.jsonl")))
+                .env("WAYLAND_DISPLAY", socket)
+                .env_remove("WAYLAND_SOCKET")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let until = monotonic().unwrap() + Duration::from_secs(3);
+        loop {
+            let snapshot = sampler.sample(checking, 1, SessionKind::User).unwrap();
+            if let Some(window) = snapshot
+                .windows
+                .iter()
+                .find(|window| !previous.windows.iter().any(|old| old.id == window.id))
+            {
+                return (child, window.id.clone());
+            }
+            assert!(monotonic().unwrap() < until, "owned receiver never mapped");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    let (mut target_child, target_id) = spawn("hyprland-target");
+    let (mut guard_child, guard_id) = spawn("hyprland-guard");
+    let source = r#"
+local p=require('prek')
+p.events.on('ready',function()
+ assert(p.capabilities.has('hyprland_actions') and not p.capabilities.ready('hyprland_actions'))
+end)
+p.events.on('stop',function()assert(p.capabilities.current()==nil)end)
+local handler=p.actions.define('window',{requires={'hyprland_actions'}},function(payload)
+ assert(p.capabilities.ready('hyprland_actions') and p.capabilities.ready('lua_actions'))
+ assert(payload.event.window~=nil)
+ return p.actions.hyprland{action=payload.event.rule}
+end)
+return p.config.new{mode='route',policy={allowed_devices={'keyboard'}},devices={keyboard={keys={'KEY_A','KEY_B','KEY_C'}}},rules={
+ p.rules.define{id='move_right_and_follow',devices={'keyboard'},trigger=p.triggers.key{key='KEY_A'},action=handler},
+ p.rules.define{id='move_left_and_follow',devices={'keyboard'},trigger=p.triggers.key{key='KEY_B'},action=handler},
+ p.rules.define{id='close',devices={'keyboard'},trigger=p.triggers.key{key='KEY_C'},action=handler},
+}}
+"#;
+    let definition = Definition::compile(source, "owned-windows.lua").unwrap();
+    let config = definition.validate().unwrap();
+    let negotiated = BTreeSet::from([
+        Capability::Context,
+        Capability::Observations,
+        Capability::LuaEvents,
+        Capability::LuaActions,
+        Capability::HyprlandActions,
+    ]);
+    let mut session = Session::spawn(app, fence, "seat0", definition).unwrap();
+    session
+        .update_capabilities(negotiated.clone(), BTreeSet::new())
+        .unwrap();
+    let mut ignored = Vec::new();
+    settle(&mut session, &mut ignored);
+    let view = |snapshot: Snapshot| View {
+        fence,
+        sampled_at: snapshot.captured_at,
+        state: snapshot.state,
+        error: None,
+        context: Some(Box::new(ProvidedContext {
+            binding: binding.clone(),
+            snapshot,
+        })),
+    };
+    let first = sampler.sample(checking, 1, SessionKind::User).unwrap();
+    let runtime = socket.parent().unwrap();
+    let Consumer::Hyprland { instance, .. } = checking.consumer() else {
+        panic!()
+    };
+    let executable = fs::read_link(format!("/proc/{}/exe", binding.compositor_pid)).unwrap();
+    let client = Client::open(runtime, &instance, binding.uid, &executable).unwrap();
+    let mut executor =
+        Executor::new(fence, "seat0".into(), Mode::Route, negotiated.clone()).unwrap();
+    executor
+        .set_hyprland_adapter(HyprlandAdapter::new(client, view(first)).unwrap())
+        .unwrap();
+    executor.lua_ready(true);
+    let (mut channel, mut broker) = Channel::pair().unwrap();
+    let mut receipts = Vec::new();
+    for (index, action) in [
+        WindowAction::MoveRightAndFollow,
+        WindowAction::MoveLeftAndFollow,
+        WindowAction::Close,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let snapshot = sampler.sample(checking, 1, SessionKind::User).unwrap();
+        let window = snapshot
+            .windows
+            .iter()
+            .find(|window| window.id == target_id)
+            .unwrap()
+            .clone();
+        let expires = snapshot.captured_at + Duration::from_millis(250);
+        let fresh = view(snapshot);
+        executor.update_hyprland_context(fresh.clone()).unwrap();
+        session
+            .update_capabilities(
+                negotiated.clone(),
+                executor.ready_capabilities(monotonic().unwrap()),
+            )
+            .unwrap();
+        session.update_context(fresh).unwrap();
+        settle(&mut session, &mut ignored);
+        let id = index as u64 + 1;
+        let event = Box::new(Event::Matched {
+            version: 1,
+            rule: config.rules[index].id.clone(),
+            id,
+            ordinal: 1,
+            source: Source {
+                device: 501,
+                generation: 1,
+                seat: "seat0".into(),
+            },
+            at: monotonic().unwrap(),
+            config_generation: 1,
+            session_generation: 1,
+            stage: Stage::Discrete,
+            action: config.rules[index].action.clone(),
+            evidence: Evidence::Key { down: true },
+            window: Some(target_id.clone()),
+            output: Some(window.output.clone()),
+            workspace: Some(window.workspace),
+        });
+        executor.offer(fence, event, monotonic().unwrap()).unwrap();
+        executor.flush(&mut channel).unwrap();
+        let mut authorized = false;
+        while let Some(packet) = broker.receive::<Request>().unwrap() {
+            if matches!(packet.message,Request::Authorize{id:incoming,ordinal:1,..} if incoming==id)
+            {
+                authorized = true;
+            }
+        }
+        assert!(
+            authorized,
+            "window action must request its explicit model grant"
+        );
+        if action == WindowAction::Close {
+            // Change focus only through the owned nested compositor. The offer
+            // already froze the target; closing active/focused would kill guard.
+            let address = guard_id.split_once(':').unwrap().0;
+            let status = std::process::Command::new(std::env::var_os("PREK_CAGE_HYPRCTL").unwrap())
+                .args(["dispatch", "focuswindow", &format!("address:{address}")])
+                .env("HYPRLAND_INSTANCE_SIGNATURE", &instance)
+                .stdout(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert!(status.success());
+            let current = sampler.sample(checking, 1, SessionKind::User).unwrap();
+            assert!(
+                current
+                    .windows
+                    .iter()
+                    .any(|window| window.id == guard_id && window.focused)
+            );
+        }
+        executor
+            .grant(fence, id, 1, expires, monotonic().unwrap())
+            .unwrap();
+        let until = monotonic().unwrap() + Duration::from_secs(3);
+        let completion = loop {
+            executor
+                .execute_ready_with_lua(monotonic().unwrap(), Some(&mut session))
+                .unwrap();
+            assert!(session.step(monotonic().unwrap()).unwrap().is_empty());
+            for (id, ordinal, result) in session.take_actions() {
+                executor
+                    .resolve_action(id, ordinal, result, monotonic().unwrap())
+                    .unwrap();
+            }
+            executor.flush(&mut channel).unwrap();
+            let mut completed = None;
+            while let Some(packet) = broker.receive::<Request>().unwrap() {
+                if let Request::Complete {
+                    id: incoming,
+                    ordinal: 1,
+                    result,
+                    ..
+                } = packet.message
+                {
+                    assert_eq!(incoming, id);
+                    completed = Some(result);
+                }
+            }
+            if let Some(completion) = completed {
+                break completion;
+            }
+            assert!(monotonic().unwrap() < until, "window plan did not complete");
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert_eq!(
+            completion,
+            Completion::Applied,
+            "window plan {action:?} failed"
+        );
+        let snapshot = sampler.sample(checking, 1, SessionKind::User).unwrap();
+        let observed = snapshot
+            .windows
+            .iter()
+            .find(|window| window.id == target_id);
+        let after = match action {
+            WindowAction::MoveRightAndFollow => Some(window.workspace + 1),
+            WindowAction::MoveLeftAndFollow => Some(window.workspace - 1),
+            _ => None,
+        };
+        if let Some(workspace) = after {
+            let observed = observed.unwrap();
+            assert_eq!(observed.workspace, workspace);
+            assert!(observed.focused);
+            assert_eq!(observed.output, window.output);
+        } else {
+            assert!(observed.is_none());
+            let until = monotonic().unwrap() + Duration::from_secs(1);
+            while target_child.0.try_wait().unwrap().is_none() {
+                assert!(
+                    monotonic().unwrap() < until,
+                    "target did not acknowledge its close"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert!(
+                fs::read_to_string(output.join("hyprland-target.jsonl"))
+                    .unwrap()
+                    .contains("\"event\":\"closed\"")
+            );
+        }
+        assert!(guard_child.0.try_wait().unwrap().is_none());
+        receipts.push(serde_json::json!({"action":config.rules[index].id,"completion":completion,"window":target_id,
+            "workspace_before":window.workspace,"workspace_after":after,"target_closed":after.is_none(),
+            "guard_alive":true,"lua_capabilities_checked":true}));
+    }
+    session.stop().unwrap();
+    settle(&mut session, &mut ignored);
+    fs::write(
+        output.join("hyprland-receipts.json"),
+        serde_json::to_vec(&receipts).unwrap(),
+    )
+    .unwrap();
 }
 
 fn power_acceptance(

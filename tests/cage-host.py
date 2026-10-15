@@ -26,6 +26,8 @@ def main():
                         help="verify normalized source observations through worker IPC and Lua")
     parser.add_argument("--power", action="store_true",
                         help="verify Lua-planned DPMS blank/wake on the owned nested output")
+    parser.add_argument("--windows", action="store_true",
+                        help="verify Lua-planned close and adjacent workspace moves on owned test windows")
     parser.add_argument("--visible", action="store_true",
                         default=os.environ.get("VISIBLE") == "1")
     parser.add_argument("--output", default="target/cage-host")
@@ -142,6 +144,9 @@ def main():
                                    PREK_CAGE_LAYER_TEST="1" if args.layers else "0",
                                    PREK_CAGE_INPUT_TEST="1" if args.input else "0")
                 fixture_env["PREK_CAGE_POWER_TEST"] = "1" if args.power else "0"
+                fixture_env["PREK_CAGE_WINDOW_TEST"] = "1" if args.windows else "0"
+                fixture_env["PREK_CAGE_RECEIVER"] = args.receiver
+                fixture_env["PREK_CAGE_HYPRCTL"] = str(Path(args.hyprland).parent / "hyprctl")
                 instances = [path.parent.name for path in (runtime / "hypr").glob("*/.socket2.sock")]
                 if len(instances) != 1:
                     raise RuntimeError("expected one owned compositor instance")
@@ -217,6 +222,15 @@ def main():
                         assert [row["screen"] for row in power] == ["off", "on"]
                         assert power[0]["output"] == power[1]["output"]
                         print("PASS: granted Lua plans blanked and woke only the owned nested output; stock IPC confirmed DPMS off/on.")
+                    if args.windows:
+                        windows = json.loads((output / "hyprland-receipts.json").read_text())
+                        assert [row["action"] for row in windows] == ["move_right_and_follow", "move_left_and_follow", "close"]
+                        assert all(row["completion"] == "applied" and row["lua_capabilities_checked"] for row in windows)
+                        assert len({row["window"] for row in windows}) == 1
+                        assert windows[0]["workspace_after"] == windows[0]["workspace_before"] + 1
+                        assert windows[1]["workspace_after"] == windows[1]["workspace_before"] - 1
+                        assert windows[2]["target_closed"] and windows[2]["guard_alive"]
+                        print("PASS: granted Lua plans moved the owned starting window right/left with workspace follow, then closed it while another window was focused; guard remained alive.")
                     dispatches = json.loads((output / "dispatches.json").read_text())
                     a = [event for event in dispatches if event["rule"] == "local-a"]
                     b = [event for event in dispatches if event["rule"] == "local-b"]

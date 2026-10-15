@@ -617,7 +617,7 @@ local SchedulerAPI = {}
 ---@class (exact) prek.CapabilityView
 ---@field fence prek.Fence
 ---@field negotiated prek.Capability[] Registration flags; policy and per-effect authorization still apply.
----@field ready prek.Capability[] Current executor capacity for commands, lua_actions and power_actions only.
+---@field ready prek.Capability[] Current executor capacity for commands, lua_actions, power_actions and host-installed hyprland_actions.
 ---@field sampled_at prek.MonotonicTime Original parent sampling time; expires after 250ms.
 
 ---@class prek.CapabilitiesAPI
@@ -780,7 +780,7 @@ function CapabilitiesAPI.current() error("Prek editor definition") end
 ---@return boolean
 function CapabilitiesAPI.has(name) error("Prek editor definition") end
 ---Executor capacity only; effects still require context, target checks and broker grants.
----@param name string Only commands, lua_actions and power_actions can be ready.
+---@param name string commands, lua_actions, power_actions or explicitly host-installed hyprland_actions.
 ---@return boolean
 function CapabilitiesAPI.ready(name) error("Prek editor definition") end
 
@@ -895,7 +895,7 @@ function ActionsAPI.command(fields) error("Prek editor definition") end
 ---@param fields prek.MorfFields
 ---@return prek.MorfActionDeclaration
 function ActionsAPI.morf(fields) error("Prek editor definition") end
----Declaration only; live adapter execution remains pending.
+---Typed close/adjacent moves require explicit host adapter installation and grants; public session negotiation is pending.
 ---@param fields prek.HyprlandFields
 ---@return prek.HyprlandAction
 function ActionsAPI.hyprland(fields) error("Prek editor definition") end

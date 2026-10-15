@@ -81,7 +81,7 @@ pub fn api() -> serde_json::Value {
         (
             "capabilities.ready",
             "capabilities.ready(name) -> boolean",
-            "Test current parent executor capacity for commands, lua_actions or power_actions; every effect still requires fresh context, target checks and a broker grant.",
+            "Test current parent executor capacity for commands, lua_actions, power_actions or a host-installed hyprland_actions adapter; every effect still requires fresh context, target checks and a broker grant.",
         ),
         (
             "outputs.list",
@@ -289,6 +289,21 @@ pub fn api() -> serde_json::Value {
             "signature":format!("actions.{kind}(named_fields) -> Action"),
             "description":"Declare an action; configuration evaluation does not execute it."}));
     }
+    let hyprland_adapter = serde_json::json!({
+        "public_session_negotiation": false, "production_routing_available": false,
+        "version": "0.54.3", "host_api": "actions::Executor::set_hyprland_adapter(HyprlandAdapter)",
+        "capability": "hyprland_actions", "actions": ["close","move_left_and_follow","move_right_and_follow"],
+        "excluded": ["reorder_up","reorder_down","scroll_stack"],
+        "workspace_moves": "adjacent positive numeric workspace on a single-output desktop",
+        "workspace_id_min": 1, "workspace_id_max": 2147483647, "desktop_operations_per_plan": 1,
+        "direct_phases": ["discrete","begin"],
+        "target": "explicit frozen window address plus stableId, output, geometry generation and workspace; focus never selects a target",
+        "race": "stock address selectors cannot atomically test stableId; replacement after preflight can affect another window",
+        "deadline": "remaining broker grant and 200ms total IPC budget",
+        "completion": "accepted dispatch plus observed target disappearance or exact workspace/output/focus",
+        "uncertain": "any failure after mutation bytes were written; never retry",
+        "cage_flags": ["layers","input","power","windows"]
+    });
     serde_json::json!({"api_version":API_VERSION,"schema_version":crate::config::SCHEMA_VERSION,
         "engine":"onix-os/luna", "engine_version":"0.5.1", "phase":"configuration_and_session_actions",
         "symbols":symbols, "limits":{"source_bytes":MAX_CONFIG_BYTES,"memory_bytes":MEMORY,
@@ -302,11 +317,12 @@ pub fn api() -> serde_json::Value {
         "rule_hooks":{"registration":"configuration only; rule ID must exist in the validated initial configuration","phases":["discrete","begin","update","end","cancel"],"inline_fields":["on_discrete","on_begin","on_update","on_end","on_cancel"],"budget":"shared event subscription, fuel, time and log limits","delivery":"rule ID and phase filtered in the owning VM; registration order; updates may coalesce","effects":"observational; no returned effects, input claims or synthetic ownership","lifetime":"approved source generation; follows stable rule ID across acknowledged edits; removed rules emit no fresh matches; reload disposes the old VM","export":"callbacks require original Lua source"},
         "input_events":{"event":"input","configuration_mode":"observe","agent_flags":["lua","input"],"capability":"input_events","system_permission":"policy.allow_input_events","production_broker":"observation_mode","sources":"explicit policy.allowed_devices selectors on the owning seat; virtual devices excluded","context":"fresh desktop without secure overlay","freshness_ms":250,"payload":"InputPayload","raw_frames":false,"input_claims":false,"delivery":"ordered, no coalescing; overflow retires the affected stream or Lua component","resets":["attached","reconciled","mapping_changed","removed","lost"],"coordinates":"device axis counts","maximum_changes":4096,"maximum_contacts":256,"identity_fields":["source.device","source.generation","sequence","contacts[].id.generation","contacts_started[].generation","contacts_ended[].generation","ended_contacts[].id.generation"],"identity_type":"decimal_string"},
         "context_limits":{"snapshot_bytes":4194304,"chunk_bytes":32768,"transfer_time_ms":1000,"freshness_ms":250,"refresh_ms":100,"queued_snapshots":2,"read_only":true},
-        "capability_queries":{"source":"broker-negotiated registration flags and parent executor readiness; never inferred from Lua source","freshness_ms":250,"refresh_ms":100,"queued_snapshots":1,"in_flight_snapshots":1,"ready_families":["commands","lua_actions","power_actions"],"unavailable":"current returns nil; has and ready return false","unknown_names":"false; names must be strings of 1 to 128 bytes","grants":false,"lifetime":"negotiated flags immutable within the owning fence; stop clears metadata"},
+        "capability_queries":{"source":"broker-negotiated registration flags and parent executor readiness; never inferred from Lua source","freshness_ms":250,"refresh_ms":100,"queued_snapshots":1,"in_flight_snapshots":1,"ready_families":["commands","lua_actions","power_actions","hyprland_actions"],"hyprland":"explicit authorized host installation; public session negotiation unavailable","unavailable":"current returns nil; has and ready return false","unknown_names":"false; names must be strings of 1 to 128 bytes","grants":false,"lifetime":"negotiated flags immutable within the owning fence; stop clears metadata"},
         "geometry_queries":{"context":"fresh owning desktop without secure overlay","lookup":"exact output name or rendered region ID","references":"canonical decimal-string fence, snapshot revision and output geometry generation; copies confer no authority","spaces":["normalized","local","global"],"normalized":"post-transform output axes, not raw device axes","local":"post-transform logical units; rotation and scale applied through output logical size","region_bounds":"global logical, half-open","overlaps":"all matches in provider order, no target selection","unavailable":"nil for absent/stale/inhibited context, missing name or retired reference; known empty arrays remain empty","conversion":"finite numeric points, no clamping; arithmetic overflow raises an error","effects":false},
         "runtime_requires":{"uid":"unprivileged active session","capabilities":["context","observations","lua_events"],"thread":"owning Luna arena","generation":"current broker/configuration/session fence"},
         "action_requires":{"agent_flags":["lua","commands"],"capabilities":["context","observations","lua_events","lua_actions","commands"],"implemented_effects":["commands","observations","power_actions"],"power_alternative":{"agent_flags":["lua","power"],"system_permission":"policy.allow_power_actions","broker_mode":"route","target":"explicit frozen output"},"grant_time_ms":250},
         "experimental_adapters":{"power":{"public_session_negotiation":true,"broker_mode":"route","production_routing_available":false,"system_permission":"policy.allow_power_actions","agent_flags":["power"],"named_handler_flags":["lua","power"],"rule_output":"explicit name or validated input mapping; no focus fallback","host_api":"actions::Executor::set_power_adapter(PowerAdapter)","actions":["blank","wake"],"excluded":["lock_and_blank","toggle","suspend"],"target":"explicit frozen owning output, exact geometry generation and binding","deadline":"remaining broker grant and 200ms total IPC budget","completion":"accepted dispatch and observed compositor-reported DPMS state; no hardware power claim","uncertain":"any failure after a mutating request may have been written; never retry","cage_flags":["layers","input","power"]}},
+        "hyprland_adapter":hyprland_adapter,
         "editor":{"format":"LuaCATS","module":"prek","cli":["prek","api","--lua"],"path":"share/prek/lua/prek.lua","scope":"implemented_configuration_and_runtime"},
         "device_queries":{"catalog":"permitted metadata received through input reset notifications; no host inventory scan","maximum_sources":256,"maximum_bytes":4194304,"lookup":"exact Source device/generation/seat with canonical decimal strings","nil":"no received metadata, unknown source, missing mapping or unavailable/stale desktop context","empty_list":"all known sources removed while context remains usable","revision":"decimal string; metadata changes/removals only","map_keys":"numeric evdev type/axis keys in Lua","position":"validated device counts to normalized/mm/output-local/global coordinates; no action authority","seat":"current fresh desktop binding/fence only; no other-seat enumeration"},
         "runtime_api":"partial"})

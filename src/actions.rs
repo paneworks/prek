@@ -17,7 +17,9 @@ use std::{
     process::{Child, Command, Stdio},
     time::Duration,
 };
+mod hyprland;
 mod power;
+pub use hyprland::HyprlandAdapter;
 pub use power::PowerAdapter;
 
 pub const MAX_RUNNING: usize = 8;
@@ -29,6 +31,7 @@ struct Pending {
     resolving: bool,
     resolved: Option<Vec<Action>>,
     power_target: Option<crate::context::OutputState>,
+    window_target: Option<hyprland::Target>,
 }
 
 struct Running {
@@ -68,6 +71,7 @@ pub struct Executor {
     groups: BTreeMap<ExecutionKey, ExecutionGroup>,
     emitted: VecDeque<(Fence, u64, u64, String)>,
     power: Option<PowerAdapter>,
+    hyprland: Option<HyprlandAdapter>,
 }
 impl Executor {
     pub fn new(
@@ -99,6 +103,7 @@ impl Executor {
             groups: BTreeMap::new(),
             emitted: VecDeque::new(),
             power: None,
+            hyprland: None,
         })
     }
     pub fn transition(&mut self, fence: Fence) -> io::Result<()> {
@@ -119,6 +124,7 @@ impl Executor {
         self.lua_ready = false;
         self.emitted.clear();
         self.power = None;
+        self.hyprland = None;
         // Already dispatched commands cannot be undone. Keep reaping them,
         // counting them against the bound, and discard their old completions.
         Ok(())
@@ -157,7 +163,8 @@ impl Executor {
         };
         if fence != self.fence
             || self.mode != Mode::Route
-            || !protocol::supported_session_action(action)
+            || !(protocol::supported_session_action(action)
+                || matches!(action, Action::Hyprland { action } if hyprland::supported(*action)))
             || !protocol::action_capabilities(action).is_subset(&self.capabilities)
             || source.seat != self.seat
             || *id == 0
@@ -188,6 +195,27 @@ impl Executor {
             } else {
                 None
             };
+        let window_target =
+            if protocol::action_capabilities(action).contains(&Capability::HyprlandActions) {
+                let adapter = self
+                    .hyprland
+                    .as_ref()
+                    .ok_or_else(|| protocol::invalid("Hyprland adapter unavailable"))?;
+                let Event::Matched {
+                    window: Some(window),
+                    output: Some(output),
+                    workspace: Some(workspace),
+                    ..
+                } = event.as_ref()
+                else {
+                    return Err(protocol::invalid(
+                        "Hyprland action requires a frozen window, output and workspace",
+                    ));
+                };
+                Some(adapter.target(window, output, *workspace, now)?)
+            } else {
+                None
+            };
         if self.seen.get(id).is_some_and(|old| ordinal <= old)
             || (!self.seen.contains_key(id) && self.seen.len() >= MAX_GESTURES)
             || self.pending.len() >= MAX_PENDING
@@ -207,9 +235,35 @@ impl Executor {
                 resolving: false,
                 resolved: None,
                 power_target,
+                window_target,
             },
         );
         Ok(())
+    }
+    /// Explicit host opt-in. Public broker negotiation remains separate.
+    pub fn set_hyprland_adapter(&mut self, adapter: HyprlandAdapter) -> io::Result<()> {
+        if !self.capabilities.contains(&Capability::HyprlandActions)
+            || self.hyprland.is_some()
+            || adapter.fence() != self.fence
+            || adapter.seat() != Some(self.seat.as_str())
+        {
+            return Err(protocol::invalid(
+                "Hyprland adapter exceeds executor authority",
+            ));
+        }
+        self.hyprland = Some(adapter);
+        self.reported_available = None;
+        Ok(())
+    }
+    pub fn update_hyprland_context(
+        &mut self,
+        view: crate::context_transfer::View,
+    ) -> io::Result<()> {
+        self.reported_available = None;
+        self.hyprland
+            .as_mut()
+            .ok_or_else(|| protocol::invalid("Hyprland adapter unavailable"))?
+            .update_context(view)
     }
     /// Explicit host opt-in. Public broker negotiation remains separate.
     pub fn set_power_adapter(&mut self, adapter: PowerAdapter) -> io::Result<()> {
@@ -466,8 +520,10 @@ impl Executor {
                 }
                 continue;
             }
-            if matches!(action, Action::Command { .. } | Action::Power { .. })
-                && !matches!(stage, Stage::Discrete | Stage::Begin)
+            if matches!(
+                action,
+                Action::Command { .. } | Action::Power { .. } | Action::Hyprland { .. }
+            ) && !matches!(stage, Stage::Discrete | Stage::Begin)
             {
                 self.complete(id, ordinal, Completion::Cancelled)?;
                 continue;
@@ -491,17 +547,19 @@ impl Executor {
                                 action: crate::config::PowerAction::Wake
                                     | crate::config::PowerAction::Blank
                             }
-                    )
+                    ) && !matches!(action, Action::Hyprland { action } if hyprland::supported(*action))
                 })
                 || actions
                     .iter()
-                    .filter(|action| matches!(action, Action::Power { .. }))
+                    .filter(|action| matches!(action, Action::Power { .. } | Action::Hyprland { .. }))
                     .count()
                     > 1
                 || actions
                     .iter()
                     .any(|action| matches!(action, Action::Power { .. }))
                     && (self.power.is_none() || pending.power_target.is_none())
+                || actions.iter().any(|action| matches!(action, Action::Hyprland { .. }))
+                    && (self.hyprland.is_none() || pending.window_target.is_none())
             {
                 self.complete(id, ordinal, Completion::Unavailable)?;
                 continue;
@@ -529,6 +587,24 @@ impl Executor {
                     let completion = self.power.as_mut().unwrap().execute(
                         action,
                         pending.power_target.as_ref().unwrap(),
+                        pending.expires.unwrap(),
+                    );
+                    if completion == Completion::Applied {
+                        applied = true;
+                        emitted_event = true;
+                        continue;
+                    }
+                    result = if applied {
+                        Completion::Uncertain
+                    } else {
+                        completion
+                    };
+                    break;
+                }
+                if let Action::Hyprland { action } = action {
+                    let completion = self.hyprland.as_mut().unwrap().execute(
+                        action,
+                        pending.window_target.as_ref().unwrap(),
                         pending.expires.unwrap(),
                     );
                     if completion == Completion::Applied {
@@ -637,6 +713,7 @@ impl Executor {
                 Capability::Commands,
                 Capability::LuaActions,
                 Capability::PowerActions,
+                Capability::HyprlandActions,
             ]
             .into_iter()
             .filter(|capability| {
@@ -644,6 +721,11 @@ impl Executor {
                     && (*capability != Capability::LuaActions || self.lua_ready)
                     && (*capability != Capability::PowerActions
                         || self.power.as_ref().is_some_and(|power| power.ready(now)))
+                    && (*capability != Capability::HyprlandActions
+                        || self
+                            .hyprland
+                            .as_ref()
+                            .is_some_and(|adapter| adapter.ready(now)))
             })
             .collect()
         } else {

@@ -648,7 +648,9 @@ Configuration-time queries raise an error.
 The session supplies the actual broker-negotiated flags after checking the
 registration reply. Lua declarations and system policy alone do not populate
 this view. Negotiated flags remain fixed within the session fence; readiness
-can change. Only `commands`, `lua_actions` and `power_actions` can be ready.
+can change. `commands`, `lua_actions`, `power_actions` and an explicitly
+host-installed `hyprland_actions` adapter can be ready. Public Hyprland action
+negotiation remains unavailable; declarations alone do not install an adapter.
 Observation sessions report an empty readiness list. Source loading, executor
 capacity and adapter/context expiry can withdraw readiness.
 
@@ -889,6 +891,61 @@ it. Observation and replay execute no live effect. Actions require the applicabl
 session capability, context and ownership checks in routing mode. Functions in
 the configuration result are rejected. Named callbacks use their private
 approved registry; callable pointers are never serialized into configuration.
+
+## Experimental targeted Hyprland window adapter
+
+Approved named handlers can return `actions.hyprland {action=...}` plans for
+`close`, `move_left_and_follow` and `move_right_and_follow` when an authorized
+embedding explicitly installs `actions::HyprlandAdapter` into the unprivileged
+executor. The host supplies a verified client and broker-approved binding/view
+to `HyprlandAdapter::new(client, view)`, then uses
+`Executor::set_hyprland_adapter(adapter)` and
+`Executor::update_hyprland_context(view)`. These are Rust host APIs, not Lua
+authority setters. Public broker/session negotiation and production routing
+remain unavailable. [The declaration example](../examples/lua/window_actions.lua)
+compiles offline without executing any operation.
+
+The adapter currently supports verified stock **Hyprland 0.54.3**. The exact
+window address **and stableId**, output/geometry generation, positive numeric
+workspace and geometry are frozen at offer time. Missing or malformed targets,
+another binding/seat/fence, secure overlays, lock inhibition, expired context,
+retired geometry and changed window lifetimes refuse execution. A focus change
+never retargets an offer. Move/follow computes the adjacent absolute workspace
+from the starting window, rather than from later focus. Moves currently require
+a single-output desktop; cross-output workspace-rule topology remains pending.
+Numeric destinations must fit stock Hyprland's positive 32-bit workspace parser
+(`1..2147483647`); moving left from 1 or right from 2147483647 is unavailable.
+Reorder and scrolling-layout actions remain unavailable.
+
+Each effect requires a separate current broker grant. Direct declarations act
+only on discrete/begin; named handlers choose their phases explicitly. The
+executor preflights the complete plan and allows at most one Hyprland or power
+operation per plan. Exact argv commands and observation effects can accompany
+it, retaining partial-effect uncertainty. Source/candidate cancellation and
+generation retirement use the existing action lifetime rules.
+
+The remaining grant, capped at 200 ms, covers independent stock context/lock
+preflight, one exact address-targeted mutation and state verification. Close
+uses `closewindow address:...`; move/follow uses
+`movetoworkspace N,address:...`. No implicit active-window selector or shell is
+used. Applied completion means the compositor accepted the request and the
+original window disappeared, or that same window moved to the exact workspace,
+remained on the output and became focused there. It does not prove rendered
+animation completion. Missing confirmation or any error after request bytes
+were written reports uncertainty and is never retried.
+
+**Stock IPC race:** Hyprland dispatch selectors accept an address, not an
+atomic address-plus-stableId guard. Preflight rejects already replaced
+windows, but a replacement between the final query and dispatch can still be
+affected. The adapter cannot guarantee lifetime identity across that interval;
+postchecks do not remove the race. Lock/topology can also change after
+preflight. This limitation is separate from broker authority and must be
+resolved or explicitly accepted before production window routing is enabled.
+
+Run the owned local fixture with `nix run .#cage-test -- --layers --input
+--power --windows` (add `--visible` for a visible nested window). It uses actual
+Lua/helper/stock IPC and test receiver close receipts with explicit model
+seat/grant metadata; it does not establish physical root/logind takeover.
 
 ## Experimental output-scoped DPMS adapter
 

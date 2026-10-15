@@ -62,7 +62,10 @@ pub enum Mode {
 pub fn execution_capability(capability: Capability) -> bool {
     matches!(
         capability,
-        Capability::Commands | Capability::LuaActions | Capability::PowerActions
+        Capability::Commands
+            | Capability::LuaActions
+            | Capability::PowerActions
+            | Capability::HyprlandActions
     )
 }
 pub fn supported_session_action(action: &crate::config::Action) -> bool {
