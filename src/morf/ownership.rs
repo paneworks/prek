@@ -107,7 +107,11 @@ mod tests {
         let s = source(1, 1);
         ledger.watch(f, "seat0").unwrap();
         ledger.prepared(f, s.clone()).unwrap();
+        assert!(ledger.prepared_by(&channel, ledger.worker, f, &s));
+        assert!(!ledger.prepared_by(&channel, modeled_worker(&channel, 2), f, &s));
+        assert!(!ledger.prepared_by(&channel, ledger.worker, fence(2), &s));
         ledger.retire_except(&[]);
+        assert!(!ledger.prepared_by(&channel, ledger.worker, f, &s));
         assert!(
             ledger
                 .released(&channel, modeled_worker(&channel, 2), f, &s)
@@ -258,6 +262,24 @@ pub(crate) struct Ledger {
     exited: bool,
 }
 impl Ledger {
+    pub fn matches_worker(&self, channel: &Channel, worker: WorkerIdentity) -> bool {
+        !self.exited && channel.peer() == self.credentials && worker == self.worker
+    }
+    pub fn prepared_by(
+        &self,
+        channel: &Channel,
+        worker: WorkerIdentity,
+        fence: Fence,
+        source: &Source,
+    ) -> bool {
+        !self.exited
+            && channel.peer() == self.credentials
+            && worker == self.worker
+            && self
+                .scopes
+                .get(&key(fence, &source.seat))
+                .is_some_and(|scope| !scope.retired && scope.sources.get(source) == Some(&false))
+    }
     pub fn worker(&self) -> WorkerIdentity {
         self.worker
     }

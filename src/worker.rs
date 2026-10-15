@@ -89,6 +89,9 @@ pub enum Report {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Message {
+    MorfReady {
+        activation: crate::morf::admission::Activation,
+    },
     /// Private sole-worker acknowledgement after descriptor closure.
     Released {
         worker: crate::supervisor::WorkerIdentity,

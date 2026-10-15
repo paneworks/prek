@@ -1325,16 +1325,8 @@ impl Broker {
         now: Duration,
     ) -> io::Result<Option<crate::configuration::Command>> {
         descriptor.validate().map_err(protocol::invalid)?;
-        // Quiescence alone cannot authorize a physical grab. The coordinator
-        // owns inhibition/cleanup; kernel cutover and native activation are
-        // still required before a watched seat can receive transport readiness.
-        if self
-            .morf_handoffs
-            .iter()
-            .any(|handoff| handoff.fence == subscription.fence && handoff.seat == subscription.seat)
-        {
-            return Ok(None);
-        }
+        let owners = self.morf_requirements(subscription.fence, &subscription.seat);
+        let lease = self.morf_lease(subscription.fence, &subscription.seat, now);
         let Some(bound) = self
             .connections
             .iter_mut()
@@ -1366,6 +1358,17 @@ impl Broker {
             fence: bound.fence,
             source: descriptor.source.clone(),
             evidence,
+            admission: (!owners.is_empty()).then_some(crate::morf::admission::Admission {
+                owners,
+                expires: lease.map(|until| {
+                    until
+                        .min(bound.context.checked + crate::context::SNAPSHOT_MAX_AGE)
+                        .min(
+                            bound.context.value.as_ref().unwrap().snapshot.captured_at
+                                + crate::context::SNAPSHOT_MAX_AGE,
+                        )
+                }),
+            }),
         }))
     }
     pub fn deadline(&self) -> Option<Duration> {

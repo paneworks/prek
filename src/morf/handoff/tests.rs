@@ -109,6 +109,21 @@ fn queued_release_requires_a_native_restoration_observation() {
         assert!(observed(Phase::ReleaseQueued, 3, 2, &state(remote), now).is_err());
     }
 }
+
+#[test]
+fn owned_observations_cannot_regress_or_cross_native_generations() {
+    let now = Duration::from_secs(1);
+    assert_eq!(
+        observed(Phase::Owned, 3, 2, &state("owned"), now).unwrap(),
+        Phase::Owned
+    );
+    for remote in ["native", "quiescing", "quiesced", "releasing", "lost"] {
+        assert!(observed(Phase::Owned, 3, 2, &state(remote), now).is_err());
+    }
+    assert!(observed(Phase::Owned, 3, 3, &state("owned"), now).is_err());
+    assert!(observed(Phase::Owned, 4, 2, &state("owned"), now).is_err());
+    assert!(observed(Phase::Activating, 3, 2, &state("owned"), now).is_err());
+}
 #[test]
 fn cleanup_cannot_reuse_or_retarget_the_retired_scope() {
     validate_cleanup(fence(1), fence(2)).unwrap();
@@ -171,6 +186,8 @@ fn actual_reaped_worker_proof_is_scoped_and_release_is_not_repeatable() {
     for phase in [
         Phase::Quiescing,
         Phase::Quiesced,
+        Phase::Activating,
+        Phase::Owned,
         Phase::Retired,
         Phase::Lost,
     ] {

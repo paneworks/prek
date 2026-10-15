@@ -35,6 +35,7 @@ struct Seat {
 }
 struct Output {
     fence: Fence,
+    admission: crate::morf::admission::Gate,
     virtual_device: Virtual,
     state_probe: Option<linux::StateProbe>,
     readiness: Option<Readiness>,
@@ -97,6 +98,7 @@ impl Outbox {
             let discard = match message {
                 Message::Outcome { report } => report.subscription().seat == seat,
                 Message::Transport { subscription, .. } => subscription.seat == seat,
+                Message::MorfReady { activation } => activation.source.seat == seat,
                 Message::Configuration { .. } => false,
                 Message::RulesChanged {
                     seat: changed_seat, ..
@@ -136,6 +138,40 @@ fn invalid(reason: &str) -> io::Error {
     protocol::invalid(reason)
 }
 impl Stream {
+    fn offer_transport(&mut self, source: &Source, now: Duration) -> io::Result<()> {
+        let Some(output) = self.outputs.get_mut(source) else {
+            return Ok(());
+        };
+        if now < output.offered + Duration::from_millis(100) {
+            return Ok(());
+        }
+        output.offered = now;
+        let descriptor = Box::new(output.virtual_device.descriptor().clone());
+        let subscription = identity(&self.seats[&source.seat].subscription);
+        self.queue(Message::Transport {
+            subscription,
+            descriptor,
+        })
+    }
+    fn expire_admissions(&mut self, now: Duration) -> io::Result<()> {
+        let expired = self
+            .outputs
+            .iter()
+            .filter(|(source, output)| {
+                self.grabbed.contains(*source) && !output.admission.allowed(now)
+            })
+            .map(|(source, _)| source.clone())
+            .collect::<Vec<_>>();
+        for source in expired {
+            if let Some(seat) = self.seats.get_mut(&source.seat) {
+                seat.routing.recover(&source);
+            }
+            self.collect(&source.seat, now)?;
+            self.outputs.remove(&source);
+        }
+        Ok(())
+    }
+
     pub fn new(config: Config, channel: Channel) -> io::Result<Self> {
         if config.mode != Mode::Route {
             return Err(invalid("routing worker requires route configuration"));
@@ -381,6 +417,13 @@ impl InputSink for Stream {
             return Ok(ReaderDisposition::Keep);
         }
         if self.grabbed.contains(&device.source) {
+            self.expire_admissions(now)?;
+            if !self.outputs.contains_key(&device.source) {
+                return Ok(ReaderDisposition::Reopen);
+            }
+            if self.outputs[&device.source].admission.watched() {
+                self.offer_transport(&device.source, now)?;
+            }
             return Ok(ReaderDisposition::Keep);
         }
         if !self.outputs.contains_key(&device.source) {
@@ -424,6 +467,11 @@ impl InputSink for Stream {
                 device.source.clone(),
                 Output {
                     fence: subscription.fence,
+                    admission: crate::morf::admission::Gate::new(
+                        health.worker_identity(),
+                        subscription.fence,
+                        device.source.clone(),
+                    ),
                     virtual_device: output,
                     state_probe: Some(state_probe),
                     readiness: Some(readiness),
@@ -439,31 +487,33 @@ impl InputSink for Stream {
         if now.saturating_sub(output.started) >= Duration::from_secs(5) {
             return Err(invalid("virtual device readiness timed out before grab"));
         }
-        if now >= output.offered + Duration::from_millis(100) {
-            output.offered = now;
-            let descriptor = Box::new(output.virtual_device.descriptor().clone());
-            let subscription = identity(&self.seats[&device.source.seat].subscription);
-            self.queue(Message::Transport {
-                subscription,
-                descriptor,
-            })?;
-        }
+        self.offer_transport(&device.source, now)?;
         let output = self.outputs.get_mut(&device.source).unwrap();
         let Some(evidence) = output.consumer.as_ref() else {
             return Ok(ReaderDisposition::Keep);
         };
         if now < evidence.at || now - evidence.at > Duration::from_millis(250) {
+            output.admission.cancel_pending();
             return Ok(ReaderDisposition::Keep);
         }
         if !output.virtual_device.processed_metadata()? {
+            output.admission.cancel_pending();
             return Ok(ReaderDisposition::Keep);
         }
         // Complete frames awaiting the watermark and partial assembler state
         // belong to observation. Let the sole loop deliver them before grab.
         if !buffer.is_drained() {
+            output.admission.cancel_pending();
             return Ok(ReaderDisposition::Keep);
         }
         if !output.state_probe.as_ref().unwrap().is_neutral(device)? {
+            output.admission.cancel_pending();
+            return Ok(ReaderDisposition::Keep);
+        }
+        if !output.admission.allowed(monotonic()?) {
+            if let Some(activation) = output.admission.request(now).map_err(invalid)? {
+                self.queue(Message::MorfReady { activation })?;
+            }
             return Ok(ReaderDisposition::Keep);
         }
         let gate = output.readiness.as_mut().unwrap();
@@ -479,10 +529,12 @@ impl InputSink for Stream {
             .map_err(invalid)?;
         raw.grab()?;
         // A handoff cannot convert already held input into a new gesture.
-        if !output.state_probe.as_ref().unwrap().is_neutral(device)? {
+        if !output.admission.allowed(monotonic()?)
+            || !output.state_probe.as_ref().unwrap().is_neutral(device)?
+        {
             self.outputs.remove(&device.source);
             raw.ungrab()?;
-            return Ok(ReaderDisposition::Keep);
+            return Ok(ReaderDisposition::Reopen);
         }
         // TODO: this drain cannot distinguish pre-grab backlog from events
         // arriving after grab. The software-buffer gate above does not solve
@@ -509,6 +561,11 @@ impl InputSink for Stream {
                 }
             }
         }
+        if !output.admission.allowed(monotonic()?) {
+            self.outputs.remove(&device.source);
+            raw.ungrab()?;
+            return Ok(ReaderDisposition::Reopen);
+        }
         let seat = self.seats.get_mut(&device.source.seat).unwrap();
         if let Err(error) = seat.routing.attach(device.clone(), &ready, None, now) {
             let _ = raw.ungrab();
@@ -526,6 +583,7 @@ impl InputSink for Stream {
         Ok(ReaderDisposition::Keep)
     }
     fn push(&mut self, record: Record) -> io::Result<()> {
+        self.expire_admissions(monotonic()?)?;
         if matches!(record, Record::Header { .. }) {
             return Ok(());
         }
@@ -577,6 +635,7 @@ impl InputSink for Stream {
     }
     fn service(&mut self) -> io::Result<()> {
         let now = monotonic()?;
+        self.expire_admissions(now)?;
         if self
             .assembly
             .deadline()
@@ -633,11 +692,23 @@ impl InputSink for Stream {
                     fence,
                     source,
                     evidence,
+                    admission,
                 } => {
                     if let Some(output) = self.outputs.get_mut(&source)
                         && output.fence == fence
                     {
+                        output
+                            .admission
+                            .update(admission, monotonic()?)
+                            .map_err(invalid)?;
                         output.consumer = Some(evidence);
+                    }
+                }
+                Command::MorfActivated { grant } => {
+                    if let Some(output) = self.outputs.get_mut(&grant.activation.source)
+                        && output.fence == grant.activation.fence
+                    {
+                        output.admission.grant(&grant, monotonic()?);
                     }
                 }
                 command => {
@@ -675,6 +746,7 @@ impl InputSink for Stream {
     }
     fn flush(&mut self) -> io::Result<()> {
         let now = monotonic()?;
+        self.expire_admissions(now)?;
         let sources: Vec<_> = self
             .outputs
             .keys()
@@ -720,8 +792,13 @@ impl InputSink for Stream {
             .chain(
                 self.outputs
                     .values()
-                    .filter(|output| output.readiness.is_some())
+                    .filter(|output| output.readiness.is_some() || output.admission.watched())
                     .map(|output| output.offered + Duration::from_millis(100)),
+            )
+            .chain(
+                self.outputs
+                    .values()
+                    .filter_map(|output| output.admission.deadline()),
             )
             .min()
     }

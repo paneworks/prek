@@ -624,6 +624,7 @@ pub(crate) mod tests {
 
         let expected = evidence(&spec);
         let command = crate::configuration::Command::Transport {
+            admission: None,
             fence,
             source: spec.source.clone(),
             evidence: expected.clone(),

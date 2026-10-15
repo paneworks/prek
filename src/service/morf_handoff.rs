@@ -3,6 +3,115 @@ use super::*;
 use crate::morf::handoff::{Phase, Session};
 
 impl Broker {
+    pub(super) fn morf_requirements(
+        &self,
+        fence: Fence,
+        seat: &str,
+    ) -> Vec<crate::morf::admission::Owner> {
+        let mut owners = self
+            .morf_handoffs
+            .iter()
+            .filter(|session| session.fence == fence && session.seat == seat)
+            .map(Session::owner)
+            .collect::<Vec<_>>();
+        owners.sort_by(|a, b| a.output.cmp(&b.output));
+        owners
+    }
+    pub(super) fn morf_lease(&self, fence: Fence, seat: &str, now: Duration) -> Option<Duration> {
+        let mut until = None;
+        for session in self
+            .morf_handoffs
+            .iter()
+            .filter(|session| session.fence == fence && session.seat == seat)
+        {
+            let value = session.admission_until(now)?;
+            until = Some(until.map_or(value, |old: Duration| old.min(value)));
+        }
+        until
+    }
+    /// Private worker request after metadata, consumer and neutral preflight.
+    /// No public client-supplied readiness enters this path.
+    pub fn activate_morf_handoff(
+        &mut self,
+        channel: &Channel,
+        activation: &crate::morf::admission::Activation,
+    ) -> io::Result<Option<crate::configuration::Command>> {
+        let now = monotonic()?;
+        if !self
+            .input_releases
+            .as_ref()
+            .is_some_and(|ledger| ledger.matches_worker(channel, activation.worker))
+        {
+            return Err(protocol::invalid(
+                "native admission came from another worker",
+            ));
+        }
+        if !activation.fresh(now)
+            || !self.input_releases.as_ref().is_some_and(|ledger| {
+                ledger.prepared_by(
+                    channel,
+                    activation.worker,
+                    activation.fence,
+                    &activation.source,
+                )
+            })
+            || self.morf_requirements(activation.fence, &activation.source.seat)
+                != activation.owners
+        {
+            return Ok(None);
+        }
+        let Some(bound) = self
+            .connections
+            .iter_mut()
+            .filter_map(|connection| connection.bound.as_mut())
+            .find(|bound| {
+                bound.role == Role::Agent
+                    && bound.fence == activation.fence
+                    && bound.seat == activation.source.seat
+                    && bound.context.fresh(now)
+                    && bound.context.state == State::Desktop
+                    && bound
+                        .context
+                        .value
+                        .as_ref()
+                        .is_some_and(|context| !context.snapshot.secure_overlay)
+            })
+        else {
+            return Ok(None);
+        };
+        bound.registration.check(&self.logind, &bound.client)?;
+        let context_until = (bound.context.checked + crate::context::SNAPSHOT_MAX_AGE).min(
+            bound.context.value.as_ref().unwrap().snapshot.captured_at
+                + crate::context::SNAPSHOT_MAX_AGE,
+        );
+        for session in self.morf_handoffs.iter_mut().filter(|session| {
+            session.fence == activation.fence && session.seat == activation.source.seat
+        }) {
+            if !activation.fresh(monotonic()?) || !session.activate(&self.logind).unwrap_or(false) {
+                return Ok(None);
+            }
+        }
+        let completed = monotonic()?;
+        if !activation.fresh(completed) || completed >= context_until {
+            return Ok(None);
+        }
+        let Some(until) = self.morf_lease(activation.fence, &activation.source.seat, completed)
+        else {
+            return Ok(None);
+        };
+        let expires = until
+            .min(context_until)
+            .min(activation.observed_at + crate::morf::admission::FRESHNESS);
+        if expires <= completed {
+            return Ok(None);
+        }
+        Ok(Some(crate::configuration::Command::MorfActivated {
+            grant: crate::morf::admission::Grant {
+                activation: activation.clone(),
+                expires,
+            },
+        }))
+    }
     /// Inhibit a configured native Morf recognizer before physical takeover.
     /// This does not grant transport readiness or enable Morf action dispatch.
     /// The CLI keeps routing disabled pending the kernel cutover gate.

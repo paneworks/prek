@@ -1046,6 +1046,13 @@ fn run_broker(
                             let _ = control.send(&command, monotonic()?)?;
                         }
                     }
+                    prek::worker::Message::MorfReady { activation } => {
+                        if let Some(command) =
+                            broker.activate_morf_handoff(&control, &activation)?
+                        {
+                            let _ = control.send(&command, monotonic()?)?;
+                        }
+                    }
                 },
                 Ok(None) => break,
                 Err(error) if worker_link_closed(&error) => control_closed = true,

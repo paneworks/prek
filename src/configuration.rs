@@ -28,6 +28,11 @@ pub enum Command {
         fence: crate::protocol::Fence,
         source: crate::input::Source,
         evidence: crate::transport::ConsumerEvidence,
+        #[serde(default)]
+        admission: Option<crate::morf::admission::Admission>,
+    },
+    MorfActivated {
+        grant: crate::morf::admission::Grant,
     },
     Begin {
         generation: u64,

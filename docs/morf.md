@@ -183,11 +183,41 @@ acknowledgements and renews the lease while the original session remains valid.
 
 Agent loss, context expiry, locking, output removal or configuration replacement
 retires the local session and stops renewal. It does not restore native globals.
-The watched seat receives no transport readiness: native quiescence is not a
-safe physical cutover or activation grant. This entry point is groundwork for
-the routing coordinator; the CLI does not invoke it or enable production route
-mode yet. Up to eight retained handoffs are allowed, without evicting unresolved
+Virtual consumer readiness includes the exact per-output native ownership
+requirements. It grants no physical admission. The CLI does not invoke this
+entry point or enable production route mode yet. Up to eight retained handoffs
+are allowed, without evicting unresolved
 cleanup obligations. A new handoff cannot adopt an already inhibited provider.
+
+The routing worker requests native activation only after its metadata,
+consumer, drained software buffer and physical-neutral preflight. Its private
+`MorfReady` message binds the actual worker lifetime, broker/configuration/
+session fence, source generation, per-source attempt, observation time and all
+selected output/endpoint/UI/ownership generations. The broker checks the
+authenticated worker channel and exact live ledger enrollment, then checks the
+owning desktop registration and native quiescence. It activates each native
+owner once and observes its owned state. Later source requests sample existing
+ownership rather than repeating the native activation operation. Here `owned`
+means the native recognizer acknowledgement, not a completed kernel cutover.
+
+A private `MorfActivated` grant is bounded by the original observation's 250 ms
+lifetime, native ownership freshness and desktop context freshness. The worker
+accepts it only for its current pending attempt and checks physical neutrality
+and grant validity again before grab. New input or an incomplete software frame
+retires pre-grab permission. Old, foreign, expired or repeated grants cannot
+authorize a replacement attempt or source. Transport replies cannot introduce
+or remove ownership requirements within a source lifetime, or substitute for
+the first neutral admission grant. Public session requests cannot use either
+private message.
+
+Active watched sources request periodic lease refresh through the same private
+transport. A renewal may preserve an already admitted, unexpired source; it
+cannot revive expired authority. Native ownership loss, context expiry or a
+missing renewal makes the worker recover the route, retire its virtual output
+and reopen the original reader with a fresh generation. Admission is checked
+before forwarding as well as before and after grab. The pre-grab kernel backlog
+race and complete consumer cutover boundary remain unresolved, so this bridge
+does not enable production routing or establish physical takeover acceptance.
 
 After the supervisor actually reaps the bound worker, `input_worker_exited`
 consumes its opaque ledger evidence and submits native release under a fresh
@@ -201,6 +231,6 @@ is reported while native inhibition remains in place.
 
 This evidence covers only the enrolled worker's descriptors. It does not prove
 consumer neutrality, external lisgd shutdown, a safe kernel admission boundary,
-or Morf ownership. Physical activation, finer per-seat live-worker draining,
+or completed physical ownership. The kernel admission boundary, finer per-seat live-worker draining,
 recovery across provider replacement and actual root/logind/phone acceptance
 remain required; production Morf action negotiation stays disabled.

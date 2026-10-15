@@ -1,6 +1,6 @@
 //! Broker-owned recognizer inhibition and confirmed worker-exit cleanup.
-//! Quiescence is not physical takeover: transport admission stays inhibited
-//! until the separate kernel cutover and activation path is implemented.
+//! Quiescence is not physical takeover. Native activation gates the worker's
+//! admission separately; the complete kernel cutover gate remains required.
 use super::{ShellClient, native};
 use crate::{
     hyprland, morf::ownership::ReleasedInputs, protocol::Fence, session::Logind,
@@ -18,6 +18,8 @@ const RENEW: Duration = Duration::from_millis(250);
 pub enum Phase {
     Quiescing,
     Quiesced,
+    Activating,
+    Owned,
     Retired,
     ReleaseQueued,
     ReleaseFailed,
@@ -93,6 +95,80 @@ impl Session {
     pub fn generation(&self) -> u64 {
         self.generation
     }
+    pub fn owner(&self) -> super::admission::Owner {
+        super::admission::Owner {
+            output: self.output.clone(),
+            epoch: self.capabilities.epoch().into(),
+            ui_generation: self.capabilities.ui_generation(),
+            ownership_generation: self.generation,
+        }
+    }
+    pub fn admission_until(&self, now: Duration) -> Option<Duration> {
+        let until = (self.checked + super::admission::FRESHNESS)
+            .min(self.renewed + self.capabilities.lease_limit());
+        (self.phase == Phase::Owned && now >= self.checked && now < until).then_some(until)
+    }
+    /// Initial activation mutates once; later source admissions only sample
+    /// existing ownership instead of replaying that operation.
+    pub fn activate(&mut self, logind: &Logind) -> io::Result<bool> {
+        if !matches!(self.phase, Phase::Quiesced | Phase::Owned) {
+            return Ok(false);
+        }
+        let result = (|| {
+            let state = self.client.handoff_state(logind, &self.compositor)?;
+            let now = crate::ipc::monotonic()?;
+            if self.phase == Phase::Owned {
+                self.phase = observed(
+                    self.phase,
+                    self.generation,
+                    self.capabilities.ui_generation(),
+                    &state,
+                    now,
+                )?;
+                self.checked = now;
+                return Ok(true);
+            }
+            if state.phase() == native::HandoffPhase::Quiescing {
+                self.phase = Phase::Quiescing;
+                self.checked = now;
+                return Ok(false);
+            }
+            if observed(
+                self.phase,
+                self.generation,
+                self.capabilities.ui_generation(),
+                &state,
+                now,
+            )? != Phase::Quiesced
+            {
+                return Ok(false);
+            }
+            self.phase = Phase::Activating;
+            let scope = native::Scope {
+                capabilities: &self.capabilities,
+                fence: self.control_fence,
+            };
+            accepted(
+                self.client
+                    .activate_handoff(scope, &state, logind, &self.compositor),
+            )?;
+            let state = self.client.handoff_state(logind, &self.compositor)?;
+            let completed = crate::ipc::monotonic()?;
+            self.phase = observed(
+                Phase::Owned,
+                self.generation,
+                self.capabilities.ui_generation(),
+                &state,
+                completed,
+            )?;
+            self.checked = completed;
+            Ok(true)
+        })();
+        if result.is_err() {
+            self.phase = Phase::Lost;
+        }
+        result
+    }
     pub fn start(&mut self, logind: &Logind, now: Duration) -> io::Result<()> {
         let result = (|| {
             self.renew(logind, now)?;
@@ -125,14 +201,17 @@ impl Session {
         Ok(())
     }
     pub fn retire(&mut self) {
-        if matches!(self.phase, Phase::Quiescing | Phase::Quiesced) {
+        if matches!(
+            self.phase,
+            Phase::Quiescing | Phase::Quiesced | Phase::Owned | Phase::Activating
+        ) {
             self.phase = Phase::Retired;
         }
     }
     pub fn deadline(&self) -> Option<Duration> {
         matches!(
             self.phase,
-            Phase::Quiescing | Phase::Quiesced | Phase::ReleaseQueued
+            Phase::Quiescing | Phase::Quiesced | Phase::Owned | Phase::ReleaseQueued
         )
         .then_some(self.checked + REFRESH)
     }
@@ -250,6 +329,7 @@ fn observed(
         ));
     }
     match (phase, state.phase()) {
+        (Phase::Owned, native::HandoffPhase::Owned) if !state.global_enabled() => Ok(Phase::Owned),
         (Phase::Quiescing | Phase::Quiesced, native::HandoffPhase::Quiescing) => {
             Ok(Phase::Quiescing)
         }
