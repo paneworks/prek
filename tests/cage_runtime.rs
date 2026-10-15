@@ -85,7 +85,25 @@ fn context(
     binding: &Binding,
     fence: Fence,
 ) {
-    let snapshot = sampler.sample(client, 1, SessionKind::User).unwrap();
+    // A compositor can miss one request budget while mapping/rendering the
+    // receiver. Inject no next input until a new, independently bracketed
+    // snapshot succeeds; never extend the production request/freshness limit
+    // or reuse the prior sample. Invalid/security failures remain immediate.
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let snapshot = loop {
+        match sampler.sample(client, 1, SessionKind::User) {
+            Ok(snapshot) => break snapshot,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::TimedOut
+                    && std::time::Instant::now() < deadline =>
+            {
+                eprintln!("Retrying a fresh fixture context sample after timeout");
+                settle(session, logs);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("fixture context sample failed: {error}"),
+        }
+    };
     assert!(!snapshot.outputs.is_empty());
     let now = monotonic().unwrap();
     routing
