@@ -124,8 +124,11 @@ fn real_stream_exchanges_all_typed_operations_without_claiming_root_authority() 
         let mut server = BufReader::new(server);
         for (op, fields, reply) in [
             ("lease", 6, response("accepted", None, None)),
+            ("handoff-quiesce", 6, response("accepted", None, None)),
+            ("handoff-activate", 6, response("accepted", None, None)),
             ("submit", 8, response("queued", Some(7), None)),
             ("receipt", 6, response("dispatched", Some(7), None)),
+            ("handoff-release", 7, response("accepted", None, None)),
             ("revoke", 5, response("accepted", None, None)),
         ] {
             let mut line = String::new();
@@ -140,6 +143,12 @@ fn real_stream_exchanges_all_typed_operations_without_claiming_root_authority() 
                 assert_eq!(request["request"]["output"], "HEADLESS-1");
                 assert_eq!(request["id"], "7");
             }
+            if op.starts_with("handoff-") {
+                assert_eq!(request["ownership_generation"], "1");
+            }
+            if op == "handoff-release" {
+                assert_eq!(request["descriptors_released"], true);
+            }
             // Fragment every response to exercise framing, not one recv/JSON.
             let reply = reply.to_string() + "\n";
             for part in reply.as_bytes().chunks(3) {
@@ -153,18 +162,31 @@ fn real_stream_exchanges_all_typed_operations_without_claiming_root_authority() 
         Operation::Lease {
             expires_ns: nanos(monotonic().unwrap() + Duration::from_millis(900)).unwrap(),
         },
+        Operation::HandoffQuiesce {
+            ownership_generation: Decimal(1),
+        },
+        Operation::HandoffActivate {
+            ownership_generation: Decimal(1),
+        },
         Operation::Submit {
             id: Decimal(7),
             deadline_ns: nanos(monotonic().unwrap() + Duration::from_millis(200)).unwrap(),
             request: &request,
         },
         Operation::Receipt { id: Decimal(7) },
+        Operation::HandoffRelease {
+            ownership_generation: Decimal(1),
+            descriptors_released: true,
+        },
         Operation::Revoke,
     ];
     for (operation, expected) in operations.into_iter().zip([
         Status::Accepted,
+        Status::Accepted,
+        Status::Accepted,
         Status::Queued,
         Status::Dispatched,
+        Status::Accepted,
         Status::Accepted,
     ]) {
         let mut sent = false;

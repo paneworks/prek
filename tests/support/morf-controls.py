@@ -162,16 +162,51 @@ def main():
             assert (capabilities["queue"], capabilities["receipts"], capabilities["lease_ms"],
                     capabilities["grant_ms"]) == (8, 64, 1000, 250)
             assert os.geteuid() != 0, "this fixture exercises real unprivileged refusal"
-            for operation in ("lease", "submit", "revoke"):
+            handoff = native_rpc(dict(version=1, op="handoff-state"))
+            until = time.monotonic() + 3
+            while handoff["handoff"]["observed_ns"] == "0":
+                assert time.monotonic() < until, "native UI contact observation did not arrive"
+                time.sleep(.02)
+                handoff = native_rpc(dict(version=1, op="handoff-state"))
+            assert handoff["version"] == 1 and handoff["epoch"] == initial_native["epoch"]
+            assert handoff["ui_generation"] == "1"
+            h = handoff["handoff"]
+            assert h["phase"] == "native" and h["global_enabled"] is True
+            assert h["scope"] == "global_phone_touch" and h["recognizer_ownership"] is False
+            assert h["ownership_generation"] == "0" and h["contacts"] == 0
+            assert h["native_neutral"] is True and int(h["observed_ns"]) <= time.monotonic_ns()
+            # Reload the actual owned shell once. Native connection identity
+            # stays fixed while the Lua VM generation retires and advances.
+            assert rpc("reload") is True
+            until = time.monotonic() + 5
+            while True:
+                reloaded = native_rpc(dict(version=1, op="handoff-state"))
+                assert reloaded["epoch"] == handoff["epoch"]
+                if reloaded["ui_generation"] == "2":
+                    break
+                assert reloaded["ui_generation"] == "1" and time.monotonic() < until
+                time.sleep(.02)
+            handoff = reloaded
+            capabilities = native_rpc(dict(version=1, op="control-capabilities"))
+            assert capabilities["ui_generation"] == "2"
+            assert handoff["handoff"]["phase"] == "native" and handoff["handoff"]["global_enabled"] is True
+            for operation in ("lease", "submit", "revoke", "handoff-quiesce", "handoff-activate", "handoff-release"):
                 message = dict(version=1, op=operation, epoch=initial_native["epoch"],
-                               ui_generation="1", fence=dict(broker=[1, 2], configuration=1, session=1))
+                               ui_generation=capabilities["ui_generation"], fence=dict(broker=[1, 2], configuration=1, session=1))
                 if operation == "lease":
                     message["expires_ns"] = str(time.monotonic_ns() + 500_000_000)
                 elif operation == "submit":
                     message.update(id="1", deadline_ns=str(time.monotonic_ns() + 100_000_000),
                                    request=request("apps"))
+                elif operation.startswith("handoff-"):
+                    message["ownership_generation"] = "1"
+                    if operation == "handoff-release":
+                        message["descriptors_released"] = True
                 assert native_rpc(message) is None, "unprivileged native mutation was accepted"
             assert native_state()[1] == initial_native
+            after = native_rpc(dict(version=1, op="handoff-state"))["handoff"]
+            assert after["phase"] == "native" and after["global_enabled"] is True
+            assert after["ownership_generation"] == "0"
             for action in ("dashboard", "notifications", "quick_settings", "apps", "web"):
                 send(request(action))
                 value = state()
@@ -225,6 +260,8 @@ def main():
                 broker_grant_tested=False, recognizer_handoff_tested=False,
                 native_root_operations_refused=True, root_grant_tested=False,
                 native_control_capabilities=capabilities,
+                native_handoff_state=handoff, native_handoff_operations_refused=True,
+                native_reload_generation_verified=True,
                 native_shell_binding=final_native, native_endpoint_removed=True,
                 shutdown_acknowledged=shutdown_acknowledged,
                 actual_compositor_layers=layers, initial=initial, final=final_state,

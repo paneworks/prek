@@ -133,3 +133,25 @@ errors and local refusals have `uncertain=false`. Socket-pair tests exercise
 the real framing/typed operation code with modeled replies, not root/logind
 acceptance. This transport does not yet connect production Morf action offers
 or enable action/recognizer ownership negotiation.
+
+The native phone-touch handoff uses `handoff_state`, `quiesce_handoff`,
+`activate_handoff` and `confirm_handoff_release`. The typed state distinguishes
+native, quiescing, quiesced, owned, releasing and lost. Activation checks the
+exact endpoint/VM/ownership generation, UI acknowledgement and a native-neutral
+observation less than 250 ms old. Read-only status polling refreshes that
+observation. Submission requires owned handoff at the native receiver.
+
+`confirm_handoff_release` transmits root's release assertion; its caller must
+first stop recognition, drain input and confirm all owned device descriptors
+are closed. Transport does not itself supply that proof. Morf persists
+inhibition across worker restart and preserves its native policy across Lua VM
+replacement; loss or expiry cannot enable a competing recognizer. Local widget
+and keyboard gestures remain available while duplicated global phone gestures
+are quiesced. An external unmanaged lisgd cannot acknowledge takeover.
+
+This supplies the Morf receiver and broker wire contract. The production
+broker's physical descriptor lifecycle, activation/release orchestration,
+rendered context and root/logind/phone acceptance remain required before action
+negotiation can be enabled. Cage checks inspect actual native handoff state
+and refuse unprivileged mutations; positive ownership remains explicit model
+evidence, not physical takeover.

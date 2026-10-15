@@ -2,6 +2,8 @@
 //! is not action completion, rendered context or recognizer ownership.
 use super::*;
 use crate::{ipc::monotonic, protocol::Fence};
+mod handoff;
+pub use handoff::{HandoffPhase, HandoffState};
 
 const MAX_REQUEST: usize = 4096;
 const LEASE: Duration = Duration::from_secs(1);
@@ -123,6 +125,13 @@ pub enum Refusal {
     DuplicateGesture,
     Expired,
     ControllerRefused,
+    HandoffRequired,
+    HandoffUnavailable,
+    StaleOwnership,
+    Busy,
+    InhibitionFailed,
+    NotNeutral,
+    ReleaseUnconfirmed,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -171,7 +180,11 @@ impl Reply {
         if self.id().is_some_and(|id| Some(id) != expected)
             || (self.status != Status::Rejected && self.id() != expected)
             || match operation {
-                Operation::Lease { .. } | Operation::Revoke => {
+                Operation::Lease { .. }
+                | Operation::Revoke
+                | Operation::HandoffQuiesce { .. }
+                | Operation::HandoffActivate { .. }
+                | Operation::HandoffRelease { .. } => {
                     !matches!(self.status, Status::Accepted | Status::Rejected)
                 }
                 Operation::Submit { .. } => {
@@ -238,6 +251,19 @@ enum Operation<'a> {
         id: Decimal,
     },
     Revoke,
+    #[serde(rename = "handoff-quiesce")]
+    HandoffQuiesce {
+        ownership_generation: Decimal,
+    },
+    #[serde(rename = "handoff-activate")]
+    HandoffActivate {
+        ownership_generation: Decimal,
+    },
+    #[serde(rename = "handoff-release")]
+    HandoffRelease {
+        ownership_generation: Decimal,
+        descriptors_released: bool,
+    },
 }
 impl Operation<'_> {
     fn validate(&self, state: &ShellState, at: Duration) -> io::Result<()> {
@@ -258,6 +284,16 @@ impl Operation<'_> {
             }
             Self::Receipt { id } => id.0 > 0,
             Self::Revoke => true,
+            Self::HandoffQuiesce {
+                ownership_generation,
+            }
+            | Self::HandoffActivate {
+                ownership_generation,
+            } => ownership_generation.0 > 0,
+            Self::HandoffRelease {
+                ownership_generation,
+                descriptors_released,
+            } => ownership_generation.0 > 0 && *descriptors_released,
         };
         if !valid {
             return Err(invalid(
