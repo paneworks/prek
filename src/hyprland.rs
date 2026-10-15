@@ -208,6 +208,20 @@ pub struct Client {
 }
 
 impl Client {
+    /// Retain the same verified compositor binding for broker-owned cleanup
+    /// after the user-agent connection retires. This duplicates no input fd.
+    pub(crate) fn retain_binding(&self) -> io::Result<Self> {
+        Ok(Self {
+            directory: self.directory.try_clone()?,
+            socket_inode: self.socket_inode,
+            uid: self.uid,
+            pid: self.pid,
+            start: self.start,
+            executable: self.executable,
+            instance: self.instance.clone(),
+            version: self.version.clone(),
+        })
+    }
     pub fn open(runtime: &Path, instance: &str, uid: u32, executable: &Path) -> io::Result<Self> {
         if !runtime.is_absolute()
             || instance.is_empty()

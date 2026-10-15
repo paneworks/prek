@@ -150,7 +150,7 @@ and keyboard gestures remain available while duplicated global phone gestures
 are quiesced. An external unmanaged lisgd cannot acknowledge takeover.
 
 This supplies the Morf receiver and broker wire contract. The production
-broker's physical descriptor lifecycle, activation/release orchestration,
+broker's physical cutover, activation and complete release orchestration,
 rendered context and root/logind/phone acceptance remain required before action
 negotiation can be enabled. Cage checks inspect actual native handoff state
 and refuse unprivileged mutations; positive ownership remains explicit model
@@ -172,8 +172,35 @@ cannot construct this evidence. Tests use real socket EOF for closure ordering
 and actual supervised/reaped child processes for exit evidence; no evdev access
 is involved.
 
+The trusted broker API now connects enrollment and native inhibition:
+`Broker::begin_morf_handoff(fence, output)` requires the root routing broker,
+a fresh bound desktop without a secure overlay, a selected native shell and
+no preceding transport readiness. It negotiates the native UI generation,
+enrolls the worker ledger, retains the compositor/provider bindings outside the
+agent connection, and requests a lease and quiescence. The broker polls native
+acknowledgements and renews the lease while the original session remains valid.
+`morf_handoff_status` reports the local phase and ownership generation.
+
+Agent loss, context expiry, locking, output removal or configuration replacement
+retires the local session and stops renewal. It does not restore native globals.
+The watched seat receives no transport readiness: native quiescence is not a
+safe physical cutover or activation grant. This entry point is groundwork for
+the routing coordinator; the CLI does not invoke it or enable production route
+mode yet. Up to eight retained handoffs are allowed, without evicting unresolved
+cleanup obligations. A new handoff cannot adopt an already inhibited provider.
+
+After the supervisor actually reaps the bound worker, `input_worker_exited`
+consumes its opaque ledger evidence and submits native release under a fresh
+cleanup fence. It checks the exact original fence, seat and worker lifetime.
+Per-source closure alone is insufficient for this path, because it does not
+establish that recognition and all buffered work stopped. Lost replies are not
+retried. An accepted release means queued restoration; only a subsequent native
+state observation can establish restoration. The broker's normal exit can leave
+Morf completing that queued operation at its own neutral UI boundary. Failure
+is reported while native inhibition remains in place.
+
 This evidence covers only the enrolled worker's descriptors. It does not prove
 consumer neutrality, external lisgd shutdown, a safe kernel admission boundary,
-or Morf ownership. Production handoff orchestration must enroll and consume it
-alongside those other conditions; it is not yet connected to the native release
-assertion, and production Morf action negotiation remains disabled.
+or Morf ownership. Physical activation, finer per-seat live-worker draining,
+recovery across provider replacement and actual root/logind/phone acceptance
+remain required; production Morf action negotiation stays disabled.

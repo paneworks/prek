@@ -1,6 +1,7 @@
 //! Broker-only native Morf lock endpoint. Lua state and process/socket loss
 //! never establish a completed unlock transition.
 pub mod controls;
+pub mod handoff;
 pub mod native;
 pub mod ownership;
 mod shell;

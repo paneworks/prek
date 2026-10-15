@@ -258,6 +258,12 @@ pub(crate) struct Ledger {
     exited: bool,
 }
 impl Ledger {
+    pub fn worker(&self) -> WorkerIdentity {
+        self.worker
+    }
+    pub fn watching(&self, fence: Fence, seat: &str) -> bool {
+        self.scopes.contains_key(&key(fence, seat))
+    }
     pub fn new(worker: WorkerIdentity, credentials: Credentials) -> io::Result<Self> {
         // Caller binds identity from its owned Supervisor, never a session packet.
         if !worker.valid() || worker.pid() != credentials.pid {

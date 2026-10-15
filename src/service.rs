@@ -15,6 +15,7 @@ use nix::{
     libc,
     poll::{PollFd, PollFlags},
 };
+mod morf_handoff;
 mod rule_control;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -635,6 +636,7 @@ fn subscriptions_fit(seats: &[Subscription]) -> bool {
 
 pub struct Broker {
     input_releases: Option<crate::morf::ownership::Ledger>,
+    morf_handoffs: Vec<crate::morf::handoff::Session>,
     endpoint: Endpoint,
     logind: Logind,
     policy: Policy,
@@ -674,6 +676,7 @@ impl Broker {
         }
         Ok(Self {
             input_releases: None,
+            morf_handoffs: Vec::new(),
             endpoint,
             logind: Logind::open(library)?,
             policy,
@@ -745,7 +748,8 @@ impl Broker {
         self.input_releases
             .as_mut()
             .ok_or_else(|| protocol::invalid("input worker is not bound"))?
-            .exited(report)
+            .exited(report)?;
+        self.release_morf_after_worker_exit()
     }
     pub fn take_released_inputs(
         &mut self,
@@ -1321,6 +1325,16 @@ impl Broker {
         now: Duration,
     ) -> io::Result<Option<crate::configuration::Command>> {
         descriptor.validate().map_err(protocol::invalid)?;
+        // Quiescence alone cannot authorize a physical grab. The coordinator
+        // owns inhibition/cleanup; kernel cutover and native activation are
+        // still required before a watched seat can receive transport readiness.
+        if self
+            .morf_handoffs
+            .iter()
+            .any(|handoff| handoff.fence == subscription.fence && handoff.seat == subscription.seat)
+        {
+            return Ok(None);
+        }
         let Some(bound) = self
             .connections
             .iter_mut()
@@ -1376,6 +1390,11 @@ impl Broker {
                     },
                 )
             })
+            .chain(
+                self.morf_handoffs
+                    .iter()
+                    .filter_map(|handoff| handoff.deadline()),
+            )
             .min()
     }
     pub fn poll_sources(&self) -> Vec<PollFd<'_>> {
@@ -1396,6 +1415,7 @@ impl Broker {
     /// One incoming message/registration per step prevents a subscriber from
     /// monopolizing supervision. All sends are nonblocking and bounded.
     pub fn step(&mut self, now: Duration) -> io::Result<()> {
+        self.poll_morf_handoffs(now);
         if let Some(channel) = self.endpoint.accept()?
             && self.connections.len() < MAX_CLIENTS
         {
