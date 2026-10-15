@@ -14,6 +14,7 @@ preset.rules[1] = p.rules.define {
     id = "editor-example", trigger = p.triggers.key {kind = "key", key = "KEY_A"},
     action = p.actions.event {name = "example"},
     on_begin = function(payload) p.log.info(payload.event.rule) end,
+    output = "eDP-1",
 }
 local triggers = {
     p.triggers.button_taps {key = "KEY_A", count = 2},

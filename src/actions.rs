@@ -157,15 +157,7 @@ impl Executor {
         };
         if fence != self.fence
             || self.mode != Mode::Route
-            || !matches!(
-                action,
-                Action::Command { .. }
-                    | Action::Lua { .. }
-                    | Action::Power {
-                        action: crate::config::PowerAction::Wake
-                            | crate::config::PowerAction::Blank
-                    }
-            )
+            || !protocol::supported_session_action(action)
             || !protocol::action_capabilities(action).is_subset(&self.capabilities)
             || source.seat != self.seat
             || *id == 0
@@ -175,7 +167,7 @@ impl Executor {
             || now - *at > protocol::MAX_PACKET_AGE
         {
             return Err(protocol::invalid(
-                "command offer lacks current session authority",
+                "action offer lacks current session authority",
             ));
         }
         crate::config::validate_action(action).map_err(|error| protocol::invalid(&error))?;
@@ -240,6 +232,46 @@ impl Executor {
             .as_mut()
             .ok_or_else(|| protocol::invalid("power adapter unavailable"))?
             .update_context(view)
+    }
+    /// Install only from a fresh broker-owned binding; never trust a Lua target
+    /// or discover a compositor independently of that binding.
+    pub fn sync_power_context(
+        &mut self,
+        runtime: &std::path::Path,
+        instance: &str,
+        view: crate::context_transfer::View,
+    ) -> io::Result<()> {
+        if self.power.is_some() {
+            return self.update_power_context(view);
+        }
+        view.validate()?;
+        if view.fence != self.fence || !self.capabilities.contains(&Capability::PowerActions) {
+            return Err(protocol::invalid(
+                "power context exceeds current executor authority",
+            ));
+        }
+        let Some(context) = view.context.as_ref() else {
+            return Ok(());
+        };
+        let now = monotonic()?;
+        if view.state != crate::context::State::Desktop
+            || context.snapshot.secure_overlay
+            || now < view.sampled_at
+            || now - view.sampled_at >= crate::context_transfer::FRESHNESS
+            || now < context.snapshot.captured_at
+            || now - context.snapshot.captured_at >= crate::context_transfer::FRESHNESS
+        {
+            return Ok(());
+        }
+        // SAFETY: read-only current process credential query.
+        if context.binding.seat != self.seat || context.binding.uid != unsafe { libc::geteuid() } {
+            return Err(protocol::invalid("power context belongs to another owner"));
+        }
+        let executable =
+            std::path::PathBuf::from(format!("/proc/{}/exe", context.binding.compositor_pid));
+        let client =
+            crate::hyprland::Client::open(runtime, instance, context.binding.uid, &executable)?;
+        self.set_power_adapter(PowerAdapter::new(client, view)?)
     }
     pub fn grant(
         &mut self,
@@ -596,7 +628,8 @@ impl Executor {
         Ok(())
     }
     pub fn flush(&mut self, channel: &mut Channel) -> io::Result<()> {
-        let available = self.running.len() + self.pending.len() < MAX_RUNNING;
+        let available =
+            self.mode == Mode::Route && self.running.len() + self.pending.len() < MAX_RUNNING;
         let now = monotonic()?;
         let capabilities = if available {
             [

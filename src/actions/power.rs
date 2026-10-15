@@ -84,12 +84,7 @@ impl PowerAdapter {
         Ok(&provided.snapshot)
     }
     pub(super) fn target(&self, name: &str, now: Duration) -> io::Result<OutputState> {
-        if name.is_empty()
-            || name.len() > 256
-            || !name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
-        {
+        if !crate::config::valid_power_output(name) {
             return Err(io::Error::other(
                 "power output requires an exact safe connector name",
             ));

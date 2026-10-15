@@ -600,7 +600,14 @@ return p.config.new {
     settle(&mut session, &mut logs);
     if std::env::var("PREK_CAGE_POWER_TEST").as_deref() == Ok("1") {
         let checking = Client::open(runtime, &instance, uid, &executable).unwrap();
-        power_acceptance(client, &checking, &binding, fence, &app, &output);
+        power_acceptance(
+            &checking,
+            &binding,
+            fence,
+            &app,
+            &output,
+            (runtime, &instance),
+        );
     }
     println!(
         "Verified real Hyprland context and Luna transaction receipts, with model-routed A consumption before the edit and A/B forwarding afterward"
@@ -608,33 +615,38 @@ return p.config.new {
 }
 
 fn power_acceptance(
-    client: Client,
     checking: &Client,
     binding: &Binding,
     fence: Fence,
     app: &Path,
     output: &Path,
+    connection: (&Path, &str),
 ) {
     use prek::{
-        actions::{Executor, PowerAdapter},
+        actions::Executor,
         config::{Action, PowerAction, Screen},
         protocol::{Completion, Mode, Request},
         rules::{Event, Evidence, Stage},
     };
-    let definition = Definition::compile(
-        r#"
+    let initial = ContextSampler::default()
+        .sample(checking, 1, SessionKind::User)
+        .unwrap();
+    assert_eq!(initial.outputs.len(), 1);
+    let target = &initial.outputs[0].geometry.name;
+    assert!(prek::config::valid_power_output(target));
+    let source=r#"
 local p=require('prek')
+local target=__OUTPUT__
 local handler=p.actions.define('screen',{requires={'power_actions'}},function(payload)
  return p.actions.power{action=payload.event.rule}
 end)
-return p.config.new{rules={
- p.rules.define{id='blank',trigger=p.triggers.key{key='KEY_A'},action=handler},
- p.rules.define{id='wake',trigger=p.triggers.key{key='KEY_B'},action=handler},
+return p.config.new{mode='route',policy={allowed_devices={'keyboard'},allow_power_actions=true},
+devices={keyboard={keys={'KEY_A','KEY_B'}}},rules={
+ p.rules.define{id='blank',devices={'keyboard'},output=target,trigger=p.triggers.key{key='KEY_A'},action=handler},
+ p.rules.define{id='wake',devices={'keyboard'},output=target,trigger=p.triggers.key{key='KEY_B'},action=handler},
 }}
-"#,
-        "owned-power.lua",
-    )
-    .unwrap();
+"#.replace("__OUTPUT__",&serde_json::to_string(target).unwrap());
+    let definition = Definition::compile(&source, "owned-power.lua").unwrap();
     let config = definition.validate().unwrap();
     let mut session = Session::spawn(app, fence, "seat0", definition).unwrap();
     let mut ignored = Vec::new();
@@ -664,7 +676,7 @@ return p.config.new{rules={
     )
     .unwrap();
     executor
-        .set_power_adapter(PowerAdapter::new(client, view(first)).unwrap())
+        .sync_power_context(connection.0, connection.1, view(first))
         .unwrap();
     executor.lua_ready(true);
     let (mut channel, mut broker) = Channel::pair().unwrap();
@@ -678,6 +690,7 @@ return p.config.new{rules={
     {
         let snapshot = sampler.sample(checking, 1, SessionKind::User).unwrap();
         let name = snapshot.outputs[0].geometry.name.clone();
+        assert_eq!(config.rules[index].output.as_ref(), Some(&name));
         let expires = snapshot.captured_at + Duration::from_millis(250);
         let fresh = view(snapshot);
         executor.update_power_context(fresh.clone()).unwrap();

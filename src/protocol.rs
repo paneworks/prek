@@ -59,6 +59,22 @@ pub enum Mode {
     Observe,
     Route,
 }
+pub fn execution_capability(capability: Capability) -> bool {
+    matches!(
+        capability,
+        Capability::Commands | Capability::LuaActions | Capability::PowerActions
+    )
+}
+pub fn supported_session_action(action: &crate::config::Action) -> bool {
+    matches!(
+        action,
+        crate::config::Action::Command { .. }
+            | crate::config::Action::Lua { .. }
+            | crate::config::Action::Power {
+                action: crate::config::PowerAction::Wake | crate::config::PowerAction::Blank
+            }
+    )
+}
 pub fn effect_capability(kind: crate::config::EffectKind) -> Capability {
     use crate::config::EffectKind;
     match kind {

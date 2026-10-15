@@ -134,6 +134,13 @@ pub(crate) struct RouteIntent {
     candidate: Candidate,
 }
 impl RouteIntent {
+    pub fn power_target_available(&self) -> bool {
+        self.candidate
+            .permit
+            .as_ref()
+            .and_then(|permit| permit.desktop_output())
+            .is_some_and(|output| crate::config::valid_power_output(&output.geometry.name))
+    }
     pub fn id(&self) -> u64 {
         self.candidate.id
     }

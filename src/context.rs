@@ -270,6 +270,11 @@ impl Permit {
     pub fn output(&self) -> Option<&OutputState> {
         self.output.as_ref()
     }
+    pub(crate) fn desktop_output(&self) -> Option<&OutputState> {
+        (self.state == State::Desktop && !self.secure_overlay)
+            .then_some(self.output.as_ref())
+            .flatten()
+    }
     pub fn scope(&self) -> Scope {
         self.scope
     }
@@ -563,6 +568,7 @@ impl Authority {
             if self.console.as_ref() != Some(&source.seat)
                 || !positions.is_empty()
                 || rule.scope != Scope::Everywhere
+                || rule.output.is_some()
                 || !rule.contexts.contains(&Context::Console)
                 || matches!(
                     rule.action,
@@ -635,7 +641,23 @@ impl Authority {
             if output.geometry != *mapped || output.geometry_generation != mapping.generation {
                 return Err(Rejection::OutputChanged);
             }
+            if rule
+                .output
+                .as_ref()
+                .is_some_and(|name| *name != output.geometry.name)
+            {
+                return Err(Rejection::OutputChanged);
+            }
             Some(output.clone())
+        } else if let Some(name) = &rule.output {
+            Some(
+                snapshot
+                    .outputs
+                    .iter()
+                    .find(|output| output.geometry.name == *name)
+                    .ok_or(Rejection::TargetMissing)?
+                    .clone(),
+            )
         } else {
             None
         };
@@ -813,7 +835,7 @@ impl Authority {
                 .find(|current| current.geometry.name == output.geometry.name)
                 .ok_or(Rejection::OutputChanged)?;
             if current != output
-                || mapping.is_none_or(|mapping| mapping.output.as_ref() != Some(&current.geometry))
+                || mapping.is_some_and(|mapping| mapping.output.as_ref() != Some(&current.geometry))
             {
                 return Err(Rejection::OutputChanged);
             }
@@ -934,6 +956,61 @@ mod tests {
         gestures::Transform,
         input::Axis,
     };
+    #[test]
+    fn explicit_output_freezes_keyboard_targets_without_inventing_a_mapping() {
+        let mut authority = authority();
+        let mut candidate = Config::preset("desktop").unwrap().rules.remove(0);
+        candidate.output = Some("phone".into());
+        candidate.screen = Some(Screen::On);
+        let source = source();
+        let input = InputContext {
+            source: &source,
+            mapping: None,
+            at: ms(0),
+        };
+        let permit = authority.start(&candidate, input, &[]).unwrap();
+        assert_eq!(permit.output().unwrap().geometry.name, "phone");
+        authority.validate(&permit, input).unwrap();
+        let mut changed = snapshot(authority.generation(), 2, 10);
+        changed.outputs[0].geometry_generation += 1;
+        authority.update(changed, ms(10)).unwrap();
+        error(
+            authority.validate(
+                &permit,
+                InputContext {
+                    at: ms(10),
+                    ..input
+                },
+            ),
+            Rejection::OutputChanged,
+        );
+        candidate.output = Some("missing".into());
+        error(
+            authority.start(
+                &candidate,
+                InputContext {
+                    at: ms(10),
+                    ..input
+                },
+                &[],
+            ),
+            Rejection::TargetMissing,
+        );
+        candidate.output = Some("other".into());
+        let mapping = mapping();
+        error(
+            authority.start(
+                &candidate,
+                InputContext {
+                    source: &source,
+                    mapping: Some(&mapping),
+                    at: ms(10),
+                },
+                &[],
+            ),
+            Rejection::OutputChanged,
+        );
+    }
     fn ms(n: u64) -> Duration {
         Duration::from_millis(n)
     }

@@ -168,6 +168,74 @@ struct Bound {
     rules: rule_control::Rules,
 }
 
+fn registration_capabilities(
+    routing: Option<&crate::config::Config>,
+    baseline: Option<&crate::config::Config>,
+    lua: bool,
+    observations: bool,
+    role: Role,
+    capabilities: &BTreeSet<Capability>,
+) -> io::Result<()> {
+    let commands = routing.is_some_and(|config| {
+        config.rules.iter().any(|rule| {
+            rule.enabled
+                && matches!(
+                    rule.action,
+                    crate::config::Action::Command { .. } | crate::config::Action::Lua { .. }
+                )
+        })
+    });
+    let power = routing.is_some_and(|config| {
+        config.mode == crate::config::Mode::Route
+            && config.policy.allow_power_actions
+            && config.rules.iter().any(|rule| {
+                rule.enabled
+                    && rule.action.requires_power()
+                    && protocol::supported_session_action(&rule.action)
+            })
+    });
+    if capabilities.iter().any(|capability| {
+        !(matches!(capability, Capability::Observations | Capability::Context)
+            || *capability == Capability::LuaEvents
+                && lua
+                && capabilities.contains(&Capability::Observations)
+                && capabilities.contains(&Capability::Context)
+            || *capability == Capability::LuaActions
+                && routing.is_some()
+                && lua
+                && capabilities.contains(&Capability::LuaEvents)
+                && (capabilities.contains(&Capability::Commands)
+                    || capabilities.contains(&Capability::PowerActions))
+            || *capability == Capability::PowerActions
+                && power
+                && capabilities.contains(&Capability::Context)
+            || *capability == Capability::RuntimeRules
+                && routing.is_none()
+                && baseline.is_some_and(|config| config.policy.allow_runtime_rules)
+                && capabilities.contains(&Capability::LuaEvents)
+                && capabilities.contains(&Capability::Context)
+                && capabilities.contains(&Capability::Observations)
+            || *capability == Capability::InputEvents
+                && routing.is_none()
+                && lua
+                && baseline.is_some_and(|config| {
+                    config.policy.allow_input_events && config.mode == crate::config::Mode::Observe
+                })
+                && capabilities.contains(&Capability::LuaEvents)
+                && capabilities.contains(&Capability::Context)
+                && capabilities.contains(&Capability::Observations)
+            || *capability == Capability::Commands
+                && commands
+                && capabilities.contains(&Capability::Context))
+    }) || !capabilities.is_empty() && (!observations || role != Role::Agent)
+    {
+        return Err(protocol::invalid(
+            "requested capabilities are not implemented by this broker",
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Default)]
 struct ActionLedger {
     pending: BTreeMap<(u64, u64), Offered>,
@@ -183,6 +251,19 @@ struct Offered {
     sent: bool,
     delivered: bool,
     cancelled: bool,
+    required: BTreeSet<Capability>,
+}
+impl Offered {
+    fn capabilities_available(
+        &self,
+        negotiated: &BTreeSet<Capability>,
+        available: &BTreeSet<Capability>,
+    ) -> bool {
+        self.required.is_subset(negotiated)
+            && self.required.iter().all(|capability| {
+                !protocol::execution_capability(*capability) || available.contains(capability)
+            })
+    }
 }
 impl ActionLedger {
     fn offer(
@@ -225,6 +306,12 @@ impl ActionLedger {
                 sent: false,
                 delivered: false,
                 cancelled: false,
+                required: match event {
+                    crate::rules::Event::Matched { action, .. } => {
+                        protocol::action_capabilities(action)
+                    }
+                    _ => unreachable!(),
+                },
             },
         );
         Ok(())
@@ -707,7 +794,11 @@ impl Broker {
                 bound.role == Role::Agent
                     && (bound.capabilities.contains(&Capability::Observations)
                         || self.routing.is_some()
-                            && bound.capabilities.contains(&Capability::Commands))
+                            && bound
+                                .capabilities
+                                .iter()
+                                .copied()
+                                .any(protocol::execution_capability))
                     && bound.context.fresh(now)
             })
             .map(|bound| Subscription {
@@ -718,7 +809,15 @@ impl Broker {
                     .capabilities
                     .iter()
                     .filter(|capability| {
-                        !matches!(**capability, Capability::Commands | Capability::LuaActions)
+                        if **capability == Capability::PowerActions
+                            && !self
+                                .routing
+                                .as_ref()
+                                .is_some_and(|config| config.policy.allow_power_actions)
+                        {
+                            return false;
+                        }
+                        !protocol::execution_capability(**capability)
                             || bound.available_actions.contains(capability)
                                 && bound.actions.pending.len() < crate::actions::MAX_RUNNING
                     })
@@ -760,7 +859,11 @@ impl Broker {
                     && bound.role == Role::Agent
                     && (bound.capabilities.contains(&Capability::Observations)
                         || self.routing.is_some()
-                            && bound.capabilities.contains(&Capability::Commands))
+                            && bound
+                                .capabilities
+                                .iter()
+                                .copied()
+                                .any(protocol::execution_capability))
                     && (bound.context.fresh(now)
                         || matches!(
                             &report,
@@ -921,8 +1024,11 @@ impl Broker {
                     self.connections.insert(index, connection);
                     return Ok(());
                 }
-                if !bound.available_actions.contains(&Capability::Commands)
-                    && !bound.available_actions.contains(&Capability::LuaActions)
+                if !bound
+                    .available_actions
+                    .iter()
+                    .copied()
+                    .any(protocol::execution_capability)
                     || bound.actions.pending.len() >= crate::actions::MAX_RUNNING
                 {
                     self.advance_session(&mut connection, now)?;
@@ -963,13 +1069,19 @@ impl Broker {
                     || protocol::action_capabilities(action)
                         .iter()
                         .any(|capability| {
-                            matches!(capability, Capability::Commands | Capability::LuaActions)
+                            protocol::execution_capability(*capability)
                                 && !bound.available_actions.contains(capability)
                         })
-                    || !matches!(
-                        action,
-                        crate::config::Action::Command { .. } | crate::config::Action::Lua { .. }
-                    )
+                    || !protocol::supported_session_action(action)
+                    || action.requires_power()
+                        && (!config.policy.allow_power_actions
+                            || output
+                                .as_deref()
+                                .is_none_or(|name| !crate::config::valid_power_output(name)))
+                    || configured
+                        .output
+                        .as_ref()
+                        .is_some_and(|name| Some(name) != output.as_ref())
                     || source.seat != bound.seat
                     || source.generation == 0
                     || *at > now
@@ -1190,55 +1302,14 @@ impl Broker {
                     role,
                     capabilities,
                 } if connection.bound.is_none() => {
-                    let commands = self.routing.as_ref().is_some_and(|config| {
-                        config.rules.iter().any(|rule| {
-                            rule.enabled
-                                && matches!(
-                                    rule.action,
-                                    crate::config::Action::Command { .. }
-                                        | crate::config::Action::Lua { .. }
-                                )
-                        })
-                    });
-                    if capabilities.iter().any(|capability| {
-                        !(matches!(capability, Capability::Observations | Capability::Context)
-                            || *capability == Capability::LuaEvents
-                                && self.lua_source.is_some()
-                                && capabilities.contains(&Capability::Observations)
-                                && capabilities.contains(&Capability::Context)
-                            || *capability == Capability::LuaActions
-                                && self.routing.is_some()
-                                && self.lua_source.is_some()
-                                && capabilities.contains(&Capability::LuaEvents)
-                                && capabilities.contains(&Capability::Commands)
-                            || *capability == Capability::RuntimeRules
-                                && self.routing.is_none()
-                                && self
-                                    .rule_baseline
-                                    .as_ref()
-                                    .is_some_and(|config| config.policy.allow_runtime_rules)
-                                && capabilities.contains(&Capability::LuaEvents)
-                                && capabilities.contains(&Capability::Context)
-                                && capabilities.contains(&Capability::Observations)
-                            || *capability == Capability::InputEvents
-                                && self.routing.is_none()
-                                && self.lua_source.is_some()
-                                && self.rule_baseline.as_ref().is_some_and(|config| {
-                                    config.policy.allow_input_events
-                                        && config.mode == crate::config::Mode::Observe
-                                })
-                                && capabilities.contains(&Capability::LuaEvents)
-                                && capabilities.contains(&Capability::Context)
-                                && capabilities.contains(&Capability::Observations)
-                            || *capability == Capability::Commands
-                                && commands
-                                && capabilities.contains(&Capability::Context))
-                    }) || !capabilities.is_empty() && (!self.observations || role != Role::Agent)
-                    {
-                        return Err(protocol::invalid(
-                            "requested capabilities are not implemented by this broker",
-                        ));
-                    }
+                    registration_capabilities(
+                        self.routing.as_ref(),
+                        self.rule_baseline.as_deref(),
+                        self.lua_source.is_some(),
+                        self.observations,
+                        role,
+                        &capabilities,
+                    )?;
                     let peer = Peer::from_socket(&connection.channel)?;
                     self.verify_agent(peer.pid())?;
                     let client = Client::open(
@@ -1450,11 +1521,15 @@ impl Broker {
                             return Err(io::ErrorKind::UnexpectedEof.into());
                         }
                         Request::Authorize { id, ordinal, .. } => {
-                            if !bound.capabilities.contains(&Capability::Commands)
+                            if !bound
+                                .capabilities
+                                .iter()
+                                .copied()
+                                .any(protocol::execution_capability)
                                 || self.routing.is_none()
                             {
                                 return Err(protocol::invalid(
-                                    "command execution was not negotiated",
+                                    "action execution was not negotiated",
                                 ));
                             }
                             if bound
@@ -1472,8 +1547,25 @@ impl Broker {
                             let bound = connection.bound.as_mut().unwrap();
                             let now = monotonic()?;
                             let context = bound.context.value.as_ref().ok_or_else(|| {
-                                protocol::invalid("command context is unavailable")
+                                protocol::invalid("action context is unavailable")
                             })?;
+                            let offer =
+                                bound.actions.pending.get(&(id, ordinal)).ok_or_else(|| {
+                                    protocol::invalid("action grant lacks an offer")
+                                })?;
+                            if !offer.capabilities_available(
+                                &bound.capabilities,
+                                &bound.available_actions,
+                            ) {
+                                bound
+                                    .actions
+                                    .pending
+                                    .get_mut(&(id, ordinal))
+                                    .unwrap()
+                                    .cancelled = true;
+                                connection.push(Reply::ActionCancelled { fence, id, ordinal })?;
+                                return connection.flush(monotonic()?);
+                            }
                             bound
                                 .actions
                                 .authorize(id, ordinal, &context.snapshot, now)?;
@@ -1514,10 +1606,8 @@ impl Broker {
                         }
                         Request::Availability { capabilities, .. } => {
                             if capabilities.iter().any(|capability| {
-                                !matches!(
-                                    *capability,
-                                    Capability::Commands | Capability::LuaActions
-                                ) || !bound.capabilities.contains(capability)
+                                !protocol::execution_capability(*capability)
+                                    || !bound.capabilities.contains(capability)
                             }) {
                                 return Err(protocol::invalid(
                                     "action availability exceeds negotiated capabilities",

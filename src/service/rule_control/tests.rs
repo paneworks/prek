@@ -1,8 +1,92 @@
 use super::*;
 use crate::{
-    config::Action,
+    config::{Action, Config},
     rule_transactions::{Change, Transaction},
 };
+#[test]
+fn public_power_registration_requires_route_policy_declared_effects_and_context() {
+    let mut config = Config::preset("desktop").unwrap();
+    config.mode = crate::config::Mode::Route;
+    config.rules[0].enabled = true;
+    config.rules[0].action = Action::Power {
+        action: crate::config::PowerAction::Blank,
+    };
+    let caps = BTreeSet::from([Capability::Context, Capability::PowerActions]);
+    let accepted = |config: Option<&Config>, lua, caps: &BTreeSet<Capability>| {
+        registration_capabilities(config, None, lua, true, Role::Agent, caps)
+    };
+    assert!(accepted(Some(&config), false, &caps).is_err());
+    config.policy.allow_power_actions = true;
+    assert!(accepted(Some(&config), false, &caps).is_ok());
+    assert!(accepted(None, false, &caps).is_err());
+    assert!(
+        accepted(
+            Some(&config),
+            false,
+            &BTreeSet::from([Capability::PowerActions])
+        )
+        .is_err()
+    );
+    assert!(
+        registration_capabilities(Some(&config), None, false, true, Role::Inspect, &caps).is_err()
+    );
+    config.rules[0].action = Action::Power {
+        action: crate::config::PowerAction::LockAndBlank,
+    };
+    assert!(accepted(Some(&config), false, &caps).is_err());
+    config.rules[0].action = Action::Lua {
+        handler: "power".into(),
+        requires: BTreeSet::from([crate::config::EffectKind::PowerActions]),
+    };
+    let caps = BTreeSet::from([
+        Capability::Context,
+        Capability::Observations,
+        Capability::LuaEvents,
+        Capability::LuaActions,
+        Capability::PowerActions,
+    ]);
+    assert!(accepted(Some(&config), true, &caps).is_ok());
+    assert!(accepted(Some(&config), false, &caps).is_err());
+    config.mode = crate::config::Mode::Observe;
+    assert!(accepted(Some(&config), true, &caps).is_err());
+}
+#[test]
+fn power_offer_capabilities_are_rechecked_before_a_grant() {
+    let snapshot = crate::context_transfer::tests::view(Duration::ZERO)
+        .context
+        .unwrap()
+        .snapshot;
+    let mut ledger = ActionLedger::default();
+    let event = crate::rules::Event::Matched {
+        version: 1,
+        id: 1,
+        ordinal: 1,
+        rule: "power".into(),
+        source: crate::input::Source {
+            device: 1,
+            generation: 1,
+            seat: "seat0".into(),
+        },
+        at: Duration::ZERO,
+        config_generation: 1,
+        session_generation: 1,
+        stage: crate::rules::Stage::Begin,
+        action: Action::Lua {
+            handler: "power".into(),
+            requires: BTreeSet::from([crate::config::EffectKind::PowerActions]),
+        },
+        evidence: crate::rules::Evidence::Key { down: true },
+        window: None,
+        output: Some("fixture-output".into()),
+        workspace: None,
+    };
+    ledger.offer(&event, &snapshot, Duration::ZERO).unwrap();
+    let offer = &ledger.pending[&(1, 1)];
+    let caps = BTreeSet::from([Capability::LuaActions, Capability::PowerActions]);
+    assert!(offer.capabilities_available(&caps, &caps));
+    assert!(!offer.capabilities_available(&caps, &BTreeSet::from([Capability::LuaActions])));
+    assert!(!offer.capabilities_available(&BTreeSet::from([Capability::LuaActions]), &caps));
+}
 fn config() -> Arc<crate::config::Config> {
     Arc::new(crate::config::Config::parse_named("version=1\n[policy]\nallow_runtime_rules=true\n[[rules]]\nid='a'\n[rules.trigger]\nkind='key'\nkey='KEY_A'\n[rules.action]\nkind='event'\nname='a'","system.toml").unwrap())
 }
@@ -406,6 +490,7 @@ fn rule_retirement_removes_unsent_offers_and_cancels_delivered_work() {
         sent: delivered,
         delivered,
         cancelled: false,
+        required: BTreeSet::from([Capability::Commands]),
     };
     let mut ledger = ActionLedger {
         pending: BTreeMap::from([((1, 1), offer(false)), ((2, 1), offer(true))]),

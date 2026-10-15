@@ -50,6 +50,7 @@
 ---@field allowed_seats? string[]
 ---@field allow_runtime_rules? boolean Default false; only protected system policy grants permission.
 ---@field allow_input_events? boolean Default false; requires protected policy, --lua --input and fresh desktop context.
+---@field allow_power_actions? boolean Default false; protected permission for --power on a routing broker.
 
 ---@class (exact) prek.ShapeCapture
 ---@field max_samples? integer Default 2048.
@@ -210,6 +211,7 @@
 ---@field seats? string[]
 ---@field contexts? prek.Context[]
 ---@field scope? prek.Scope Default everywhere.
+---@field output? string Explicit output name for keyboard/non-spatial rules; mapping must agree when present.
 ---@field screen? prek.Screen
 ---@field keyboard_visible? boolean
 ---@field require_keys? prek.Key[]

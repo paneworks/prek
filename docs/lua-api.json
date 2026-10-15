@@ -14,8 +14,18 @@
     "grant_time_ms": 250,
     "implemented_effects": [
       "commands",
-      "observations"
-    ]
+      "observations",
+      "power_actions"
+    ],
+    "power_alternative": {
+      "agent_flags": [
+        "lua",
+        "power"
+      ],
+      "broker_mode": "route",
+      "system_permission": "policy.allow_power_actions",
+      "target": "explicit frozen output"
+    }
   },
   "api_version": 1,
   "context_limits": {
@@ -74,6 +84,10 @@
         "blank",
         "wake"
       ],
+      "agent_flags": [
+        "power"
+      ],
+      "broker_mode": "route",
       "cage_flags": [
         "layers",
         "input",
@@ -87,7 +101,14 @@
         "suspend"
       ],
       "host_api": "actions::Executor::set_power_adapter(PowerAdapter)",
-      "public_session_negotiation": false,
+      "named_handler_flags": [
+        "lua",
+        "power"
+      ],
+      "production_routing_available": false,
+      "public_session_negotiation": true,
+      "rule_output": "explicit name or validated input mapping; no focus fallback",
+      "system_permission": "policy.allow_power_actions",
       "target": "explicit frozen owning output, exact geometry generation and binding",
       "uncertain": "any failure after a mutating request may have been written; never retry"
     }

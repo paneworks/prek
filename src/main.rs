@@ -101,6 +101,10 @@ enum Command {
         /// a routing broker; fresh compositor context is negotiated implicitly.
         #[arg(long)]
         commands: bool,
+        /// Execute protected-policy DPMS blank/wake on explicit frozen outputs.
+        /// Requires a routing broker and verified desktop context.
+        #[arg(long)]
+        power: bool,
         /// Run approved Lua callbacks, timers and named handlers in a separate VM.
         #[arg(long)]
         lua: bool,
@@ -409,6 +413,7 @@ fn run(command: Command) -> io::Result<()> {
             observations,
             context,
             commands,
+            power,
             lua,
             rule_mutations,
             input,
@@ -422,6 +427,7 @@ fn run(command: Command) -> io::Result<()> {
                 observations,
                 context,
                 commands,
+                power,
                 lua,
                 rule_mutations,
                 input,
@@ -1161,6 +1167,7 @@ struct SessionOptions {
     observations: bool,
     context: bool,
     commands: bool,
+    power: bool,
     lua: bool,
     rule_mutations: bool,
     input: bool,
@@ -1203,10 +1210,12 @@ fn run_session(
         observations,
         context,
         commands,
+        power,
         lua,
         rule_mutations,
         input,
     } = options;
+    let effects = commands || power;
     use nix::{
         libc,
         poll::{PollFd, PollFlags, PollTimeout, poll},
@@ -1235,15 +1244,18 @@ fn run_session(
     if observations {
         requested.insert(Capability::Observations);
     }
-    if context || commands || lua {
+    if context || effects || lua {
         requested.insert(Capability::Context);
     }
     if commands {
         requested.insert(Capability::Commands);
     }
+    if power {
+        requested.insert(Capability::PowerActions);
+    }
     if lua {
         requested.insert(Capability::LuaEvents);
-        if commands {
+        if effects {
             requested.insert(Capability::LuaActions);
         }
     }
@@ -1254,7 +1266,7 @@ fn run_session(
         requested.insert(Capability::InputEvents);
     }
     let registration = Request::Register {
-        instance,
+        instance: instance.clone(),
         role: if inspect { Role::Inspect } else { Role::Agent },
         capabilities: requested.clone(),
     };
@@ -1341,13 +1353,13 @@ fn run_session(
                     mode,
                     capabilities,
                 } if fence.is_none() => {
-                    if (commands && mode != Mode::Route) || capabilities != requested {
+                    if (effects && mode != Mode::Route) || capabilities != requested {
                         return Err(io::Error::other(
                             "session adapter does not support these broker capabilities",
                         ));
                     }
                     broker_mode = mode;
-                    if commands {
+                    if effects {
                         executor = Some(prek::actions::Executor::new(
                             accepted,
                             seat.clone(),
@@ -1412,8 +1424,7 @@ fn run_session(
                         let _ = channel.send(&Request::Disconnect { fence: observed }, now);
                         return Ok(());
                     }
-                    if lua
-                        && (lua_runtime.is_some() || lua_download.is_some())
+                    if (power || lua && (lua_runtime.is_some() || lua_download.is_some()))
                         && context_download.is_none()
                     {
                         context_download =
@@ -1434,13 +1445,27 @@ fn run_session(
                     offset,
                     bytes,
                     data,
-                } if lua && Some(incoming) == fence => {
+                } if (lua || power) && Some(incoming) == fence => {
                     let now = monotonic()?;
                     let download = context_download
                         .as_mut()
                         .ok_or_else(|| io::Error::other("unsolicited broker context"))?;
                     match download.push(incoming, offset, bytes, &data, now)? {
                         Some(view) => {
+                            if power && let Some(executor) = executor.as_mut() {
+                                let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+                                    .map(PathBuf::from)
+                                    .ok_or_else(|| {
+                                        io::Error::other(
+                                            "power adapter requires the owning XDG_RUNTIME_DIR",
+                                        )
+                                    })?;
+                                if let Err(error) =
+                                    executor.sync_power_context(&runtime, &instance, view.clone())
+                                {
+                                    eprintln!("Power adapter unavailable: {error}");
+                                }
+                            }
                             if let Some(runtime) = lua_runtime.as_mut() {
                                 runtime.update_context(view.clone())?;
                             }
@@ -1584,7 +1609,7 @@ fn run_session(
                     next = now + Duration::from_millis(250);
                 }
                 Reply::Subscribed { fence: subscribed }
-                    if (observations || commands) && Some(subscribed) == fence =>
+                    if (observations || effects) && Some(subscribed) == fence =>
                 {
                     lua_rules_subscribed = true;
                     if json {
@@ -1684,7 +1709,7 @@ fn run_session(
                 Reply::Dispatch {
                     fence: offered,
                     event,
-                } if commands && Some(offered) == fence => {
+                } if effects && Some(offered) == fence => {
                     executor
                         .as_mut()
                         .unwrap()
@@ -1770,7 +1795,7 @@ fn run_session(
                     id,
                     ordinal,
                     expires,
-                } if commands && Some(granted) == fence => {
+                } if effects && Some(granted) == fence => {
                     executor.as_mut().unwrap().grant(
                         granted,
                         id,
@@ -1783,7 +1808,7 @@ fn run_session(
                     fence: cancelled,
                     id,
                     ordinal,
-                } if commands && Some(cancelled) == fence => {
+                } if effects && Some(cancelled) == fence => {
                     executor
                         .as_mut()
                         .unwrap()
@@ -1939,7 +1964,7 @@ fn run_session(
                 "broker context transfer timed out",
             ));
         }
-        let context_active = lua && (lua_runtime.is_some() || lua_download.is_some());
+        let context_active = power || lua && (lua_runtime.is_some() || lua_download.is_some());
         if context_active
             && context_download.is_none()
             && now >= next_context

@@ -170,6 +170,7 @@ fn power_requires_a_route_offer_and_explicit_grant_and_never_retries_a_duplicate
             .is_err()
     );
     assert_eq!(observed.dispatches.load(Ordering::Relaxed), 0);
+    assert!(observed.execute().iter().any(|request|matches!(request,Request::Availability{capabilities,..} if capabilities.is_empty())));
     let mut fixture = Fixture::new(Mode::Route);
     fixture.offer(1);
     assert!(
@@ -347,4 +348,51 @@ fn preflight_uses_remaining_grant_time_and_generation_change_retires_the_adapter
             .is_err()
     );
     assert_eq!(fixture.dispatches.load(Ordering::Relaxed), 0);
+}
+#[test]
+fn public_adapter_factory_uses_the_broker_binding_and_rejects_another_instance_or_seat() {
+    let fixture = Fixture::new(Mode::Route);
+    let mut executor = Executor::new(
+        fixture.view.fence,
+        "seat0".into(),
+        Mode::Route,
+        BTreeSet::from([Capability::PowerActions]),
+    )
+    .unwrap();
+    assert!(
+        executor
+            .sync_power_context(&fixture._server.directory, "other", fixture.view.clone())
+            .is_err()
+    );
+    let mut wrong = fixture.view.clone();
+    wrong.context.as_mut().unwrap().binding.seat = "seat1".into();
+    assert!(
+        executor
+            .sync_power_context(&fixture._server.directory, "test", wrong)
+            .is_err()
+    );
+    let mut wrong = fixture.view.clone();
+    wrong.context.as_mut().unwrap().binding.compositor_start += 1;
+    assert!(
+        executor
+            .sync_power_context(&fixture._server.directory, "test", wrong)
+            .is_err()
+    );
+    executor
+        .sync_power_context(&fixture._server.directory, "test", fixture.view.clone())
+        .unwrap();
+    executor
+        .offer(fixture.view.fence, fixture.event(1), monotonic().unwrap())
+        .unwrap();
+    executor
+        .grant(
+            fixture.view.fence,
+            1,
+            1,
+            fixture.view.sampled_at + Duration::from_millis(250),
+            monotonic().unwrap(),
+        )
+        .unwrap();
+    executor.execute_ready(monotonic().unwrap()).unwrap();
+    assert_eq!(fixture.dispatches.load(Ordering::Relaxed), 1);
 }

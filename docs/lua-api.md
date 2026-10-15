@@ -742,7 +742,7 @@ The returned configuration accepts `version`, `mode`, `timing`, `shape_capture`,
 `policy`, `devices`, `layers`, `shapes` and `rules`. Rust schema validation remains
 authoritative, including unknown fields, references, priorities, resource bounds,
 activation keys, permitted seats and source selectors. A rule accepts `id`,
-`enabled`, `priority`, `devices`, `seats`, `contexts`, `scope`, `screen`,
+`enabled`, `priority`, `devices`, `seats`, `contexts`, `scope`, `output`, `screen`,
 `keyboard_visible`, `require_keys`, `keys_throughout`, `layer`, `delivery`,
 `trigger` and `action`. Existing defaults and exact units remain in effect.
 
@@ -851,14 +851,33 @@ approved registry; callable pointers are never serialized into configuration.
 
 ## Experimental output-scoped DPMS adapter
 
-The Rust session executor has an explicit host opt-in for typed power plans:
+`prek session --power` opts into protected-policy DPMS actions on a routing
+broker. Use `--lua --power` for named Lua handlers; `--commands` is independent
+and is required only for command effects. The protected system configuration
+must set `policy.allow_power_actions=true` (default false) and declare an enabled
+blank/wake rule or an approved handler requiring `power_actions`. A user overlay
+cannot grant this policy. Observe brokers and inspector registrations refuse
+power negotiation. **Production routing remains disabled pending takeover
+acceptance; this flag does not bypass that gate.**
+
+A rule can set `output="eDP-1"` to freeze an exact verified output for keyboard
+or other non-spatial input. When a device mapping exists it must name the same
+output; a missing/mismatched output is unavailable. No name is inferred from
+focus or from a single-monitor layout. The complete output state and generation
+are validated throughout the gesture. Normal input passes through when policy,
+target or current power availability is missing. Unsupported lock-and-blank
+also remains unavailable before claiming input.
+
+The Rust session executor additionally supports explicit host installation:
 `actions::PowerAdapter::new(client, view)`,
 `Executor::set_power_adapter(adapter)` and `Executor::update_power_context(view)`.
 The host supplies a broker-approved binding/view and an already verified
-Hyprland client; these are not Lua authority setters. **Public `prek session`
-power negotiation remains disabled.** Ordinary sessions still execute only the
-command/event effects described above. This adapter foundation does not enable
-production routing or supply a user CLI permission shortcut.
+Hyprland client; these are not Lua authority setters. The public session agent
+uses `Executor::sync_power_context` to open the exact compositor from its fresh
+broker binding, verify process birth/executable/UID and private endpoint, and
+install the adapter. It refreshes this view without depending on a running Lua
+VM. Fence changes retire the old adapter. This supplies no raw fd or authority
+setter to user Lua.
 
 When a host authorizes it, existing `actions.power {action="blank"}` and
 `actions.power {action="wake"}` plans execute against the offered match's
@@ -890,9 +909,11 @@ retirement apply. Partial composed plans retain uncertain completion semantics.
 the actual helper and executor, with explicit model broker grants, and checks
 DPMS off/on through stock IPC on the owned nested output. Add `--visible` for
 the owned visible path. These fixtures open no host evdev devices and do not
-change host-display DPMS. Broker/logind authorization, production target
-preflight/negotiation, lock-provider integration and physical phone/power
-acceptance remain required.
+change host-display DPMS. Authenticated broker/logind and production-routing
+acceptance, lock-provider integration and physical phone/power trials
+remain required. The installed `power.lua` declaration shows exact
+output selection, separate screen-on/off rules and a named handler that performs
+an effect only in the begin phase. Offline checking performs no effect.
 
 ## Limits, libraries and errors
 

@@ -261,9 +261,10 @@ See [geometry queries](docs/lua-api.md#output-region-and-coordinate-queries).
 Rule declarations support observational `on_begin`, `on_update`, `on_end` and
 `on_cancel` hooks; `rules.on` returns a disposable per-rule subscription.
 See [rule callbacks](docs/lua-api.md#rule-phase-callbacks).
-The explicit host DPMS adapter can execute typed Lua blank/wake plans on a
-frozen output; `nix run .#cage-test -- --layers --input --power` verifies the owned
-nested output. Public power negotiation remains disabled; see
+`session --power` negotiates protected-policy DPMS blank/wake on explicit frozen
+outputs with a routing broker; `--lua --power` also enables approved Lua plans.
+Production takeover remains gated. `nix run .#cage-test -- --layers --input --power`
+verifies the owned nested output; see
 [adapter scope and requirements](docs/lua-api.md#experimental-output-scoped-dpms-adapter).
 Production routing remains disabled; named-effect execution currently has model
 grant and helper-process coverage, without authenticated production routing proof.

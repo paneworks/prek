@@ -291,6 +291,8 @@ pub struct Policy {
     pub allow_runtime_rules: bool,
     /// Root-approved, explicit opt-in to normalized desktop input observation.
     pub allow_input_events: bool,
+    /// Protected system permission for output-scoped user-session DPMS effects.
+    pub allow_power_actions: bool,
 }
 impl Default for Policy {
     fn default() -> Self {
@@ -299,6 +301,7 @@ impl Default for Policy {
             allowed_seats: vec!["seat0".into()],
             allow_runtime_rules: false,
             allow_input_events: false,
+            allow_power_actions: false,
         }
     }
 }
@@ -479,6 +482,10 @@ pub enum EffectKind {
     PowerActions,
 }
 impl Action {
+    pub fn requires_power(&self) -> bool {
+        matches!(self, Self::Power { .. })
+            || matches!(self,Self::Lua {requires,..} if requires.contains(&EffectKind::PowerActions))
+    }
     pub fn effect_kind(&self) -> Option<EffectKind> {
         Some(match self {
             Self::Lua { .. } => return None,
@@ -522,6 +529,13 @@ pub enum PowerAction {
     Wake,
     Blank,
 }
+pub fn valid_power_output(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 256
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+}
 
 fn enabled() -> bool {
     true
@@ -542,6 +556,8 @@ pub struct Rule {
     pub contexts: Vec<Context>,
     #[serde(default)]
     pub scope: Scope,
+    #[serde(default)]
+    pub output: Option<String>,
     #[serde(default)]
     pub screen: Option<Screen>,
     #[serde(default)]
@@ -812,6 +828,13 @@ impl Config {
         let mut ids = BTreeSet::new();
         for rule in &self.rules {
             let prefix = format!("rules.{}", rule.id);
+            if rule.output.as_ref().is_some_and(|name| {
+                name.is_empty() || name.len() > 256 || name.chars().any(char::is_control)
+            }) {
+                return Err(ConfigError(format!(
+                    "{prefix}.output: expected an exact output name of 1–256 bytes without control characters"
+                )));
+            }
             if rule.id.is_empty() || rule.id.len() > 128 || !ids.insert(&rule.id) {
                 return fail(format!("{prefix}: duplicate, empty or oversized rule ID"));
             }
@@ -980,6 +1003,7 @@ impl Config {
                     seats: vec![],
                     contexts: vec![],
                     scope: Scope::Everywhere,
+                    output: None,
                     screen: None,
                     keyboard_visible: None,
                     require_keys: vec![],
@@ -1179,6 +1203,7 @@ impl Config {
                             vec![Context::Desktop]
                         },
                         scope,
+                        output: None,
                         screen: Some(Screen::On),
                         keyboard_visible: if scope == Scope::Keyboard {
                             Some(true)
@@ -1218,6 +1243,7 @@ impl Config {
                         seats: vec![],
                         contexts: vec![Context::Locked, Context::Greeter],
                         scope,
+                        output: None,
                         screen: Some(screen),
                         keyboard_visible: None,
                         require_keys: vec![],
@@ -1531,6 +1557,24 @@ mod tests {
                 })
                 .is_err()
         );
+    }
+    #[test]
+    fn output_names_and_power_policy_round_trip_without_user_policy_expansion() {
+        let mut system = Config::preset("desktop").unwrap();
+        system.policy.allow_power_actions = true;
+        system.rules[0].output = Some("panel".into());
+        assert_eq!(
+            Config::parse(&toml::to_string(&system).unwrap()).unwrap(),
+            system
+        );
+        assert!(
+            toml::from_str::<Overlay>("version=1\n[policy]\nallow_power_actions=true").is_err()
+        );
+        for bad in ["".to_owned(), "bad\noutput".to_owned(), "x".repeat(257)] {
+            let mut config = system.clone();
+            config.rules[0].output = Some(bad);
+            assert!(config.validate().is_err());
+        }
     }
     #[test]
     fn t09_overlapping_exclusive_rules_require_priority() {

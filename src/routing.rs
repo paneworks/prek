@@ -208,6 +208,15 @@ impl Routing {
     }
     fn available(&self, intent: &RouteIntent, at: Duration) -> bool {
         self.capability_generation == self.authority_generation
+            && (!intent.rule.action.requires_power()
+                || self.engine.config().policy.allow_power_actions
+                    && intent.power_target_available()
+                    && !matches!(
+                        intent.rule.action,
+                        crate::config::Action::Power {
+                            action: crate::config::PowerAction::LockAndBlank
+                        }
+                    ))
             && at < self.capability_expires
             && crate::protocol::action_capabilities(&intent.rule.action)
                 .is_subset(&self.capabilities)
@@ -1058,6 +1067,121 @@ mod tests {
         up(&mut routing, 3, 180, 2);
         assert_eq!(drain(&mut routing, 180).len(), 1);
         assert!(routing.take_dispatches(ms(180)).is_empty());
+    }
+    #[test]
+    fn keyboard_power_claim_requires_policy_target_and_current_consumer() {
+        use crate::config::{Key, PowerAction};
+        for case in [
+            "allowed",
+            "policy",
+            "consumer",
+            "target",
+            "missing",
+            "unsupported",
+            "locked",
+            "overlay",
+        ] {
+            let mut device = device();
+            device.axes.clear();
+            device.properties.clear();
+            device.capabilities = BTreeMap::from([(EV_SYN, vec![SYN_REPORT]), (EV_KEY, vec![30])]);
+            let mut config = config();
+            config.policy.allow_power_actions = case != "policy";
+            let rule = &mut config.rules[0];
+            rule.trigger = Trigger::Key { key: Key(30) };
+            rule.delivery = Delivery::Reserve;
+            if case == "locked" {
+                rule.contexts.push(Context::Locked);
+            }
+            rule.action = Action::Power {
+                action: if case == "unsupported" {
+                    PowerAction::LockAndBlank
+                } else {
+                    PowerAction::Blank
+                },
+            };
+            rule.output = if case == "target" {
+                None
+            } else {
+                Some(if case == "missing" { "missing" } else { "test" }.into())
+            };
+            let mut routing = Routing::new(config).unwrap();
+            context(&mut routing, 0);
+            if matches!(case, "locked" | "overlay") {
+                if case == "locked" {
+                    routing.authority_mut().lock_requested();
+                    let generation = routing.authority_mut().generation();
+                    routing.authority_mut().lock_confirmed(generation).unwrap();
+                }
+                let mut snapshot = crate::context_transfer::tests::view(ms(0))
+                    .context
+                    .unwrap()
+                    .snapshot;
+                snapshot.generation = routing.authority_mut().generation();
+                snapshot.state = if case == "locked" {
+                    State::Locked
+                } else {
+                    State::Desktop
+                };
+                snapshot.secure_overlay = case == "overlay";
+                snapshot.outputs = vec![OutputState {
+                    geometry: output(),
+                    geometry_generation: 2,
+                    active_workspace: Some(1),
+                    screen: Screen::On,
+                    keyboard: None,
+                }];
+                snapshot.windows.clear();
+                snapshot.regions.clear();
+                routing.authority_mut().update(snapshot, ms(0)).unwrap();
+            }
+            routing
+                .attach(device.clone(), &ready(&device), None, ms(0))
+                .unwrap();
+            let generation = routing.authority_mut().generation();
+            routing.actions_available(
+                generation,
+                if case == "consumer" {
+                    BTreeSet::new()
+                } else {
+                    BTreeSet::from([Capability::PowerActions])
+                },
+                ms(0),
+            );
+            routing
+                .push(Record::Frame {
+                    frame: Frame {
+                        source: device.source.clone(),
+                        at: ms(0),
+                        sequence: 1,
+                        events: vec![
+                            RawEvent {
+                                kind: EV_KEY,
+                                code: 30,
+                                value: 1,
+                            },
+                            RawEvent {
+                                kind: EV_SYN,
+                                code: SYN_REPORT,
+                                value: 0,
+                            },
+                        ],
+                    },
+                })
+                .unwrap();
+            let forwarded = drain(&mut routing, 0);
+            let dispatches = routing.take_dispatches(ms(0));
+            if case == "allowed" {
+                assert!(forwarded.is_empty());
+                assert_eq!(dispatches.len(), 1);
+                assert!(
+                    matches!(&dispatches[0],Event::Matched{output:Some(output),stage:crate::rules::Stage::Begin,..} if output=="test")
+                );
+            } else {
+                assert_eq!(forwarded.len(), 1, "{case} must preserve ordinary input");
+                assert!(dispatches.is_empty());
+            }
+        }
     }
     #[test]
     fn observing_rule_in_route_mode_dispatches_and_also_preserves_raw_input() {
