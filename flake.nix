@@ -13,6 +13,7 @@
       packages = forSystems (system:
         let pkgs = nixpkgs.legacyPackages.${system};
         in {
+          cage-touch-test = import ./tests/cage-touch.nix { inherit pkgs; };
           cage-test = import ./tests/cage-host.nix {
             inherit pkgs;
             package = self.packages.${system}.default;
@@ -53,6 +54,10 @@
         });
 
       apps = forSystems (system: {
+        cage-touch-test = {
+          type = "app";
+          program = "${self.packages.${system}.cage-touch-test}/bin/prek-cage-touch-test";
+        };
         default = {
           type = "app";
           program = "${self.packages.${system}.default}/bin/prek";

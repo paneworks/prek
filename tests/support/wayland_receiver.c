@@ -36,7 +36,7 @@ struct app {
     struct xkb_keymap *keymap;
     struct xkb_state *key_state;
     FILE *log;
-    bool running, configured, dirty, touch_pending, keys[KEYS];
+    bool running, configured, dirty, touch_pending, presentation_requested, keys[KEYS];
     uint32_t depressed, latched, locked, group;
     unsigned buffers;
     int width, height;
@@ -82,6 +82,10 @@ static void receipt(struct app *app,const char *event,const char *detail) {
     app->dirty=true;
     draw(app);
 }
+static void presented(void *data,struct wl_callback *callback,uint32_t time) {
+    wl_callback_destroy(callback);receipt(data,"rendered",NULL);
+}
+static const struct wl_callback_listener presentation_listener={.done=presented};
 static void released(void *data,struct wl_buffer *buffer) {
     struct drawing *drawing=data;
     struct app *app=drawing->app;
@@ -129,6 +133,11 @@ static void draw(struct app *app) {
     }
     cairo_set_source_rgb(cr,.95,.7,.2);cairo_rectangle(cr,app->pointer_x-4,app->pointer_y-4,8,8);cairo_fill(cr);
     cairo_destroy(cr);cairo_surface_destroy(surface);
+    if(!app->presentation_requested) {
+        app->presentation_requested=true;
+        struct wl_callback *callback=wl_surface_frame(app->surface);
+        wl_callback_add_listener(callback,&presentation_listener,app);
+    }
     wl_surface_attach(app->surface,buffer,0,0);wl_surface_damage_buffer(app->surface,0,0,app->width,app->height);wl_surface_commit(app->surface);
     app->dirty=false;
 }

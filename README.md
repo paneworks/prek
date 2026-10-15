@@ -449,6 +449,7 @@ The desktop test setup follows Mold's `tools/sandbox/nested.sh`:
 ```sh
 nix run .#cage-test                     # headless Cage -> nested Hyprland -> receiver
 nix run .#cage-test -- --visible        # watch the owned session as a window
+nix run .#cage-touch-test               # direct headless Cage touch receipts
 ```
 
 The runner uses private Wayland sockets, a scratch home/XDG directories and a
@@ -474,8 +475,16 @@ file/session fences stay at 1. A second phase must deliver A and B to the same
 real receiver, with neutral keys/modifiers and increasing gesture IDs. Nine
 actual compositor snapshots and the correlated Lua receipt are checked.
 
-This local check currently proves keyboard delivery and model-routed consumption. Touch,
-remapping/repeats, broker/lock integration and handoff races retain their own
+The separate touch runner uses a test-only Cage build with a private inherited
+socketpair and a wlroots touch device. Its events use Cage's ordinary touch
+handlers and must reach the actual receiver as two identified contacts, precise
+coordinates, motion, four ordered touch frames and neutral releases. The driver
+refuses non-headless backends before startup and terminates on malformed input.
+No public input protocol or kernel input device is created. The receiver's first
+rendered-frame receipt establishes the mapped target before touch injection.
+
+These local checks prove keyboard/touch delivery and modeled keyboard consumption.
+Touch routing/consumption, cancellation, remapping/repeats, broker/lock integration and handoff races retain their own
 required acceptance gates. The old NixOS/QEMU test drivers are retired; ARM
 builds and execution follow the native-CI and phone cross-build paths below.
 
