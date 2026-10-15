@@ -249,8 +249,9 @@ store. The compositor, Morf and log writer remain your user. The root probe
 clears its environment, uses the packaged libsystemd, and selects one exact
 ignored test; it cannot select an arbitrary command or test filter.
 
-The local default is the frozen verified Morf executable in
-`../mold/target/async-wallpaper-verified/morf` and the Caelestia shell in that
+The local default prefers the frozen Morf executable in
+`../mold/target/native-cancel-verified/morf`, falling back to
+`../mold/target/async-wallpaper-verified/morf`, and the Caelestia shell in that
 checkout. Override `PREK_MORF_REPO`, `PREK_MORF_BINARY` or `PREK_MORF_SHELL` for
 another local build. The script enters the Morf development environment for its
 graphics dependencies. It uses the existing visible nested session with parent
@@ -309,7 +310,39 @@ turn unresolved work into uncertain results; terminal outcomes are retained.
 
 This host backend does not add a public session payload request or advertise
 `MorfActions`. Agent plan transport, native rendered-context authority,
-per-action/source cancellation and full physical cutover remain required
+public cancellation transport and full physical cutover remain required
 before production negotiation. The opt-in root script tests the native backend
 directly, not the broker's live action-grant path; its receipt keeps
 `broker_grant_tested=false` and `native_action_rendering_tested=false`.
+
+Native capabilities may advertise `cancel_gesture=true`. Its absence means
+unavailable; source-bound action submissions refuse before writing unless the
+provider supports it. The `cancel-gesture` operation carries the exact gesture
+epoch and ID under the existing root-only endpoint/UI/fence binding. It retires
+only that gesture's pending jobs and native UI guard, without revoking the
+owning lease or another source's gesture. Acceptance confirms permission
+retirement, not rendered cancellation or undoing an already-started effect.
+
+The broker binds source-backed submissions to the original device, connection
+generation and seat. Source invalidation and gesture cancellation schedule only
+matching native gestures, including an accepted begin whose receipt was already
+consumed. A later accepted begin retires older continuous histories under
+Morf's one-controller-per-output contract. Pending requests remain bounded.
+Cancellation attempts are recorded before sending. Confirmed and failed
+attempts cannot be resubmitted, and unresolved effects remain uncertain.
+
+Loss of the entire desktop/fence/output schedules one native `revoke` instead.
+The broker processes current client messages before polling native work, so a
+known context loss cannot renew its former authority in that step. Revocation
+retires queued work while native recognizers stay inhibited. Only the separate
+worker-reaping proof and neutral release sequence can restore recognition.
+No root I/O occurs from `Drop`; failed/uncertain exchanges stop without retry.
+
+The root script checks scoped cancellation when the provider advertises it,
+verifies a different gesture still dispatches on the same lease, then checks
+scope revocation before worker-exit restoration. Its receipt records
+`native_gesture_cancel_supported`, `native_gesture_cancel_tested` and
+`native_scope_revocation_tested`; a legacy provider cannot be reported as a
+scoped-cancellation pass. Production agent transport, native rendered-context
+authority, full ownership orchestration and physical/phone acceptance remain
+unfinished.

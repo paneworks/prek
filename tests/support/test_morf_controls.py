@@ -14,6 +14,8 @@ class NativeReceipt(unittest.TestCase):
         return dict(status="passed", uid=0, native_ui_handoff_tested=True,
                     actual_logind_registration=True, compositor_pid=123,
                     native_action_receipts_tested=True, native_action_rendering_tested=False,
+                    native_scope_revocation_tested=True, native_gesture_cancel_supported=False,
+                    native_gesture_cancel_tested=False,
                     producer_pid=456, output="HEADLESS-1", worker_reaped=True,
                     input_devices_opened=0, physical_takeover_tested=False,
                     broker_grant_tested=False, restored=True)
@@ -43,6 +45,17 @@ class NativeReceipt(unittest.TestCase):
                 receipt[field] = replacement
                 with self.subTest(field=field, replacement=replacement), self.assertRaises(ValueError):
                     self.parse(self.line(receipt))
+    def test_cancellation_acceptance_requires_the_observed_native_capability(self):
+        receipt = self.receipt()
+        receipt.update(native_gesture_cancel_supported=True, native_gesture_cancel_tested=True)
+        with self.assertRaises(ValueError):
+            self.parse(self.line(receipt))
+        controls.native_root_receipt(self.line(receipt),compositor_pid=123,producer_pid=456,
+                                     output="HEADLESS-1",cancel_supported=True)
+        receipt["native_gesture_cancel_tested"] = False
+        with self.assertRaises(ValueError):
+            controls.native_root_receipt(self.line(receipt),compositor_pid=123,producer_pid=456,
+                                         output="HEADLESS-1",cancel_supported=True)
 
 
 if __name__ == "__main__":

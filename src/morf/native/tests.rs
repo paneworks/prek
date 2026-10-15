@@ -74,6 +74,17 @@ fn pair() -> (Transport, UnixStream) {
 #[test]
 fn capability_negotiation_rejects_foreign_regressed_or_ownership_claims() {
     let good = capabilities();
+    assert!(
+        !good.can_cancel_gestures(),
+        "legacy capabilities must not invent gesture cancellation"
+    );
+    let mut enhanced = serde_json::json!({"version":1,"epoch":"a".repeat(32),
+        "ui_generation":"1","root_only":true,"queue":8,"receipts":64,"lease_ms":1000,"grant_ms":250,
+        "recognizer_ownership":false,"cancel_gesture":true});
+    let enhanced_caps: Capabilities = serde_json::from_value(enhanced.clone()).unwrap();
+    assert!(enhanced_caps.can_cancel_gestures());
+    enhanced["cancel_gesture"] = json!("true");
+    assert!(serde_json::from_value::<Capabilities>(enhanced).is_err());
     good.validate(&state(), Some(1)).unwrap();
     for (key, bad) in [
         ("version", json!(2)),
@@ -128,6 +139,7 @@ fn real_stream_exchanges_all_typed_operations_without_claiming_root_authority() 
             ("handoff-activate", 6, response("accepted", None, None)),
             ("submit", 8, response("queued", Some(7), None)),
             ("receipt", 6, response("dispatched", Some(7), None)),
+            ("cancel-gesture", 7, response("accepted", None, None)),
             ("handoff-release", 7, response("accepted", None, None)),
             ("revoke", 5, response("accepted", None, None)),
         ] {
@@ -174,6 +186,10 @@ fn real_stream_exchanges_all_typed_operations_without_claiming_root_authority() 
             request: &request,
         },
         Operation::Receipt { id: Decimal(7) },
+        Operation::CancelGesture {
+            gesture_epoch: &request.epoch,
+            gesture: &request.gesture,
+        },
         Operation::HandoffRelease {
             ownership_generation: Decimal(1),
             descriptors_released: true,
@@ -186,6 +202,7 @@ fn real_stream_exchanges_all_typed_operations_without_claiming_root_authority() 
         Status::Accepted,
         Status::Queued,
         Status::Dispatched,
+        Status::Accepted,
         Status::Accepted,
         Status::Accepted,
     ]) {

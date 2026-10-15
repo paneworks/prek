@@ -1148,12 +1148,18 @@ impl Broker {
         match &report {
             Report::SourceInvalidated { source, .. } => {
                 connection.cancel_actions(source, None)?;
+                self.cancel_morf_source(connection.bound.as_ref().unwrap().fence, source, None);
                 self.connections.insert(index, connection);
                 return Ok(());
             }
             Report::Observation { event, .. } => {
                 if let crate::rules::Event::Cancelled { source, id, .. } = event.as_ref() {
                     connection.cancel_actions(source, Some(*id))?;
+                    self.cancel_morf_source(
+                        connection.bound.as_ref().unwrap().fence,
+                        source,
+                        Some(*id),
+                    );
                 }
             }
             _ => {}
@@ -1495,7 +1501,6 @@ impl Broker {
     /// One incoming message/registration per step prevents a subscriber from
     /// monopolizing supervision. All sends are nonblocking and bounded.
     pub fn step(&mut self, now: Duration) -> io::Result<()> {
-        self.poll_morf_handoffs(now);
         if let Some(channel) = self.endpoint.accept()?
             && self.connections.len() < MAX_CLIENTS
         {
@@ -1510,6 +1515,7 @@ impl Broker {
             });
         }
         if self.connections.is_empty() {
+            self.poll_morf_handoffs(monotonic()?);
             return Ok(());
         }
         self.cursor %= self.connections.len();
@@ -1532,6 +1538,7 @@ impl Broker {
         }
         // A bad, stale or disconnected client loses all queued work and its
         // seat owner immediately. No raw payload is logged or returned to it.
+        self.poll_morf_handoffs(monotonic()?);
         Ok(())
     }
     fn process(&mut self, connection: &mut Connection, now: Duration) -> io::Result<()> {

@@ -142,7 +142,9 @@ fn owned_native_handoff() {
     };
     let now = crate::ipc::monotonic().unwrap();
     let deadline = (now + Duration::from_millis(200)).min(session.admission_until(now).unwrap());
-    let ticket = session.submit_control(&request, deadline, &logind).unwrap();
+    let ticket = session
+        .submit_control(&request, deadline, None, &logind)
+        .unwrap();
     let until = Instant::now() + Duration::from_secs(4);
     loop {
         session
@@ -158,6 +160,86 @@ fn owned_native_handoff() {
         );
         thread::sleep(Duration::from_millis(20));
     }
+    let cancel_supported = session.capabilities.can_cancel_gestures();
+    if cancel_supported {
+        let mut cancelled = request.clone();
+        cancelled.gesture = format!("{:032x}", 43);
+        let now = crate::ipc::monotonic().unwrap();
+        let ticket = session
+            .submit_control(
+                &cancelled,
+                (now + Duration::from_millis(200)).min(session.admission_until(now).unwrap()),
+                None,
+                &logind,
+            )
+            .unwrap();
+        assert!(session.cancel_control(&ticket));
+        let until = Instant::now() + Duration::from_secs(4);
+        while session.control_cancellation(&ticket)
+            != Some(crate::morf::dispatch::Cancellation::Confirmed)
+        {
+            session
+                .poll(&logind, crate::ipc::monotonic().unwrap())
+                .unwrap();
+            assert!(
+                Instant::now() < until,
+                "native gesture cancellation did not complete"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            session.take_control(&ticket),
+            Some(crate::morf::dispatch::Outcome::Uncertain)
+        );
+        assert_eq!(session.phase(), Phase::Owned);
+        // A different gesture must still work on the same native lease.
+        cancelled.gesture = format!("{:032x}", 44);
+        let now = crate::ipc::monotonic().unwrap();
+        let ticket = session
+            .submit_control(
+                &cancelled,
+                (now + Duration::from_millis(200)).min(session.admission_until(now).unwrap()),
+                None,
+                &logind,
+            )
+            .unwrap();
+        let until = Instant::now() + Duration::from_secs(4);
+        loop {
+            session
+                .poll(&logind, crate::ipc::monotonic().unwrap())
+                .unwrap();
+            if let Some(outcome) = session.take_control(&ticket) {
+                assert_eq!(outcome, crate::morf::dispatch::Outcome::Dispatched);
+                break;
+            }
+            assert!(
+                Instant::now() < until,
+                "unrelated native gesture stopped after cancellation"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+    session.retire();
+    let until = Instant::now() + Duration::from_secs(4);
+    while session.revocation() != Some(crate::morf::dispatch::Cancellation::Confirmed) {
+        session
+            .poll(&logind, crate::ipc::monotonic().unwrap())
+            .unwrap();
+        assert!(
+            Instant::now() < until,
+            "native scope revocation did not complete"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    let revoked = session
+        .client
+        .handoff_state(&logind, &session.compositor)
+        .unwrap();
+    assert_eq!(revoked.phase(), native::HandoffPhase::Lost);
+    assert!(
+        !revoked.global_enabled(),
+        "revocation restored native recognition before worker proof"
+    );
     let report = loop {
         if let Some(report) = worker.check().unwrap() {
             break report;
@@ -194,6 +276,8 @@ fn owned_native_handoff() {
             "status":"passed","uid":0,"native_ui_handoff_tested":true,
             "actual_logind_registration":true,"compositor_pid":expected_compositor,
             "native_action_receipts_tested":true,"native_action_rendering_tested":false,
+            "native_scope_revocation_tested":true,"native_gesture_cancel_supported":cancel_supported,
+            "native_gesture_cancel_tested":cancel_supported,
             "producer_pid":expected_producer,"output":output,"worker_reaped":true,
             "input_devices_opened":0,"physical_takeover_tested":false,
             "broker_grant_tested":false,"restored":true

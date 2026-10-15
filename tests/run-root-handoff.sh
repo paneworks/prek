@@ -45,7 +45,11 @@ git -C "$repo" status --short
 : "${WAYLAND_DISPLAY:?Run this from your Wayland desktop terminal}"
 : "${XDG_RUNTIME_DIR:?Run this from your Wayland desktop terminal}"
 morf_repo=${PREK_MORF_REPO:-"$repo/../mold"}
-morf_binary=${PREK_MORF_BINARY:-"$morf_repo/target/async-wallpaper-verified/morf"}
+morf_default="$morf_repo/target/async-wallpaper-verified/morf"
+if [[ -x "$morf_repo/target/native-cancel-verified/morf" ]]; then
+  morf_default="$morf_repo/target/native-cancel-verified/morf"
+fi
+morf_binary=${PREK_MORF_BINARY:-"$morf_default"}
 morf_shell=${PREK_MORF_SHELL:-"$morf_repo/examples/shells/caelestia/shell/init.lua"}
 if [[ ! -x "$morf_binary" || ! -f "$morf_shell" ]]; then
   printf 'Missing Morf executable or shell: %s / %s\n' "$morf_binary" "$morf_shell" >&2

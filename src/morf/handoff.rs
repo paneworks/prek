@@ -43,6 +43,7 @@ pub(crate) struct Session {
     checked: Duration,
     renewed: Duration,
     dispatches: super::dispatch::Queue,
+    revocation: Option<super::dispatch::Cancellation>,
 }
 impl Session {
     pub fn prepare(
@@ -89,6 +90,7 @@ impl Session {
             checked: Duration::ZERO,
             renewed: Duration::ZERO,
             dispatches: super::dispatch::Queue::default(),
+            revocation: None,
         })
     }
     pub fn phase(&self) -> Phase {
@@ -211,9 +213,16 @@ impl Session {
             Phase::Quiescing | Phase::Quiesced | Phase::Owned | Phase::Activating
         ) {
             self.phase = Phase::Retired;
+            self.revocation
+                .get_or_insert(super::dispatch::Cancellation::Pending);
         }
     }
     pub fn deadline(&self) -> Option<Duration> {
+        if self.revocation == Some(super::dispatch::Cancellation::Pending)
+            || self.phase == Phase::Owned && self.dispatches.has_cancellations()
+        {
+            return Some(Duration::ZERO);
+        }
         matches!(
             self.phase,
             Phase::Quiescing | Phase::Quiesced | Phase::Owned | Phase::ReleaseQueued
@@ -221,6 +230,24 @@ impl Session {
         .then_some(self.checked + REFRESH)
     }
     pub fn poll(&mut self, logind: &Logind, now: Duration) -> io::Result<()> {
+        if self.revocation == Some(super::dispatch::Cancellation::Pending) {
+            self.revocation = Some(super::dispatch::Cancellation::Attempted);
+            let result = accepted(self.client.revoke_control(
+                native::Scope {
+                    capabilities: &self.capabilities,
+                    fence: self.control_fence,
+                },
+                logind,
+                &self.compositor,
+            ));
+            self.revocation = Some(if result.is_ok() {
+                super::dispatch::Cancellation::Confirmed
+            } else {
+                super::dispatch::Cancellation::Failed
+            });
+            self.dispatches.scope_revoked(result.is_ok());
+            return result;
+        }
         if self.deadline().is_none_or(|deadline| now < deadline) {
             return Ok(());
         }
@@ -258,15 +285,32 @@ impl Session {
         &mut self,
         request: &super::controls::Request,
         deadline: Duration,
+        source: Option<&crate::input::Source>,
         logind: &Logind,
     ) -> io::Result<super::dispatch::Ticket> {
         let now = crate::ipc::monotonic()?;
         let until = self
             .admission_until(now)
             .ok_or_else(|| io::Error::other("native action requires fresh owned recognition"))?;
-        let ticket =
-            self.dispatches
-                .reserve(self.fence, self.owner(), request, now, deadline, until)?;
+        if source.is_some_and(|source| {
+            source.seat != self.seat || source.device == 0 || source.generation == 0
+        }) || source.is_some() && !self.capabilities.can_cancel_gestures()
+        {
+            return Err(io::Error::other(
+                "native action requires a valid source and gesture cancellation support",
+            ));
+        }
+        let ticket = self.dispatches.reserve(
+            super::dispatch::Origin {
+                fence: self.fence,
+                owner: self.owner(),
+                source,
+            },
+            request,
+            now,
+            deadline,
+            until,
+        )?;
         let mut wire_request = request.clone();
         wire_request.ordinal = self.dispatches.wire_ordinal(&ticket);
         let result = self.client.submit_control(
@@ -290,6 +334,25 @@ impl Session {
         Ok(ticket)
     }
     fn poll_control(&mut self, logind: &Logind, now: Duration) -> io::Result<()> {
+        if let Some(gesture) = self.dispatches.next_cancellation() {
+            let epoch = format!(
+                "{:016x}{:016x}",
+                self.fence.broker.0[0], self.fence.broker.0[1]
+            );
+            let result = accepted(self.client.cancel_control_gesture(
+                native::Scope {
+                    capabilities: &self.capabilities,
+                    fence: self.control_fence,
+                },
+                &epoch,
+                &gesture,
+                logind,
+                &self.compositor,
+            ));
+            self.dispatches
+                .cancellation_finished(&gesture, result.is_ok());
+            return result;
+        }
         let Some(id) = self.dispatches.next_receipt(now) else {
             return Ok(());
         };
@@ -317,6 +380,25 @@ impl Session {
     ) -> Option<super::dispatch::Outcome> {
         self.dispatches.take(ticket)
     }
+    pub fn cancel_source(&mut self, source: &crate::input::Source, id: Option<u64>) {
+        if self.phase == Phase::Owned && source.seat == self.seat {
+            self.dispatches.cancel_source(source, id);
+        }
+    }
+    pub fn cancel_control(&mut self, ticket: &super::dispatch::Ticket) -> bool {
+        self.phase == Phase::Owned
+            && self.capabilities.can_cancel_gestures()
+            && self.dispatches.cancel_ticket(ticket)
+    }
+    pub fn control_cancellation(
+        &self,
+        ticket: &super::dispatch::Ticket,
+    ) -> Option<super::dispatch::Cancellation> {
+        self.dispatches.cancellation_state(ticket)
+    }
+    pub fn revocation(&self) -> Option<super::dispatch::Cancellation> {
+        self.revocation
+    }
     /// Only an actual reaped worker proves recognition has stopped as well as
     /// descriptor closure. Per-source closure alone cannot assert drain here.
     pub fn release(
@@ -329,6 +411,7 @@ impl Session {
         validate_release(self.fence, &self.seat, self.worker, self.phase, proof)?;
         validate_cleanup(self.fence, cleanup)?;
         self.dispatches.retire();
+        self.revocation = None;
         // Commit before writing: an uncertain mutation is never retried.
         self.phase = Phase::ReleaseFailed;
         self.control_fence = cleanup;
@@ -344,6 +427,7 @@ impl Session {
             &self.compositor,
         ))?;
         self.phase = Phase::ReleaseQueued;
+        self.dispatches.scope_revoked(true);
         self.checked = now;
         Ok(())
     }

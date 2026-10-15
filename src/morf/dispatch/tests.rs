@@ -34,8 +34,11 @@ fn request(id: u64) -> controls::Request {
 }
 fn reserve(queue: &mut Queue, request: &controls::Request) -> io::Result<Ticket> {
     queue.reserve(
-        fence(),
-        owner(),
+        Origin {
+            fence: fence(),
+            owner: owner(),
+            source: None,
+        },
         request,
         Duration::from_secs(1),
         Duration::from_millis(1100),
@@ -99,8 +102,11 @@ fn frozen_scope_grant_and_strict_progress_cannot_be_replaced() {
     assert!(
         queue
             .reserve(
-                fence(),
-                owner(),
+                Origin {
+                    fence: fence(),
+                    owner: owner(),
+                    source: None
+                },
                 &request(1),
                 Duration::from_secs(1),
                 Duration::from_secs(1),
@@ -111,8 +117,11 @@ fn frozen_scope_grant_and_strict_progress_cannot_be_replaced() {
     assert!(
         queue
             .reserve(
-                fence(),
-                owner(),
+                Origin {
+                    fence: fence(),
+                    owner: owner(),
+                    source: None
+                },
                 &request(1),
                 Duration::from_secs(1),
                 Duration::from_millis(1251),
@@ -123,8 +132,11 @@ fn frozen_scope_grant_and_strict_progress_cannot_be_replaced() {
     assert!(
         queue
             .reserve(
-                fence(),
-                owner(),
+                Origin {
+                    fence: fence(),
+                    owner: owner(),
+                    source: None
+                },
                 &request(1),
                 Duration::from_secs(1),
                 Duration::from_millis(1100),
@@ -168,6 +180,84 @@ fn coalesced_original_ordinals_become_contiguous_native_attempts() {
     let c = reserve(&mut queue, &progress).unwrap();
     assert_eq!(queue.wire_ordinal(&c), 3);
     assert!(reserve(&mut queue, &progress).is_err());
+}
+fn source(generation: u64) -> Source {
+    Source {
+        device: 1,
+        generation,
+        seat: "seat0".into(),
+    }
+}
+fn from_source(queue: &mut Queue, id: u64, source: &Source) -> Ticket {
+    queue
+        .reserve(
+            Origin {
+                fence: fence(),
+                owner: owner(),
+                source: Some(source),
+            },
+            &request(id),
+            Duration::from_secs(1),
+            Duration::from_millis(1100),
+            Duration::from_millis(1200),
+        )
+        .unwrap()
+}
+#[test]
+fn source_cancellation_is_exact_and_does_not_retire_another_source() {
+    let mut queue = Queue::default();
+    let a = from_source(&mut queue, 1, &source(1));
+    let b = from_source(&mut queue, 2, &source(2));
+    assert!(!queue.cancel_source(&source(3), None));
+    assert!(queue.cancel_source(&source(1), Some(1)));
+    assert_eq!(queue.cancellation_state(&a), Some(Cancellation::Pending));
+    assert_eq!(queue.cancellation_state(&b), None);
+    let key = queue.next_cancellation().unwrap();
+    assert_eq!(key, request(1).gesture);
+    assert_eq!(queue.cancellation_state(&a), Some(Cancellation::Attempted));
+    assert!(queue.next_cancellation().is_none());
+    queue.cancellation_finished(&key, true);
+    assert_eq!(queue.cancellation_state(&a), Some(Cancellation::Confirmed));
+    assert_eq!(queue.take(&a), Some(Outcome::Uncertain));
+    assert_eq!(queue.take(&b), None);
+    queue.observed(b.id(), &reply(b.id(), "dispatched"));
+    assert_eq!(queue.take(&b), Some(Outcome::Dispatched));
+    assert!(!queue.cancel_source(&source(1), None));
+}
+#[test]
+fn retained_active_progress_and_failed_cancellation_cannot_be_lost_or_retried() {
+    let mut queue = Queue::default();
+    let a = from_source(&mut queue, 1, &source(1));
+    queue.observed(a.id(), &reply(a.id(), "dispatched"));
+    assert_eq!(queue.take(&a), Some(Outcome::Dispatched));
+    assert!(
+        queue.cancel_source(&source(1), None),
+        "taking a begin receipt forgot its active controller"
+    );
+    let key = queue.next_cancellation().unwrap();
+    queue.cancellation_finished(&key, false);
+    assert!(queue.next_cancellation().is_none());
+    assert!(!queue.cancel_source(&source(1), None));
+    let mut progress = request(1);
+    progress.phase = controls::Phase::Update;
+    progress.ordinal = 2;
+    assert!(
+        queue
+            .reserve(
+                Origin {
+                    fence: fence(),
+                    owner: owner(),
+                    source: Some(&source(1))
+                },
+                &progress,
+                Duration::from_secs(1),
+                Duration::from_millis(1100),
+                Duration::from_millis(1200)
+            )
+            .is_err()
+    );
+    // A replacement source can start its own gesture, never adopt the old one.
+    from_source(&mut queue, 2, &source(2));
 }
 
 #[test]

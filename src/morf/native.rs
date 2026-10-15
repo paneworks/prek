@@ -49,6 +49,8 @@ pub struct Capabilities {
     lease_ms: u64,
     grant_ms: u64,
     recognizer_ownership: bool,
+    #[serde(default)]
+    cancel_gesture: bool,
 }
 impl Capabilities {
     pub fn epoch(&self) -> &str {
@@ -68,6 +70,9 @@ impl Capabilities {
     }
     pub fn grant_limit(&self) -> Duration {
         Duration::from_millis(self.grant_ms)
+    }
+    pub fn can_cancel_gestures(&self) -> bool {
+        self.cancel_gesture
     }
     fn validate(&self, state: &ShellState, previous: Option<u64>) -> io::Result<()> {
         if self.version != 1
@@ -182,6 +187,7 @@ impl Reply {
             || match operation {
                 Operation::Lease { .. }
                 | Operation::Revoke
+                | Operation::CancelGesture { .. }
                 | Operation::HandoffQuiesce { .. }
                 | Operation::HandoffActivate { .. }
                 | Operation::HandoffRelease { .. } => {
@@ -251,6 +257,11 @@ enum Operation<'a> {
         id: Decimal,
     },
     Revoke,
+    #[serde(rename = "cancel-gesture")]
+    CancelGesture {
+        gesture_epoch: &'a str,
+        gesture: &'a str,
+    },
     #[serde(rename = "handoff-quiesce")]
     HandoffQuiesce {
         ownership_generation: Decimal,
@@ -284,6 +295,18 @@ impl Operation<'_> {
             }
             Self::Receipt { id } => id.0 > 0,
             Self::Revoke => true,
+            Self::CancelGesture {
+                gesture_epoch,
+                gesture,
+            } => {
+                let valid = |value: &str| {
+                    value.len() == 32
+                        && value
+                            .bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                };
+                valid(gesture_epoch) && valid(gesture)
+            }
             Self::HandoffQuiesce {
                 ownership_generation,
             }
@@ -466,6 +489,35 @@ impl Client<ShellState> {
         compositor: &hyprland::Client,
     ) -> Result<Reply, Error> {
         self.control(scope, Operation::Revoke, logind, compositor)
+    }
+    /// Retires one gesture's queued work and native UI authorization without
+    /// revoking the owning fence. Accepted is not rendered cancellation proof.
+    pub fn cancel_control_gesture(
+        &mut self,
+        scope: Scope<'_>,
+        gesture_epoch: &str,
+        gesture: &str,
+        logind: &Logind,
+        compositor: &hyprland::Client,
+    ) -> Result<Reply, Error> {
+        if !scope.capabilities.can_cancel_gestures() {
+            return Err(Error {
+                source: io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "native provider has no gesture cancellation operation",
+                ),
+                uncertain: false,
+            });
+        }
+        self.control(
+            scope,
+            Operation::CancelGesture {
+                gesture_epoch,
+                gesture,
+            },
+            logind,
+            compositor,
+        )
     }
     fn control(
         &mut self,

@@ -71,7 +71,7 @@ impl Broker {
                 .admission_until(monotonic()?)
                 .ok_or_else(|| protocol::invalid("native recognition lease unavailable"))?,
         );
-        session.submit_control(request, deadline, &self.logind)
+        session.submit_control(request, deadline, Some(&offer.source), &self.logind)
     }
     pub fn take_morf_control(
         &mut self,
@@ -81,6 +81,45 @@ impl Broker {
             .iter_mut()
             .find(|session| session.fence == ticket.fence() && session.output == ticket.output())?
             .take_control(ticket)
+    }
+    pub fn cancel_morf_control(&mut self, ticket: &crate::morf::dispatch::Ticket) -> bool {
+        self.morf_handoffs
+            .iter_mut()
+            .find(|session| session.fence == ticket.fence() && session.output == ticket.output())
+            .is_some_and(|session| session.cancel_control(ticket))
+    }
+    pub fn morf_control_cancellation(
+        &self,
+        ticket: &crate::morf::dispatch::Ticket,
+    ) -> Option<crate::morf::dispatch::Cancellation> {
+        self.morf_handoffs
+            .iter()
+            .find(|session| session.fence == ticket.fence() && session.output == ticket.output())?
+            .control_cancellation(ticket)
+    }
+    pub fn morf_revocation(
+        &self,
+        fence: Fence,
+        output: &str,
+    ) -> Option<crate::morf::dispatch::Cancellation> {
+        self.morf_handoffs
+            .iter()
+            .find(|session| session.fence == fence && session.output == output)?
+            .revocation()
+    }
+    pub(super) fn cancel_morf_source(
+        &mut self,
+        fence: Fence,
+        source: &crate::input::Source,
+        id: Option<u64>,
+    ) {
+        for session in self
+            .morf_handoffs
+            .iter_mut()
+            .filter(|session| session.fence == fence && session.seat == source.seat)
+        {
+            session.cancel_source(source, id);
+        }
     }
     pub(super) fn morf_requirements(
         &self,

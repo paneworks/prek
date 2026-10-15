@@ -10,9 +10,11 @@ import subprocess
 import time
 
 
-def native_root_receipt(stdout, *, compositor_pid, producer_pid, output):
+def native_root_receipt(stdout, *, compositor_pid, producer_pid, output, cancel_supported=False):
     """Require one complete receipt bound to the session we actually launched."""
     prefix = "PREK_NATIVE_ROOT_RECEIPT="
+    if type(cancel_supported) is not bool:
+        raise ValueError("native cancellation capability must be boolean")
     receipts = [json.loads(line[len(prefix):]) for line in stdout.splitlines()
                 if line.startswith(prefix)]
     if len(receipts) != 1 or not isinstance(receipts[0], dict):
@@ -21,6 +23,8 @@ def native_root_receipt(stdout, *, compositor_pid, producer_pid, output):
     expected = dict(status="passed", uid=0, native_ui_handoff_tested=True,
                     actual_logind_registration=True, compositor_pid=compositor_pid,
                     native_action_receipts_tested=True, native_action_rendering_tested=False,
+                    native_scope_revocation_tested=True, native_gesture_cancel_supported=cancel_supported,
+                    native_gesture_cancel_tested=cancel_supported,
                     producer_pid=producer_pid, output=output, worker_reaped=True,
                     input_devices_opened=0, physical_takeover_tested=False,
                     broker_grant_tested=False, restored=True)
@@ -228,7 +232,7 @@ def main():
             capabilities = native_rpc(dict(version=1, op="control-capabilities"))
             assert capabilities["ui_generation"] == "2"
             assert handoff["handoff"]["phase"] == "native" and handoff["handoff"]["global_enabled"] is True
-            for operation in ("lease", "submit", "revoke", "handoff-quiesce", "handoff-activate", "handoff-release"):
+            for operation in ("lease", "submit", "revoke", "cancel-gesture", "handoff-quiesce", "handoff-activate", "handoff-release"):
                 message = dict(version=1, op=operation, epoch=initial_native["epoch"],
                                ui_generation=capabilities["ui_generation"], fence=dict(broker=[1, 2], configuration=1, session=1))
                 if operation == "lease":
@@ -236,6 +240,8 @@ def main():
                 elif operation == "submit":
                     message.update(id="1", deadline_ns=str(time.monotonic_ns() + 100_000_000),
                                    request=request("apps"))
+                elif operation == "cancel-gesture":
+                    message.update(gesture_epoch="a" * 32, gesture="b" * 32)
                 elif operation.startswith("handoff-"):
                     message["ownership_generation"] = "1"
                     if operation == "handoff-release":
@@ -297,7 +303,8 @@ def main():
                                             text=True, timeout=30)
                 assert result.returncode == 0, "native root probe failed; see morf-native-root.log"
                 root_receipt = native_root_receipt(root_log.read_text(), compositor_pid=args.pid,
-                                                  producer_pid=child.pid, output=name)
+                                                  producer_pid=child.pid, output=name,
+                                                  cancel_supported=capabilities.get("cancel_gesture", False))
                 (output / "morf-native-root-receipts.json").write_text(json.dumps(root_receipt) + "\n")
                 assert state()["workspace_preview"] is False
             shutdown_acknowledged = True
