@@ -27,6 +27,18 @@
     "snapshot_bytes": 4194304,
     "transfer_time_ms": 1000
   },
+  "device_queries": {
+    "catalog": "permitted metadata received through input reset notifications; no host inventory scan",
+    "empty_list": "all known sources removed while context remains usable",
+    "lookup": "exact Source device/generation/seat with canonical decimal strings",
+    "map_keys": "numeric evdev type/axis keys in Lua",
+    "maximum_bytes": 4194304,
+    "maximum_sources": 256,
+    "nil": "no received metadata, unknown source, missing mapping or unavailable/stale desktop context",
+    "position": "validated device counts to normalized/mm/output-local/global coordinates; no action authority",
+    "revision": "decimal string; metadata changes/removals only",
+    "seat": "current fresh desktop binding/fence only; no other-seat enumeration"
+  },
   "editor": {
     "cli": [
       "prek",
@@ -452,6 +464,36 @@
       "name": "context.error",
       "phase": "runtime",
       "signature": "context.error() -> string | nil"
+    },
+    {
+      "description": "Return owned permitted metadata received in this VM while desktop context is fresh; nil before the catalog is available.",
+      "name": "devices.list",
+      "phase": "runtime",
+      "signature": "devices.list() -> DeviceInfo[] | nil"
+    },
+    {
+      "description": "Look up the exact source identity/generation/seat; stale, unknown or foreign-seat identities return nil.",
+      "name": "devices.get",
+      "phase": "runtime",
+      "signature": "devices.get(source) -> DeviceInfo | nil"
+    },
+    {
+      "description": "Return the lossless received-catalog revision while its context is usable.",
+      "name": "devices.revision",
+      "phase": "runtime",
+      "signature": "devices.revision() -> string | nil"
+    },
+    {
+      "description": "Map integer device counts through the permitted source's validated mapping; invalid coordinates raise an error, unavailable mappings return nil.",
+      "name": "devices.position",
+      "phase": "runtime",
+      "signature": "devices.position(source, x, y) -> Position | nil"
+    },
+    {
+      "description": "Return an owned binding/fence/state copy for this VM's fresh desktop session; cannot enumerate other seats.",
+      "name": "seats.current",
+      "phase": "runtime",
+      "signature": "seats.current() -> SeatInfo | nil"
     },
     {
       "description": "Construct a typed trigger with the documented schema fields.",

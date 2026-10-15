@@ -458,6 +458,45 @@
 ---@field reason 'attached'|'reconciled'|'mapping_changed'|'removed'|'lost'
 ---@field keys integer[] Already held evdev codes; no invented press events.
 ---@field contacts prek.Contact[] Already held contacts have fresh=false. Removal/loss clears state.
+---@field metadata? prek.DeviceInfo Permitted metadata for present sources; absent on removal.
+---@class (exact) prek.Axis
+---@field minimum integer
+---@field maximum integer
+---@field resolution integer Device counts per millimetre for touch position axes; zero means unavailable.
+---@field fuzz integer
+---@field flat integer
+---@class (exact) prek.InputDevice
+---@field source prek.Source
+---@field identity string
+---@field name string
+---@field path string Metadata only; grants no permission to open it.
+---@field physical string
+---@field unique string
+---@field vendor integer
+---@field product integer
+---@field properties integer[]
+---@field capabilities table<integer, integer[]> Numeric event-type keys and numeric code arrays.
+---@field axes table<integer, prek.Axis> Numeric evdev axis keys, e.g. axes[53].
+---@field virtual_device boolean Permitted catalog entries have false.
+---@class (exact) prek.InputMapping
+---@field generation prek.Identity
+---@field x prek.Axis
+---@field y prek.Axis
+---@field calibration [[number, number, number], [number, number, number]]
+---@field output? prek.Output
+---@class (exact) prek.DeviceInfo
+---@field device prek.InputDevice
+---@field selectors string[]
+---@field mapping? prek.InputMapping
+---@class (exact) prek.Position
+---@field normalized prek.Point Calibrated normalized coordinates, transformed when an output is mapped.
+---@field millimetres? prek.Point Available when both axis resolutions are positive.
+---@field local? prek.Point Output-local logical coordinates; use position["local"] in Lua.
+---@field global? prek.Point Global logical coordinates when an output is mapped.
+---@class (exact) prek.SeatInfo
+---@field binding prek.Binding
+---@field fence prek.Fence
+---@field state 'desktop'
 ---@class (exact) prek.InputPayload: prek.FencedPayload
 ---@field input prek.InputFrame|prek.InputReset
 ---@class (exact) prek.MatchedPayload: prek.FencedPayload
@@ -554,6 +593,10 @@ local LogAPI = {}
 local SchedulerAPI = {}
 ---@class prek.ContextAPI
 local ContextAPI = {}
+---@class prek.DevicesAPI
+local DevicesAPI = {}
+---@class prek.SeatsAPI
+local SeatsAPI = {}
 
 ---@class (exact) prek.Module
 ---@field api_version integer
@@ -569,10 +612,13 @@ local ContextAPI = {}
 ---@field log prek.LogAPI
 ---@field scheduler prek.SchedulerAPI
 ---@field context prek.ContextAPI
+---@field devices prek.DevicesAPI
+---@field seats prek.SeatsAPI
 local prek = {
     api_version = 1, version = "0.1.0", api = {},
     config = ConfigAPI, rules = RulesAPI, layers = LayersAPI, triggers = TriggersAPI, actions = ActionsAPI,
     units = UnitsAPI, events = EventsAPI, log = LogAPI, scheduler = SchedulerAPI, context = ContextAPI,
+    devices = DevicesAPI, seats = SeatsAPI,
 }
 
 ---Supply version=1 if absent; validate the final model in Rust. No effects or I/O.
@@ -673,6 +719,27 @@ function ContextAPI.state() error("Prek editor definition") end
 function ContextAPI.fence() error("Prek editor definition") end
 ---@return string?
 function ContextAPI.error() error("Prek editor definition") end
+
+---Runtime only. Owned permitted metadata received in this VM, at most 256 entries / 4 MiB.
+---Nil before metadata arrives or when context is unavailable/stale; empty after all known sources are removed.
+---@return prek.DeviceInfo[]?
+function DevicesAPI.list() error("Prek editor definition") end
+---Exact source identity/generation/seat lookup; never redirects an old handle to a replacement.
+---@param source prek.Source Canonical decimal-string device/generation identities.
+---@return prek.DeviceInfo?
+function DevicesAPI.get(source) error("Prek editor definition") end
+---Exact received-catalog revision; metadata changes/removals advance it, input frames do not.
+---@return prek.Identity?
+function DevicesAPI.revision() error("Prek editor definition") end
+---Project integer device counts using the permitted source's mapping. Invalid coordinates raise an error.
+---@param source prek.Source
+---@param x integer
+---@param y integer
+---@return prek.Position?
+function DevicesAPI.position(source, x, y) error("Prek editor definition") end
+---Owned current desktop binding/fence; no enumeration of other seats. Requires fresh context, not device access.
+---@return prek.SeatInfo?
+function SeatsAPI.current() error("Prek editor definition") end
 
 ---@param fields prek.KeyTriggerFields
 ---@return prek.KeyTrigger

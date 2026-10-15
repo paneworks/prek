@@ -9,6 +9,8 @@ use std::{
 
 #[cfg(target_os = "linux")]
 mod context;
+#[cfg(target_os = "linux")]
+mod devices;
 mod editor;
 mod export;
 mod handlers;
@@ -172,6 +174,36 @@ pub fn api() -> serde_json::Value {
         symbols.push(serde_json::json!({"name":format!("context.{name}"),
             "signature":format!("context.{name}() -> {result}"),"phase":"runtime","description":description}));
     }
+    #[cfg(target_os = "linux")]
+    for (name, signature, description) in [
+        (
+            "devices.list",
+            "devices.list() -> DeviceInfo[] | nil",
+            "Return owned permitted metadata received in this VM while desktop context is fresh; nil before the catalog is available.",
+        ),
+        (
+            "devices.get",
+            "devices.get(source) -> DeviceInfo | nil",
+            "Look up the exact source identity/generation/seat; stale, unknown or foreign-seat identities return nil.",
+        ),
+        (
+            "devices.revision",
+            "devices.revision() -> string | nil",
+            "Return the lossless received-catalog revision while its context is usable.",
+        ),
+        (
+            "devices.position",
+            "devices.position(source, x, y) -> Position | nil",
+            "Map integer device counts through the permitted source's validated mapping; invalid coordinates raise an error, unavailable mappings return nil.",
+        ),
+        (
+            "seats.current",
+            "seats.current() -> SeatInfo | nil",
+            "Return an owned binding/fence/state copy for this VM's fresh desktop session; cannot enumerate other seats.",
+        ),
+    ] {
+        symbols.push(serde_json::json!({"name":name,"signature":signature,"phase":"runtime","description":description}));
+    }
     for kind in [
         "key",
         "button_taps",
@@ -213,6 +245,7 @@ pub fn api() -> serde_json::Value {
         "runtime_requires":{"uid":"unprivileged active session","capabilities":["context","observations","lua_events"],"thread":"owning Luna arena","generation":"current broker/configuration/session fence"},
         "action_requires":{"agent_flags":["lua","commands"],"capabilities":["context","observations","lua_events","lua_actions","commands"],"implemented_effects":["commands","observations"],"grant_time_ms":250},
         "editor":{"format":"LuaCATS","module":"prek","cli":["prek","api","--lua"],"path":"share/prek/lua/prek.lua","scope":"implemented_configuration_and_runtime"},
+        "device_queries":{"catalog":"permitted metadata received through input reset notifications; no host inventory scan","maximum_sources":256,"maximum_bytes":4194304,"lookup":"exact Source device/generation/seat with canonical decimal strings","nil":"no received metadata, unknown source, missing mapping or unavailable/stale desktop context","empty_list":"all known sources removed while context remains usable","revision":"decimal string; metadata changes/removals only","map_keys":"numeric evdev type/axis keys in Lua","position":"validated device counts to normalized/mm/output-local/global coordinates; no action authority","seat":"current fresh desktop binding/fence only; no other-seat enumeration"},
         "runtime_api":"partial"})
 }
 const MEMORY: usize = 32 * 1024 * 1024;
@@ -484,6 +517,8 @@ fn instantiate(
                 "log",
                 "scheduler",
                 "context",
+                "devices",
+                "seats",
             ] {
                 module.set(ctx, namespace, Table::new(&ctx))?;
             }
@@ -559,6 +594,16 @@ fn instantiate(
                 for field in ["snapshot", "binding", "state", "fence", "error"] {
                     context.set(ctx, field, self::context::getter(&ctx, host.clone(), field))?;
                 }
+                let devices: Table = module.get(ctx, "devices")?;
+                for field in ["list", "get", "revision", "position"] {
+                    devices.set(ctx, field, self::devices::getter(&ctx, host.clone(), field))?;
+                }
+                let seats: Table = module.get(ctx, "seats")?;
+                seats.set(
+                    ctx,
+                    "current",
+                    self::devices::getter(&ctx, host.clone(), "seat"),
+                )?;
             }
             Ok((
                 ctx.stash(registry),

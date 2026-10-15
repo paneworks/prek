@@ -105,7 +105,35 @@ pub(super) fn payload<'gc>(ctx: Context<'gc>, json: &Json) -> Result<Value<'gc>,
                     }
                 }
             }
+            if let Some(metadata) = input.get("metadata").filter(|value| value.is_object()) {
+                let info: crate::input_events::DeviceInfo =
+                    serde_json::from_value(metadata.clone()).map_err(io::Error::other)?;
+                input_table.set(ctx, "metadata", device_info(ctx, &info)?)?;
+            }
         }
+    }
+    Ok(value)
+}
+
+pub(super) fn device_info<'gc>(
+    ctx: Context<'gc>,
+    info: &crate::input_events::DeviceInfo,
+) -> Result<Value<'gc>, luna::Error<'gc>> {
+    let value = luna_util::serde::to_value(ctx, info).map_err(io::Error::other)?;
+    let Value::Table(table) = value else {
+        unreachable!()
+    };
+    let device: Table = table.get(ctx, "device")?;
+    let source: Table = device.get(ctx, "source")?;
+    source.set(ctx, "device", identity(ctx, info.device.source.device))?;
+    source.set(
+        ctx,
+        "generation",
+        identity(ctx, info.device.source.generation),
+    )?;
+    if let Some(mapping) = &info.mapping {
+        let table: Table = table.get(ctx, "mapping")?;
+        table.set(ctx, "generation", identity(ctx, mapping.generation))?;
     }
     Ok(value)
 }

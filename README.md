@@ -252,6 +252,9 @@ Only explicitly allowed devices on that seat in fresh desktop context are
 eligible. See [input subscriptions](docs/lua-api.md#permitted-normalized-input)
 and [the example](examples/lua/input_events.lua) for frame/reset types and limits.
 These observations do not grant input consumption or action authority.
+`devices.list/get/revision/position` expose the received permitted metadata and
+validated coordinate mapping; `seats.current` returns the fresh current session
+binding. See [device queries](docs/lua-api.md#permitted-device-and-seat-queries).
 Production routing remains disabled; named-effect execution currently has model
 grant and helper-process coverage, without authenticated production routing proof.
 Pending effects are canceled by generation, gesture cancellation and source

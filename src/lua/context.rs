@@ -95,6 +95,7 @@ impl Runtime {
         }
         self.set_clock(now)?;
         let mut host = self.host.borrow_mut();
+        host.devices.context(&view);
         host.context = Some(view);
         Ok(())
     }

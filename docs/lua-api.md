@@ -357,6 +357,62 @@ resets through worker/helper IPC alongside actual compositor context and app
 delivery. The fixture supplies synthetic device/seat authority. Add `--visible`
 for the owned visible nested-Hyprland path; it opens no host evdev devices.
 
+## Permitted device and seat queries
+
+These runtime queries return owned copies; changing a returned table changes
+neither the worker nor future query results. Device queries describe metadata
+actually received in permitted input reset notifications. They perform no host
+device scan and open no device nodes. The same protected policy, allowlists and
+`session --lua --input` capability gates apply to that metadata delivery.
+
+| Function | Result |
+| --- | --- |
+| `devices.list()` | `DeviceInfo[]`, or nil while the received catalog is unavailable. |
+| `devices.get(source)` | `DeviceInfo`, or nil for an unknown, retired, foreign-seat or unavailable source. |
+| `devices.revision()` | Exact decimal-string catalog revision, or nil while unavailable. |
+| `devices.position(source,x,y)` | Projected `Position`, or nil when the source/mapping is unavailable. Invalid integer coordinates raise an error. |
+| `seats.current()` | `{binding,fence,state="desktop"}`, or nil while fresh desktop context is unavailable. |
+
+`source` is the complete `{device,generation,seat}` identity from an input
+payload. Both numeric identities must remain canonical decimal strings; numeric
+values, leading zeros and overflow are rejected. Lookup never redirects an old
+connection generation to its replacement. The catalog holds at most 256 entries
+and 4 MiB of encoded metadata. Metadata changes, replacement and removal advance
+its revision; ordinary input frames do not. A malformed, regressing or excessive
+metadata update retires the Lua component. Context inhibition or a new fence
+retires the cached view.
+
+Before the first metadata arrives, `devices.list()` returns nil. After all known
+sources are removed, it returns an empty array while context remains usable.
+This is the received permitted catalog, not a claim that every host device has
+been enumerated or that startup delivery is an atomic inventory snapshot. All
+queries require runtime evaluation and fresh desktop context. Copies that expire
+during serialization are discarded. `seats.current()` uses the verified context
+binding without requiring device access; it cannot enumerate other seats.
+
+`DeviceInfo` contains `{device,selectors,mapping}`. `device` contains `source`,
+stable `identity`, `name`, metadata `path`, `physical`, `unique`, numeric
+`vendor`/`product`, `properties`, `capabilities`, `axes` and `virtual_device`.
+Paths grant no permission to open them. Capabilities and axes use **numeric Lua
+keys**: `info.device.capabilities[1]` is the key-code array and
+`info.device.axes[53]` is the touch-X axis. This representation is identical in
+reset payload metadata and direct queries. Each axis has `minimum`, `maximum`,
+`resolution`, `fuzz` and `flat`. Present-source reset notifications include this
+same optional `metadata`; removal notifications omit it.
+
+An optional mapping contains exact string `generation`, X/Y axis metadata, a
+2×3 calibration matrix and an optional output geometry. `devices.position`
+reuses the Rust mapping implementation. Its result has calibrated `normalized`
+coordinates, `millimetres` when both resolutions are positive, and optional
+output-local/global logical coordinates. Lua accesses the reserved field name
+as `position["local"]`. Without an output, local/global coordinates are nil;
+without a mapping, the function returns nil. Mapping and coordinate queries
+confer no target, consumption, synthetic-input or action authority.
+
+[device_queries.lua](../examples/lua/device_queries.lua) demonstrates metadata and
+touch projection. This read API does not implement device creation/removal,
+operating-mode changes, custom recognizer claims or physical takeover.
+
 ## Runtime context
 
 The `context` namespace reads the broker-verified session snapshot. Queries

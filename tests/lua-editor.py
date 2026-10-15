@@ -61,6 +61,15 @@ end)
 p.events.on("context_changed", function(payload) p.log.info(payload.state, {revision = payload.revision}) end)
 p.events.on("rules_changed", function(payload) p.log.info("receipt", {accepted = payload.accepted}) end)
 p.events.on("input", function(payload)
+    local info = p.devices.get(payload.input.source)
+    if info then
+        local axis = info.device.axes[53]
+        local position = p.devices.position(payload.input.source, 0, 0)
+        if position and position["local"] then p.log.info("position", {x = position["local"].x}) end
+        p.log.info(info.device.name, {maximum = axis and axis.maximum, revision = p.devices.revision()})
+    end
+    local seat = p.seats.current()
+    if seat then p.log.info(seat.binding.seat) end
     if payload.input.kind == "frame" then
         ---@type string
         local sequence = payload.input.sequence

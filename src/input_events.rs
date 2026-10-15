@@ -6,6 +6,51 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, time::Duration};
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceInfo {
+    pub device: Device,
+    pub selectors: Vec<String>,
+    pub mapping: Option<crate::gestures::Mapping>,
+}
+impl DeviceInfo {
+    pub fn validate(&self) -> std::io::Result<()> {
+        let device = &self.device;
+        if device.virtual_device
+            || device.source.generation == 0
+            || device.identity.is_empty()
+            || [
+                &device.identity,
+                &device.name,
+                &device.path,
+                &device.physical,
+                &device.unique,
+            ]
+            .iter()
+            .any(|value| value.len() > 4096 || value.contains('\0'))
+            || device.properties.len() > 256
+            || device.axes.len() > 128
+            || device.capabilities.len() > 64
+            || device.capabilities.values().any(|codes| codes.len() > 4096)
+            || device
+                .axes
+                .values()
+                .any(|axis| axis.maximum < axis.minimum || axis.resolution < 0)
+            || self.selectors.is_empty()
+            || self.selectors.len() > 256
+        {
+            return Err(std::io::Error::other("invalid permitted device metadata"));
+        }
+        if let Some(mapping) = &self.mapping {
+            mapping.validate().map_err(std::io::Error::other)?;
+            if mapping.generation == 0 {
+                return Err(std::io::Error::other("invalid input mapping generation"));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResetReason {
@@ -37,6 +82,8 @@ pub enum Event {
         reason: ResetReason,
         keys: BTreeSet<u16>,
         contacts: Vec<Contact>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<Box<DeviceInfo>>,
     },
 }
 impl Event {
@@ -54,6 +101,18 @@ impl Event {
             return Err(std::io::Error::other(
                 "invalid normalized input identity or selectors",
             ));
+        }
+        if let Self::Reset {
+            metadata: Some(metadata),
+            ..
+        } = self
+        {
+            metadata.validate()?;
+            if &metadata.device.source != self.source() || metadata.selectors != self.selectors() {
+                return Err(std::io::Error::other(
+                    "input metadata differs from source or selectors",
+                ));
+            }
         }
         match self {
             Self::Frame {
@@ -133,6 +192,7 @@ impl Event {
     pub(crate) fn reset(
         config: &Config,
         device: &Device,
+        mapping: Option<&crate::gestures::Mapping>,
         at: Duration,
         reason: ResetReason,
         keys: &BTreeSet<u16>,
@@ -150,6 +210,13 @@ impl Event {
         Some(Self::Reset {
             source: device.source.clone(),
             at,
+            metadata: (!matches!(reason, ResetReason::Removed)).then(|| {
+                Box::new(DeviceInfo {
+                    device: device.clone(),
+                    selectors: selectors.clone(),
+                    mapping: mapping.cloned(),
+                })
+            }),
             selectors,
             reason,
             keys: if clear { BTreeSet::new() } else { keys.clone() },
@@ -213,6 +280,7 @@ mod tests {
             reason: ResetReason::Removed,
             keys: BTreeSet::new(),
             contacts: vec![],
+            metadata: None,
         };
         input.validate().unwrap();
         assert!(!input.fresh(Duration::from_millis(99)));

@@ -148,6 +148,16 @@ def main():
                     with (output / f"hyprland-{query}.json").open("w") as data:
                         subprocess.run([hyprctl,"-j",query],env=diagnostic_env,
                                        stdout=data,stderr=log,check=True,timeout=3)
+                # Prepare the keymap/hotplug round trip before the fixture
+                # acquires its short-lived context. Injection still waits for
+                # the phase-one receipt; production freshness stays unchanged.
+                prepared_keys = output / "phase-keys.txt"
+                prepared_keys.write_text("")
+                keyboard = subprocess.Popen([args.keyboard,str(socket),str(prepared_keys)],
+                                            stdin=subprocess.PIPE,stdout=subprocess.PIPE,
+                                            stderr=log,text=True)
+                if not select.select([keyboard.stdout], [], [], 5)[0] or keyboard.stdout.readline() != "ready\n":
+                    raise RuntimeError("prepared routed keyboard handshake failed")
                 fixture = subprocess.Popen([args.prek_fixture,"--ignored","--exact",
                                             "local_cage_lua_routing_and_context","--nocapture"],
                                            env=fixture_env,stdout=log,stderr=log)
@@ -165,11 +175,12 @@ def main():
                         keys_file = output / "phase-keys.txt"
                         keys_file.write_text("".join(f"{event['code']} {event['value']}\n" for event in keys))
                         start = len(rows())
-                        keyboard = subprocess.Popen([args.keyboard,str(socket),str(keys_file)],
-                                                    stdin=subprocess.PIPE,stdout=subprocess.PIPE,
-                                                    stderr=log,text=True)
-                        if not select.select([keyboard.stdout], [], [], 5)[0] or keyboard.stdout.readline() != "ready\n":
-                            raise RuntimeError("routed keyboard handshake failed")
+                        if keyboard is None or keyboard.poll() is not None:
+                            keyboard = subprocess.Popen([args.keyboard,str(socket),str(keys_file)],
+                                                        stdin=subprocess.PIPE,stdout=subprocess.PIPE,
+                                                        stderr=log,text=True)
+                            if not select.select([keyboard.stdout], [], [], 5)[0] or keyboard.stdout.readline() != "ready\n":
+                                raise RuntimeError("routed keyboard handshake failed")
                         keyboard.communicate("\n",timeout=5)
                         if keyboard.returncode != 0:
                             raise RuntimeError("routed keyboard failed")

@@ -123,7 +123,7 @@ pub struct Mapping {
     /// None permits generic normalized observation, never pixel-based actions.
     pub output: Option<Output>,
 }
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct Position {
     pub normalized: Point,
     pub millimetres: Option<Point>,

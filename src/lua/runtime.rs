@@ -209,6 +209,8 @@ pub(super) struct Host {
     pub(super) context: Option<crate::context_transfer::View>,
     #[cfg(target_os = "linux")]
     pub(super) context_clock: Option<Instant>,
+    #[cfg(target_os = "linux")]
+    pub(super) devices: super::devices::Catalog,
 }
 pub(super) fn logger<'gc>(ctx: &Context<'gc>, host: Rc<RefCell<Host>>) -> Callback<'gc> {
     Callback::from_fn(ctx, move |ctx, _, mut stack| {
@@ -291,6 +293,18 @@ impl Runtime {
             return Err(error("Lua runtime was retired after callback failure"));
         }
         bounded_json(payload, MAX_EVENT_BYTES).map_err(error)?;
+        #[cfg(target_os = "linux")]
+        if kind == EventKind::Input {
+            let result = self.host.borrow_mut().devices.apply(&self.config, payload);
+            if let Err(reason) = result {
+                self.failed = true;
+                self.host
+                    .borrow_mut()
+                    .rules
+                    .discard("invalid permitted device metadata");
+                return Err(reason);
+            }
+        }
         self.host.borrow_mut().running = true;
         let started = Instant::now();
         let result = self.invoke(kind, payload, started);

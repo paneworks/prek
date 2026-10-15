@@ -596,6 +596,7 @@ impl Engine {
                 crate::input_events::Event::reset(
                     &self.config,
                     &state.device,
+                    state.mapping.as_ref(),
                     at,
                     crate::input_events::ResetReason::Attached,
                     &state.keys,
@@ -617,6 +618,7 @@ impl Engine {
         crate::input_events::Event::reset(
             &self.config,
             &state.device,
+            state.mapping.as_ref(),
             at,
             reason,
             &state.keys,

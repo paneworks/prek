@@ -38,6 +38,11 @@ p.events.on('input',function(payload)
  local e=payload.input
  assert(e.source.device=='9223372036854775808' and e.source.generation=='18446744073709551615')
  assert(e.source.seat=='seat0' and e.raw==nil and e.events==nil and e.selectors[1]=='keyboard')
+ local info=p.devices.get(e.source)
+ assert(info and info.device.name=='owned input model' and info.device.capabilities[1][1]==30)
+ assert(p.devices.revision()=='1' and #p.devices.list()==1)
+ assert(p.devices.position(e.source,0,0)==nil)
+ assert(p.seats.current().binding.seat=='seat0')
  if e.kind=='reset' then
    assert(e.reason=='attached' and e.keys[1]==30)
    held=true;p.log.info('input-reset')
@@ -109,7 +114,8 @@ return p.config.new{policy={allow_input_events=true,allowed_devices={'keyboard'}
             binding: Binding {
                 seat: "seat0".into(),
                 session: "model-session".into(),
-                uid: 1000,
+                // SAFETY: read-only UID query for this helper's owning user.
+                uid: unsafe { nix::libc::geteuid() },
                 compositor_pid: 42,
                 compositor_start: 1,
                 kind: SessionKind::User,
@@ -126,6 +132,16 @@ return p.config.new{policy={allow_input_events=true,allowed_devices={'keyboard'}
             },
         })),
     };
+    session
+        .update_context(prek::context_transfer::View {
+            fence,
+            sampled_at: now,
+            state: State::Desktop,
+            context: subscription.context.clone(),
+            error: None,
+        })
+        .unwrap();
+    drain(&mut session);
     parent
         .send(
             &Command::Subscriptions {

@@ -293,6 +293,14 @@ if input_control then p.events.on('input',function(payload)
   assert(e.source.seat=='seat0' and e.raw==nil and e.events==nil)
   assert(e.source.generation=='1' or e.source.generation=='2')
   assert(e.selectors[1]=='keyboard')
+  if e.reason=='removed' then assert(p.devices.get(e.source)==nil)
+  else
+    local info=p.devices.get(e.source)
+    assert(info and info.device.name=='Prek local keyboard' and #p.devices.list()==1)
+    assert(info.device.source.generation==e.source.generation)
+    assert(p.devices.position(e.source,0,0)==nil)
+  end
+  assert(p.seats.current().binding.seat=='seat0' and p.devices.revision())
   if e.kind=='frame' then
     assert(#e.changes==1 and e.changes[1].kind=='key')
     p.log.info('local-input',{generation=e.source.generation,sequence=e.sequence,code=e.changes[1].code,state=e.changes[1].state})
