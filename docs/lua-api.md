@@ -43,6 +43,70 @@ type diagnostics with the pinned Lua Language Server package.
 
 ## Runtime rules
 
+### Rule phase callbacks
+
+`rules.on(id, phase, callback) -> Subscription` registers an observational
+callback during configuration evaluation. The rule ID must exist in the fully
+validated initial configuration; registration may precede its declaration.
+Supported phases are `"discrete"`, `"begin"`, `"update"`, `"end"` and `"cancel"`.
+Unknown IDs/phases, invalid callbacks and runtime registration raise errors.
+The returned subscription supports idempotent `:dispose()`. Registration shares
+the 256-subscription lifetime quota with `events.on`, including disposed entries.
+
+`rules.define` additionally accepts `on_discrete`, `on_begin`, `on_update`,
+`on_end` and `on_cancel` functions. It registers them in that phase order and
+removes the function fields from the returned declarative rule. Use this
+constructor for inline hooks; raw configuration tables cannot contain functions.
+Inline hooks live for the source generation; use `rules.on` when a disposal
+handle is needed. Registration performs no effect during evaluation.
+
+Callbacks receive the same `{fence, event}` owned payloads as semantic event
+subscriptions. Non-cancel phases receive a matched event; cancel receives either
+a matched `stage="cancel"` event or a cancellation with a reason. Cancellation
+events do not necessarily contain an ordinal or stage. IDs, ordinals and source
+generations retain the normal exact decimal-string representation. Hooks filter
+by exact rule ID and phase inside the approved VM, run in subscription order and
+receive independent copies. Global matched/phase subscriptions may coexist;
+each scoped hook runs once for its canonical notification, rather than once for
+both global matched and phase notifications. Updates may coalesce; begin/end/
+cancel keep their existing queue ordering.
+
+Hooks follow a stable rule ID across acknowledged enable/disable/replace
+transactions. Removing a rule prevents new matches for it; existing cancellation
+notifications may still arrive. Adding another rule ID does not transfer its
+hooks. The broker/worker's existing generation and pending-event retirement
+rules apply; source reload creates new closures and retires the old VM.
+Hook IDs/phases, registration order and active flags are part of the approved
+source snapshot and must match when the helper reconstructs it.
+
+Hooks share the event's 20 ms deadline, memory limits and 32-record/16 KiB log
+batch, with 100,000 instruction fuel units per callback. They must return no values and cannot yield.
+Returning an action table grants no effect: it fails the callback, discards the
+whole dispatch's logs/proposals and retires this Lua component. Infinite loops
+and errors have the same failure behavior. Authorized runtime transactions and
+observational queries retain their existing permissions inside callbacks.
+Hooks grant no input claim, synthetic ownership or adapter authority.
+
+```lua
+local p = require("prek")
+local rule = p.rules.define {
+    id="watch-a", delivery="observe", contexts={"desktop"},
+    trigger=p.triggers.key {key="KEY_A"},
+    action=p.actions.event {name="a-observed"},
+    on_begin=function(payload) p.log.info("begin", {id=payload.event.id}) end,
+    on_end=function(payload) p.log.info("end", {id=payload.event.id}) end,
+}
+return p.config.new {rules={rule}}
+```
+
+The installed `rule_callbacks.lua` example also handles cancellation. Preserve
+the original source to preserve hooks: the Rust model contains no functions,
+and `config.export` refuses a declarative export once rule hooks are registered.
+Runtime transaction replacement accepts declarative rules only; it cannot add
+new callback code or change approved registrations.
+
+### Acknowledged rule queries and transactions
+
 `rules.list()`, `rules.get(id)` and `rules.revision()` are available inside runtime
 callbacks. Queries return owned copies of the current acknowledged rule view;
 editing those tables has no effect. A missing ID returns nil. Revisions are

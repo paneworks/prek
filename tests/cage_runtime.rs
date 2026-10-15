@@ -347,7 +347,9 @@ return p.config.new {
     delivery='reserve',trigger=p.triggers.key {key='KEY_A'},
     action=p.actions.event {name='local-a-claimed'}},
     p.rules.define {id='local-b',devices={'keyboard'},contexts={'desktop'},delivery='observe',
-      trigger=p.triggers.key {key='KEY_B'},action=p.actions.event {name='local-rule-disable'}}}
+      trigger=p.triggers.key {key='KEY_B'},action=p.actions.event {name='local-rule-disable'},
+      on_begin=function(event)p.log.info('local-rule-hook',{rule=event.event.rule,stage=event.event.stage,ordinal=event.event.ordinal})end,
+      on_end=function(event)p.log.info('local-rule-hook',{rule=event.event.rule,stage=event.event.stage,ordinal=event.event.ordinal})end}}
 }
 "#.replace("__LAYER_CONTROL__", if layer_control { "true" } else { "false" }).replace("__INPUT_CONTROL__",if input_control {"true"}else{"false"});
     let definition = Definition::compile(&source, "local-cage.lua").unwrap();

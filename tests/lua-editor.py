@@ -13,6 +13,7 @@ local preset = p.config.preset("minimal")
 preset.rules[1] = p.rules.define {
     id = "editor-example", trigger = p.triggers.key {kind = "key", key = "KEY_A"},
     action = p.actions.event {name = "example"},
+    on_begin = function(payload) p.log.info(payload.event.rule) end,
 }
 local triggers = {
     p.triggers.button_taps {key = "KEY_A", count = 2},
@@ -28,6 +29,7 @@ local triggers = {
     p.triggers.shape {name = "circle", fingers = 2},
     p.triggers.sequence {steps = {p.triggers.key {key = "KEY_A"}}, timeout = "1s"},
 }
+p.rules.on("editor-example", "cancel", function(payload) p.log.info(payload.event.rule) end)
 local actions = {
     p.actions.command {argv = {"printf", "%s", "hello"}},
     p.actions.keys {kind = "keys", keys = {"KEY_LEFTMETA", "KEY_A"}}, p.actions.remap {key = "KEY_B"},
@@ -106,6 +108,8 @@ p.events.on("ready", function(payload)
     p.layers.transaction():activate_layer(12) -- expect: param-type-mismatch
 end)
 p.events.on("bogus", function() end) -- expect: param-type-mismatch
+p.rules.on("editor-example", "ready", function() end) -- expect: param-type-mismatch
+p.rules.on("editor-example", "begin", false) -- expect: param-type-mismatch
 p.coordinates.convert({}, {x=0,y=0}, "local", "global") -- expect: missing-fields
 p.events.on("ready", function()
     local output = p.outputs.get("x")

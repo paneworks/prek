@@ -149,11 +149,12 @@ def main():
                         subprocess.run([hyprctl,"-j",query],env=diagnostic_env,
                                        stdout=data,stderr=log,check=True,timeout=3)
                 # Prepare the keymap/hotplug round trip before the fixture
-                # acquires its short-lived context. Injection still waits for
-                # the phase-one receipt; production freshness stays unchanged.
+                # acquires its short-lived context. Keep this neutral protocol
+                # keyboard alive across both gated batches, avoiding compositor
+                # hotplug/teardown work during that lease.
                 prepared_keys = output / "phase-keys.txt"
                 prepared_keys.write_text("")
-                keyboard = subprocess.Popen([args.keyboard,str(socket),str(prepared_keys)],
+                keyboard = subprocess.Popen([args.keyboard,str(socket),str(prepared_keys),"--persistent"],
                                             stdin=subprocess.PIPE,stdout=subprocess.PIPE,
                                             stderr=log,text=True)
                 if not select.select([keyboard.stdout], [], [], 5)[0] or keyboard.stdout.readline() != "ready\n":
@@ -175,15 +176,12 @@ def main():
                         keys_file = output / "phase-keys.txt"
                         keys_file.write_text("".join(f"{event['code']} {event['value']}\n" for event in keys))
                         start = len(rows())
-                        if keyboard is None or keyboard.poll() is not None:
-                            keyboard = subprocess.Popen([args.keyboard,str(socket),str(keys_file)],
-                                                        stdin=subprocess.PIPE,stdout=subprocess.PIPE,
-                                                        stderr=log,text=True)
-                            if not select.select([keyboard.stdout], [], [], 5)[0] or keyboard.stdout.readline() != "ready\n":
-                                raise RuntimeError("routed keyboard handshake failed")
-                        keyboard.communicate("\n",timeout=5)
-                        if keyboard.returncode != 0:
-                            raise RuntimeError("routed keyboard failed")
+                        if keyboard.poll() is not None:
+                            raise RuntimeError("prepared routed keyboard stopped")
+                        keyboard.stdin.write("\n")
+                        keyboard.stdin.flush()
+                        if not select.select([keyboard.stdout], [], [], 5)[0] or keyboard.stdout.readline() != "done\n":
+                            raise RuntimeError("routed keyboard batch handshake failed")
                         deadline = time.monotonic() + 3
                         while len([row for row in rows()[start:] if row["event"] == "key"]) < len(expected):
                             if time.monotonic() >= deadline:
@@ -230,6 +228,10 @@ def main():
                                        "rule_enabled":args.layers}]
                     matches = [row["fields"] for row in logs if row["message"] == "local-matched"]
                     assert matches == [{"rule":"local-a","stage":"begin"},{"rule":"local-a","stage":"end"}]
+                    hooks = [row["fields"] for row in logs if row["message"] == "local-rule-hook"]
+                    assert hooks == [{"rule":"local-b","stage":stage,"ordinal":ordinal}
+                                     for stage,ordinal in [("begin","1"),("end","2"),("begin","1"),("end","2")]]
+                    print("PASS: four ordered per-rule Lua phase callbacks retained exact ordinals across acknowledged mutation and source replacement.")
                     if args.input:
                         inputs = [row["fields"] for row in logs if row["message"] == "local-input"]
                         assert [(row["code"], row["state"]) for row in inputs] == [(30,"press"),(30,"release"),(48,"press"),(48,"release")] * 2

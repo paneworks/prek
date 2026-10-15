@@ -58,6 +58,8 @@ pub struct Registration {
     pub id: u16,
     pub kind: EventKind,
     pub active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<super::hooks::RuleHook>,
 }
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -105,12 +107,14 @@ impl Definition {
         // process budget, particularly under emulation. Consumers validate it.
         definition.validate_metadata()?;
         definition.validate_handlers(&runtime.config)?;
+        super::hooks::validate(&definition.registrations, &runtime.config)?;
         Ok(definition)
     }
     pub fn validate(&self) -> Result<Config, ConfigError> {
         self.validate_metadata()?;
         let config = Config::parse(&self.model)?;
         self.validate_handlers(&config)?;
+        super::hooks::validate(&self.registrations, &config)?;
         Ok(config)
     }
     fn validate_metadata(&self) -> Result<(), ConfigError> {
@@ -198,6 +202,7 @@ pub struct LogRecord {
 pub(super) struct Host {
     pub(super) configuring: bool,
     pub(super) running: bool,
+    pub(super) rule_hooks: bool,
     pub(super) logs: Vec<LogRecord>,
     pub(super) bytes: usize,
     pub(super) now: Option<Duration>,
@@ -276,6 +281,12 @@ impl Runtime {
                         id: index as u16,
                         kind,
                         active: entry.get(ctx, "active")?,
+                        rule: luna_util::serde::from_value_with(
+                            ctx,
+                            entry.get(ctx, "rule")?,
+                            luna_util::serde::DeOptions::default().max_depth(4),
+                        )
+                        .map_err(io::Error::other)?,
                     });
                 }
                 Ok(result)
@@ -337,6 +348,18 @@ impl Runtime {
                     let active: bool = entry.get(ctx, "active")?;
                     let event: luna::String = entry.get(ctx, "kind")?;
                     if !active || event.to_str()? != kind.name() {
+                        return Ok(None);
+                    }
+                    let rule: Option<super::hooks::RuleHook> = luna_util::serde::from_value_with(
+                        ctx,
+                        entry.get(ctx, "rule")?,
+                        luna_util::serde::DeOptions::default().max_depth(4),
+                    )
+                    .map_err(io::Error::other)?;
+                    if rule
+                        .as_ref()
+                        .is_some_and(|rule| !rule.matches(kind, payload))
+                    {
                         return Ok(None);
                     }
                     let callback: Function = entry.get(ctx, "callback")?;

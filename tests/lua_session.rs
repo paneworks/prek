@@ -567,6 +567,94 @@ fn callback_failure_does_not_poison_a_replacement_generation() {
 }
 
 #[test]
+fn real_helper_delivers_rule_hooks_with_phase_filtering_disposal_and_generation_retirement() {
+    let source = r#"
+local p=require('prek');local count=0;local once
+once=p.rules.on('watch','begin',function(payload)
+ assert(payload.event.id=='18446744073709551615')
+ once:dispose();p.log.info('once',{generation=payload.fence.configuration})
+end)
+for _,phase in ipairs({'discrete','begin','update','end','cancel'}) do
+ p.rules.on('watch',phase,function(payload)
+  count=count+1;p.log.info('hook',{phase=phase,count=count,generation=payload.fence.configuration})
+ end)
+end
+return p.config.new{rules={
+ p.rules.define{id='watch',trigger=p.triggers.key{key='KEY_A'},action=p.actions.event{name='watch'}},
+ p.rules.define{id='other',trigger=p.triggers.key{key='KEY_B'},action=p.actions.event{name='other'}},
+}}
+"#;
+    let definition = Definition::compile(source, "scoped-helper.lua").unwrap();
+    let binary = Path::new(env!("CARGO_BIN_EXE_prek"));
+    let mut session = Session::spawn(binary, fence(1), "seat0", definition.clone()).unwrap();
+    drain(&mut session).unwrap();
+    let mut count = 0;
+    for (phase, kind) in [
+        ("begin", EventKind::Matched),
+        ("begin", EventKind::Begin),
+        ("update", EventKind::Matched),
+        ("update", EventKind::Update),
+        ("end", EventKind::Matched),
+        ("end", EventKind::End),
+        ("discrete", EventKind::Matched),
+        ("cancel", EventKind::Matched),
+        ("cancel", EventKind::Cancel),
+    ] {
+        session
+            .notify(
+                kind,
+                serde_json::json!({"fence":fence(1),"event":{
+                    "outcome":"matched","rule":"watch","stage":phase,"id":u64::MAX,"ordinal":1
+                }}),
+            )
+            .unwrap();
+        let logs = drain(&mut session).unwrap();
+        if kind == EventKind::Matched && phase != "cancel" || kind == EventKind::Cancel {
+            count += 1;
+            let hook = logs.last().unwrap();
+            assert_eq!(hook.message, "hook");
+            assert_eq!(
+                hook.fields,
+                serde_json::json!({"phase":phase,"count":count,"generation":"1"})
+            );
+            assert_eq!(logs.len(), if count == 1 { 2 } else { 1 });
+        } else {
+            assert!(logs.is_empty());
+        }
+    }
+    session
+        .notify(
+            EventKind::Matched,
+            serde_json::json!({"fence":fence(1),"event":{
+                "outcome":"matched","rule":"other","stage":"begin","id":u64::MAX,"ordinal":1
+            }}),
+        )
+        .unwrap();
+    assert!(drain(&mut session).unwrap().is_empty());
+    session.stop().unwrap();
+    drain(&mut session).unwrap();
+    drop(session);
+    let mut replacement = Session::spawn(binary, fence(2), "seat0", definition).unwrap();
+    drain(&mut replacement).unwrap();
+    replacement
+        .notify(
+            EventKind::Matched,
+            serde_json::json!({"fence":fence(2),"event":{
+                "outcome":"matched","rule":"watch","stage":"begin","id":u64::MAX,"ordinal":1
+            }}),
+        )
+        .unwrap();
+    let logs = drain(&mut replacement).unwrap();
+    assert_eq!(logs[0].message, "once");
+    assert_eq!(
+        logs[1].fields,
+        serde_json::json!({"phase":"begin","count":1,"generation":"2"})
+    );
+    replacement.stop().unwrap();
+    drain(&mut replacement).unwrap();
+}
+
+#[test]
 fn supervised_timers_run_during_idle_and_cancel_before_the_next_tick() {
     let definition = Definition::compile(
         r#"

@@ -33,7 +33,8 @@ static const struct wl_registry_listener registry_listener = {
     .global = global, .global_remove = removed,
 };
 int main(int argc, char **argv) {
-    if ((argc != 2 && argc != 3) || argv[1][0] != '/') {
+    if ((argc != 2 && argc != 3 && argc != 4) || argv[1][0] != '/' ||
+        (argc == 4 && strcmp(argv[3], "--persistent"))) {
         fprintf(stderr, "supply the absolute owned Cage socket path\n");
         return 2;
     }
@@ -69,10 +70,13 @@ int main(int argc, char **argv) {
     close(fd);
     if (wl_display_roundtrip(display) < 0) return 1;
     puts("ready"); fflush(stdout);
+    unsigned timestamp = 0;
+    for (;;) {
     if (getchar() != '\n') {
+        if (argc == 4 && feof(stdin)) break;
         fprintf(stderr, "keyboard test requires a start acknowledgement\n"); return 1;
     }
-    if (argc == 3) {
+    if (argc >= 3) {
         FILE *input = fopen(argv[2], "r");
         struct xkb_state *state = xkb_state_new(keymap);
         if (!input || !state) { perror("routed keys"); return 1; }
@@ -82,7 +86,7 @@ int main(int argc, char **argv) {
             if (code >= 768 || value > 1 || ++count > 64) {
                 fprintf(stderr, "invalid routed key\n"); return 1;
             }
-            zwp_virtual_keyboard_v1_key(keyboard, count, code, value);
+            zwp_virtual_keyboard_v1_key(keyboard, ++timestamp, code, value);
             xkb_state_update_key(state, code + 8,
                 value ? XKB_KEY_DOWN : XKB_KEY_UP);
             zwp_virtual_keyboard_v1_modifiers(keyboard,
@@ -106,6 +110,9 @@ int main(int argc, char **argv) {
     zwp_virtual_keyboard_v1_modifiers(keyboard, 0, 0, 0, 0);
     }
     if (wl_display_roundtrip(display) < 0) return 1;
+    puts("done"); fflush(stdout);
+    if (argc != 4) break;
+    }
     zwp_virtual_keyboard_v1_destroy(keyboard);
     int result = wl_display_roundtrip(display);
     wl_display_disconnect(display);

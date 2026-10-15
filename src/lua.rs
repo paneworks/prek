@@ -16,6 +16,7 @@ mod export;
 #[cfg(target_os = "linux")]
 mod geometry;
 mod handlers;
+mod hooks;
 mod modules;
 mod rule_api;
 mod runtime;
@@ -28,6 +29,7 @@ mod values;
 pub use editor::editor_definitions;
 pub use export::export_config;
 pub use handlers::{ActionResult, HandlerRegistration};
+pub use hooks::RuleHook;
 pub use modules::{Module, Sources};
 pub use rule_api::{RuleProposal, RuleReceipt};
 pub use runtime::{Definition, EventKind, LogRecord, MAX_SNAPSHOT_BYTES, Registration, Runtime};
@@ -43,6 +45,7 @@ pub fn api() -> serde_json::Value {
         serde_json::json!({"name":"config.preset", "signature":"config.preset(name) -> Config", "description":"Return a mutable minimal, desktop or phone preset."}),
         serde_json::json!({"name":"config.export", "signature":"config.export(config) -> string", "phase":"configuration", "description":"Validate and export a complete declarative model as bounded Lua source; performs no I/O and requires original source for named handlers."}),
         serde_json::json!({"name":"rules.define", "signature":"rules.define(table) -> Rule", "description":"Declare a rule; strict validation occurs at compilation."}),
+        serde_json::json!({"name":"rules.on", "signature":"rules.on(id, phase, callback) -> Subscription", "phase":"configuration", "description":"Register a generation-scoped observational rule-phase callback for an existing configured rule; phases are discrete, begin, update, end and cancel; dispose with Subscription.dispose."}),
         serde_json::json!({"name":"layers.define", "signature":"layers.define(table) -> Layer", "description":"Declare a physical-key layer with physical, active or inactive activation; strict validation occurs at compilation."}),
         serde_json::json!({"name":"units.duration", "signature":"units.duration(string) -> string", "description":"Declare an explicitly unit-qualified duration."}),
         serde_json::json!({"name":"units.distance", "signature":"units.distance(string) -> string", "description":"Declare an explicitly unit-qualified distance."}),
@@ -277,6 +280,7 @@ pub fn api() -> serde_json::Value {
         "runtime_identities":{"type":"decimal_string","range":"0..18446744073709551615","fields":["fence.broker[]","fence.configuration","fence.session","event.id","event.ordinal","event.source.device","event.source.generation","event.config_generation","event.session_generation","Snapshot.generation","Snapshot.revision","OutputState.geometry_generation","Binding.compositor_start","context_changed.revision","rules.revision","input.source.device","input.source.generation","input.sequence","input.contacts[].id.generation","input.contacts_started[].generation","input.contacts_ended[].generation","input.ended_contacts[].id.generation"],"comparison":"exact string equality; no numeric conversion","bounded_handles":"subscription/timer/task IDs remain Lua integers","protocol":"Rust transport retains u64 values"},
         "rule_transactions":{"builders":64,"operations":64,"transaction_bytes":32768,"pending_proposals":1,"receipt_time_ms":250,"revision_type":"decimal_string","transport":"explicit authorized host opt-in","production_broker":"observation_mode","system_permission":"policy.allow_runtime_rules","agent_flags":["lua","rule-mutations"],"capability":"runtime_rules","context":"fresh owning desktop","routing":"unavailable"},
         "runtime_layers":{"declared_layers":64,"activation_values":["physical","active","inactive"],"default":"physical","queries":"acknowledged definitions and activation overrides; no physical-key state","transaction":"shared RuleTransaction revision/receipt/permissions","definitions":"immutable at runtime","activation":"fresh input only; existing candidates retired","physical_toggles":"preserved across runtime edits; reconciled on source reload","seat":"owning broker registration"},
+        "rule_hooks":{"registration":"configuration only; rule ID must exist in the validated initial configuration","phases":["discrete","begin","update","end","cancel"],"inline_fields":["on_discrete","on_begin","on_update","on_end","on_cancel"],"budget":"shared event subscription, fuel, time and log limits","delivery":"rule ID and phase filtered in the owning VM; registration order; updates may coalesce","effects":"observational; no returned effects, input claims or synthetic ownership","lifetime":"approved source generation; follows stable rule ID across acknowledged edits; removed rules emit no fresh matches; reload disposes the old VM","export":"callbacks require original Lua source"},
         "input_events":{"event":"input","configuration_mode":"observe","agent_flags":["lua","input"],"capability":"input_events","system_permission":"policy.allow_input_events","production_broker":"observation_mode","sources":"explicit policy.allowed_devices selectors on the owning seat; virtual devices excluded","context":"fresh desktop without secure overlay","freshness_ms":250,"payload":"InputPayload","raw_frames":false,"input_claims":false,"delivery":"ordered, no coalescing; overflow retires the affected stream or Lua component","resets":["attached","reconciled","mapping_changed","removed","lost"],"coordinates":"device axis counts","maximum_changes":4096,"maximum_contacts":256,"identity_fields":["source.device","source.generation","sequence","contacts[].id.generation","contacts_started[].generation","contacts_ended[].generation","ended_contacts[].id.generation"],"identity_type":"decimal_string"},
         "context_limits":{"snapshot_bytes":4194304,"chunk_bytes":32768,"transfer_time_ms":1000,"freshness_ms":250,"refresh_ms":100,"queued_snapshots":2,"read_only":true},
         "geometry_queries":{"context":"fresh owning desktop without secure overlay","lookup":"exact output name or rendered region ID","references":"canonical decimal-string fence, snapshot revision and output geometry generation; copies confer no authority","spaces":["normalized","local","global"],"normalized":"post-transform output axes, not raw device axes","local":"post-transform logical units; rotation and scale applied through output logical size","region_bounds":"global logical, half-open","overlaps":"all matches in provider order, no target selection","unavailable":"nil for absent/stale/inhibited context, missing name or retired reference; known empty arrays remain empty","conversion":"finite numeric points, no clamping; arithmetic overflow raises an error","effects":false},
@@ -362,13 +366,25 @@ local allowed_events = {
     skipped=true, ready=true, reload=true, stop=true, recovery=true,
     session_changed=true, context_changed=true, rules_changed=true,
 }
-function api.events.on(kind, callback)
+local function subscribe(kind, callback, rule)
     assert(allowed_events[kind], "unsupported event subscription")
     assert(type(callback) == "function", "events.on expects a callback")
     assert(#registrations < 256, "Lua subscription limit exceeded")
-    local entry = {id=#registrations+1, kind=kind, callback=callback, active=true}
+    local entry = {id=#registrations+1, kind=kind, callback=callback, active=true, rule=rule}
     registrations[entry.id] = entry
     return {dispose=function(self) entry.active=false end}
+end
+function api.events.on(kind, callback) return subscribe(kind,callback,nil) end
+local hook_guard=api.rules.__hook_guard
+api.rules.__hook_guard=nil
+local rule_phases={discrete=true,begin=true,update=true,["end"]=true,cancel=true}
+function api.rules.on(id,phase,callback)
+    hook_guard(false)
+    assert(type(id)=="string" and #id>0 and #id<=256, "invalid rule hook ID")
+    assert(rule_phases[phase], "unsupported rule hook phase")
+    local handle=subscribe(phase=="cancel" and "cancel" or "matched",callback,{id=id,phase=phase})
+    hook_guard(true)
+    return handle
 end
 function api.config.new(value)
     assert(type(value) == "table", "config.new expects a table")
@@ -377,6 +393,13 @@ function api.config.new(value)
 end
 function api.rules.define(value)
     assert(type(value) == "table", "rules.define expects a table")
+    for _,phase in ipairs({"discrete","begin","update","end","cancel"}) do
+        local key="on_" .. phase
+        if value[key]~=nil then
+            api.rules.on(value.id,phase,value[key])
+            value[key]=nil
+        end
+    end
     return value
 end
 function api.layers.define(value)
@@ -591,6 +614,9 @@ fn instantiate(
                         )
                         .into());
                     }
+                    if export_host.borrow().rule_hooks {
+                        return Err(io::Error::other("rule callbacks require original Lua source; declarative export would discard them").into());
+                    }
                     let value: Value = stack.consume(ctx)?;
                     let config: Config = luna_util::serde::from_value_with(
                         ctx,
@@ -616,6 +642,24 @@ fn instantiate(
             ctx.globals().set(ctx, "__prek_modules", module_loaders)?;
             let actions: Table = module.get(ctx, "actions")?;
             rule_api::register(&ctx, module.get(ctx, "rules")?, host.clone())?;
+            let rules: Table = module.get(ctx, "rules")?;
+            let hook_host = host.clone();
+            rules.set(
+                ctx,
+                "__hook_guard",
+                Callback::from_fn(&ctx, move |ctx, _, mut stack| {
+                    if !hook_host.borrow().configuring {
+                        return Err(io::Error::other(
+                            "rule hook registration requires configuration evaluation",
+                        )
+                        .into());
+                    }
+                    if stack.consume::<bool>(ctx)? {
+                        hook_host.borrow_mut().rule_hooks = true;
+                    }
+                    Ok(CallbackReturn::Return)
+                }),
+            )?;
             rule_api::register_layers(
                 &ctx,
                 module.get(ctx, "layers")?,
@@ -725,6 +769,7 @@ fn instantiate(
         failed: false,
     };
     let handlers = runtime.handler_registrations()?;
+    hooks::validate(&runtime.registrations()?, &runtime.config)?;
     runtime
         .host
         .borrow_mut()

@@ -219,6 +219,13 @@
 ---@field trigger prek.Trigger
 ---@field action prek.Action
 
+---@class (exact) prek.RuleFields: prek.Rule
+---@field on_discrete? fun(payload: prek.MatchedPayload)
+---@field on_begin? fun(payload: prek.MatchedPayload)
+---@field on_update? fun(payload: prek.MatchedPayload)
+---@field on_end? fun(payload: prek.MatchedPayload)
+---@field on_cancel? fun(payload: prek.CancelPayload)
+
 ---@class (exact) prek.Config
 ---@field version? integer config.new supplies 1; all other defaults apply during Rust validation.
 ---@field mode? prek.Mode Default observe. Production route mode remains unavailable.
@@ -651,13 +658,22 @@ function ConfigAPI.new(fields) error("Prek editor definition") end
 ---@param name 'minimal'|'desktop'|'phone'
 ---@return prek.Preset
 function ConfigAPI.preset(name) error("Prek editor definition") end
----Export a fully validated declarative model, bounded to 1 MiB. Named handlers require original source.
+---Export a fully validated declarative model, bounded to 1 MiB. Named handlers and rule hooks require original source.
 ---@param config prek.Config
 ---@return string
 function ConfigAPI.export(config) error("Prek editor definition") end
----@param fields prek.Rule
+---Configuration only for inline hooks; callbacks are registered separately from the Rust rule model.
+---@param fields prek.RuleFields
 ---@return prek.Rule
 function RulesAPI.define(fields) error("Prek editor definition") end
+---Configuration only. Observational callback for an existing rule ID; shares event limits and disposal.
+---@overload fun(id: string, phase: 'discrete'|'begin'|'update'|'end', callback: fun(payload: prek.MatchedPayload)): prek.Subscription
+---@overload fun(id: string, phase: 'cancel', callback: fun(payload: prek.CancelPayload)): prek.Subscription
+---@param id string Configured rule ID; source snapshots validate its existence.
+---@param phase prek.Stage
+---@param callback fun(payload: prek.MatchedPayload|prek.CancelPayload)
+---@return prek.Subscription
+function RulesAPI.on(id, phase, callback) error("Prek editor definition") end
 ---Runtime callback/task only. Return owned acknowledged rules; edits to copies have no effect.
 ---@return prek.Rule[]
 function RulesAPI.list() error("Prek editor definition") end

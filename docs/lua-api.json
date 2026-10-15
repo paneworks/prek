@@ -142,6 +142,28 @@
     "symlinks": false
   },
   "phase": "configuration_and_session_actions",
+  "rule_hooks": {
+    "budget": "shared event subscription, fuel, time and log limits",
+    "delivery": "rule ID and phase filtered in the owning VM; registration order; updates may coalesce",
+    "effects": "observational; no returned effects, input claims or synthetic ownership",
+    "export": "callbacks require original Lua source",
+    "inline_fields": [
+      "on_discrete",
+      "on_begin",
+      "on_update",
+      "on_end",
+      "on_cancel"
+    ],
+    "lifetime": "approved source generation; follows stable rule ID across acknowledged edits; removed rules emit no fresh matches; reload disposes the old VM",
+    "phases": [
+      "discrete",
+      "begin",
+      "update",
+      "end",
+      "cancel"
+    ],
+    "registration": "configuration only; rule ID must exist in the validated initial configuration"
+  },
   "rule_transactions": {
     "agent_flags": [
       "lua",
@@ -254,6 +276,12 @@
       "description": "Declare a rule; strict validation occurs at compilation.",
       "name": "rules.define",
       "signature": "rules.define(table) -> Rule"
+    },
+    {
+      "description": "Register a generation-scoped observational rule-phase callback for an existing configured rule; phases are discrete, begin, update, end and cancel; dispose with Subscription.dispose.",
+      "name": "rules.on",
+      "phase": "configuration",
+      "signature": "rules.on(id, phase, callback) -> Subscription"
     },
     {
       "description": "Declare a physical-key layer with physical, active or inactive activation; strict validation occurs at compilation.",
