@@ -84,6 +84,9 @@
             CC_aarch64_unknown_linux_musl = crossCc;
             # Use the phone's loader so runtime systemd loading remains possible.
             CARGO_BUILD_RUSTFLAGS = "-C target-feature=-crt-static -C link-arg=-Wl,--dynamic-linker=/lib/ld-musl-aarch64.so.1";
+            # Prek needs no pkg-config libraries; keep host paths out, as in Mold.
+            PKG_CONFIG_LIBDIR = "";
+            PKG_CONFIG_PATH = "";
             LD_LIBRARY_PATH = "";
           };
           default = pkgs.mkShell {

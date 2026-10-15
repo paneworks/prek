@@ -29,7 +29,7 @@ def main():
     parent.settimeout(3)
     env = {name:value for name,value in os.environ.items() if name not in (
         "WAYLAND_DISPLAY", "WAYLAND_SOCKET", "DISPLAY", "HYPRLAND_INSTANCE_SIGNATURE",
-        "NIRI_SOCKET", "SWAYSOCK", "XDG_SESSION_ID", "XDG_SEAT", "XDG_VTNR")}
+        "NIRI_SOCKET", "SWAYSOCK", "I3SOCK", "XDG_SESSION_ID", "XDG_SEAT", "XDG_VTNR")}
     env.update(XDG_RUNTIME_DIR=str(runtime), HOME=str(home),
                XDG_CONFIG_HOME=str(home / ".config"), XDG_DATA_HOME=str(home / ".local/share"),
                XDG_STATE_HOME=str(home / ".local/state"), XDG_CACHE_HOME=str(home / ".cache"),
