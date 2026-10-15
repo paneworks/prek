@@ -2,6 +2,7 @@
 //! never establish a completed unlock transition.
 pub mod admission;
 pub mod controls;
+pub mod dispatch;
 pub mod handoff;
 pub mod native;
 pub mod ownership;

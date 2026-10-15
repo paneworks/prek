@@ -124,6 +124,40 @@ fn owned_native_handoff() {
     }
     assert!(session.activate(&logind).unwrap());
     assert_eq!(session.phase(), Phase::Owned);
+    // Exercise the real root queue and asynchronous native receipt. Hiding an
+    // already hidden keyboard is confined to this owned shell. This does not
+    // establish broker action-grant or rendered-animation acceptance.
+    let request = crate::morf::controls::Request {
+        version: 1,
+        output: output.clone(),
+        epoch: format!("{:016x}{:016x}", scope.broker.0[0], scope.broker.0[1]),
+        gesture: format!("{:032x}", 42),
+        ordinal: 1,
+        action: crate::config::MorfAction::KeyboardHide,
+        phase: crate::morf::controls::Phase::Discrete,
+        dx: 0.,
+        dy: 0.,
+        vx: 0.,
+        vy: 0.,
+    };
+    let now = crate::ipc::monotonic().unwrap();
+    let deadline = (now + Duration::from_millis(200)).min(session.admission_until(now).unwrap());
+    let ticket = session.submit_control(&request, deadline, &logind).unwrap();
+    let until = Instant::now() + Duration::from_secs(4);
+    loop {
+        session
+            .poll(&logind, crate::ipc::monotonic().unwrap())
+            .unwrap();
+        if let Some(outcome) = session.take_control(&ticket) {
+            assert_eq!(outcome, crate::morf::dispatch::Outcome::Dispatched);
+            break;
+        }
+        assert!(
+            Instant::now() < until,
+            "native action receipt did not complete"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
     let report = loop {
         if let Some(report) = worker.check().unwrap() {
             break report;
@@ -159,6 +193,7 @@ fn owned_native_handoff() {
         serde_json::json!({
             "status":"passed","uid":0,"native_ui_handoff_tested":true,
             "actual_logind_registration":true,"compositor_pid":expected_compositor,
+            "native_action_receipts_tested":true,"native_action_rendering_tested":false,
             "producer_pid":expected_producer,"output":output,"worker_reaped":true,
             "input_devices_opened":0,"physical_takeover_tested":false,
             "broker_grant_tested":false,"restored":true

@@ -161,6 +161,11 @@ fn mode_selection_cannot_activate_actions_beyond_negotiated_capabilities() {
 }
 #[test]
 fn power_offer_capabilities_are_rechecked_before_a_grant() {
+    let fence = Fence {
+        broker: Epoch([1, 2]),
+        configuration: 1,
+        session: 1,
+    };
     let snapshot = crate::context_transfer::tests::view(Duration::ZERO)
         .context
         .unwrap()
@@ -189,7 +194,9 @@ fn power_offer_capabilities_are_rechecked_before_a_grant() {
         output: Some("fixture-output".into()),
         workspace: None,
     };
-    ledger.offer(&event, &snapshot, Duration::ZERO).unwrap();
+    ledger
+        .offer(fence, &event, &snapshot, Duration::ZERO)
+        .unwrap();
     let offer = &ledger.pending[&(1, 1)];
     let caps = BTreeSet::from([Capability::LuaActions, Capability::PowerActions]);
     assert!(offer.capabilities_available(&caps, &caps));
@@ -596,6 +603,8 @@ fn rule_retirement_removes_unsent_offers_and_cancels_delivered_work() {
         window: None,
         deadline: RECEIPT_TIME,
         granted: true,
+        grant_until: Some(RECEIPT_TIME),
+        morf: None,
         sent: delivered,
         delivered,
         cancelled: false,

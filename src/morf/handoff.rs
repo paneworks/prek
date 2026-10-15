@@ -42,6 +42,7 @@ pub(crate) struct Session {
     capabilities: native::Capabilities,
     checked: Duration,
     renewed: Duration,
+    dispatches: super::dispatch::Queue,
 }
 impl Session {
     pub fn prepare(
@@ -87,6 +88,7 @@ impl Session {
             capabilities,
             checked: Duration::ZERO,
             renewed: Duration::ZERO,
+            dispatches: super::dispatch::Queue::default(),
         })
     }
     pub fn phase(&self) -> Phase {
@@ -166,6 +168,7 @@ impl Session {
         })();
         if result.is_err() {
             self.phase = Phase::Lost;
+            self.dispatches.retire();
         }
         result
     }
@@ -183,6 +186,7 @@ impl Session {
         })();
         if result.is_err() {
             self.phase = Phase::Lost;
+            self.dispatches.retire();
         }
         result
     }
@@ -201,6 +205,7 @@ impl Session {
         Ok(())
     }
     pub fn retire(&mut self) {
+        self.dispatches.retire();
         if matches!(
             self.phase,
             Phase::Quiescing | Phase::Quiesced | Phase::Owned | Phase::Activating
@@ -236,12 +241,81 @@ impl Session {
                 completed,
             )?;
             self.checked = completed;
+            if self.phase == Phase::Owned {
+                self.poll_control(logind, completed)?;
+            }
             Ok(())
         })();
         if result.is_err() {
             self.phase = Phase::Lost;
+            self.dispatches.retire();
         }
         result
+    }
+    /// The trusted broker must separately validate the exact action offer,
+    /// frozen target and execution grant. This backend never creates a grant.
+    pub fn submit_control(
+        &mut self,
+        request: &super::controls::Request,
+        deadline: Duration,
+        logind: &Logind,
+    ) -> io::Result<super::dispatch::Ticket> {
+        let now = crate::ipc::monotonic()?;
+        let until = self
+            .admission_until(now)
+            .ok_or_else(|| io::Error::other("native action requires fresh owned recognition"))?;
+        let ticket =
+            self.dispatches
+                .reserve(self.fence, self.owner(), request, now, deadline, until)?;
+        let mut wire_request = request.clone();
+        wire_request.ordinal = self.dispatches.wire_ordinal(&ticket);
+        let result = self.client.submit_control(
+            native::Scope {
+                capabilities: &self.capabilities,
+                fence: self.control_fence,
+            },
+            native::Submission {
+                id: ticket.id(),
+                deadline,
+                request: &wire_request,
+            },
+            logind,
+            &self.compositor,
+        );
+        self.dispatches.submitted(ticket.id(), &result);
+        if result.is_err() || result.as_ref().is_ok_and(control_authority_lost) {
+            self.phase = Phase::Lost;
+            self.dispatches.retire();
+        }
+        Ok(ticket)
+    }
+    fn poll_control(&mut self, logind: &Logind, now: Duration) -> io::Result<()> {
+        let Some(id) = self.dispatches.next_receipt(now) else {
+            return Ok(());
+        };
+        let reply = self
+            .client
+            .control_receipt(
+                native::Scope {
+                    capabilities: &self.capabilities,
+                    fence: self.control_fence,
+                },
+                id,
+                logind,
+                &self.compositor,
+            )
+            .map_err(io::Error::other)?;
+        self.dispatches.observed(id, &reply);
+        if control_authority_lost(&reply) {
+            return Err(io::Error::other("native control authority retired"));
+        }
+        Ok(())
+    }
+    pub fn take_control(
+        &mut self,
+        ticket: &super::dispatch::Ticket,
+    ) -> Option<super::dispatch::Outcome> {
+        self.dispatches.take(ticket)
     }
     /// Only an actual reaped worker proves recognition has stopped as well as
     /// descriptor closure. Per-source closure alone cannot assert drain here.
@@ -254,6 +328,7 @@ impl Session {
     ) -> io::Result<()> {
         validate_release(self.fence, &self.seat, self.worker, self.phase, proof)?;
         validate_cleanup(self.fence, cleanup)?;
+        self.dispatches.retire();
         // Commit before writing: an uncertain mutation is never retried.
         self.phase = Phase::ReleaseFailed;
         self.control_fence = cleanup;
@@ -284,6 +359,20 @@ fn validate_cleanup(original: Fence, cleanup: Fence) -> io::Result<()> {
         ));
     }
     Ok(())
+}
+fn control_authority_lost(reply: &native::Reply) -> bool {
+    matches!(
+        reply.refusal(),
+        Some(
+            native::Refusal::UiReplaced
+                | native::Refusal::ExpiredLease
+                | native::Refusal::StaleFence
+                | native::Refusal::Retired
+                | native::Refusal::HandoffRequired
+                | native::Refusal::HandoffUnavailable
+                | native::Refusal::StaleOwnership
+        )
+    )
 }
 fn accepted(result: Result<native::Reply, native::Error>) -> io::Result<()> {
     match result {

@@ -3,6 +3,85 @@ use super::*;
 use crate::morf::handoff::{Phase, Session};
 
 impl Broker {
+    /// Trusted host dispatch of an already offered/granted action. Public
+    /// session packets cannot supply a native payload or create these grants.
+    /// MorfActions negotiation remains gated pending rendered context/cutover.
+    pub fn submit_morf_control(
+        &mut self,
+        fence: Fence,
+        id: u64,
+        ordinal: u64,
+        request: &crate::morf::controls::Request,
+    ) -> io::Result<crate::morf::dispatch::Ticket> {
+        // SAFETY: actual process credentials, not caller-supplied metadata.
+        if unsafe { libc::geteuid() } != 0 || self.routing.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "native control requires the root routing broker",
+            ));
+        }
+        let now = monotonic()?;
+        let bound = self
+            .connections
+            .iter_mut()
+            .filter_map(|connection| connection.bound.as_mut())
+            .find(|bound| {
+                bound.fence == fence
+                    && bound.role == Role::Agent
+                    && bound.context.fresh(now)
+                    && bound.context.state == State::Desktop
+                    && now >= bound.renewed
+                    && now - bound.renewed < protocol::MAX_PACKET_AGE
+            })
+            .ok_or_else(|| protocol::invalid("native control lacks its owning desktop"))?;
+        bound.registration.check(&self.logind, &bound.client)?;
+        let offer = bound
+            .actions
+            .pending
+            .get(&(id, ordinal))
+            .ok_or_else(|| protocol::invalid("native control lacks its broker offer"))?;
+        if !bound.capabilities.contains(&Capability::MorfActions)
+            || !bound.available_actions.contains(&Capability::MorfActions)
+            || !offer.capabilities_available(&bound.capabilities, &bound.available_actions)
+            || offer.source.seat != bound.seat
+        {
+            return Err(protocol::invalid("native action capability unavailable"));
+        }
+        let snapshot = &bound
+            .context
+            .value
+            .as_ref()
+            .ok_or_else(|| protocol::invalid("native control context missing"))?
+            .snapshot;
+        let deadline = offer
+            .morf_control(request, snapshot, now)?
+            .min(bound.context.checked + crate::context::SNAPSHOT_MAX_AGE)
+            .min(snapshot.captured_at + crate::context::SNAPSHOT_MAX_AGE);
+        let session = self
+            .morf_handoffs
+            .iter_mut()
+            .find(|session| {
+                session.fence == fence
+                    && session.seat == bound.seat
+                    && session.output == request.output
+            })
+            .ok_or_else(|| protocol::invalid("native control has no owning recognizer"))?;
+        let deadline = deadline.min(
+            session
+                .admission_until(monotonic()?)
+                .ok_or_else(|| protocol::invalid("native recognition lease unavailable"))?,
+        );
+        session.submit_control(request, deadline, &self.logind)
+    }
+    pub fn take_morf_control(
+        &mut self,
+        ticket: &crate::morf::dispatch::Ticket,
+    ) -> Option<crate::morf::dispatch::Outcome> {
+        self.morf_handoffs
+            .iter_mut()
+            .find(|session| session.fence == ticket.fence() && session.output == ticket.output())?
+            .take_control(ticket)
+    }
     pub(super) fn morf_requirements(
         &self,
         fence: Fence,

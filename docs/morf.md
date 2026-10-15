@@ -265,10 +265,51 @@ receipt. The remaining compositor, shell and cleanup logs are beside it.
 
 This probe checks actual root credentials, logind registration and the native
 quiesce → activate → restore sequence, with a genuinely supervised and reaped
-child as release evidence. It opens no evdev/uinput devices and does not test
+child as release evidence. While owned, it also submits one keyboard-hide
+request and waits for its native controller receipt. This exercises the queue
+transport, without claiming a rendered keyboard transition. It opens no
+evdev/uinput devices and does not test
 physical takeover, a broker admission grant or phone input. The packaged test
 executable is in the separate `nativeTests` output, outside the normal runtime
 installation. Default Cage tests never invoke sudo. To use just the packaged
 runner with explicit local paths, run `nix run --no-write-lock-file
 .#cage-root-test -- --visible --morf /absolute/path/to/morf --morf-shell
 /absolute/path/to/shell/init.lua`.
+
+## Broker dispatch and native receipts
+
+The trusted host entry `Broker::submit_morf_control` requires an already
+offered action, its delivered execution grant, negotiated and ready Morf
+capabilities, fresh desktop registration/context and an owned native handoff.
+The action's output, gesture, ordinal, phase and logical pan displacement and
+velocity are frozen from the original worker event. Static actions cannot be
+substituted. A named Lua handler may select a Morf action only within its
+declared Morf effect permission; it cannot replace the event's target or
+motion. Refreshing context cannot extend the original execution grant.
+Coalesced worker ordinals remain the authorization/deduplication identities;
+the native controller receives consecutive ordinals for submitted attempts.
+Cumulative displacement is preserved across that translation.
+
+The native session reserves a monotonic request ID before sending. Its opaque
+ticket includes the broker fence and native output/endpoint/UI/ownership
+generations. `Broker::take_morf_control` consumes a terminal result once;
+unknown, queued, foreign and already-consumed tickets return no result. A
+queued reply is not controller acceptance. `Dispatched` means the native
+controller accepted the request, without proving presentation or animation
+completion. Rejected, unavailable and uncertain outcomes remain distinct.
+
+Each handoff retains at most eight pending requests, 64 unconsumed receipt
+records and 4096 gesture histories. Full queues reject before sending and never
+evict unresolved records. Receipt reads rotate fairly; they expire to uncertain
+one second after the dispatch deadline. Taking a receipt cannot permit replay.
+Repeated/retired progress, changed actions, foreign output/epoch and deadlines
+outside the current grant or ownership freshness fail before submission.
+Failed mutations are never repeated. Ownership loss, retirement and release
+turn unresolved work into uncertain results; terminal outcomes are retained.
+
+This host backend does not add a public session payload request or advertise
+`MorfActions`. Agent plan transport, native rendered-context authority,
+per-action/source cancellation and full physical cutover remain required
+before production negotiation. The opt-in root script tests the native backend
+directly, not the broker's live action-grant path; its receipt keeps
+`broker_grant_tested=false` and `native_action_rendering_tested=false`.

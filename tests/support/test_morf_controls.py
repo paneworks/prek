@@ -13,6 +13,7 @@ class NativeReceipt(unittest.TestCase):
     def receipt(self):
         return dict(status="passed", uid=0, native_ui_handoff_tested=True,
                     actual_logind_registration=True, compositor_pid=123,
+                    native_action_receipts_tested=True, native_action_rendering_tested=False,
                     producer_pid=456, output="HEADLESS-1", worker_reaped=True,
                     input_devices_opened=0, physical_takeover_tested=False,
                     broker_grant_tested=False, restored=True)

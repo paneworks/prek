@@ -339,12 +339,93 @@ struct Offered {
     window: Option<String>,
     deadline: Duration,
     granted: bool,
+    grant_until: Option<Duration>,
+    morf: Option<(crate::config::Action, crate::morf::controls::Request)>,
     sent: bool,
     delivered: bool,
     cancelled: bool,
     required: BTreeSet<Capability>,
 }
 impl Offered {
+    fn target_valid(&self, snapshot: &crate::context::Snapshot, now: Duration) -> bool {
+        let output = |snapshot: &crate::context::Snapshot| {
+            snapshot
+                .outputs
+                .iter()
+                .find(|output| Some(&output.geometry.name) == self.output.as_ref())
+                .cloned()
+        };
+        let window = |snapshot: &crate::context::Snapshot| {
+            snapshot
+                .windows
+                .iter()
+                .find(|window| Some(&window.id) == self.window.as_ref())
+                .cloned()
+        };
+        !self.cancelled
+            && now < self.deadline
+            && snapshot.captured_at <= now
+            && now - snapshot.captured_at < SNAPSHOT_MAX_AGE
+            && snapshot.state == State::Desktop
+            && !snapshot.secure_overlay
+            && snapshot.generation == self.snapshot.generation
+            && (self.output.is_none()
+                || output(&self.snapshot).is_some_and(|old| Some(old) == output(snapshot)))
+            && (self.window.is_none()
+                || window(&self.snapshot).is_some_and(|old| Some(old) == window(snapshot)))
+            && (self.output.is_none() || snapshot.regions == self.snapshot.regions)
+    }
+    fn morf_control(
+        &self,
+        request: &crate::morf::controls::Request,
+        snapshot: &crate::context::Snapshot,
+        now: Duration,
+    ) -> io::Result<Duration> {
+        let until = self
+            .grant_until
+            .filter(|until| now < *until)
+            .filter(|_| {
+                self.granted && self.sent && self.delivered && self.target_valid(snapshot, now)
+            })
+            .ok_or_else(|| {
+                protocol::invalid("native control has no live delivered execution grant")
+            })?;
+        let (action, template) = self
+            .morf
+            .as_ref()
+            .ok_or_else(|| protocol::invalid("action offer has no native control payload"))?;
+        if !match action {
+            crate::config::Action::Morf { action } => *action == request.action,
+            crate::config::Action::Lua { requires, .. } => {
+                requires.contains(&crate::config::EffectKind::MorfActions)
+            }
+            _ => false,
+        } {
+            return Err(protocol::invalid(
+                "native action exceeds its configured offer",
+            ));
+        }
+        let mut expected = template.clone();
+        expected.action = request.action;
+        if expected.phase == crate::morf::controls::Phase::Begin
+            && !matches!(
+                request.action,
+                crate::config::MorfAction::Dashboard
+                    | crate::config::MorfAction::Notifications
+                    | crate::config::MorfAction::QuickSettings
+                    | crate::config::MorfAction::WorkspacePreview
+            )
+        {
+            expected.phase = crate::morf::controls::Phase::Discrete;
+        }
+        request.validate()?;
+        if expected != *request {
+            return Err(protocol::invalid(
+                "native payload differs from frozen event",
+            ));
+        }
+        Ok(until)
+    }
     fn capabilities_available(
         &self,
         negotiated: &BTreeSet<Capability>,
@@ -359,6 +440,7 @@ impl Offered {
 impl ActionLedger {
     fn offer(
         &mut self,
+        fence: Fence,
         event: &crate::rules::Event,
         snapshot: &crate::context::Snapshot,
         now: Duration,
@@ -394,6 +476,22 @@ impl ActionLedger {
                 window: window.clone(),
                 deadline: now + protocol::MAX_PACKET_AGE,
                 granted: false,
+                grant_until: None,
+                morf: match event {
+                    crate::rules::Event::Matched { action, .. }
+                        if protocol::action_capabilities(action)
+                            .contains(&Capability::MorfActions) =>
+                    {
+                        let selected = match action {
+                            crate::config::Action::Morf { action } => *action,
+                            _ => crate::config::MorfAction::Dashboard,
+                        };
+                        crate::morf::controls::Request::from_event(fence, event, selected)
+                            .ok()
+                            .map(|request| (action.clone(), request))
+                    }
+                    _ => None,
+                },
                 sent: false,
                 delivered: false,
                 cancelled: false,
@@ -418,37 +516,14 @@ impl ActionLedger {
             .pending
             .get_mut(&(id, ordinal))
             .ok_or_else(|| protocol::invalid("action authorization has no broker offer"))?;
-        let output = |snapshot: &crate::context::Snapshot| {
-            snapshot
-                .outputs
-                .iter()
-                .find(|output| Some(&output.geometry.name) == offer.output.as_ref())
-                .cloned()
-        };
-        let window = |snapshot: &crate::context::Snapshot| {
-            snapshot
-                .windows
-                .iter()
-                .find(|window| Some(&window.id) == offer.window.as_ref())
-                .cloned()
-        };
-        if offer.cancelled
-            || offer.granted
-            || now >= offer.deadline
-            || snapshot.captured_at > now
-            || now.saturating_sub(snapshot.captured_at) >= SNAPSHOT_MAX_AGE
-            || snapshot.state != State::Desktop
-            || snapshot.secure_overlay
-            || snapshot.generation != offer.snapshot.generation
-            || offer.output.is_some() && output(snapshot) != output(&offer.snapshot)
-            || offer.window.is_some() && window(snapshot) != window(&offer.snapshot)
-            || offer.output.is_some() && snapshot.regions != offer.snapshot.regions
-        {
+        if offer.granted || !offer.target_valid(snapshot, now) {
             return Err(protocol::invalid(
                 "action target or execution authority expired",
             ));
         }
         offer.granted = true;
+        offer.grant_until =
+            Some((now + SNAPSHOT_MAX_AGE).min(snapshot.captured_at + SNAPSHOT_MAX_AGE));
         Ok(())
     }
     fn complete(&mut self, id: u64, ordinal: u64) -> io::Result<()> {
@@ -1301,7 +1376,9 @@ impl Broker {
                     event: event.clone(),
                 }
                 .validate()?;
-                bound.actions.offer(&event, &context.snapshot, now)?;
+                bound
+                    .actions
+                    .offer(bound.fence, &event, &context.snapshot, now)?;
                 Reply::Dispatch { fence, event }
             }
             Report::Ended { reason, .. } => {
@@ -2177,8 +2254,14 @@ mod tests {
         };
         let mut actions = ActionLedger::default();
         assert!(actions.authorize(1, 1, &snapshot, Duration::ZERO).is_err());
-        actions.offer(&event, &snapshot, Duration::ZERO).unwrap();
-        assert!(actions.offer(&event, &snapshot, Duration::ZERO).is_err());
+        actions
+            .offer(fence, &event, &snapshot, Duration::ZERO)
+            .unwrap();
+        assert!(
+            actions
+                .offer(fence, &event, &snapshot, Duration::ZERO)
+                .is_err()
+        );
         assert!(actions.complete(1, 1).is_err());
         actions.authorize(1, 1, &snapshot, Duration::ZERO).unwrap();
         assert!(actions.authorize(1, 1, &snapshot, Duration::ZERO).is_err());
@@ -2197,7 +2280,9 @@ mod tests {
             (1, State::Desktop, 2),
         ] {
             let mut actions = ActionLedger::default();
-            actions.offer(&event, &snapshot, Duration::ZERO).unwrap();
+            actions
+                .offer(fence, &event, &snapshot, Duration::ZERO)
+                .unwrap();
             let changed = crate::context::Snapshot {
                 state,
                 generation,
@@ -2208,6 +2293,185 @@ mod tests {
                     .authorize(1, 1, &changed, Duration::from_millis(at))
                     .is_err()
             );
+        }
+    }
+    #[test]
+    fn native_controls_require_delivered_grants_and_exact_frozen_event_and_target() {
+        // Explicit context/registration model; this does not establish live
+        // root, logind, native controller execution or physical ownership.
+        let at = Duration::from_secs(1);
+        let view = crate::context_transfer::tests::view(at);
+        let snapshot = view.context.unwrap().snapshot;
+        let fence = view.fence;
+        let Reply::Observation { mut event, .. } = progress(fence, 1, Stage::Begin) else {
+            unreachable!()
+        };
+        let Event::Matched {
+            action,
+            output,
+            evidence,
+            at: event_at,
+            ..
+        } = event.as_mut()
+        else {
+            unreachable!()
+        };
+        *action = Action::Morf {
+            action: crate::config::MorfAction::Dashboard,
+        };
+        *output = Some(snapshot.outputs[0].geometry.name.clone());
+        *event_at = at;
+        let Evidence::Touch { space, .. } = evidence else {
+            unreachable!()
+        };
+        *space = Space::Logical;
+        let request = crate::morf::controls::Request::from_event(
+            fence,
+            &event,
+            crate::config::MorfAction::Dashboard,
+        )
+        .unwrap();
+        let mut actions = ActionLedger::default();
+        actions.offer(fence, &event, &snapshot, at).unwrap();
+        assert!(
+            actions.pending[&(1, 1)]
+                .morf_control(&request, &snapshot, at)
+                .is_err()
+        );
+        actions.authorize(1, 1, &snapshot, at).unwrap();
+        let offer = actions.pending.get_mut(&(1, 1)).unwrap();
+        assert!(offer.morf_control(&request, &snapshot, at).is_err());
+        offer.sent = true;
+        assert!(offer.morf_control(&request, &snapshot, at).is_err());
+        offer.delivered = true;
+        let until = at + SNAPSHOT_MAX_AGE;
+        assert_eq!(offer.morf_control(&request, &snapshot, at).unwrap(), until);
+        for field in ["dx", "output", "epoch", "ordinal", "action"] {
+            let mut bad = request.clone();
+            match field {
+                "dx" => bad.dx += 1.,
+                "output" => bad.output = "other".into(),
+                "epoch" => bad.epoch = "f".repeat(32),
+                "ordinal" => bad.ordinal += 1,
+                _ => bad.action = crate::config::MorfAction::Notifications,
+            }
+            assert!(offer.morf_control(&bad, &snapshot, at).is_err(), "{field}");
+        }
+        let mut fresh = snapshot.clone();
+        fresh.captured_at += Duration::from_millis(100);
+        assert_eq!(
+            offer
+                .morf_control(&request, &fresh, fresh.captured_at)
+                .unwrap(),
+            until
+        );
+        fresh.captured_at = until;
+        assert!(
+            offer.morf_control(&request, &fresh, until).is_err(),
+            "context refresh extended the original grant"
+        );
+        for changed in [
+            crate::context::Snapshot {
+                secure_overlay: true,
+                ..snapshot.clone()
+            },
+            crate::context::Snapshot {
+                outputs: vec![],
+                ..snapshot.clone()
+            },
+            crate::context::Snapshot {
+                regions: vec![],
+                ..snapshot.clone()
+            },
+        ] {
+            assert!(offer.morf_control(&request, &changed, at).is_err());
+        }
+        offer.cancelled = true;
+        assert!(offer.morf_control(&request, &snapshot, at).is_err());
+
+        let Event::Matched { action, .. } = event.as_mut() else {
+            unreachable!()
+        };
+        *action = Action::Lua {
+            handler: "shell".into(),
+            requires: BTreeSet::from([crate::config::EffectKind::MorfActions]),
+        };
+        let mut actions = ActionLedger::default();
+        actions.offer(fence, &event, &snapshot, at).unwrap();
+        actions.authorize(1, 1, &snapshot, at).unwrap();
+        let offer = actions.pending.get_mut(&(1, 1)).unwrap();
+        offer.sent = true;
+        offer.delivered = true;
+        let mut selected = request.clone();
+        selected.action = crate::config::MorfAction::Notifications;
+        assert_eq!(offer.morf_control(&selected, &snapshot, at).unwrap(), until);
+        selected.dy += 1.;
+        assert!(offer.morf_control(&selected, &snapshot, at).is_err());
+    }
+    #[test]
+    fn native_progress_needs_logical_evidence_and_current_event_generations() {
+        let fence = Fence {
+            broker: Epoch([1, 2]),
+            configuration: 1,
+            session: 1,
+        };
+        let Reply::Observation { mut event, .. } = progress(fence, 1, Stage::Begin) else {
+            unreachable!()
+        };
+        let Event::Matched { output, .. } = event.as_mut() else {
+            unreachable!()
+        };
+        *output = Some("TEST-1".into());
+        let build = |event: &Event| {
+            crate::morf::controls::Request::from_event(
+                fence,
+                event,
+                crate::config::MorfAction::Dashboard,
+            )
+        };
+        assert!(
+            build(&event).is_err(),
+            "normalized values passed as logical displacement"
+        );
+        let Event::Matched {
+            evidence: Evidence::Touch { space, .. },
+            ..
+        } = event.as_mut()
+        else {
+            unreachable!()
+        };
+        *space = Space::Logical;
+        assert!(build(&event).is_ok());
+        let Event::Matched {
+            config_generation, ..
+        } = event.as_mut()
+        else {
+            unreachable!()
+        };
+        *config_generation += 1;
+        assert!(build(&event).is_err());
+    }
+    #[test]
+    fn an_absent_frozen_target_cannot_match_an_absent_current_target() {
+        let at = Duration::from_secs(1);
+        let view = crate::context_transfer::tests::view(at);
+        let fence = view.fence;
+        let snapshot = view.context.unwrap().snapshot;
+        for missing_window in [false, true] {
+            let Reply::Observation { mut event, .. } = progress(fence, 1, Stage::Begin) else {
+                unreachable!()
+            };
+            let Event::Matched { output, window, .. } = event.as_mut() else {
+                unreachable!()
+            };
+            if missing_window {
+                *window = Some("missing".into());
+            } else {
+                *output = Some("missing".into());
+            }
+            let mut actions = ActionLedger::default();
+            actions.offer(fence, &event, &snapshot, at).unwrap();
+            assert!(actions.authorize(1, 1, &snapshot, at).is_err());
         }
     }
     #[test]
@@ -2246,8 +2510,12 @@ mod tests {
         *id = 2;
         other_source.device += 1;
         let mut actions = ActionLedger::default();
-        actions.offer(&event, &snapshot, Duration::ZERO).unwrap();
-        actions.offer(&other, &snapshot, Duration::ZERO).unwrap();
+        actions
+            .offer(fence, &event, &snapshot, Duration::ZERO)
+            .unwrap();
+        actions
+            .offer(fence, &other, &snapshot, Duration::ZERO)
+            .unwrap();
         actions.pending.get_mut(&(1, 1)).unwrap().delivered = true;
         assert_eq!(actions.cancel(&source, Some(1)), vec![((1, 1), true)]);
         assert!(actions.authorize(1, 1, &snapshot, Duration::ZERO).is_err());
@@ -2257,7 +2525,11 @@ mod tests {
         );
         actions.complete_unexecuted(1, 1).unwrap();
         assert!(actions.complete_unexecuted(1, 1).is_err());
-        assert!(actions.offer(&event, &snapshot, Duration::ZERO).is_err());
+        assert!(
+            actions
+                .offer(fence, &event, &snapshot, Duration::ZERO)
+                .is_err()
+        );
         actions.authorize(2, 1, &snapshot, Duration::ZERO).unwrap();
 
         let Event::Matched { source, .. } = other.as_ref() else {

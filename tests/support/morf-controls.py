@@ -20,6 +20,7 @@ def native_root_receipt(stdout, *, compositor_pid, producer_pid, output):
     receipt = receipts[0]
     expected = dict(status="passed", uid=0, native_ui_handoff_tested=True,
                     actual_logind_registration=True, compositor_pid=compositor_pid,
+                    native_action_receipts_tested=True, native_action_rendering_tested=False,
                     producer_pid=producer_pid, output=output, worker_reaped=True,
                     input_devices_opened=0, physical_takeover_tested=False,
                     broker_grant_tested=False, restored=True)

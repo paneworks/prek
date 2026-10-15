@@ -36,6 +36,85 @@ pub struct Request {
     pub vy: f64,
 }
 impl Request {
+    pub(crate) fn from_event(
+        fence: crate::protocol::Fence,
+        event: &crate::rules::Event,
+        action: MorfAction,
+    ) -> io::Result<Self> {
+        use crate::{
+            gestures::{Space, TouchGesture},
+            rules::{Event, Evidence, Stage},
+        };
+        let Event::Matched {
+            id,
+            ordinal,
+            config_generation,
+            session_generation,
+            stage,
+            output: Some(output),
+            evidence,
+            ..
+        } = event
+        else {
+            return Err(io::Error::other(
+                "native action requires a frozen matched output",
+            ));
+        };
+        fence.validate()?;
+        if *config_generation != fence.configuration || *session_generation != fence.session {
+            return Err(io::Error::other(
+                "native event belongs to a retired configuration/session",
+            ));
+        }
+        let continuous = matches!(
+            action,
+            MorfAction::Dashboard
+                | MorfAction::Notifications
+                | MorfAction::QuickSettings
+                | MorfAction::WorkspacePreview
+        );
+        let phase = match stage {
+            Stage::Discrete => Phase::Discrete,
+            Stage::Begin if !continuous => Phase::Discrete,
+            Stage::Begin => Phase::Begin,
+            Stage::Update => Phase::Update,
+            Stage::End => Phase::End,
+            Stage::Cancel => Phase::Cancel,
+        };
+        let (dx, dy, vx, vy) = match evidence {
+            Evidence::Touch {
+                space: Space::Logical,
+                gesture:
+                    TouchGesture::Pan {
+                        total, velocity, ..
+                    },
+            } => (total.x, total.y, velocity.x, velocity.y),
+            _ if phase == Phase::Discrete => (0., 0., 0., 0.),
+            _ => {
+                return Err(io::Error::other(
+                    "native progress requires output-logical pan evidence",
+                ));
+            }
+        };
+        if *id == 0 {
+            return Err(io::Error::other("native gesture identity is zero"));
+        }
+        let request = Self {
+            version: 1,
+            output: output.clone(),
+            epoch: format!("{:016x}{:016x}", fence.broker.0[0], fence.broker.0[1]),
+            gesture: format!("{id:032x}"),
+            ordinal: (*ordinal).try_into().map_err(io::Error::other)?,
+            action,
+            phase,
+            dx,
+            dy,
+            vx,
+            vy,
+        };
+        request.validate()?;
+        Ok(request)
+    }
     pub fn validate(&self) -> io::Result<()> {
         let hex = |value: &str| {
             value.len() == 32
