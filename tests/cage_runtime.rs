@@ -764,7 +764,54 @@ return p.config.new{mode='route',policy={allowed_devices={'keyboard'},allow_hypr
     .into_iter()
     .enumerate()
     {
-        let snapshot = sampler.sample(checking, 1, SessionKind::User).unwrap();
+        // A new gesture starts after the preceding workspace/layout animation
+        // settles. Do this before freezing context and starting its short grant;
+        // changing geometry after that boundary must still refuse the action.
+        let until = monotonic().unwrap() + Duration::from_secs(3);
+        let mut previous = None;
+        let mut stable_since = monotonic().unwrap();
+        let snapshot = loop {
+            assert!(
+                monotonic().unwrap() < until,
+                "owned window geometry never settled"
+            );
+            let snapshot = match sampler.sample(checking, 1, SessionKind::User) {
+                Ok(snapshot) => snapshot,
+                Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+                    // A missing observation cannot contribute to stability.
+                    // A new read-only sample gets its own normal IPC budget.
+                    previous = None;
+                    stable_since = monotonic().unwrap();
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(error) => panic!("window readiness sample failed: {error}"),
+            };
+            let window = snapshot
+                .windows
+                .iter()
+                .find(|window| window.id == target_id)
+                .unwrap();
+            let state = (
+                window.clone(),
+                snapshot
+                    .outputs
+                    .iter()
+                    .find(|output| output.geometry.name == window.output)
+                    .unwrap()
+                    .clone(),
+            );
+            let now = monotonic().unwrap();
+            if previous.as_ref() != Some(&state) {
+                previous = Some(state);
+                stable_since = now;
+            }
+            if now.saturating_sub(stable_since) >= Duration::from_millis(150) {
+                break snapshot;
+            }
+            assert!(now < until, "owned window geometry never settled");
+            std::thread::sleep(Duration::from_millis(10));
+        };
         let window = snapshot
             .windows
             .iter()
@@ -870,6 +917,13 @@ return p.config.new{mode='route',policy={allowed_devices={'keyboard'},allow_hypr
             assert!(monotonic().unwrap() < until, "window plan did not complete");
             std::thread::sleep(Duration::from_millis(1));
         };
+        if completion != Completion::Applied {
+            let sampled = sampler.sample(checking, 1, SessionKind::User);
+            fs::write(output.join("hyprland-window-failure.json"),serde_json::to_vec(&serde_json::json!({
+                "action":action,"completion":completion,"frozen_window":window,
+                "snapshot":sampled.as_ref().ok(),"sample_error":sampled.as_ref().err().map(ToString::to_string)
+            })).unwrap()).unwrap();
+        }
         assert_eq!(
             completion,
             Completion::Applied,
