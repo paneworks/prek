@@ -149,6 +149,7 @@ pub struct Policy {
     pub allowed_seats: BTreeSet<String>,
 }
 struct Bound {
+    transport_started: bool,
     client: Client,
     registration: Registration,
     seat: String,
@@ -633,6 +634,7 @@ fn subscriptions_fit(seats: &[Subscription]) -> bool {
 }
 
 pub struct Broker {
+    input_releases: Option<crate::morf::ownership::Ledger>,
     endpoint: Endpoint,
     logind: Logind,
     policy: Policy,
@@ -671,6 +673,7 @@ impl Broker {
             ));
         }
         Ok(Self {
+            input_releases: None,
             endpoint,
             logind: Logind::open(library)?,
             policy,
@@ -691,6 +694,65 @@ impl Broker {
             rule_baseline: None,
             rule_handlers: Vec::new(),
         })
+    }
+    pub fn bind_input_worker(
+        &mut self,
+        worker: &crate::supervisor::Supervisor,
+        channel: &Channel,
+    ) -> io::Result<()> {
+        if self.input_releases.is_some() {
+            return Err(protocol::invalid("input worker already bound"));
+        }
+        self.input_releases = Some(crate::morf::ownership::Ledger::new(
+            worker.worker_identity(),
+            channel.peer(),
+        )?);
+        Ok(())
+    }
+    /// The handoff owner enrolls before any consumer readiness can be issued.
+    /// No public client request can create or complete this descriptor evidence.
+    pub fn watch_input_ownership(&mut self, fence: Fence, seat: &str) -> io::Result<()> {
+        if !self
+            .connections
+            .iter()
+            .filter_map(|c| c.bound.as_ref())
+            .any(|b| {
+                b.fence == fence && b.seat == seat && !b.transport_started && b.role == Role::Agent
+            })
+        {
+            return Err(protocol::invalid(
+                "ownership must enroll before transport readiness",
+            ));
+        }
+        self.input_releases
+            .as_mut()
+            .ok_or_else(|| protocol::invalid("input worker is not bound"))?
+            .watch(fence, seat)
+    }
+    pub fn input_released(
+        &mut self,
+        channel: &Channel,
+        worker: crate::supervisor::WorkerIdentity,
+        fence: Fence,
+        source: &crate::input::Source,
+    ) -> io::Result<()> {
+        self.input_releases
+            .as_mut()
+            .ok_or_else(|| protocol::invalid("input worker is not bound"))?
+            .released(channel, worker, fence, source)
+    }
+    pub fn input_worker_exited(&mut self, report: &crate::supervisor::Report) -> io::Result<()> {
+        self.input_releases
+            .as_mut()
+            .ok_or_else(|| protocol::invalid("input worker is not bound"))?
+            .exited(report)
+    }
+    pub fn take_released_inputs(
+        &mut self,
+        fence: Fence,
+        seat: &str,
+    ) -> Option<crate::morf::ownership::ReleasedInputs> {
+        self.input_releases.as_mut()?.take(fence, seat)
     }
     pub fn clients(&self) -> usize {
         self.connections
@@ -923,6 +985,14 @@ impl Broker {
                 consumer: Some(bound.client.consumer()),
             })
             .collect();
+        if let Some(ledger) = self.input_releases.as_mut() {
+            ledger.retire_except(
+                &subscriptions
+                    .iter()
+                    .map(|s| (s.fence, s.seat.clone()))
+                    .collect::<Vec<_>>(),
+            );
+        }
         if !subscriptions_fit(&subscriptions) {
             // Never publish a truncated target list or let an oversized
             // optional context snapshot stop the supervised input reader.
@@ -1274,6 +1344,10 @@ impl Broker {
             return Ok(None);
         };
         bound.registration.check(&self.logind, &bound.client)?;
+        if let Some(ledger) = self.input_releases.as_mut() {
+            ledger.prepared(bound.fence, descriptor.source.clone())?;
+        }
+        bound.transport_started = true;
         Ok(Some(crate::configuration::Command::Transport {
             fence: bound.fence,
             source: descriptor.source.clone(),
@@ -1473,6 +1547,7 @@ impl Broker {
                         context.inhibit();
                     }
                     connection.bound = Some(Bound {
+                        transport_started: false,
                         client,
                         registration,
                         seat: seat.clone(),

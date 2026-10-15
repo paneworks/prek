@@ -54,6 +54,7 @@ pub struct Stream {
     seats: BTreeMap<String, Seat>,
     outputs: BTreeMap<Source, Output>,
     grabbed: BTreeSet<Source>,
+    releases: BTreeMap<Source, (Fence, crate::supervisor::WorkerIdentity)>,
     assembly: Assembly,
     messages: Outbox,
 }
@@ -100,6 +101,7 @@ impl Outbox {
                 Message::RulesChanged {
                     seat: changed_seat, ..
                 } => changed_seat == seat,
+                Message::Released { .. } => false,
             };
             if discard {
                 self.bytes -= bytes;
@@ -160,6 +162,7 @@ impl Stream {
             seats: BTreeMap::new(),
             outputs: BTreeMap::new(),
             grabbed: BTreeSet::new(),
+            releases: BTreeMap::new(),
             assembly: Assembly::default(),
             messages,
         })
@@ -332,6 +335,20 @@ impl Stream {
     }
 }
 impl InputSink for Stream {
+    fn reader_released(&mut self, source: &Source) -> io::Result<()> {
+        if self.outputs.contains_key(source) {
+            return Err(invalid("original closed before virtual retirement"));
+        }
+        let Some((fence, worker)) = self.releases.remove(source) else {
+            return Ok(());
+        };
+        self.queue(Message::Released {
+            worker,
+            fence,
+            source: source.clone(),
+        })?;
+        self.messages.flush(&mut self.channel)
+    }
     fn reader(
         &mut self,
         raw: &mut RawDevice,
@@ -340,7 +357,9 @@ impl InputSink for Stream {
         health: Option<&Heartbeat>,
     ) -> io::Result<ReaderDisposition> {
         let now = monotonic()?;
-        if self.grabbed.contains(&device.source) && !self.outputs.contains_key(&device.source) {
+        if (self.grabbed.contains(&device.source) || self.releases.contains_key(&device.source))
+            && !self.outputs.contains_key(&device.source)
+        {
             // The old routing engine retires this source on Remove before a
             // reopened reader can attach with a fresh connection generation.
             return Ok(ReaderDisposition::Reopen);
@@ -392,6 +411,13 @@ impl InputSink for Stream {
                     .prepare_for_worker(descriptor.clone(), health)?,
             )?;
             let subscription = self.seats[&device.source.seat].subscription.clone();
+            if self.releases.len() >= 4096 {
+                return Err(invalid("too many pending reader releases"));
+            }
+            self.releases.insert(
+                device.source.clone(),
+                (subscription.fence, health.worker_identity()),
+            );
             let readiness = Readiness::new(descriptor, subscription.consumer.clone().unwrap(), now)
                 .map_err(invalid)?;
             self.outputs.insert(
@@ -804,5 +830,42 @@ mod tests {
         queue.discard_seat("seat1");
         assert_eq!(queue.messages.len(), 1);
         assert_eq!(queue.bytes, queue.messages[0].1);
+    }
+
+    #[test]
+    fn seat_replacement_preserves_original_descriptor_release_acknowledgements() {
+        let mut queue = Outbox::default();
+        let worker = serde_json::from_value(serde_json::json!({
+            "pid":std::process::id(),"birth":1,"epoch":1
+        }))
+        .unwrap();
+        let fence = Fence {
+            broker: protocol::Epoch([1, 2]),
+            configuration: 1,
+            session: 1,
+        };
+        let source = Source {
+            device: 7,
+            generation: 2,
+            seat: "seat0".into(),
+        };
+        queue.push(ended("seat0", 1)).unwrap();
+        queue
+            .push(Message::Released {
+                worker,
+                fence,
+                source: source.clone(),
+            })
+            .unwrap();
+        queue.discard_seat("seat0");
+        assert_eq!(queue.messages.len(), 1);
+        assert_eq!(queue.bytes, queue.messages[0].1);
+        let (mut sender, mut receiver) = Channel::pair().unwrap();
+        queue.flush(&mut sender).unwrap();
+        assert_eq!(queue.bytes, 0);
+        let message = receiver.receive::<Message>().unwrap().unwrap().message;
+        assert!(
+            matches!(message,Message::Released {worker:w,fence:f,source:s} if w==worker && f==fence && s==source)
+        );
     }
 }

@@ -806,6 +806,7 @@ fn run_broker(
         command.arg("--duration").arg(duration.to_string());
     }
     let (mut supervisor, mut control) = Supervisor::spawn_controlled(command)?;
+    broker.bind_input_worker(&supervisor, &control)?;
     broker.enable_observations();
     let mut refresh = monotonic()?;
     let mut revision = 0u64;
@@ -825,6 +826,7 @@ fn run_broker(
             supervisor.request_stop()?;
         }
         if let Some(report) = supervisor.check()? {
+            broker.input_worker_exited(&report)?;
             return if signals.requested()
                 || report.reason() == Reason::Requested
                 || report.reason() == Reason::Exited && report.status().success()
@@ -980,6 +982,11 @@ fn run_broker(
             }
             match control.receive::<prek::worker::Message>() {
                 Ok(Some(packet)) => match packet.message {
+                    prek::worker::Message::Released {
+                        worker,
+                        fence,
+                        source,
+                    } => broker.input_released(&control, worker, fence, &source)?,
                     prek::worker::Message::RulesChanged {
                         seat,
                         fence,

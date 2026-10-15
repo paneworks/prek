@@ -155,3 +155,25 @@ rendered context and root/logind/phone acceptance remain required before action
 negotiation can be enabled. Cage checks inspect actual native handoff state
 and refuse unprivileged mutations; positive ownership remains explicit model
 evidence, not physical takeover.
+
+The input worker now reports original-reader closure separately from source
+removal. It retires virtual output first, drops the original descriptor, then
+sends a private `Released` acknowledgement containing the worker lifetime,
+broker/configuration/session fence and exact source generation. Seat replacement
+preserves queued closure acknowledgements. Backpressure or a missing message
+cannot establish release; an actual reaped-worker report supplies the fallback.
+
+The broker's ownership ledger can enroll a seat/fence before its first consumer
+readiness. It records every source subsequently offered readiness and yields
+opaque `ReleasedInputs` evidence only after that scope retires and all recorded
+sources close, or its exact worker is reaped. The ledger bounds pending scopes
+and sources without evicting unconfirmed entries. Public session messages
+cannot construct this evidence. Tests use real socket EOF for closure ordering
+and actual supervised/reaped child processes for exit evidence; no evdev access
+is involved.
+
+This evidence covers only the enrolled worker's descriptors. It does not prove
+consumer neutrality, external lisgd shutdown, a safe kernel admission boundary,
+or Morf ownership. Production handoff orchestration must enroll and consume it
+alongside those other conditions; it is not yet connected to the native release
+assertion, and production Morf action negotiation remains disabled.

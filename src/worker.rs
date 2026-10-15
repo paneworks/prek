@@ -89,6 +89,12 @@ pub enum Report {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Message {
+    /// Private sole-worker acknowledgement after descriptor closure.
+    Released {
+        worker: crate::supervisor::WorkerIdentity,
+        fence: Fence,
+        source: crate::input::Source,
+    },
     RulesChanged {
         seat: String,
         fence: Fence,

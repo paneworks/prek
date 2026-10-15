@@ -2,6 +2,7 @@
 //! never establish a completed unlock transition.
 pub mod controls;
 pub mod native;
+pub mod ownership;
 mod shell;
 pub use shell::{Phase as ShellPhase, State as ShellState};
 pub type ShellClient = Client<ShellState>;

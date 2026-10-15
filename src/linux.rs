@@ -475,6 +475,11 @@ pub trait InputSink {
     /// Retire virtual output while the loop still owns every original fd.
     /// Cleanup must be bounded and must also tolerate a failed transport.
     fn shutdown(&mut self) {}
+    /// Called after the original reader closes. Removal records are not a
+    /// release acknowledgement; actual worker exit remains the error fallback.
+    fn reader_released(&mut self, _source: &Source) -> io::Result<()> {
+        Ok(())
+    }
     fn push(&mut self, record: Record) -> io::Result<()>;
     fn deadline(&self) -> Option<Duration>;
     fn flush(&mut self) -> io::Result<()>;
@@ -540,6 +545,77 @@ impl<S: InputSink> Drop for ReaderOwner<'_, S> {
         // The body runs before `readers` is dropped, including on errors and
         // unwinding. Virtual output retires before any original grab releases.
         self.sink.shutdown();
+        for reader in self.readers.drain(..) {
+            let source = reader.device.source.clone();
+            let _ = release_reader(reader, &source, self.sink);
+        }
+    }
+}
+fn release_reader(
+    reader: impl Sized,
+    source: &Source,
+    sink: &mut impl InputSink,
+) -> io::Result<()> {
+    drop(reader);
+    sink.reader_released(source)
+}
+
+#[cfg(test)]
+mod reader_release_tests {
+    use super::*;
+    use std::{io::Read, os::unix::net::UnixStream};
+
+    struct Sink {
+        peer: UnixStream,
+        acknowledged: bool,
+        fail: bool,
+    }
+    impl InputSink for Sink {
+        fn reader_released(&mut self, _source: &Source) -> io::Result<()> {
+            let mut byte = [0];
+            // A live writer gives WouldBlock; EOF proves it actually closed.
+            assert_eq!(self.peer.read(&mut byte)?, 0);
+            self.acknowledged = true;
+            if self.fail {
+                Err(io::Error::other("failed acknowledgement"))
+            } else {
+                Ok(())
+            }
+        }
+        fn push(&mut self, _record: Record) -> io::Result<()> {
+            Ok(())
+        }
+        fn deadline(&self) -> Option<Duration> {
+            None
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn reader_closes_before_release_ack_even_when_ack_fails() {
+        for fail in [false, true] {
+            let (reader, peer) = UnixStream::pair().unwrap();
+            peer.set_nonblocking(true).unwrap();
+            let mut sink = Sink {
+                peer,
+                acknowledged: false,
+                fail,
+            };
+            assert_eq!(
+                sink.peer.read(&mut [0]).unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
+            let source = Source {
+                device: 1,
+                generation: 1,
+                seat: "seat0".into(),
+            };
+            assert_eq!(release_reader(reader, &source, &mut sink).is_err(), fail);
+            assert!(sink.acknowledged);
+            assert_eq!(sink.peer.read(&mut [0]).unwrap(), 0);
+        }
     }
 }
 struct WatchSink<'a, 'b, W: Write> {
@@ -697,8 +773,11 @@ fn observe_loop(
         for index in reopen.into_iter().rev() {
             let source = readers[index].device.source.clone();
             pending.retain(|frame| frame.source != source);
-            sink.push(Record::Remove { source, at: now })?;
-            readers.remove(index);
+            sink.push(Record::Remove {
+                source: source.clone(),
+                at: now,
+            })?;
+            release_reader(readers.remove(index), &source, sink)?;
             scan_at = now;
         }
         if stop_at.is_some_and(|stop| now >= stop) {
@@ -781,11 +860,11 @@ fn observe_loop(
             let source = readers[index].device.source.clone();
             pending.retain(|frame| frame.source != source);
             let record = Record::Remove {
-                source,
+                source: source.clone(),
                 at: watermark,
             };
             sink.push(record)?;
-            readers.remove(index);
+            release_reader(readers.remove(index), &source, sink)?;
         }
         let tick = Record::Tick { at: watermark };
         sink.push(tick)?;
@@ -886,8 +965,11 @@ fn refresh_readers(
         {
             let source = readers[index].device.source.clone();
             pending.retain(|frame| frame.source != source);
-            sink.push(Record::Remove { source, at: now })?;
-            readers.remove(index);
+            sink.push(Record::Remove {
+                source: source.clone(),
+                at: now,
+            })?;
+            release_reader(readers.remove(index), &source, sink)?;
         }
     }
     for entry in entries {
