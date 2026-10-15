@@ -149,9 +149,10 @@ fn local_cage_lua_routing_and_context() {
         configuration: 1,
         session: 1,
     };
-    let definition = Definition::compile(
-        r#"
+    let layer_control = std::env::var("PREK_CAGE_LAYER_TEST").as_deref() == Ok("1");
+    let source = r#"
 local p=require('prek')
+local layer_control=__LAYER_CONTROL__
 local transaction
 p.events.on('context_changed',function(event)
   local snapshot=p.context.snapshot(); local binding=p.context.binding()
@@ -164,27 +165,30 @@ p.events.on('matched',function(event)
   if event.event.rule=='local-a' then
     p.log.info('local-matched',{rule=event.event.rule,stage=event.event.stage})
   elseif event.event.rule=='local-b' and event.event.stage=='end' and not transaction then
-    transaction=p.rules.transaction(); transaction:disable('local-a'); transaction:commit()
+    transaction=p.rules.transaction()
+    if layer_control then transaction:deactivate_layer('local-layer') else transaction:disable('local-a') end
+    transaction:commit()
   end
 end)
 p.events.on('rules_changed',function(event)
-  assert(event.accepted and event.revision=='2' and not p.rules.get('local-a').enabled)
+  assert(event.accepted and event.revision=='2' and p.rules.get('local-a').enabled==layer_control)
+  assert(p.layers.get('local-layer').activation==(layer_control and 'inactive' or 'active'))
   assert(transaction:status().state=='accepted' and p.rules.revision()=='2')
   p.log.info('local-rules-changed',{accepted=event.accepted,revision=event.revision,state=transaction:status().state})
+  p.log.info('local-layer-state',{activation=p.layers.get('local-layer').activation,rule_enabled=p.rules.get('local-a').enabled})
 end)
 return p.config.new {
   mode='route',policy={allowed_devices={'keyboard'},allow_runtime_rules=true},
   devices={keyboard={name='Prek local keyboard'}},
-  rules={p.rules.define {id='local-a',priority=20,devices={'keyboard'},contexts={'desktop'},
+  layers={p.layers.define{id='local-layer',key='KEY_LEFTMETA',activation='active'}},
+  rules={p.rules.define {id='local-a',layer='local-layer',priority=20,devices={'keyboard'},contexts={'desktop'},
     delivery='reserve',trigger=p.triggers.key {key='KEY_A'},
     action=p.actions.event {name='local-a-claimed'}},
     p.rules.define {id='local-b',devices={'keyboard'},contexts={'desktop'},delivery='observe',
       trigger=p.triggers.key {key='KEY_B'},action=p.actions.event {name='local-rule-disable'}}}
 }
-"#,
-        "local-cage.lua",
-    )
-    .unwrap();
+"#.replace("__LAYER_CONTROL__", if layer_control { "true" } else { "false" });
+    let definition = Definition::compile(&source, "local-cage.lua").unwrap();
     let mut routing = Routing::new(toml::from_str(&definition.model).unwrap()).unwrap();
     routing
         .authority_mut()
@@ -404,6 +408,6 @@ return p.config.new {
     session.stop().unwrap();
     settle(&mut session, &mut logs);
     println!(
-        "Verified real Hyprland context and Luna rule receipts, with model-routed A consumption before disable and A/B forwarding after disable"
+        "Verified real Hyprland context and Luna transaction receipts, with model-routed A consumption before the edit and A/B forwarding afterward"
     );
 }

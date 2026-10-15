@@ -22,7 +22,7 @@ in its protected system configuration and `prek session --lua --rule-mutations`.
 The permission defaults to false. The broker negotiates `runtime_rules` only
 with the owning agent, verifies current logind/compositor identity and unlocked
 desktop context, and rejects work during configuration installation. A mutable
-user rule cannot change policy, selectors, layers or mode. Every replacement
+user rule cannot change policy, selectors, physical layer definitions or mode. Every replacement
 or enabled action must fit negotiated capabilities; named Lua handler identity
 and declared effects must match the approved source exactly.
 
@@ -43,10 +43,11 @@ session; a user-owned example file grants no broker authority.
 
 An enabled host provides a generation-scoped `RuleTransaction` with
 `:enable(id)`, `:disable(id)`, `:replace(rule)` (also adds a new ID), `:remove(id)`,
-`:commit()`, `:cancel()` and `:status()`. Edit methods return nil. Each batch
+`:activate_layer(id)`, `:deactivate_layer(id)`, `:reset_layer(id)`, `:commit()`,
+`:cancel()` and `:status()`. Edit methods return nil. Each batch
 contains 1–64 operations and at most 32 KiB of encoded changes. Commit validates
 the complete resulting configuration and approved named-handler references before
-submitting. It cannot change system policy, selectors, layers or mode. At most
+submitting. It cannot change system policy, selectors, physical layer definitions or mode. At most
 64 open builders and one pending proposal are permitted per helper generation.
 An old builder retains its original revision and fails after another batch is accepted.
 
@@ -70,6 +71,55 @@ p.events.on("ready", function()
     end
 end)
 ```
+
+### Runtime layers
+
+`layers.define {id, key, toggle=false, activation="physical"}` declares a layer
+inside the configuration's `layers` array. `key` is required even for an
+override, so returning to physical control has a defined binding. There are at
+most 64 declared layers; IDs are nonempty, at most 256 bytes and contain no
+control characters. `activation` is `physical` (derive activation from the
+momentary/toggled key), `active` (eligible without holding that key), or
+`inactive` (ineligible). Overrides do not synthesize key events.
+
+| Function/method | Meaning |
+| --- | --- |
+| `layers.list()` | Owned copies of acknowledged `Layer` definitions. |
+| `layers.get(id)` | Owned acknowledged `Layer`, or `nil` for an unknown ID. |
+| `layers.revision()` | The shared rule/layer revision as a decimal string. |
+| `layers.transaction()` | Open the same `RuleTransaction` as `rules.transaction()`. |
+| `transaction:activate_layer(id)` | Stage the declared layer's `active` override. |
+| `transaction:deactivate_layer(id)` | Stage its `inactive` override. |
+| `transaction:reset_layer(id)` | Stage restoring `physical` control. |
+
+`Layer` contains `{id, key, toggle, activation}`. Queries/transactions require a
+runtime callback or task. Queries describe definitions and overrides; they do
+not expose whether a physical key is held. Mutating a query result changes no
+host state. Runtime operations cannot add/remove layers or redefine their keys.
+Unknown IDs or an invalid operation reject the complete mixed rule/layer batch.
+Different layer names do not establish disjoint exclusive scopes: layers can
+activate together. Equally prioritized overlapping exclusive rules are rejected
+unless their layer is forced `inactive`. Deactivate one layer and activate the
+other in the same transaction to switch an otherwise conflicting pair atomically.
+
+These operations use the protected `policy.allow_runtime_rules` permission,
+`--lua --rule-mutations` negotiation, owning desktop/session checks and bounded
+receipt transport described above. Activating or restoring a layer also checks
+the action capabilities and approved named handlers of its enabled rules.
+Changes become visible only after the worker acknowledges activation; the
+`rules_changed` callback covers both rule and layer edits. They share one pending
+proposal, one revision, and all cancellation/retirement limits.
+
+An accepted transaction retires existing recognition candidates. Activating a
+layer cannot claim a key/contact that was already held; fresh input is required.
+Physical press/toggle state survives runtime edits, so reset restores that
+state without inventing presses. A source reload follows ordinary held-state
+reconciliation. Routing embeddings must also complete transport recovery and
+establish fresh neutral readiness; the production broker currently permits
+mutation in observation mode only. Actual routing-mode transitions remain pending.
+
+`examples/lua/layer_transactions.lua` activates a layer after permission is
+granted, then restores physical control after its configured key rule ends.
 
 Lua modules live in `modules/` beside the entry configuration. For example,
 `require("phone.bindings")` loads `modules/phone/bindings.lua`. Names use ASCII

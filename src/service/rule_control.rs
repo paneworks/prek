@@ -69,14 +69,22 @@ impl Rules {
             .prepare(current, self.revision)
             .map_err(io::Error::other)?;
         for change in &proposal.transaction.changes {
-            let edited = match change {
-                crate::rule_transactions::Change::Replace { rule } => Some(rule.as_ref()),
+            let edited: Vec<_> = match change {
+                crate::rule_transactions::Change::Replace { rule } => vec![rule.as_ref()],
                 crate::rule_transactions::Change::Enabled { id, enabled: true } => {
-                    next.rules.iter().find(|rule| rule.id == *id)
+                    next.rules.iter().filter(|rule| rule.id == *id).collect()
                 }
-                _ => None,
+                crate::rule_transactions::Change::Layer { id, activation }
+                    if *activation != crate::config::LayerActivation::Inactive =>
+                {
+                    next.rules
+                        .iter()
+                        .filter(|rule| rule.enabled && rule.layer.as_ref() == Some(id))
+                        .collect()
+                }
+                _ => Vec::new(),
             };
-            if let Some(rule) = edited {
+            for rule in edited {
                 if !protocol::action_capabilities(&rule.action).is_subset(capabilities) {
                     return Err(protocol::invalid(
                         "runtime rule action exceeds negotiated capabilities",

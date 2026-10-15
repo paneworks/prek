@@ -896,6 +896,10 @@ impl Engine {
             .prepare(&self.config, self.rule_revision)
             .map_err(invalid)?;
         let mut next = self.prepare_generation(config, self.generation, at)?;
+        next.conditions = self
+            .conditions
+            .with_layer_activations(&next.config.layers)
+            .map_err(invalid)?;
         next.rule_revision = self
             .rule_revision
             .checked_add(1)
@@ -3256,6 +3260,7 @@ mod tests {
             id: "touch".into(),
             key: Key(125),
             toggle: false,
+            activation: Default::default(),
         }];
         config.rules[0].layer = Some("touch".into());
         config.rules[0].keys_throughout = true;
@@ -3268,6 +3273,89 @@ mod tests {
         key(&mut engine, 1, 720, 4, 115, true);
         tick(&mut engine, 1320);
         assert_eq!(matches(&engine.events).len(), 1);
+    }
+
+    #[test]
+    fn runtime_layer_activation_requires_fresh_input_and_deactivation_cancels_progress() {
+        use crate::{
+            config::LayerActivation,
+            rule_transactions::{Change, Transaction},
+        };
+        let mut config = config(hold(600));
+        config.layers = vec![Layer {
+            id: "touch".into(),
+            key: Key(125),
+            toggle: false,
+            activation: LayerActivation::Physical,
+        }];
+        config.rules[0].layer = Some("touch".into());
+        config.rules[0].keys_throughout = true;
+        let mut engine = engine(config);
+        key(&mut engine, 1, 0, 1, 115, true);
+        engine
+            .transact_rules(
+                &Transaction {
+                    revision: 1,
+                    changes: vec![Change::Layer {
+                        id: "touch".into(),
+                        activation: LayerActivation::Active,
+                    }],
+                },
+                ms(100),
+            )
+            .unwrap();
+        tick(&mut engine, 700);
+        assert!(
+            matches(&engine.events).is_empty(),
+            "activation reused input that was already held"
+        );
+        key(&mut engine, 1, 710, 2, 115, false);
+        key(&mut engine, 1, 720, 3, 115, true);
+        tick(&mut engine, 1320);
+        let matched = engine
+            .take_events()
+            .into_iter()
+            .find_map(|event| match event {
+                Event::Matched { id, .. } => Some(id),
+                _ => None,
+            })
+            .unwrap();
+        let invalid = Transaction {
+            revision: 2,
+            changes: vec![Change::Layer {
+                id: "missing".into(),
+                activation: LayerActivation::Inactive,
+            }],
+        };
+        assert!(engine.transact_rules(&invalid, ms(1330)).is_err());
+        assert_eq!(engine.rule_revision(), 2);
+        assert_eq!(
+            engine.config().layers[0].activation,
+            LayerActivation::Active
+        );
+        engine
+            .transact_rules(
+                &Transaction {
+                    revision: 2,
+                    changes: vec![Change::Layer {
+                        id: "touch".into(),
+                        activation: LayerActivation::Inactive,
+                    }],
+                },
+                ms(1340),
+            )
+            .unwrap();
+        assert!(
+            engine
+                .take_events()
+                .iter()
+                .any(|event| matches!(event,Event::Cancelled{id,..} if *id==matched))
+        );
+        assert_eq!(engine.generation(), 1);
+        key(&mut engine, 1, 1350, 4, 115, false);
+        key(&mut engine, 1, 1360, 5, 115, true);
+        tick(&mut engine, 2000);
+        assert!(matches(&engine.events).is_empty());
     }
     #[test]
     fn t17_wheel_high_resolution_is_counted_once_with_modifier_conditions() {

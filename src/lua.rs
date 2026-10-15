@@ -37,6 +37,7 @@ pub fn api() -> serde_json::Value {
         serde_json::json!({"name":"config.preset", "signature":"config.preset(name) -> Config", "description":"Return a mutable minimal, desktop or phone preset."}),
         serde_json::json!({"name":"config.export", "signature":"config.export(config) -> string", "phase":"configuration", "description":"Validate and export a complete declarative model as bounded Lua source; performs no I/O and requires original source for named handlers."}),
         serde_json::json!({"name":"rules.define", "signature":"rules.define(table) -> Rule", "description":"Declare a rule; strict validation occurs at compilation."}),
+        serde_json::json!({"name":"layers.define", "signature":"layers.define(table) -> Layer", "description":"Declare a physical-key layer with physical, active or inactive activation; strict validation occurs at compilation."}),
         serde_json::json!({"name":"units.duration", "signature":"units.duration(string) -> string", "description":"Declare an explicitly unit-qualified duration."}),
         serde_json::json!({"name":"units.distance", "signature":"units.distance(string) -> string", "description":"Declare an explicitly unit-qualified distance."}),
         serde_json::json!({"name":"events.on", "signature":"events.on(kind, callback) -> Subscription", "description":"Subscribe to approved semantic or lifecycle events in this session generation; registration has no evaluation effects."}),
@@ -98,6 +99,21 @@ pub fn api() -> serde_json::Value {
             "Stage removing an existing rule.",
         ),
         (
+            "activate_layer",
+            "transaction:activate_layer(id) -> nil",
+            "Stage activating a declared layer; fresh input is required after acknowledgement.",
+        ),
+        (
+            "deactivate_layer",
+            "transaction:deactivate_layer(id) -> nil",
+            "Stage deactivating a declared layer and retiring its candidates.",
+        ),
+        (
+            "reset_layer",
+            "transaction:reset_layer(id) -> nil",
+            "Stage returning a declared layer to physical-key control.",
+        ),
+        (
             "commit",
             "transaction:commit() -> nil",
             "Validate the complete batch and submit one proposal; active queries change only after an accepted host receipt.",
@@ -114,6 +130,14 @@ pub fn api() -> serde_json::Value {
         ),
     ] {
         symbols.push(serde_json::json!({"name":format!("RuleTransaction.{name}"),"receiver":"RuleTransaction","signature":signature,"phase":"runtime_callback","description":description}));
+    }
+    for (name, signature) in [
+        ("list", "layers.list() -> Layer[]"),
+        ("get", "layers.get(id) -> Layer | nil"),
+        ("revision", "layers.revision() -> string"),
+        ("transaction", "layers.transaction() -> RuleTransaction"),
+    ] {
+        symbols.push(serde_json::json!({"name":format!("layers.{name}"),"signature":signature,"phase":"runtime_callback","description":"Query acknowledged layer definitions/activation overrides or open the shared rule/layer transaction; physical key state is not exposed."}));
     }
     #[cfg(target_os = "linux")]
     for (name, result, description) in [
@@ -181,6 +205,7 @@ pub fn api() -> serde_json::Value {
         "event_kinds":["matched","begin","update","end","cancel","skipped","ready","reload","stop","recovery","session_changed","context_changed","rules_changed"],
         "runtime_identities":{"type":"decimal_string","range":"0..18446744073709551615","fields":["fence.broker[]","fence.configuration","fence.session","event.id","event.ordinal","event.source.device","event.source.generation","event.config_generation","event.session_generation","Snapshot.generation","Snapshot.revision","OutputState.geometry_generation","Binding.compositor_start","context_changed.revision","rules.revision"],"comparison":"exact string equality; no numeric conversion","bounded_handles":"subscription/timer/task IDs remain Lua integers","protocol":"Rust transport retains u64 values"},
         "rule_transactions":{"builders":64,"operations":64,"transaction_bytes":32768,"pending_proposals":1,"receipt_time_ms":250,"revision_type":"decimal_string","transport":"explicit authorized host opt-in","production_broker":"observation_mode","system_permission":"policy.allow_runtime_rules","agent_flags":["lua","rule-mutations"],"capability":"runtime_rules","context":"fresh owning desktop","routing":"unavailable"},
+        "runtime_layers":{"declared_layers":64,"activation_values":["physical","active","inactive"],"default":"physical","queries":"acknowledged definitions and activation overrides; no physical-key state","transaction":"shared RuleTransaction revision/receipt/permissions","definitions":"immutable at runtime","activation":"fresh input only; existing candidates retired","physical_toggles":"preserved across runtime edits; reconciled on source reload","seat":"owning broker registration"},
         "context_limits":{"snapshot_bytes":4194304,"chunk_bytes":32768,"transfer_time_ms":1000,"freshness_ms":250,"refresh_ms":100,"queued_snapshots":2,"read_only":true},
         "runtime_requires":{"uid":"unprivileged active session","capabilities":["context","observations","lua_events"],"thread":"owning Luna arena","generation":"current broker/configuration/session fence"},
         "action_requires":{"agent_flags":["lua","commands"],"capabilities":["context","observations","lua_events","lua_actions","commands"],"implemented_effects":["commands","observations"],"grant_time_ms":250},
@@ -276,6 +301,10 @@ function api.config.new(value)
 end
 function api.rules.define(value)
     assert(type(value) == "table", "rules.define expects a table")
+    return value
+end
+function api.layers.define(value)
+    assert(type(value) == "table", "layers.define expects a table")
     return value
 end
 local function constructor(kind)
@@ -442,6 +471,7 @@ fn instantiate(
             for namespace in [
                 "config",
                 "rules",
+                "layers",
                 "triggers",
                 "actions",
                 "units",
@@ -505,6 +535,12 @@ fn instantiate(
             ctx.globals().set(ctx, "__prek_modules", module_loaders)?;
             let actions: Table = module.get(ctx, "actions")?;
             rule_api::register(&ctx, module.get(ctx, "rules")?, host.clone())?;
+            rule_api::register_layers(
+                &ctx,
+                module.get(ctx, "layers")?,
+                module.get(ctx, "rules")?,
+                host.clone(),
+            )?;
             actions.set(ctx, "__guard", handlers::guard(&ctx, host.clone()))?;
             let scheduler: Table = module.get(ctx, "scheduler")?;
             scheduler.set(ctx, "__duration", scheduler::duration(&ctx, host.clone()))?;

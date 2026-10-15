@@ -106,6 +106,21 @@
     "range": "0..18446744073709551615",
     "type": "decimal_string"
   },
+  "runtime_layers": {
+    "activation": "fresh input only; existing candidates retired",
+    "activation_values": [
+      "physical",
+      "active",
+      "inactive"
+    ],
+    "declared_layers": 64,
+    "default": "physical",
+    "definitions": "immutable at runtime",
+    "physical_toggles": "preserved across runtime edits; reconciled on source reload",
+    "queries": "acknowledged definitions and activation overrides; no physical-key state",
+    "seat": "owning broker registration",
+    "transaction": "shared RuleTransaction revision/receipt/permissions"
+  },
   "runtime_limits": {
     "action_bytes": 32768,
     "action_effects": 32,
@@ -153,6 +168,11 @@
       "description": "Declare a rule; strict validation occurs at compilation.",
       "name": "rules.define",
       "signature": "rules.define(table) -> Rule"
+    },
+    {
+      "description": "Declare a physical-key layer with physical, active or inactive activation; strict validation occurs at compilation.",
+      "name": "layers.define",
+      "signature": "layers.define(table) -> Layer"
     },
     {
       "description": "Declare an explicitly unit-qualified duration.",
@@ -281,6 +301,27 @@
       "signature": "transaction:remove(id) -> nil"
     },
     {
+      "description": "Stage activating a declared layer; fresh input is required after acknowledgement.",
+      "name": "RuleTransaction.activate_layer",
+      "phase": "runtime_callback",
+      "receiver": "RuleTransaction",
+      "signature": "transaction:activate_layer(id) -> nil"
+    },
+    {
+      "description": "Stage deactivating a declared layer and retiring its candidates.",
+      "name": "RuleTransaction.deactivate_layer",
+      "phase": "runtime_callback",
+      "receiver": "RuleTransaction",
+      "signature": "transaction:deactivate_layer(id) -> nil"
+    },
+    {
+      "description": "Stage returning a declared layer to physical-key control.",
+      "name": "RuleTransaction.reset_layer",
+      "phase": "runtime_callback",
+      "receiver": "RuleTransaction",
+      "signature": "transaction:reset_layer(id) -> nil"
+    },
+    {
       "description": "Validate the complete batch and submit one proposal; active queries change only after an accepted host receipt.",
       "name": "RuleTransaction.commit",
       "phase": "runtime_callback",
@@ -300,6 +341,30 @@
       "phase": "runtime_callback",
       "receiver": "RuleTransaction",
       "signature": "transaction:status() -> RuleTransactionStatus"
+    },
+    {
+      "description": "Query acknowledged layer definitions/activation overrides or open the shared rule/layer transaction; physical key state is not exposed.",
+      "name": "layers.list",
+      "phase": "runtime_callback",
+      "signature": "layers.list() -> Layer[]"
+    },
+    {
+      "description": "Query acknowledged layer definitions/activation overrides or open the shared rule/layer transaction; physical key state is not exposed.",
+      "name": "layers.get",
+      "phase": "runtime_callback",
+      "signature": "layers.get(id) -> Layer | nil"
+    },
+    {
+      "description": "Query acknowledged layer definitions/activation overrides or open the shared rule/layer transaction; physical key state is not exposed.",
+      "name": "layers.revision",
+      "phase": "runtime_callback",
+      "signature": "layers.revision() -> string"
+    },
+    {
+      "description": "Query acknowledged layer definitions/activation overrides or open the shared rule/layer transaction; physical key state is not exposed.",
+      "name": "layers.transaction",
+      "phase": "runtime_callback",
+      "signature": "layers.transaction() -> RuleTransaction"
     },
     {
       "description": "Return an owned copy of the complete fresh broker snapshot, including outputs, windows, regions and keyboard geometry; generations/revisions are decimal strings; nil when unavailable or expired.",

@@ -140,7 +140,7 @@ pub(super) fn register<'gc>(
         state.rules.builders.push(Rc::downgrade(&builder));
         drop(state);
         let handle = Table::new(&ctx);
-        for operation in ["enable", "disable", "replace", "remove", "commit", "cancel", "status"] {
+        for operation in ["enable", "disable", "replace", "remove", "activate_layer", "deactivate_layer", "reset_layer", "commit", "cancel", "status"] {
             let host = host.clone();
             let builder = builder.clone();
             handle.set(ctx, operation, Callback::from_fn(&ctx, move |ctx, _, mut stack| {
@@ -184,7 +184,17 @@ pub(super) fn register<'gc>(
                         } else {
                             let (_, id): (Value, luna::String) = stack.consume(ctx)?;
                             let id = id.to_str().map_err(io::Error::other)?.to_owned();
-                            if operation == "remove" { Change::Remove { id } } else { Change::Enabled { id, enabled: operation == "enable" } }
+                            match operation {
+                                "remove" => Change::Remove { id },
+                                "activate_layer" | "deactivate_layer" | "reset_layer" => Change::Layer {
+                                    id, activation: match operation {
+                                        "activate_layer" => crate::config::LayerActivation::Active,
+                                        "deactivate_layer" => crate::config::LayerActivation::Inactive,
+                                        _ => crate::config::LayerActivation::Physical,
+                                    },
+                                },
+                                _ => Change::Enabled { id, enabled: operation == "enable" },
+                            }
                         };
                         let mut next = builder.transaction.clone();
                         next.changes.push(change);
@@ -201,6 +211,54 @@ pub(super) fn register<'gc>(
     }))?;
     Ok(())
 }
+pub(super) fn register_layers<'gc>(
+    ctx: &luna::Context<'gc>,
+    layers: Table<'gc>,
+    rules: Table<'gc>,
+    host: Rc<RefCell<runtime::Host>>,
+) -> Result<(), luna::Error<'gc>> {
+    // One revision and one pending proposal cover mixed rule/layer batches.
+    layers.set(
+        *ctx,
+        "transaction",
+        rules.get::<_, Value>(*ctx, "transaction")?,
+    )?;
+    layers.set(*ctx, "revision", rules.get::<_, Value>(*ctx, "revision")?)?;
+    for field in ["list", "get"] {
+        let host = host.clone();
+        layers.set(
+            *ctx,
+            field,
+            Callback::from_fn(ctx, move |ctx, _, mut stack| {
+                let host = host.borrow();
+                phase(&host)?;
+                let config = host
+                    .rules
+                    .config
+                    .as_ref()
+                    .ok_or_else(|| io::Error::other("runtime layer view unavailable"))?;
+                let value = if field == "list" {
+                    luna_util::serde::to_value(ctx, &config.layers).map_err(io::Error::other)?
+                } else {
+                    let id: luna::String = stack.consume(ctx)?;
+                    let id = id.to_str().map_err(io::Error::other)?;
+                    config
+                        .layers
+                        .iter()
+                        .find(|layer| layer.id == id)
+                        .map(|layer| luna_util::serde::to_value(ctx, layer))
+                        .transpose()
+                        .map_err(io::Error::other)?
+                        .unwrap_or(Value::Nil)
+                };
+                stack.replace(ctx, value);
+                Ok(CallbackReturn::Return)
+            }),
+        )?;
+    }
+    Ok(())
+}
+
 impl Runtime {
     pub(super) fn rule_proposal_checkpoint(&self) -> Option<u64> {
         self.host.borrow().rules.pending_id()

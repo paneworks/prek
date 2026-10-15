@@ -562,6 +562,17 @@ pub struct Layer {
     pub key: Key,
     #[serde(default)]
     pub toggle: bool,
+    #[serde(default)]
+    pub activation: LayerActivation,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LayerActivation {
+    #[default]
+    Physical,
+    Active,
+    Inactive,
 }
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -778,8 +789,12 @@ impl Config {
         }
         let mut layers = BTreeSet::new();
         for layer in &self.layers {
-            if layer.id.is_empty() || !layers.insert(&layer.id) {
-                return fail(format!("duplicate/empty layer {}", layer.id));
+            if layer.id.is_empty()
+                || layer.id.len() > 256
+                || layer.id.chars().any(char::is_control)
+                || !layers.insert(&layer.id)
+            {
+                return fail(format!("duplicate/invalid layer {}", layer.id));
             }
         }
         let mut shapes = BTreeSet::new();
@@ -871,15 +886,29 @@ impl Config {
                 ));
             }
         }
+        let inactive_layers: BTreeSet<_> = self
+            .layers
+            .iter()
+            .filter(|layer| layer.activation == LayerActivation::Inactive)
+            .map(|layer| layer.id.as_str())
+            .collect();
+        let exclusive = |rule: &Rule| {
+            rule.enabled
+                && rule.delivery != Delivery::Observe
+                && rule
+                    .layer
+                    .as_ref()
+                    .is_none_or(|id| !inactive_layers.contains(id.as_str()))
+        };
         for (index, a) in self
             .rules
             .iter()
             .enumerate()
-            .filter(|(_, rule)| rule.enabled && rule.delivery != Delivery::Observe)
+            .filter(|(_, rule)| exclusive(rule))
         {
             for b in self.rules[index + 1..]
                 .iter()
-                .filter(|rule| rule.enabled && rule.delivery != Delivery::Observe)
+                .filter(|rule| exclusive(rule))
             {
                 if a.priority == b.priority && overlaps(a, b) {
                     return fail(format!(
@@ -1394,9 +1423,8 @@ fn overlaps(a: &Rule, b: &Rule) -> bool {
     {
         return false;
     }
-    if a.layer != b.layer && a.layer.is_some() && b.layer.is_some() {
-        return false;
-    }
+    // Physical layers can be held together, and overrides can activate both.
+    // Different layer names cannot establish disjoint exclusive scopes.
     if matches!(
         (a.scope, b.scope),
         (Scope::AppContent, Scope::Keyboard)

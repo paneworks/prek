@@ -1,6 +1,7 @@
-//! Atomic runtime rule edits. Policy, selectors, layers and engine mode remain
+//! Atomic runtime rule and layer-activation edits. Policy, selectors, layer
+//! definitions and engine mode remain
 //! owned by the approved configuration; caller authorization is separate.
-use crate::config::{Config, ConfigError, Rule};
+use crate::config::{Config, ConfigError, LayerActivation, Rule};
 use serde::{Deserialize, Serialize};
 
 pub const MAX_OPERATIONS: usize = 64;
@@ -9,9 +10,20 @@ pub const MAX_BYTES: usize = 32 * 1024;
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Change {
-    Enabled { id: String, enabled: bool },
-    Replace { rule: Box<Rule> },
-    Remove { id: String },
+    Enabled {
+        id: String,
+        enabled: bool,
+    },
+    Replace {
+        rule: Box<Rule>,
+    },
+    Remove {
+        id: String,
+    },
+    Layer {
+        id: String,
+        activation: LayerActivation,
+    },
 }
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -28,7 +40,7 @@ impl Transaction {
         }
         for change in &self.changes {
             let id = match change {
-                Change::Enabled { id, .. } | Change::Remove { id } => id,
+                Change::Enabled { id, .. } | Change::Remove { id } | Change::Layer { id, .. } => id,
                 Change::Replace { rule } => &rule.id,
             };
             if id.is_empty() || id.len() > 256 || id.chars().any(char::is_control) {
@@ -84,6 +96,14 @@ impl Transaction {
                         .position(|rule| &rule.id == id)
                         .ok_or_else(|| ConfigError(format!("unknown runtime rule {id}")))?;
                     next.rules.remove(position);
+                }
+                Change::Layer { id, activation } => {
+                    let layer = next
+                        .layers
+                        .iter_mut()
+                        .find(|layer| &layer.id == id)
+                        .ok_or_else(|| ConfigError(format!("unknown runtime layer {id}")))?;
+                    layer.activation = *activation;
                 }
             }
         }
@@ -171,6 +191,119 @@ mod tests {
         };
         assert!(remove.prepare(&current, 1).unwrap().rules.is_empty());
     }
+    #[test]
+    fn layer_edits_are_atomic_with_rules_and_cannot_redefine_physical_bindings() {
+        let mut current = config();
+        current.layers.push(crate::config::Layer {
+            id: "touch".into(),
+            key: crate::config::Key(125),
+            toggle: true,
+            activation: LayerActivation::Physical,
+        });
+        current.rules[0].layer = Some("touch".into());
+        let transaction = Transaction {
+            revision: 1,
+            changes: vec![
+                Change::Layer {
+                    id: "touch".into(),
+                    activation: LayerActivation::Active,
+                },
+                Change::Enabled {
+                    id: "a".into(),
+                    enabled: false,
+                },
+            ],
+        };
+        let next = transaction.prepare(&current, 1).unwrap();
+        assert_eq!(next.layers[0].activation, LayerActivation::Active);
+        assert_eq!(
+            (next.layers[0].key, next.layers[0].toggle),
+            (current.layers[0].key, true)
+        );
+        assert!(!next.rules[0].enabled);
+        assert_eq!(current.layers[0].activation, LayerActivation::Physical);
+        let mut invalid = transaction.clone();
+        invalid.changes.push(Change::Layer {
+            id: "missing".into(),
+            activation: LayerActivation::Inactive,
+        });
+        assert!(invalid.prepare(&current, 1).is_err());
+        assert!(current.rules[0].enabled);
+        assert!(serde_json::from_str::<Transaction>(r#"{"revision":1,"changes":[{"operation":"layer","id":"touch","activation":"active","key":"KEY_A"}]}"#).is_err());
+    }
+
+    #[test]
+    fn simultaneous_layer_activation_rejects_ambiguity_but_atomic_layer_swap_is_valid() {
+        let mut current = config();
+        current.layers = ["one", "two"]
+            .iter()
+            .map(|id| crate::config::Layer {
+                id: (*id).into(),
+                key: crate::config::Key(125),
+                toggle: false,
+                activation: LayerActivation::Inactive,
+            })
+            .collect();
+        current.rules[0].layer = Some("one".into());
+        let mut other = current.rules[0].clone();
+        other.id = "b".into();
+        other.layer = Some("two".into());
+        current.rules.push(other);
+        current.validate().unwrap();
+        let activate = |id: &str| Change::Layer {
+            id: id.into(),
+            activation: LayerActivation::Active,
+        };
+        assert!(
+            Transaction {
+                revision: 1,
+                changes: vec![activate("one"), activate("two")]
+            }
+            .prepare(&current, 1)
+            .is_err()
+        );
+        let one = Transaction {
+            revision: 1,
+            changes: vec![activate("one")],
+        }
+        .prepare(&current, 1)
+        .unwrap();
+        let two = Transaction {
+            revision: 2,
+            changes: vec![
+                Change::Layer {
+                    id: "one".into(),
+                    activation: LayerActivation::Inactive,
+                },
+                activate("two"),
+            ],
+        }
+        .prepare(&one, 2)
+        .unwrap();
+        assert_eq!(two.layers[0].activation, LayerActivation::Inactive);
+        assert_eq!(two.layers[1].activation, LayerActivation::Active);
+        assert!(
+            current
+                .layers
+                .iter()
+                .all(|layer| layer.activation == LayerActivation::Inactive)
+        );
+        let physical = Transaction {
+            revision: 1,
+            changes: vec![
+                Change::Layer {
+                    id: "one".into(),
+                    activation: LayerActivation::Physical,
+                },
+                Change::Layer {
+                    id: "two".into(),
+                    activation: LayerActivation::Physical,
+                },
+            ],
+        };
+        assert!(physical.prepare(&current, 1).is_err());
+    }
+
     #[test]
     fn serialized_changes_reject_unknown_privilege_fields_and_resource_overflows() {
         assert!(

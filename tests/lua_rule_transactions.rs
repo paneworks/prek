@@ -113,6 +113,177 @@ fn apply(parent: &mut Channel, worker: &mut Stream, proposal: RuleProposal) -> R
     }
 }
 #[test]
+fn real_helper_layer_receipts_change_recognition_only_in_the_owning_seat() {
+    use prek::{
+        input::{Device, EV_KEY, EV_SYN, Frame, RawEvent, SYN_REPORT, Source},
+        replay::Record,
+        rules::Event,
+        worker::Report,
+    };
+    use std::collections::BTreeMap;
+    let definition=Definition::compile(r#"
+local p=require('prek')
+local tx
+local phase=0
+p.events.on('ready',function()
+ tx=p.layers.transaction();tx:activate_layer('touch');tx:commit()
+ assert(p.layers.get('touch').activation=='physical')
+end)
+p.events.on('rules_changed',function(event)
+ assert(event.accepted and tx:status().state=='accepted')
+ phase=phase+1
+ local expected=({'active','inactive','physical'})[phase]
+ assert(p.layers.get('touch').activation==expected and p.layers.revision()==event.revision)
+ p.log.info('layer-receipt',{activation=expected,revision=event.revision})
+end)
+p.events.on('reload',function()
+ tx=p.layers.transaction()
+ if phase==1 then tx:deactivate_layer('touch') else tx:reset_layer('touch') end
+ tx:commit()
+end)
+return p.config.new{
+ policy={allowed_seats={'seat0','seat1'},allowed_devices={'keyboard'}},
+ devices={keyboard={name='owned model keyboard'}},
+ layers={p.layers.define{id='touch',key='KEY_LEFTMETA'}},
+ rules={p.rules.define{id='a',layer='touch',trigger=p.triggers.key{key='KEY_A'},action=p.actions.event{name='a'}}}}
+"#, "live-layers.lua").unwrap();
+    let mut session = Session::spawn_with_rule_transactions(
+        Path::new(env!("CARGO_BIN_EXE_prek")),
+        fence(),
+        "seat0",
+        definition.clone(),
+    )
+    .unwrap();
+    let (mut parent, child) = Channel::pair().unwrap();
+    let mut worker = Stream::new(definition.validate().unwrap(), child).unwrap();
+    worker.push(Record::Header { version: 1 }).unwrap();
+    worker.flush().unwrap();
+    parent.receive::<Message>().unwrap().unwrap();
+    parent
+        .send(
+            &Command::Subscriptions {
+                update: Subscriptions {
+                    revision: 1,
+                    seats: ["seat0", "seat1"]
+                        .iter()
+                        .map(|seat| Subscription {
+                            seat: (*seat).into(),
+                            fence: fence(),
+                            context: None,
+                            capabilities: Default::default(),
+                            consumer: None,
+                        })
+                        .collect(),
+                },
+            },
+            monotonic().unwrap(),
+        )
+        .unwrap();
+    worker.service().unwrap();
+    worker.flush().unwrap();
+    while parent.receive::<Message>().unwrap().is_some() {}
+    let sources: Vec<_> = ["seat0", "seat1"]
+        .iter()
+        .enumerate()
+        .map(|(index, seat)| Source {
+            device: index as u64 + 1,
+            generation: 1,
+            seat: (*seat).into(),
+        })
+        .collect();
+    for source in &sources {
+        worker
+            .push(Record::Device {
+                device: Device {
+                    identity: source.seat.clone(),
+                    source: source.clone(),
+                    name: "owned model keyboard".into(),
+                    path: "/not-a-kernel-device".into(),
+                    physical: String::new(),
+                    unique: String::new(),
+                    vendor: 0,
+                    product: 0,
+                    properties: vec![],
+                    capabilities: BTreeMap::from([(EV_KEY, vec![30, 125])]),
+                    axes: BTreeMap::new(),
+                    virtual_device: false,
+                },
+                keys: Default::default(),
+                contacts: vec![],
+            })
+            .unwrap();
+    }
+    let mut sequence = 0;
+    for (index, activation) in ["active", "inactive", "physical"].into_iter().enumerate() {
+        if index > 0 {
+            session
+                .notify(EventKind::Reload, serde_json::json!({}))
+                .unwrap();
+        }
+        let proposal = proposal(&mut session);
+        let receipt = apply(&mut parent, &mut worker, proposal);
+        assert_eq!(receipt.revision, index as u64 + 2);
+        assert!(receipt.error.is_none());
+        session.acknowledge_rules(fence(), receipt).unwrap();
+        assert_eq!(
+            drain(&mut session)[0].fields,
+            serde_json::json!({"activation":activation,"revision":(index+2).to_string()})
+        );
+        for source in &sources {
+            for value in [1, 0] {
+                sequence += 1;
+                worker
+                    .push(Record::Frame {
+                        frame: Frame {
+                            source: source.clone(),
+                            at: monotonic().unwrap(),
+                            sequence,
+                            events: vec![
+                                RawEvent {
+                                    kind: EV_KEY,
+                                    code: 30,
+                                    value,
+                                },
+                                RawEvent {
+                                    kind: EV_SYN,
+                                    code: SYN_REPORT,
+                                    value: 0,
+                                },
+                            ],
+                        },
+                    })
+                    .unwrap();
+            }
+        }
+        worker.flush().unwrap();
+        let mut seats = Vec::new();
+        while let Some(packet) = parent.receive::<Message>().unwrap() {
+            if let Message::Outcome {
+                report:
+                    Report::Observation {
+                        subscription,
+                        event,
+                    },
+            } = packet.message
+                && matches!(*event, Event::Matched { .. })
+            {
+                seats.push(subscription.seat);
+            }
+        }
+        assert_eq!(
+            seats,
+            if activation == "active" {
+                vec!["seat0", "seat0"]
+            } else {
+                vec![]
+            }
+        );
+    }
+    session.stop().unwrap();
+    drain(&mut session);
+}
+
+#[test]
 fn real_helper_and_worker_exchange_correlated_acceptance_and_stale_rejection() {
     let (mut session, definition) = spawn();
     let first = proposal(&mut session);

@@ -54,12 +54,14 @@ pub enum KeyObservation {
         repeat: bool,
     },
 }
+#[derive(Clone)]
 struct Pressed {
     at: Option<Duration>,
     order: u64,
     holds: BTreeSet<usize>,
     repeats: BTreeMap<usize, Duration>,
 }
+#[derive(Clone)]
 pub struct Keys {
     chords: Vec<Chord>,
     holds: Vec<Hold>,
@@ -132,7 +134,28 @@ impl Keys {
         self.layers
             .iter()
             .position(|layer| layer.id == id)
-            .is_some_and(|index| self.active_layers.contains(&(seat.into(), index)))
+            .is_some_and(|index| match self.layers[index].activation {
+                crate::config::LayerActivation::Active => true,
+                crate::config::LayerActivation::Inactive => false,
+                crate::config::LayerActivation::Physical => {
+                    self.active_layers.contains(&(seat.into(), index))
+                }
+            })
+    }
+    /// Runtime edits preserve physical press/toggle state. Layer definitions
+    /// stay fixed; a source reload uses ordinary held-state reconciliation.
+    pub(crate) fn with_layer_activations(&self, layers: &[Layer]) -> Result<Self, &'static str> {
+        if layers.len() != self.layers.len()
+            || layers.iter().zip(&self.layers).any(|(new, old)| {
+                new.id != old.id || new.key != old.key || new.toggle != old.toggle
+            })
+        {
+            return Err("runtime layer definitions changed");
+        }
+        let mut next = self.clone();
+        next.layers = layers.to_vec();
+        next.refresh_layers();
+        Ok(next)
     }
     pub fn update(
         &mut self,
@@ -383,10 +406,16 @@ impl Keys {
         let mut next = BTreeSet::new();
         for seat in seats {
             for (index, layer) in self.layers.iter().enumerate() {
-                if if layer.toggle {
-                    self.toggles.contains_key(&(seat.clone(), index))
-                } else {
-                    self.down(&seat, layer.key.0)
+                if match layer.activation {
+                    crate::config::LayerActivation::Active => true,
+                    crate::config::LayerActivation::Inactive => false,
+                    crate::config::LayerActivation::Physical => {
+                        if layer.toggle {
+                            self.toggles.contains_key(&(seat.clone(), index))
+                        } else {
+                            self.down(&seat, layer.key.0)
+                        }
+                    }
                 } {
                     next.insert((seat.clone(), index));
                 }
@@ -747,11 +776,13 @@ mod tests {
                 id: "momentary".into(),
                 key: Key(42),
                 toggle: false,
+                activation: Default::default(),
             },
             Layer {
                 id: "toggle".into(),
                 key: Key(125),
                 toggle: true,
+                activation: Default::default(),
             },
         ];
         let mut keys = Keys::new(vec![], vec![], layers).unwrap();
@@ -776,6 +807,39 @@ mod tests {
         assert!(!keys.layer_active("seat1", "toggle"));
         keys.cancel_source(&source(1));
         assert!(!keys.layer_active("seat0", "toggle"));
+    }
+
+    #[test]
+    fn layer_overrides_restore_physical_toggles_without_synthesizing_presses() {
+        use crate::config::LayerActivation;
+        let physical = vec![Layer {
+            id: "toggle".into(),
+            key: Key(125),
+            toggle: true,
+            activation: LayerActivation::Physical,
+        }];
+        let mut keys = Keys::new(vec![], vec![], physical.clone()).unwrap();
+        keys.update(&source(1), 125, KeyState::Press, ms(0))
+            .unwrap();
+        keys.update(&source(1), 125, KeyState::Release, ms(1))
+            .unwrap();
+        assert!(keys.layer_active("seat0", "toggle"));
+        assert!(!keys.layer_active("seat1", "toggle"));
+        let mut overrides = physical.clone();
+        overrides[0].activation = LayerActivation::Inactive;
+        let suppressed = keys.with_layer_activations(&overrides).unwrap();
+        assert!(!suppressed.layer_active("seat0", "toggle"));
+        let restored = suppressed.with_layer_activations(&physical).unwrap();
+        assert!(restored.layer_active("seat0", "toggle"));
+        assert!(!restored.layer_active("seat1", "toggle"));
+        overrides[0].activation = LayerActivation::Active;
+        let mut active = Keys::new(vec![], vec![], overrides).unwrap();
+        assert!(active.layer_active("seat0", "toggle"));
+        active = active.with_layer_activations(&physical).unwrap();
+        assert!(!active.layer_active("seat0", "toggle"));
+        let mut changed = physical.clone();
+        changed[0].key = Key(42);
+        assert!(restored.with_layer_activations(&changed).is_err());
     }
     #[test]
     fn t14_disconnection_cancels_only_affected_hold() {

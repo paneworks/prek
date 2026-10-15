@@ -20,6 +20,8 @@ def main():
     parser.add_argument("--proxy", required=True)
     parser.add_argument("--prek-fixture")
     parser.add_argument("--prek-app")
+    parser.add_argument("--layers", action="store_true",
+                        help="verify a Lua layer deactivation while its rule stays enabled")
     parser.add_argument("--visible", action="store_true",
                         default=os.environ.get("VISIBLE") == "1")
     parser.add_argument("--output", default="target/cage-host")
@@ -132,7 +134,8 @@ def main():
                 if not args.prek_app:
                     parser.error("--prek-fixture requires --prek-app")
                 fixture_env = dict(env, PREK_LOCAL_CAGE="1", PREK_CAGE_OUTPUT=str(output),
-                                   PREK_LOCAL_CAGE_APP=args.prek_app)
+                                   PREK_LOCAL_CAGE_APP=args.prek_app,
+                                   PREK_CAGE_LAYER_TEST="1" if args.layers else "0")
                 instances = [path.parent.name for path in (runtime / "hypr").glob("*/.socket2.sock")]
                 if len(instances) != 1:
                     raise RuntimeError("expected one owned compositor instance")
@@ -208,9 +211,13 @@ def main():
                     assert len({row["revision"] for row in contexts}) == 9
                     changes = [row["fields"] for row in logs if row["message"] == "local-rules-changed"]
                     assert changes == [{"accepted":True,"revision":"2","state":"accepted"}]
+                    layers = [row["fields"] for row in logs if row["message"] == "local-layer-state"]
+                    assert layers == [{"activation":"inactive" if args.layers else "active",
+                                       "rule_enabled":args.layers}]
                     matches = [row["fields"] for row in logs if row["message"] == "local-matched"]
                     assert matches == [{"rule":"local-a","stage":"begin"},{"rule":"local-a","stage":"end"}]
-                    print("PASS: actual app received only B before the acknowledged Lua disable, then A and B afterward; context and gesture generations stayed consistent.")
+                    mutation = "layer deactivation" if args.layers else "rule disable"
+                    print(f"PASS: actual app received only B before the acknowledged Lua {mutation}, then A and B afterward; context and gesture generations stayed consistent.")
                 finally:
                     if fixture.poll() is None:
                         fixture.kill()

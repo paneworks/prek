@@ -16,6 +16,71 @@ fn ready(runtime: &mut Runtime) -> Result<Vec<LogRecord>, ConfigError> {
 }
 
 #[test]
+fn layer_queries_and_mixed_transactions_follow_acknowledgement_and_shared_revision() {
+    let source = format!(
+        r#"{BASE}
+local tx
+p.events.on('ready',function()
+ assert(p.layers.get('missing')==nil and p.layers.revision()==p.rules.revision())
+ local layers=p.layers.list();assert(layers[1].activation=='physical');layers[1].activation='active'
+ assert(p.layers.get('touch').activation=='physical')
+ assert(not pcall(function() local tx=p.layers.transaction();tx:activate_layer('missing');tx:commit() end))
+ tx=p.layers.transaction();tx:activate_layer('touch');tx:disable('a');tx:commit()
+ assert(p.layers.get('touch').activation=='physical' and p.rules.get('a').enabled)
+end)
+p.events.on('rules_changed',function()
+ assert(p.layers.get('touch').activation=='active' and not p.rules.get('a').enabled)
+ assert(p.layers.revision()=='2' and p.rules.revision()=='2' and tx:status().state=='accepted')
+ tx=p.layers.transaction();tx:deactivate_layer('touch');tx:reset_layer('touch');tx:commit()
+end)
+p.events.on('reload',function()assert(p.layers.get('touch').activation=='physical' and p.layers.revision()=='3')end)
+return p.config.new{{layers={{p.layers.define{{id='touch',key='KEY_LEFTMETA',toggle=true}}}},rules={{rule}}}}
+"#
+    );
+    let mut runtime = Runtime::load(&source, "layers.lua").unwrap();
+    let mut engine = crate::rules::Engine::new(runtime.config.clone()).unwrap();
+    runtime.enable_rule_transactions();
+    ready(&mut runtime).unwrap();
+    let proposal = runtime.take_rule_proposal().unwrap();
+    let revision = engine
+        .transact_rules(&proposal.transaction, Duration::ZERO)
+        .unwrap();
+    runtime
+        .acknowledge_rules(RuleReceipt {
+            id: proposal.id,
+            revision,
+            error: None,
+        })
+        .unwrap();
+    runtime
+        .dispatch(EventKind::RulesChanged, &serde_json::json!({}))
+        .unwrap();
+    let proposal = runtime.take_rule_proposal().unwrap();
+    let revision = engine
+        .transact_rules(&proposal.transaction, Duration::ZERO)
+        .unwrap();
+    runtime
+        .acknowledge_rules(RuleReceipt {
+            id: proposal.id,
+            revision,
+            error: None,
+        })
+        .unwrap();
+    runtime
+        .dispatch(EventKind::Reload, &serde_json::json!({}))
+        .unwrap();
+    for query in ["list()", "get('touch')", "revision()", "transaction()"] {
+        assert!(
+            Definition::compile(
+                &format!("local p=require('prek');p.layers.{query};return {{version=1}}"),
+                "phase.lua"
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
 fn private_proposals_update_owned_queries_only_after_the_actual_engine_receipt() {
     let mut runtime = load(
         r#"

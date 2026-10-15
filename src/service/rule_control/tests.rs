@@ -7,6 +7,65 @@ fn config() -> Arc<crate::config::Config> {
     Arc::new(crate::config::Config::parse_named("version=1\n[policy]\nallow_runtime_rules=true\n[[rules]]\nid='a'\n[rules.trigger]\nkind='key'\nkey='KEY_A'\n[rules.action]\nkind='event'\nname='a'","system.toml").unwrap())
 }
 #[test]
+fn layer_activation_rechecks_capabilities_of_existing_enabled_rules() {
+    use crate::config::{Key, Layer, LayerActivation};
+    let mut system = (*config()).clone();
+    system.layers.push(Layer {
+        id: "touch".into(),
+        key: Key(125),
+        toggle: false,
+        activation: LayerActivation::Inactive,
+    });
+    system.rules[0].layer = Some("touch".into());
+    system.rules[0].action = Action::Command {
+        argv: vec!["/usr/bin/true".into()],
+    };
+    let caps = BTreeSet::from([Capability::Observations]);
+    for activation in [LayerActivation::Active, LayerActivation::Physical] {
+        let mut state = Rules::new(Some(Arc::new(system.clone())));
+        assert!(
+            state
+                .prepare(
+                    proposal(
+                        1,
+                        1,
+                        vec![Change::Layer {
+                            id: "touch".into(),
+                            activation
+                        }]
+                    ),
+                    &caps,
+                    &[],
+                    Duration::ZERO
+                )
+                .is_err()
+        );
+        assert!(!state.busy());
+        assert_eq!(
+            state.config.as_ref().unwrap().layers[0].activation,
+            LayerActivation::Inactive
+        );
+    }
+    let mut state = Rules::new(Some(Arc::new(system)));
+    state
+        .prepare(
+            proposal(
+                1,
+                1,
+                vec![Change::Layer {
+                    id: "touch".into(),
+                    activation: LayerActivation::Inactive,
+                }],
+            ),
+            &caps,
+            &[],
+            Duration::ZERO,
+        )
+        .unwrap();
+    assert!(state.busy());
+}
+
+#[test]
 fn mutation_eligibility_requires_the_owning_active_fresh_desktop_and_grant() {
     let capabilities = BTreeSet::from([Capability::RuntimeRules]);
     assert!(eligible(

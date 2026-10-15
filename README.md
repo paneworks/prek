@@ -449,6 +449,7 @@ The desktop test setup follows Mold's `tools/sandbox/nested.sh`:
 ```sh
 nix run .#cage-test                     # headless Cage -> nested Hyprland -> receiver
 nix run .#cage-test -- --visible        # watch the owned session as a window
+nix run .#cage-test -- --layers         # Lua layer change with its rule still enabled
 nix run .#cage-touch-test               # direct headless Cage touch receipts
 ```
 
@@ -474,6 +475,11 @@ fresh neutral model source incarnation, and Lua receives revision 2 while the
 file/session fences stay at 1. A second phase must deliver A and B to the same
 real receiver, with neutral keys/modifiers and increasing gesture IDs. Nine
 actual compositor snapshots and the correlated Lua receipt are checked.
+
+`--layers` runs the same app-receipt sequence by deactivating A's declared layer
+while keeping A's rule enabled. The receiver must then get A and B. This tests
+acknowledged Lua layer control through the routing model and actual nested app;
+source ownership/readiness remain model fixtures.
 
 The separate touch runner uses a test-only Cage build with a private inherited
 socketpair and a wlroots touch device. Its events use Cage's ordinary touch
