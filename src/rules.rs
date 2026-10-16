@@ -115,6 +115,7 @@ impl Event {
 struct DeviceState {
     device: Device,
     input_watermark: u64,
+    last_input: Option<(u64, Duration)>,
     mapping: Option<Mapping>,
     keys: BTreeSet<u16>,
     contacts: Vec<Contact>,
@@ -130,6 +131,7 @@ struct Candidate {
     expires: Option<Duration>,
     started: Duration,
     started_input: u64,
+    continued_from: Option<u64>,
     contacts: BTreeSet<crate::input::ContactId>,
     sources: BTreeSet<Source>,
     peak_contacts: usize,
@@ -778,6 +780,7 @@ impl Engine {
                 let state = DeviceState {
                     device: device.clone(),
                     input_watermark: self.input_watermark,
+                    last_input: None,
                     keys: keys.clone(),
                     contacts: contacts.clone(),
                     mapping: Mapping::from_device(device).ok(),
@@ -894,6 +897,7 @@ impl Engine {
             keys: &self.conditions,
             generation: self.generation,
             at: self.last_at.unwrap_or_default(),
+            admitted_at: self.last_at.unwrap_or_default(),
             input_watermark: self.input_watermark,
             normalized: sequence_input.as_ref(),
         };
@@ -970,6 +974,7 @@ impl Engine {
             } => DeviceState {
                 device: device.clone(),
                 input_watermark: self.input_watermark,
+                last_input: None,
                 mapping: Mapping::from_device(device).ok(),
                 keys: keys.clone(),
                 contacts: contacts.clone(),
@@ -1198,6 +1203,7 @@ impl Engine {
             .get_mut(&source.device)
             .ok_or_else(|| invalid("unregistered frame source"))?;
         state.input_watermark = self.input_watermark;
+        state.last_input = Some((frame.raw.sequence, at));
         for change in &frame.changes {
             if let Change::Key {
                 code,
@@ -1248,7 +1254,8 @@ impl Engine {
                     Trigger::TouchTaps { .. } => frame.contacts.is_empty() && !frame.contacts_ended.is_empty(),
                     _ => false,
                 } { worker.released.insert(source.clone(), at); }
-                if let Some(candidate) = worker.candidates.get_mut(source)
+                if !matches!(worker.rule.trigger, Trigger::Custom { .. })
+                    && let Some(candidate) = worker.candidates.get_mut(source)
                     && !frame.contacts.is_empty()
                 {
                     candidate.contacts = frame.contacts.iter().map(|contact| contact.id).collect();
@@ -1602,6 +1609,11 @@ impl Engine {
         Ok(())
     }
     fn cancel_source(&mut self, source: &Source, at: Duration, reason: &str) {
+        if let Some(state) = self.devices.get_mut(&source.device)
+            && state.device.source == *source
+        {
+            state.last_input = None;
+        }
         self.conditions.cancel_source(source);
         for sequence in &mut self.sequences {
             if sequence
@@ -1674,6 +1686,7 @@ struct SequenceContext<'a> {
     keys: &'a Keys,
     generation: u64,
     at: Duration,
+    admitted_at: Duration,
     input_watermark: u64,
     normalized: Option<&'a NormalizedFrame>,
 }
@@ -1694,6 +1707,18 @@ struct PendingSequence {
     progress: bool,
     previous: Option<Candidate>,
     after_input: Option<u64>,
+}
+impl PendingSequence {
+    fn admits_input(&self, candidate: &Candidate) -> bool {
+        self.after_input.is_none_or(|watermark| {
+            candidate.started_input > watermark
+                || candidate.started_input == watermark
+                    && self.previous.as_ref().is_some_and(|previous| {
+                        candidate.continued_from == Some(previous.id)
+                            && candidate.source == previous.source
+                    })
+        })
+    }
 }
 struct Sequence {
     rule: Rule,
@@ -1989,9 +2014,7 @@ impl Sequence {
                 .values()
                 .find(|candidate| {
                     candidate.source.seat == *seat
-                        && pending
-                            .after_input
-                            .is_none_or(|watermark| candidate.started_input > watermark)
+                        && pending.admits_input(candidate)
                         && (pending.step == 0
                             || candidate.started >= pending.finished
                             || pending.previous.as_ref().is_some_and(|previous| {
@@ -2079,10 +2102,7 @@ impl Sequence {
             if pending.step != index {
                 continue;
             }
-            if pending
-                .after_input
-                .is_some_and(|watermark| trace.candidate.started_input <= watermark)
-            {
+            if !pending.admits_input(&trace.candidate) {
                 continue;
             }
             let Event::Matched {
@@ -2212,10 +2232,8 @@ impl Sequence {
                 pending.previous = Some(trace.candidate.clone());
                 pending.after_input = trace.after_input.or(pending.after_input);
                 pending.step += 1;
-                if trace.after_input.is_none()
-                    && matches!(self.triggers[pending.step], Trigger::Custom { .. })
-                {
-                    activated.insert(seat.clone(), pending.step);
+                if matches!(self.triggers[pending.step], Trigger::Custom { .. }) {
+                    activated.insert(seat.clone(), (pending.step, trace.after_input.is_none()));
                 }
                 let completed_groups: Vec<_> = pending
                     .groups
@@ -2241,23 +2259,28 @@ impl Sequence {
                 reset.insert(source.seat);
             }
         }
-        if let Some(frame) = context.normalized {
-            for (seat, step) in activated {
-                if reset.contains(&seat)
-                    || frame.raw.source.seat != seat
-                    || self
-                        .pending
-                        .get(&seat)
-                        .is_none_or(|pending| pending.step != step)
-                {
-                    continue;
-                }
-                if let Some(reason) =
-                    self.project_custom(step, frame, context, next_id, coordinator)?
-                {
-                    self.cancel(&seat, context.at, reason, events);
-                    reset.insert(seat);
-                }
+        for (seat, (step, same_record)) in activated {
+            if reset.contains(&seat)
+                || self
+                    .pending
+                    .get(&seat)
+                    .is_none_or(|pending| pending.step != step)
+            {
+                continue;
+            }
+            let reason = self.continue_custom(&seat, step, context, next_id, coordinator)?;
+            let reason = if reason.is_none()
+                && same_record
+                && let Some(frame) = context.normalized
+                && frame.raw.source.seat == seat
+            {
+                self.project_custom(step, frame, context, next_id, coordinator)?
+            } else {
+                reason
+            };
+            if let Some(reason) = reason {
+                self.cancel(&seat, context.at, reason, events);
+                reset.insert(seat);
             }
         }
         for seat in reset {
@@ -2265,6 +2288,72 @@ impl Sequence {
         }
         events.extend(skipped);
         Ok(())
+    }
+
+    fn continue_custom(
+        &mut self,
+        seat: &str,
+        step: usize,
+        context: &SequenceContext<'_>,
+        next_id: &mut u64,
+        coordinator: &mut Option<custom::State>,
+    ) -> io::Result<Option<&'static str>> {
+        let previous_touch = matches!(self.triggers[step - 1], Trigger::TouchHold { .. })
+            || matches!(&self.triggers[step - 1], Trigger::Custom { recognizer, .. }
+                if recognizer.inputs.contains(&crate::recognition::InputKind::Touch));
+        if !previous_touch
+            || !matches!(&self.triggers[step], Trigger::Custom { recognizer, .. }
+                if recognizer.inputs.contains(&crate::recognition::InputKind::Touch))
+        {
+            return Ok(None);
+        }
+        let pending = &self.pending[seat];
+        let previous = pending.previous.as_ref().unwrap();
+        if previous.contacts.is_empty() {
+            return Ok(None);
+        }
+        let Some(state) = context
+            .devices
+            .get(&previous.source.device)
+            .filter(|state| state.device.source == previous.source)
+        else {
+            return Ok(Some("touch continuation source changed"));
+        };
+        let engine = &mut self.steps[step];
+        let worker = &mut engine.workers[0];
+        if !selected(&engine.config, &worker.rule, &state.device) {
+            return Ok(None);
+        }
+        let custom = coordinator
+            .as_mut()
+            .ok_or_else(|| invalid("custom sequence coordinator is unavailable"))?;
+        if let Err(reason) = custom::continue_touch(
+            worker,
+            state,
+            previous,
+            context.admitted_at,
+            context.input_watermark,
+            custom::FrameContext {
+                config: &engine.config,
+                authority: context.authority,
+                keys: context.keys,
+                custom,
+                next_id,
+                events: &mut engine.events,
+            },
+        ) {
+            return Ok(Some(reason));
+        }
+        let pending = self.pending.get_mut(seat).unwrap();
+        for (index, _) in self
+            .groups
+            .iter()
+            .enumerate()
+            .filter(|(_, group)| group.first == step)
+        {
+            pending.groups.entry(index).or_insert(context.admitted_at);
+        }
+        Ok(None)
     }
 
     fn project_custom(
@@ -2754,6 +2843,7 @@ fn start_candidate(
                     expires: None,
                     started: at,
                     started_input: state.input_watermark,
+                    continued_from: None,
                     contacts: state.contacts.iter().map(|contact| contact.id).collect(),
                     sources: BTreeSet::from([source.clone()]),
                     peak_contacts: state.contacts.len(),

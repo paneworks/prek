@@ -21,9 +21,14 @@ pub(super) struct State {
 }
 struct Offer {
     candidate: u64,
-    input: Option<Input>,
+    input: OfferedInput,
     at: Duration,
     bytes: usize,
+}
+enum OfferedInput {
+    Frame(Input),
+    Wake,
+    TouchContinuation(Input),
 }
 #[derive(Clone, Copy)]
 struct Location {
@@ -62,11 +67,13 @@ impl State {
             bytes: 0,
         }))
     }
-    fn offer(&mut self, candidate: u64, input: Option<Input>, at: Duration) -> io::Result<()> {
-        let bytes = input.as_ref().map_or(Ok(128), |input| {
-            recognition::encoded_size(input, recognition::MAX_FRAME_BYTES - 1024)
-                .map(|size| size + 128)
-        })?;
+    fn offer(&mut self, candidate: u64, input: OfferedInput, at: Duration) -> io::Result<()> {
+        let bytes = match &input {
+            OfferedInput::Frame(input) | OfferedInput::TouchContinuation(input) => {
+                recognition::encoded_size(input, recognition::MAX_FRAME_BYTES - 1024)? + 128
+            }
+            OfferedInput::Wake => 128,
+        };
         if self.offers.len() >= recognition::MAX_PENDING
             || self.bytes + bytes > recognition::MAX_BYTES
         {
@@ -291,8 +298,17 @@ pub(super) fn frame(
     {
         closed.insert(source.clone());
     }
+    if let Some(candidate) = worker.candidates.get_mut(source)
+        && state.contacts.len() > candidate.peak_contacts
+    {
+        candidate.peak_contacts = state.contacts.len();
+        candidate.peak_at = at;
+    }
     if let Some(candidate) = worker.candidates.get(source)
-        && context.custom.offer(candidate.id, Some(input), at).is_err()
+        && context
+            .custom
+            .offer(candidate.id, OfferedInput::Frame(input), at)
+            .is_err()
     {
         cancel_candidate(
             worker,
@@ -302,6 +318,106 @@ pub(super) fn frame(
             context.events,
         );
     }
+}
+pub(super) fn continue_touch(
+    worker: &mut Worker,
+    state: &DeviceState,
+    previous: &Candidate,
+    at: Duration,
+    watermark: u64,
+    context: FrameContext<'_>,
+) -> Result<(), &'static str> {
+    let Trigger::Custom {
+        recognizer,
+        timeout,
+        wake,
+    } = &worker.rule.trigger
+    else {
+        unreachable!()
+    };
+    let Recognizer::Custom { blocked, .. } = &worker.recognizer else {
+        unreachable!()
+    };
+    if !context.custom.ready
+        || at < context.custom.ready_at
+        || blocked.contains(&previous.source)
+        || worker.candidates.contains_key(&previous.source)
+        || context.custom.live.len() + context.custom.gate.retiring() >= recognition::MAX_PENDING
+        || context.authority.generation() != context.custom.fence.session
+        || previous.session_generation != context.custom.fence.session
+        || !conditions(&worker.rule, context.keys, &previous.source.seat)
+        || !context.authority.fresh(at).is_ok_and(|snapshot| {
+            snapshot.state == crate::context::State::Desktop && !snapshot.secure_overlay
+        })
+    {
+        return Err("touch continuation is no longer eligible");
+    }
+    if previous.contacts.is_empty()
+        || previous.source != state.device.source
+        || previous.contacts != state.contacts.iter().map(|contact| contact.id).collect()
+        || state
+            .last_input
+            .is_none_or(|(_, physical_at)| physical_at > at)
+        || previous.permit.as_ref().is_none_or(|permit| {
+            context
+                .authority
+                .validate(permit, input_context(state, at))
+                .is_err()
+        })
+    {
+        return Err("touch continuation held state changed");
+    }
+    let (sequence, physical_at) = state.last_input.unwrap();
+    let input = Input::Frame {
+        source: state.device.source.clone(),
+        at: physical_at,
+        sequence,
+        selectors: Input::selected(context.config, &state.device),
+        changes: Vec::new(),
+        contacts: state
+            .contacts
+            .iter()
+            .cloned()
+            .map(|mut contact| {
+                contact.fresh = false;
+                contact
+            })
+            .collect(),
+        contacts_started: Vec::new(),
+        contacts_ended: Vec::new(),
+        ended_contacts: Vec::new(),
+    };
+    let input = recognizer
+        .project(&input, false)
+        .map_err(|_| "touch continuation projection refused")?;
+    let id = context
+        .next_id
+        .checked_add(1)
+        .ok_or("custom candidate IDs exhausted")?;
+    let expires = at
+        .checked_add(timeout.duration())
+        .ok_or("custom deadline overflow")?;
+    context
+        .custom
+        .offer(id, OfferedInput::TouchContinuation(input), at)
+        .map_err(|_| "custom recognition queue exhausted")?;
+    let mut candidate = previous.clone();
+    candidate.id = id;
+    candidate.ordinal = 0;
+    candidate.progress = false;
+    candidate.started = at;
+    candidate.started_input = watermark;
+    candidate.continued_from = Some(previous.id);
+    candidate.expires = Some(expires);
+    context.custom.live.insert(id);
+    *context.next_id = id;
+    if let Recognizer::Custom { wakes, .. } = &mut worker.recognizer
+        && let Some(wake) = wake
+    {
+        wakes.insert(previous.source.clone(), at.saturating_add(wake.duration()));
+    }
+    worker.candidates.insert(previous.source.clone(), candidate);
+    Ok(())
 }
 fn input_context(state: &DeviceState, at: Duration) -> InputContext<'_> {
     super::input(state, at)
@@ -607,11 +723,10 @@ impl Engine {
                 }
                 if *wake <= at
                     && !custom.gate.waiting(id)
-                    && !custom
-                        .offers
-                        .iter()
-                        .any(|offer| offer.candidate == id && offer.input.is_none())
-                    && custom.offer(id, None, at).is_ok()
+                    && !custom.offers.iter().any(|offer| {
+                        offer.candidate == id && matches!(offer.input, OfferedInput::Wake)
+                    })
+                    && custom.offer(id, OfferedInput::Wake, at).is_ok()
                 {
                     *wake = at.saturating_add(interval.duration());
                 }
@@ -684,8 +799,11 @@ impl Engine {
             }
             let gate = &mut self.custom.as_mut().unwrap().gate;
             let result = match offer.input {
-                Some(input) => gate.offer(&recognizer.name, &current, &input, at),
-                None => gate.offer_timer_at(&recognizer.name, &current, offer.at, at),
+                OfferedInput::Frame(input) => gate.offer(&recognizer.name, &current, &input, at),
+                OfferedInput::Wake => gate.offer_timer_at(&recognizer.name, &current, offer.at, at),
+                OfferedInput::TouchContinuation(input) => {
+                    gate.offer_touch_continuation(&recognizer.name, &current, &input, offer.at, at)
+                }
             };
             match result {
                 Ok(ticket) => tickets.push(ticket),
@@ -868,6 +986,7 @@ impl Engine {
                 keys: &self.conditions,
                 generation: self.generation,
                 at: input_at,
+                admitted_at: at,
                 input_watermark: self.input_watermark,
                 normalized: None,
             };

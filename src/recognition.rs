@@ -556,6 +556,58 @@ impl Gate {
             now,
         )
     }
+    /// Start a native-owned held-touch continuation with a timer ticket.
+    pub(crate) fn offer_touch_continuation(
+        &mut self,
+        recognizer: &str,
+        candidate: &Candidate,
+        input: &Event,
+        requested_at: Duration,
+        now: Duration,
+    ) -> io::Result<Ticket> {
+        self.expire(now);
+        input.validate()?;
+        let Event::Frame {
+            changes,
+            contacts,
+            contacts_started,
+            contacts_ended,
+            ended_contacts,
+            ..
+        } = input
+        else {
+            return Err(invalid("touch continuation requires retained input"));
+        };
+        if !candidate.valid(now)
+            || input.source() != &candidate.source
+            || input.at() > requested_at
+            || requested_at > now
+            || !changes.is_empty()
+            || contacts.is_empty()
+            || contacts.iter().any(|contact| contact.fresh)
+            || !contacts_started.is_empty()
+            || !contacts_ended.is_empty()
+            || !ended_contacts.is_empty()
+            || self.active.contains_key(&candidate.id)
+            || self.active.len() + self.cancellations.len() >= MAX_PENDING
+        {
+            return Err(invalid("invalid or repeated native touch continuation"));
+        }
+        let definition = self
+            .definitions
+            .get(recognizer)
+            .filter(|definition| definition.inputs.contains(&InputKind::Touch))
+            .ok_or_else(|| invalid("touch continuation requires a touch declaration"))?;
+        let input = definition.project(input, false)?;
+        self.issue(
+            recognizer,
+            candidate,
+            input,
+            Cause::Timer,
+            requested_at,
+            now,
+        )
+    }
     /// Wake an existing eligible candidate without inventing a physical frame.
     /// The coordinator must recheck held state and eligibility before calling.
     pub fn offer_timer(

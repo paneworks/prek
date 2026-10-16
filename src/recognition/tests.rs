@@ -58,6 +58,169 @@ fn proposal(ticket: &Ticket, phase: Phase) -> Proposal {
         data: serde_json::json!({"confidence":0.9}),
     }
 }
+fn retained_touch(at: Duration) -> Event {
+    let mut event = input(at, 9);
+    let Event::Frame {
+        changes, contacts, ..
+    } = &mut event
+    else {
+        unreachable!()
+    };
+    changes.clear();
+    contacts.push(crate::input::Contact {
+        id: crate::input::ContactId {
+            slot: 0,
+            tracking: 10,
+            generation: 4,
+        },
+        x: 10,
+        y: 20,
+        pressure: None,
+        fresh: false,
+    });
+    event
+}
+
+#[test]
+fn native_touch_continuation_can_start_with_a_timer_and_then_follow_normal_history() {
+    let physical = Duration::from_secs(1);
+    let at = Duration::from_secs(2);
+    let mut declaration = definition(false);
+    declaration.inputs = BTreeSet::from([InputKind::Touch]);
+    let mut gate = Gate::new(fence(), vec![declaration.clone()]).unwrap();
+    let mut current = candidate(at);
+    current.expires = at + Duration::from_millis(12);
+    let retained = retained_touch(physical);
+    assert!(gate.offer_timer("custom", &current, at).is_err());
+    let ticket = gate
+        .offer_touch_continuation("custom", &current, &retained, at, at)
+        .unwrap();
+    ticket.validate_for(&declaration, at).unwrap();
+    assert_eq!(ticket.input.at(), physical);
+    assert_eq!(ticket.requested_at, at);
+    assert_eq!(ticket.deadline, current.expires);
+    assert_eq!(ticket.cause, Cause::Timer);
+    assert!(
+        gate.offer_touch_continuation("custom", &current, &retained, at, at)
+            .is_err()
+    );
+    gate.validate(proposal(&ticket, Phase::Pending), &current, at)
+        .unwrap();
+    let wake = at + Duration::from_millis(1);
+    let timer = gate.offer_timer("custom", &current, wake).unwrap();
+    assert_eq!(timer.input, ticket.input);
+    gate.validate(proposal(&timer, Phase::Pending), &current, wake)
+        .unwrap();
+    let mut next = retained_touch(wake);
+    if let Event::Frame {
+        sequence, contacts, ..
+    } = &mut next
+    {
+        *sequence = 10;
+        contacts[0].x += 1;
+    }
+    let frame = gate.offer("custom", &current, &next, wake).unwrap();
+    assert_eq!(frame.cause, Cause::Frame);
+    assert!(gate.offer("custom", &current, &next, wake).is_err());
+    assert_eq!(
+        gate.validate(proposal(&frame, Phase::Discrete), &current, wake)
+            .unwrap()
+            .unwrap()
+            .observed_at,
+        wake
+    );
+}
+
+#[test]
+fn native_touch_continuation_refuses_transitions_invalid_scopes_and_exhausted_slots() {
+    let at = Duration::from_secs(2);
+    let mut declaration = definition(false);
+    declaration.inputs = BTreeSet::from([InputKind::Touch]);
+    for bad in 0..11 {
+        let mut gate = Gate::new(fence(), vec![declaration.clone()]).unwrap();
+        let mut current = candidate(at);
+        let mut retained = retained_touch(Duration::from_secs(1));
+        let Event::Frame {
+            source,
+            sequence,
+            at: physical,
+            selectors,
+            contacts,
+            changes,
+            contacts_started,
+            contacts_ended,
+            ended_contacts,
+        } = &mut retained
+        else {
+            unreachable!()
+        };
+        match bad {
+            0 => contacts.clear(),
+            1 => contacts[0].fresh = true,
+            2 => contacts_started.push(contacts[0].id),
+            3 => contacts_ended.push(contacts[0].id),
+            4 => ended_contacts.push(contacts[0].clone()),
+            5 => changes.push(Change::Key {
+                code: 30,
+                state: KeyState::Press,
+            }),
+            6 => *physical = at + Duration::from_millis(1),
+            7 => *sequence = 0,
+            8 => selectors.clear(),
+            9 => source.generation += 1,
+            _ => current.ownership = Some(Ownership::Forwarded),
+        }
+        assert!(
+            gate.offer_touch_continuation("custom", &current, &retained, at, at)
+                .is_err(),
+            "case={bad}"
+        );
+        assert!(gate.active.is_empty() && gate.pending() == 0);
+    }
+    let mut gate = Gate::new(fence(), vec![declaration.clone()]).unwrap();
+    let mut current = candidate(at);
+    let retained = retained_touch(Duration::from_secs(1));
+    assert!(
+        gate.offer_touch_continuation(
+            "custom",
+            &current,
+            &retained,
+            at + Duration::from_millis(1),
+            at
+        )
+        .is_err()
+    );
+    assert!(
+        gate.offer_touch_continuation(
+            "custom",
+            &current,
+            &retained,
+            at,
+            at + Duration::from_millis(20)
+        )
+        .is_err()
+    );
+    for id in 1..=MAX_PENDING as u64 {
+        current.id = id;
+        gate.offer_touch_continuation("custom", &current, &retained, at, at)
+            .unwrap();
+        gate.retire(id);
+    }
+    current.id = MAX_PENDING as u64 + 1;
+    assert!(
+        gate.offer_touch_continuation("custom", &current, &retained, at, at)
+            .is_err()
+    );
+    assert_eq!(gate.take_cancellations().len(), MAX_PENDING);
+    gate.offer_touch_continuation("custom", &current, &retained, at, at)
+        .unwrap();
+    let mut key_only = Gate::new(fence(), vec![definition(false)]).unwrap();
+    assert!(
+        key_only
+            .offer_touch_continuation("custom", &current, &retained, at, at)
+            .is_err()
+    );
+}
 #[test]
 fn timer_tickets_retain_original_input_time_and_reject_replayed_or_changed_candidates() {
     let at = Duration::from_secs(1);

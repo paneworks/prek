@@ -25,14 +25,68 @@ fn declaration() -> recognition::Definition {
     }
 }
 fn compile(body: &str) -> Definition {
+    compile_with(body, declaration())
+}
+fn compile_with(body: &str, recognizer: recognition::Definition) -> Definition {
     let mut definition = Definition::compile(&format!(r#"
 local p=require('prek'); local calls=0
 p.events.on('input', function(ticket) calls=calls+1; {body} end)
 p.events.on('ready',function()p.log.info('ordinary')end)
 return p.config.new{{policy={{allow_input_events=true,allowed_devices={{'keys'}}}},devices={{keys={{keys={{'KEY_A'}}}}}}}}
 "#), "recognizer.lua").unwrap();
-    definition.bind_recognizer(1, declaration()).unwrap();
+    definition.bind_recognizer(1, recognizer).unwrap();
     definition
+}
+
+#[test]
+fn an_initial_native_touch_timer_enters_the_real_lua_callback_without_contact_births() {
+    let mut recognizer = declaration();
+    recognizer.inputs = BTreeSet::from([InputKind::Touch]);
+    let definition = compile_with(
+        r#"
+assert(calls==1 and ticket.cause=='timer')
+assert(ticket.input.sequence=='7' and #ticket.input.contacts==1)
+assert(not ticket.input.contacts[1].fresh and #ticket.input.contacts_started==0)
+assert(type(ticket.input.contacts[1].id.generation)=='string')
+assert(#ticket.input.changes==0 and #ticket.input.contacts_ended==0 and #ticket.input.ended_contacts==0)
+return {phase='discrete',data={first='timer',tracking=ticket.input.contacts[1].id.tracking}}
+"#,
+        recognizer.clone(),
+    );
+    let mut runtime = definition.instantiate().unwrap();
+    let at = Duration::from_secs(2);
+    authorize(&mut runtime, at);
+    let current = candidate(at);
+    let mut retained = input(Duration::from_secs(1), 7);
+    if let Event::Frame {
+        changes, contacts, ..
+    } = &mut retained
+    {
+        changes.clear();
+        contacts.push(crate::input::Contact {
+            id: crate::input::ContactId {
+                slot: 0,
+                tracking: 10,
+                generation: 4,
+            },
+            x: 10,
+            y: 20,
+            pressure: None,
+            fresh: false,
+        });
+    }
+    let mut gate = Gate::new(fence(), vec![recognizer]).unwrap();
+    let ticket = gate
+        .offer_touch_continuation("hold", &current, &retained, at, at)
+        .unwrap();
+    let reply = runtime.recognize(&ticket).unwrap().proposal.unwrap();
+    let validated = gate.validate(reply, &current, at).unwrap().unwrap();
+    assert_eq!(
+        validated.data,
+        serde_json::json!({"first":"timer","tracking":10})
+    );
+    assert_eq!(validated.observed_at, at);
+    assert!(runtime.recognize(&ticket).is_err());
 }
 fn candidate(at: Duration) -> Candidate {
     Candidate {

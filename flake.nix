@@ -221,6 +221,13 @@
               --ignored --test-threads=1 > "$out" 2>&1 || { cat "$out"; exit 1; }
             ${pkgs.gnugrep}/bin/grep -F 'test result: ok. 1 passed; 0 failed;' "$out" || { cat "$out"; exit 1; }
           '';
+          native-composition-helper = pkgs.runCommand "prek-native-composition-helper-check" {} ''
+            PREK_TEST_LUA_BINARY=${package}/bin/prek \
+              ${package.nativeTests}/libexec/prek-native-tests \
+              --exact rules::tests::composition::helper::supervised_retained_touch_handoffs_use_one_native_coordinator \
+              --ignored --test-threads=1 > "$out" 2>&1 || { cat "$out"; exit 1; }
+            ${pkgs.gnugrep}/bin/grep -F 'test result: ok. 1 passed; 0 failed;' "$out" || { cat "$out"; exit 1; }
+          '';
           root-handoff-launcher = pkgs.runCommand "prek-root-handoff-launcher-check" {
             nativeBuildInputs = [ pkgs.bash pkgs.shellcheck ];
           } ''

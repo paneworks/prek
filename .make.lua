@@ -193,6 +193,8 @@ make.recipe{ name = "test-composition", desc = "native sequence routing and recu
                sh.cargo("test", "--locked", "--lib", "routing::tests::sequence::")
                sh.cargo("test", "--locked", "--lib", "config::recognizer_walk_tests::")
                sh.cargo("test", "--locked", "--lib", "lua::recognizers::constructor_tests::nested_native_declarations")
+               sh.cargo("test", "--locked", "--lib", "recognition::tests::native_touch_continuation")
+               sh.cargo("test", "--locked", "--lib", "lua::recognizers::tests::an_initial_native_touch_timer")
              end }
 
 make.recipe{
@@ -214,6 +216,22 @@ make.recipe{
 
 make.recipe{ name = "test-all", desc = "the suite, with every feature on",
              run = function() sh.cargo("test", "--locked", "--all-targets", "--all-features") end }
+
+make.recipe{
+  name = "test-composition-helper",
+  desc = "test private held-touch composition with the real unprivileged Lua helper",
+  deps = { "build" },
+  run = function()
+    local tested = oslo.run{ "env", "PREK_TEST_LUA_BINARY=" .. project_root() .. "/target/debug/" .. NAME,
+      "cargo", "test", "--locked", "--lib",
+      "rules::tests::composition::helper::supervised_retained_touch_handoffs_use_one_native_coordinator",
+      "--", "--exact", "--ignored", "--test-threads=1", capture = true }
+    io.write(tested.out or "")
+    io.stderr:write(tested.err or "")
+    assert(tested.ok and (tested.out or ""):find("test result: ok. 1 passed;", 1, true),
+           "native composition helper test failed or selected no case")
+  end,
+}
 
 make.recipe{ name = "test-root-session", desc = "unprivileged remote-handoff transport and cleanup models",
              run = function()
@@ -261,6 +279,6 @@ make.alias("c", "compile")
 make.recipe{
   name = "verify",
   desc = "the whole local gate",
-  deps = { "fmt-check", "check-all", "test-all", "test-routing-helper", "test-root-session", "test-root-routing", "clippy", "rustdoc" },
+  deps = { "fmt-check", "check-all", "test-all", "test-routing-helper", "test-composition-helper", "test-root-session", "test-root-routing", "clippy", "rustdoc" },
 }
 make.alias("v", "verify")

@@ -339,10 +339,22 @@ checks and nested timeout anchoring precede admission. An asynchronous reply has
 no current physical snapshot and cannot reuse the preceding record. Every step
 also rechecks its parent source/permit; losing any admitted prefix transport
 revokes the current step even when it uses another source.
+An eligible native touch hold or completed custom touch step can instead hand
+its unchanged held contacts to a new custom touch candidate. This native-only
+continuation starts with a timer ticket: original physical sequence/time,
+current held positions, no transitions and no fresh contacts. Its request time
+is the actual activation/admission time; it copies the prior frozen permit and
+rechecks source, contact membership, readiness, limits and parent deadlines.
+The asynchronous input-watermark exception belongs only to that newly created
+continuation identity, never an eager future-step candidate. Input loss,
+reconciliation and mapping changes invalidate retained physical metadata.
 Public custom-sequence validation remains closed: consuming group/ownership
-integration, held-contact continuation, real helper integration and
+integration, custom-to-native motion rebasing, full worker/helper integration and
 offline custom replay are still required. These fixtures do not constitute that
 API, privileged, device or rendered acceptance.
+`oslo make test-composition-helper` exercises a private native hold-to-custom-to-
+custom plan with source-bound callbacks in the actual supervised executable;
+it is not public source admission or consuming-route acceptance.
 
 Built-in native sequences join a later step's eligible sources before its match,
 so an explicitly reserved second-device press cannot escape while a hold matures.
