@@ -253,6 +253,375 @@ fn recognizer_parent_queue_is_bounded_and_stop_retires_queued_work() {
 }
 
 #[test]
+fn actual_helper_cleans_retired_source_state_without_fresh_desktop_authority() {
+    use prek::{
+        context::State,
+        recognition::{Gate, Retirement},
+    };
+    let (definition, recognizer) = recognizer_definition(
+        r#"
+held=held or {}
+if ticket.cause=='cancel' then
+ assert(ticket.input==nil and ticket.id==nil and held[ticket.candidate])
+ if ticket.candidate=='7' then
+  assert(ticket.reason=='source_lost' and ticket.source.generation=='4')
+  assert(p.context.state()=='unknown' and p.devices.list()==nil)
+ else assert(ticket.candidate=='8' and ticket.reason=='completed') end
+ held[ticket.candidate]=nil
+ p.log.info('cleanup',{candidate=ticket.candidate,calls=calls});return nil
+end
+assert(not held[ticket.candidate]);assert(ticket.candidate=='7' or not held['7'])
+held[ticket.candidate]=true;p.log.info('frame',{calls=calls});return nil
+"#,
+    );
+    let mut session = Session::spawn(
+        Path::new(env!("CARGO_BIN_EXE_prek")),
+        fence(1),
+        "seat0",
+        definition,
+    )
+    .unwrap();
+    drain(&mut session).unwrap();
+    authorize_recognizer(&mut session);
+    let at = monotonic().unwrap();
+    let mut current = recognizer_candidate(at);
+    current.id = 7;
+    current.source.generation = 4;
+    let mut frame = recognizer_frame(at, 1);
+    if let prek::input_events::Event::Frame { source, .. } = &mut frame {
+        *source = current.source.clone();
+    }
+    let mut gate = Gate::new(fence(1), vec![recognizer]).unwrap();
+    let ticket = gate.offer("hold", &current, &frame, at).unwrap();
+    session.request_recognition(ticket).unwrap();
+    assert_eq!(drain(&mut session).unwrap()[0].fields["calls"], 1);
+    let proposal = session.take_recognitions().pop().unwrap().1.unwrap();
+    assert!(
+        gate.validate(proposal, &current, monotonic().unwrap())
+            .unwrap()
+            .is_none()
+    );
+
+    let mut withdrawn = context_view(monotonic().unwrap(), 0);
+    withdrawn.state = State::Unknown;
+    withdrawn.context = None;
+    session.update_context(withdrawn).unwrap();
+    drain(&mut session).unwrap();
+    gate.retire_source(&current.source);
+    let cancellation = gate.take_cancellations().pop().unwrap();
+    let expected_cancellation = cancellation.clone();
+    session.cancel_recognition(cancellation.clone()).unwrap();
+    session.cancel_recognition(cancellation).unwrap();
+    let logs = drain(&mut session).unwrap();
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].message, "cleanup");
+    assert_eq!(logs[0].fields["calls"], 2);
+    assert_eq!(
+        session.take_recognition_cancellations(),
+        vec![expected_cancellation]
+    );
+    assert!(session.take_recognitions().is_empty());
+
+    // This is modeled source/context recovery, not live broker admission.
+    authorize_recognizer(&mut session);
+    let at = monotonic().unwrap();
+    current.id = 8;
+    current.source.generation = 5;
+    current.expires = at + Duration::from_secs(2);
+    let mut frame = recognizer_frame(at, 1);
+    if let prek::input_events::Event::Frame { source, .. } = &mut frame {
+        *source = current.source.clone();
+    }
+    session
+        .request_recognition(gate.offer("hold", &current, &frame, at).unwrap())
+        .unwrap();
+    assert_eq!(drain(&mut session).unwrap()[0].fields["calls"], 3);
+    session.take_recognitions();
+    gate.retire_with(current.id, Retirement::Completed);
+    session
+        .cancel_recognition(gate.take_cancellations().pop().unwrap())
+        .unwrap();
+    assert_eq!(drain(&mut session).unwrap()[0].fields["calls"], 4);
+    session.stop().unwrap();
+    drain(&mut session).unwrap();
+}
+
+#[test]
+fn cancelling_unsent_recognition_never_enters_its_callback() {
+    use prek::recognition::Gate;
+    let (definition, recognizer) = recognizer_definition(
+        "assert(calls==1 and ticket.candidate=='8');p.log.info('new');return nil",
+    );
+    let mut session = Session::spawn(
+        Path::new(env!("CARGO_BIN_EXE_prek")),
+        fence(1),
+        "seat0",
+        definition,
+    )
+    .unwrap();
+    drain(&mut session).unwrap();
+    authorize_recognizer(&mut session);
+    let at = monotonic().unwrap();
+    let mut current = recognizer_candidate(at);
+    current.id = 7;
+    let mut gate = Gate::new(fence(1), vec![recognizer]).unwrap();
+    session
+        .request_recognition(
+            gate.offer("hold", &current, &recognizer_frame(at, 1), at)
+                .unwrap(),
+        )
+        .unwrap();
+    gate.retire(current.id);
+    session
+        .cancel_recognition(gate.take_cancellations().pop().unwrap())
+        .unwrap();
+    assert!(drain(&mut session).unwrap().is_empty());
+    assert!(session.take_recognitions().is_empty());
+    current.id = 8;
+    let at = monotonic().unwrap();
+    session
+        .request_recognition(
+            gate.offer("hold", &current, &recognizer_frame(at, 2), at)
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(drain(&mut session).unwrap()[0].message, "new");
+    session.stop().unwrap();
+    drain(&mut session).unwrap();
+}
+
+#[test]
+fn cancelling_inflight_recognition_discards_its_result_and_logs_before_cleanup() {
+    use prek::recognition::Gate;
+    let (definition, recognizer) = recognizer_definition(
+        r#"
+if ticket.cause=='cancel' then assert(calls==2);p.log.info('cleanup');return nil end
+assert(calls==1);p.log.info('discard-inflight');return {phase='discrete'}
+"#,
+    );
+    let mut session = Session::spawn(
+        Path::new(env!("CARGO_BIN_EXE_prek")),
+        fence(1),
+        "seat0",
+        definition,
+    )
+    .unwrap();
+    drain(&mut session).unwrap();
+    authorize_recognizer(&mut session);
+    let at = monotonic().unwrap();
+    let current = recognizer_candidate(at);
+    let mut gate = Gate::new(fence(1), vec![recognizer]).unwrap();
+    session
+        .request_recognition(
+            gate.offer("hold", &current, &recognizer_frame(at, 1), at)
+                .unwrap(),
+        )
+        .unwrap();
+    // One step sends the request; no subsequent read has accepted its reply.
+    assert!(session.step(monotonic().unwrap()).unwrap().is_empty());
+    assert!(!session.finished());
+    gate.retire(current.id);
+    session
+        .cancel_recognition(gate.take_cancellations().pop().unwrap())
+        .unwrap();
+    let logs = drain(&mut session).unwrap();
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].message, "cleanup");
+    assert!(session.take_recognitions().is_empty());
+    session.stop().unwrap();
+    drain(&mut session).unwrap();
+}
+
+#[test]
+fn cancelling_completed_recognition_purges_results_still_owned_by_the_parent() {
+    use prek::recognition::Gate;
+    let (definition, recognizer) = recognizer_definition(
+        "if ticket.cause=='cancel' then p.log.info('cleanup');return nil end;return {phase='discrete'}",
+    );
+    let mut session = Session::spawn(
+        Path::new(env!("CARGO_BIN_EXE_prek")),
+        fence(1),
+        "seat0",
+        definition,
+    )
+    .unwrap();
+    drain(&mut session).unwrap();
+    authorize_recognizer(&mut session);
+    let at = monotonic().unwrap();
+    let current = recognizer_candidate(at);
+    let mut gate = Gate::new(fence(1), vec![recognizer]).unwrap();
+    session
+        .request_recognition(
+            gate.offer("hold", &current, &recognizer_frame(at, 1), at)
+                .unwrap(),
+        )
+        .unwrap();
+    drain(&mut session).unwrap();
+    // The result is queued in the parent and has not been handed to Rust yet.
+    gate.retire(current.id);
+    session
+        .cancel_recognition(gate.take_cancellations().pop().unwrap())
+        .unwrap();
+    assert!(session.take_recognitions().is_empty());
+    assert_eq!(drain(&mut session).unwrap()[0].message, "cleanup");
+    session.stop().unwrap();
+    drain(&mut session).unwrap();
+}
+
+#[test]
+fn cleanup_has_reserved_capacity_and_runs_before_a_full_ordinary_event_queue() {
+    use prek::recognition::Gate;
+    let (definition, recognizer) = recognizer_definition(
+        r#"
+if ticket.cause=='cancel' then cleaned=true;p.log.info('cleanup');return nil end
+cleaned=false
+p.events.on('matched',function()assert(cleaned,'ordinary callback preceded cleanup')end)
+return nil
+"#,
+    );
+    let mut session = Session::spawn(
+        Path::new(env!("CARGO_BIN_EXE_prek")),
+        fence(1),
+        "seat0",
+        definition,
+    )
+    .unwrap();
+    drain(&mut session).unwrap();
+    authorize_recognizer(&mut session);
+    let at = monotonic().unwrap();
+    let current = recognizer_candidate(at);
+    let mut gate = Gate::new(fence(1), vec![recognizer]).unwrap();
+    session
+        .request_recognition(
+            gate.offer("hold", &current, &recognizer_frame(at, 1), at)
+                .unwrap(),
+        )
+        .unwrap();
+    drain(&mut session).unwrap();
+    session.take_recognitions();
+    for _ in 0..64 {
+        session
+            .notify(EventKind::Matched, serde_json::json!({}))
+            .unwrap();
+    }
+    gate.retire(current.id);
+    session
+        .cancel_recognition(gate.take_cancellations().pop().unwrap())
+        .unwrap();
+    let logs = drain(&mut session).unwrap();
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].message, "cleanup");
+    session.stop().unwrap();
+    drain(&mut session).unwrap();
+}
+
+#[test]
+fn pending_cleanup_reserves_parent_candidate_slots_until_receipts_are_consumed() {
+    use prek::recognition::Gate;
+    let (definition, recognizer) = recognizer_definition(
+        "assert(calls==1 and ticket.candidate=='65');p.log.info('new');return nil",
+    );
+    let mut session = Session::spawn(
+        Path::new(env!("CARGO_BIN_EXE_prek")),
+        fence(1),
+        "seat0",
+        definition,
+    )
+    .unwrap();
+    drain(&mut session).unwrap();
+    authorize_recognizer(&mut session);
+    let at = monotonic().unwrap();
+    let mut current = recognizer_candidate(at);
+    let mut gate = Gate::new(fence(1), vec![recognizer]).unwrap();
+    for id in 1..=64 {
+        current.id = id;
+        session
+            .request_recognition(
+                gate.offer("hold", &current, &recognizer_frame(at, 1), at)
+                    .unwrap(),
+            )
+            .unwrap();
+    }
+    gate.retire_source(&current.source);
+    for cancellation in gate.take_cancellations() {
+        session.cancel_recognition(cancellation).unwrap();
+    }
+    current.id = 65;
+    let now = monotonic().unwrap();
+    let deferred = gate
+        .offer("hold", &current, &recognizer_frame(now, 1), now)
+        .unwrap();
+    assert!(
+        session
+            .request_recognition(deferred)
+            .unwrap_err()
+            .to_string()
+            .contains("admitted")
+    );
+    assert!(drain(&mut session).unwrap().is_empty());
+    assert!(session.take_recognitions().is_empty());
+    authorize_recognizer(&mut session);
+    let now = monotonic().unwrap();
+    let fresh = gate
+        .offer("hold", &current, &recognizer_frame(now, 2), now)
+        .unwrap();
+    assert!(
+        session
+            .request_recognition(fresh.clone())
+            .unwrap_err()
+            .to_string()
+            .contains("admitted")
+    );
+    let acknowledged = session.take_recognition_cancellations();
+    assert_eq!(acknowledged.len(), 64);
+    assert_eq!(
+        acknowledged
+            .iter()
+            .map(|cancel| cancel.candidate)
+            .collect::<Vec<_>>(),
+        (1..=64).collect::<Vec<_>>()
+    );
+    session.request_recognition(fresh).unwrap();
+    assert_eq!(drain(&mut session).unwrap()[0].message, "new");
+    session.stop().unwrap();
+    drain(&mut session).unwrap();
+}
+
+#[test]
+fn a_cleanup_proposal_retires_the_actual_helper_without_logs_or_effects() {
+    use prek::recognition::Gate;
+    let (definition, recognizer) = recognizer_definition(
+        "if ticket.cause=='cancel' then p.log.info('discarded');return {phase='discrete'} end;return nil",
+    );
+    let mut session = Session::spawn(
+        Path::new(env!("CARGO_BIN_EXE_prek")),
+        fence(1),
+        "seat0",
+        definition,
+    )
+    .unwrap();
+    drain(&mut session).unwrap();
+    authorize_recognizer(&mut session);
+    let at = monotonic().unwrap();
+    let current = recognizer_candidate(at);
+    let mut gate = Gate::new(fence(1), vec![recognizer]).unwrap();
+    session
+        .request_recognition(
+            gate.offer("hold", &current, &recognizer_frame(at, 1), at)
+                .unwrap(),
+        )
+        .unwrap();
+    drain(&mut session).unwrap();
+    session.take_recognitions();
+    gate.retire(current.id);
+    session
+        .cancel_recognition(gate.take_cancellations().pop().unwrap())
+        .unwrap();
+    assert!(drain(&mut session).is_err());
+    assert!(session.take_recognitions().is_empty());
+}
+
+#[test]
 fn real_helper_receives_broker_stamped_status_with_independent_expiry_and_stop() {
     use prek::{context::State, lua::StatusView, protocol::Mode};
     use std::collections::BTreeSet;

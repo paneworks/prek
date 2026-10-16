@@ -104,6 +104,11 @@ enum Work {
         sequence: u64,
         ticket: Box<crate::recognition::Ticket>,
     },
+    CancelRecognition {
+        fence: Fence,
+        sequence: u64,
+        cancellation: crate::recognition::Cancellation,
+    },
 }
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -150,6 +155,13 @@ enum Message {
         proposal: Option<crate::recognition::Proposal>,
         logs: Vec<LogRecord>,
     },
+    RecognitionCancelled {
+        fence: Fence,
+        sequence: u64,
+        candidate: u64,
+        through: u64,
+        logs: Vec<LogRecord>,
+    },
     Timers {
         fence: Fence,
         logs: Vec<LogRecord>,
@@ -194,6 +206,12 @@ pub struct Session {
     pending_event: Option<EventKind>,
     pending_action: Option<(u64, u64)>,
     pending_recognition: Option<u64>,
+    recognition_cancelled: bool,
+    recognition_candidates: std::collections::BTreeMap<u64, crate::recognition::Cancellation>,
+    recognition_tickets: std::collections::BTreeMap<u64, u64>,
+    cancellations: VecDeque<crate::recognition::Cancellation>,
+    pending_cancellation: Option<crate::recognition::Cancellation>,
+    cancelled_recognitions: VecDeque<crate::recognition::Cancellation>,
     recognition_last: u64,
     recognizers: std::collections::BTreeMap<String, crate::recognition::Definition>,
     recognitions: VecDeque<(u64, Option<crate::recognition::Proposal>)>,
@@ -285,6 +303,12 @@ impl Session {
             pending_event: None,
             pending_action: None,
             pending_recognition: None,
+            recognition_cancelled: false,
+            recognition_candidates: Default::default(),
+            recognition_tickets: Default::default(),
+            cancellations: VecDeque::new(),
+            pending_cancellation: None,
+            cancelled_recognitions: VecDeque::new(),
             recognition_last: 0,
             recognizers: definition
                 .recognizers
@@ -507,6 +531,26 @@ impl Session {
             .get(&ticket.recognizer)
             .ok_or_else(|| protocol::invalid("unapproved Lua recognizer"))?;
         ticket.validate_for(definition, monotonic()?)?;
+        let scope = crate::recognition::Cancellation::from_ticket(
+            &ticket,
+            crate::recognition::Retirement::Cancelled,
+        );
+        if let Some(current) = self.recognition_candidates.get(&ticket.candidate) {
+            if !current.same_candidate(&scope) {
+                return Err(protocol::invalid(
+                    "Lua recognizer candidate changed without cancellation",
+                ));
+            }
+        } else if self.recognition_candidates.len()
+            + self.cancellations.len()
+            + usize::from(self.pending_cancellation.is_some())
+            + self.cancelled_recognitions.len()
+            >= MAX_PENDING
+        {
+            return Err(protocol::invalid(
+                "too many admitted Lua recognizer candidates",
+            ));
+        }
         let bytes = protocol::encode(&protocol::Packet {
             version: protocol::VERSION,
             sequence: 1,
@@ -531,6 +575,8 @@ impl Session {
             return Err(protocol::invalid("Lua recognizer queue exceeds limit"));
         }
         self.recognition_last = ticket.id;
+        self.recognition_candidates.insert(ticket.candidate, scope);
+        self.recognition_tickets.insert(ticket.id, ticket.candidate);
         self.bytes += bytes;
         self.notices.push_back(Notice {
             event: EventKind::Input,
@@ -543,7 +589,77 @@ impl Session {
     /// A missing proposal means the request expired or lost its permitted
     /// desktop context before execution. It never means recognition succeeded.
     pub fn take_recognitions(&mut self) -> Vec<(u64, Option<crate::recognition::Proposal>)> {
-        self.recognitions.drain(..).collect()
+        let replies: Vec<_> = self.recognitions.drain(..).collect();
+        for (ticket, _) in &replies {
+            self.recognition_tickets.remove(ticket);
+        }
+        replies
+    }
+    /// Exact helper acknowledgements for the embedding's lifecycle ledger.
+    /// They establish no input ownership, effects or physical release proof.
+    pub fn take_recognition_cancellations(&mut self) -> Vec<crate::recognition::Cancellation> {
+        self.cancelled_recognitions.drain(..).collect()
+    }
+    /// Revoke in the Rust Gate first. Purge unsent/completed replies and ignore
+    /// an in-flight result, then deliver bounded identity-only closure cleanup.
+    pub fn cancel_recognition(
+        &mut self,
+        cancellation: crate::recognition::Cancellation,
+    ) -> io::Result<()> {
+        cancellation.validate()?;
+        if self.stopping
+            || cancellation.fence != self.fence
+            || cancellation.source.seat != self.seat
+        {
+            return Err(protocol::invalid(
+                "foreign or stopped Lua recognizer cancellation",
+            ));
+        }
+        let Some(current) = self.recognition_candidates.get(&cancellation.candidate) else {
+            return Ok(());
+        };
+        if !current.same_candidate(&cancellation) || cancellation.through < current.through {
+            return Err(protocol::invalid(
+                "stale or changed Lua recognizer cancellation",
+            ));
+        }
+        if self.cancellations.len() >= MAX_PENDING {
+            return Err(protocol::invalid(
+                "Lua recognizer cleanup queue exceeds limit; retire the helper",
+            ));
+        }
+        let tickets: BTreeSet<_> = self
+            .recognition_tickets
+            .iter()
+            .filter_map(|(ticket, candidate)| {
+                (*candidate == cancellation.candidate).then_some(*ticket)
+            })
+            .collect();
+        self.notices.retain(|notice| {
+            if notice
+                .recognition
+                .as_ref()
+                .is_some_and(|ticket| tickets.contains(&ticket.id))
+            {
+                self.bytes -= notice.bytes;
+                false
+            } else {
+                true
+            }
+        });
+        self.recognitions
+            .retain(|(ticket, _)| !tickets.contains(ticket));
+        if self
+            .pending_recognition
+            .is_some_and(|ticket| tickets.contains(&ticket))
+        {
+            self.recognition_cancelled = true;
+        }
+        self.recognition_tickets
+            .retain(|_, candidate| *candidate != cancellation.candidate);
+        self.recognition_candidates.remove(&cancellation.candidate);
+        self.cancellations.push_back(cancellation);
+        Ok(())
     }
     pub fn update_context(&mut self, view: crate::context_transfer::View) -> io::Result<()> {
         // SAFETY: read-only query of this unprivileged session process.
@@ -588,6 +704,7 @@ impl Session {
             && self.pending.is_none()
             && self.notices.is_empty()
             && self.actions.is_empty()
+            && self.cancellations.is_empty()
             && self.capabilities_next.is_none()
             && self.capabilities_pending.is_none()
             && self.context_source.is_empty()
@@ -614,6 +731,11 @@ impl Session {
         self.actions.clear();
         self.resolved.clear();
         self.recognitions.clear();
+        self.recognition_candidates.clear();
+        self.recognition_tickets.clear();
+        self.cancellations.clear();
+        self.cancelled_recognitions.clear();
+        self.recognition_cancelled = self.pending_recognition.is_some();
         self.bytes = 0;
         self.notify(EventKind::Stop, serde_json::json!({"fence":self.fence}))
     }
@@ -651,6 +773,10 @@ impl Session {
                 && self.rules_ready
                 && self.context_pending.is_none()
                 && self.context_offset < self.context_source.len()
+            || self.action_ready()
+                && self.context_pending.is_none()
+                && self.pending.is_none()
+                && !self.cancellations.is_empty()
             || self.ready
                 && self.rules_ready
                 && self.rule_pending.is_none()
@@ -775,7 +901,10 @@ impl Session {
                         .pending
                         .is_some_and(|(expected, _)| sequence == expected) =>
                 {
-                    if self.pending_action.is_some() || self.pending_recognition.is_some() {
+                    if self.pending_action.is_some()
+                        || self.pending_recognition.is_some()
+                        || self.pending_cancellation.is_some()
+                    {
                         return Err(protocol::invalid("Lua action returned an event response"));
                     }
                     if self.pending_event.take() == Some(EventKind::Ready) {
@@ -811,8 +940,38 @@ impl Session {
                     }
                     self.pending = None;
                     self.pending_recognition = None;
-                    if !self.stopping {
+                    if !self.stopping && !self.recognition_cancelled {
                         self.recognitions.push_back((ticket, proposal));
+                        logs.extend(batch);
+                    } else {
+                        self.recognition_tickets.remove(&ticket);
+                    }
+                    self.recognition_cancelled = false;
+                }
+                Message::RecognitionCancelled {
+                    fence,
+                    sequence,
+                    candidate,
+                    through,
+                    logs: batch,
+                } if fence == self.fence
+                    && self.ready
+                    && self
+                        .pending
+                        .is_some_and(|(expected, _)| sequence == expected)
+                    && self.pending_cancellation.as_ref().is_some_and(|pending| {
+                        pending.candidate == candidate && pending.through == through
+                    }) =>
+                {
+                    self.pending = None;
+                    let cancellation = self.pending_cancellation.take().unwrap();
+                    if !self.stopping {
+                        if self.cancelled_recognitions.len() >= MAX_PENDING {
+                            return Err(protocol::invalid(
+                                "Lua recognition cleanup receipt queue exceeds limit",
+                            ));
+                        }
+                        self.cancelled_recognitions.push_back(cancellation);
                         logs.extend(batch);
                     }
                 }
@@ -932,6 +1091,29 @@ impl Session {
                     self.context_started = None;
                     self.context_pending = Some(now + RESPONSE_TIMEOUT);
                 }
+            }
+        } else if self.context_pending.is_none()
+            && self.action_ready()
+            && self.pending.is_none()
+            && !self.cancellations.is_empty()
+        {
+            let cancellation = self.cancellations.front().unwrap().clone();
+            let sequence = self
+                .sequence
+                .checked_add(1)
+                .ok_or_else(|| protocol::invalid("Lua cleanup sequence exhausted"))?;
+            if self.channel.send(
+                &Work::CancelRecognition {
+                    fence: self.fence,
+                    sequence,
+                    cancellation: cancellation.clone(),
+                },
+                now,
+            )? {
+                self.cancellations.pop_front();
+                self.sequence = sequence;
+                self.pending = Some((sequence, now + RESPONSE_TIMEOUT));
+                self.pending_cancellation = Some(cancellation);
             }
         } else if self.context_pending.is_none()
             && self.rule_pending.is_none()
@@ -1246,6 +1428,39 @@ pub fn worker() -> io::Result<()> {
                         }
                     });
                 }
+                Work::CancelRecognition {
+                    fence: incoming,
+                    sequence: next,
+                    cancellation,
+                } if fence == Some(incoming)
+                    && runtime.is_some()
+                    && timers_enabled
+                    && cancellation.fence == incoming
+                    && next == sequence + 1 =>
+                {
+                    crate::lua_compiler::runtime_cpu_budget()?;
+                    sequence = next;
+                    runtime
+                        .as_mut()
+                        .unwrap()
+                        .set_clock(monotonic()?)
+                        .map_err(io::Error::other)?;
+                    outgoing = Some(
+                        match runtime.as_mut().unwrap().cancel_recognition(&cancellation) {
+                            Ok(logs) => Message::RecognitionCancelled {
+                                fence: incoming,
+                                sequence,
+                                candidate: cancellation.candidate,
+                                through: cancellation.through,
+                                logs,
+                            },
+                            Err(error) => Message::Failed {
+                                fence: incoming,
+                                reason: error.0.chars().take(512).collect(),
+                            },
+                        },
+                    );
+                }
                 Work::Recognition {
                     fence: incoming,
                     sequence: next,
@@ -1294,6 +1509,7 @@ pub fn worker() -> io::Result<()> {
                         runtime.as_mut().unwrap().disable_rule_transactions();
                         runtime.as_mut().unwrap().clear_capabilities();
                         runtime.as_mut().unwrap().clear_status();
+                        runtime.as_mut().unwrap().recognition_candidates.clear();
                         context_assembly = None;
                     }
                     runtime

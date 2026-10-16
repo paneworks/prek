@@ -13,7 +13,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     io,
     time::Duration,
 };
@@ -23,6 +23,7 @@ pub const MAX_PENDING: usize = 64;
 pub const MAX_BYTES: usize = 1024 * 1024;
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 pub const MAX_DATA_BYTES: usize = 4096;
+pub const MAX_CANCELLATION_BYTES: usize = 2048;
 pub const MAX_REPLY: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -197,6 +198,66 @@ pub enum Cause {
     Frame,
     Timer,
 }
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Retirement {
+    Cancelled,
+    Completed,
+    SourceLost,
+    ContextLost,
+    RuleChanged,
+    Expired,
+}
+/// Coordinator-issued cleanup, containing no new input or execution grant.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Cancellation {
+    pub fence: Fence,
+    pub candidate: u64,
+    pub revision: u64,
+    pub rule: String,
+    pub recognizer: String,
+    pub source: Source,
+    pub through: u64,
+    pub reason: Retirement,
+}
+impl Cancellation {
+    pub fn validate(&self) -> io::Result<()> {
+        self.fence.validate()?;
+        if self.candidate == 0
+            || self.revision == 0
+            || self.through == 0
+            || !selector(&self.rule)
+            || !name(&self.recognizer)
+            || self.source.generation == 0
+            || !selector(&self.source.seat)
+        {
+            return Err(invalid("invalid recognizer cancellation"));
+        }
+        encoded_size(self, MAX_CANCELLATION_BYTES)?;
+        Ok(())
+    }
+    pub fn from_ticket(ticket: &Ticket, reason: Retirement) -> Self {
+        Self {
+            fence: ticket.fence,
+            candidate: ticket.candidate,
+            revision: ticket.revision,
+            rule: ticket.rule.clone(),
+            recognizer: ticket.recognizer.clone(),
+            source: ticket.input.source().clone(),
+            through: ticket.id,
+            reason,
+        }
+    }
+    pub fn same_candidate(&self, other: &Self) -> bool {
+        self.fence == other.fence
+            && self.candidate == other.candidate
+            && self.revision == other.revision
+            && self.rule == other.rule
+            && self.recognizer == other.recognizer
+            && self.source == other.source
+    }
+}
 impl Ticket {
     /// Validate the delivery envelope, independently of current rule authority.
     /// Only Gate can establish eligibility and ownership for the response.
@@ -288,6 +349,7 @@ struct History {
     last_input: Event,
     last_request: Duration,
     last_reply: u64,
+    last_ticket: u64,
     ordinal: u64,
     progress: bool,
     terminal: bool,
@@ -299,6 +361,7 @@ pub struct Gate {
     pending: BTreeMap<u64, Pending>,
     active: BTreeMap<u64, History>,
     bytes: usize,
+    cancellations: VecDeque<Cancellation>,
 }
 impl Gate {
     pub fn new(fence: Fence, definitions: Vec<Definition>) -> io::Result<Self> {
@@ -320,6 +383,7 @@ impl Gate {
             pending: BTreeMap::new(),
             active: BTreeMap::new(),
             bytes: 0,
+            cancellations: VecDeque::new(),
         })
     }
     pub fn offer(
@@ -355,7 +419,9 @@ impl Gate {
                 "recognizer candidate changed or frame was replayed",
             ));
         }
-        if !self.active.contains_key(&candidate.id) && self.active.len() >= MAX_PENDING {
+        if !self.active.contains_key(&candidate.id)
+            && self.active.len() + self.cancellations.len() >= MAX_PENDING
+        {
             return Err(invalid("too many active recognizer candidates"));
         }
         self.issue(recognizer, candidate, input, Cause::Frame, now)
@@ -451,6 +517,7 @@ impl Gate {
             last_input: ticket.input.clone(),
             last_request: requested_at,
             last_reply: 0,
+            last_ticket: id,
             ordinal: 0,
             progress: false,
             terminal: false,
@@ -462,6 +529,7 @@ impl Gate {
             history.last_input = ticket.input.clone();
         }
         history.last_request = requested_at;
+        history.last_ticket = id;
         self.next = id;
         self.bytes += bytes;
         self.pending.insert(
@@ -553,8 +621,24 @@ impl Gate {
         });
     }
     pub fn retire(&mut self, candidate: u64) {
+        self.retire_with(candidate, Retirement::Cancelled);
+    }
+    pub fn retire_with(&mut self, candidate: u64, reason: Retirement) {
         self.discard_tickets(candidate);
-        self.active.remove(&candidate);
+        if let Some(history) = self.active.remove(&candidate) {
+            let candidate = history.candidate;
+            // Every active candidate reserved this slot before admission.
+            self.cancellations.push_back(Cancellation {
+                fence: self.fence,
+                candidate: candidate.id,
+                revision: candidate.revision,
+                rule: candidate.rule,
+                recognizer: history.recognizer,
+                source: candidate.source,
+                through: history.last_ticket,
+                reason,
+            });
+        }
     }
     pub fn retire_source(&mut self, source: &Source) {
         let ids: Vec<_> = self
@@ -563,7 +647,7 @@ impl Gate {
             .filter_map(|(id, history)| (&history.candidate.source == source).then_some(*id))
             .collect();
         for id in ids {
-            self.retire(id);
+            self.retire_with(id, Retirement::SourceLost);
         }
     }
     pub fn expire(&mut self, now: Duration) {
@@ -581,11 +665,16 @@ impl Gate {
             .filter_map(|(id, history)| (history.candidate.expires <= now).then_some(*id))
             .collect();
         for id in ids {
-            self.retire(id);
+            self.retire_with(id, Retirement::Expired);
         }
     }
     pub fn pending(&self) -> usize {
         self.pending.len()
+    }
+    /// Deliver these before offering more candidates. Dropping a notification
+    /// requires retiring its helper VM; stale proposals remain rejected here.
+    pub fn take_cancellations(&mut self) -> Vec<Cancellation> {
+        self.cancellations.drain(..).collect()
     }
 }
 fn encoded_size(value: &impl Serialize, maximum: usize) -> io::Result<usize> {

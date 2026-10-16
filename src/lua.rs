@@ -973,6 +973,7 @@ fn instantiate(
         failed: false,
         recognizers: Vec::new(),
         recognition_last: None,
+        recognition_candidates: Default::default(),
     };
     let handlers = runtime.handler_registrations()?;
     hooks::validate(&runtime.registrations()?, &runtime.config)?;

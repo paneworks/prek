@@ -273,6 +273,8 @@ pub struct Runtime {
     pub(super) failed: bool,
     pub(super) recognizers: Vec<super::recognizers::Binding>,
     pub(super) recognition_last: Option<(crate::protocol::Fence, u64)>,
+    pub(super) recognition_candidates:
+        std::collections::BTreeMap<u64, crate::recognition::Cancellation>,
 }
 impl Runtime {
     pub fn load(source: &str, name: &str) -> Result<Self, ConfigError> {

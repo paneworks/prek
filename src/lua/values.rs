@@ -54,6 +54,26 @@ pub(super) fn recognition<'gc>(
     Ok(value)
 }
 
+pub(super) fn recognition_cancellation<'gc>(
+    ctx: Context<'gc>,
+    cancellation: &crate::recognition::Cancellation,
+) -> Result<Value<'gc>, luna::Error<'gc>> {
+    let json = serde_json::to_value(cancellation).map_err(io::Error::other)?;
+    let value = payload(ctx, &json)?;
+    let Value::Table(table) = value else {
+        unreachable!()
+    };
+    fields(ctx, table, &json, &["candidate", "revision", "through"])?;
+    fields(
+        ctx,
+        table.get(ctx, "source")?,
+        &json["source"],
+        &["device", "generation"],
+    )?;
+    table.set(ctx, "cause", "cancel")?;
+    Ok(value)
+}
+
 fn identity<'gc>(ctx: Context<'gc>, value: u64) -> Value<'gc> {
     Value::String(ctx.intern(value.to_string().as_bytes()))
 }

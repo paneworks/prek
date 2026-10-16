@@ -331,3 +331,128 @@ fn full_width_ticket_identity_and_expiry_during_callback_remain_native_owned() {
     assert!(runtime.host.borrow().logs.is_empty());
     assert!(runtime.recognize(&ticket).is_err());
 }
+
+#[test]
+fn source_cleanup_uses_only_prior_identity_even_after_context_and_capabilities_expire() {
+    let mut runtime = compile(
+        r#"
+if ticket.cause=='cancel' then
+ assert(calls==2 and ticket.candidate=='18446744073709551615')
+ assert(ticket.source.generation=='18446744073709551615' and ticket.through=='1')
+ assert(ticket.input==nil and ticket.id==nil and ticket.reason=='source_lost')
+ assert(p.context.state()=='unknown' and p.capabilities.current()==nil)
+ assert(held[ticket.candidate]);held[ticket.candidate]=nil
+ p.log.info('cleanup');return nil
+end
+held=held or {};held[ticket.candidate]=true;return nil
+"#,
+    )
+    .instantiate()
+    .unwrap();
+    let at = Duration::from_secs(1);
+    authorize(&mut runtime, at);
+    let mut gate = Gate::new(fence(), vec![declaration()]).unwrap();
+    let current = candidate(at);
+    let ticket = gate.offer("hold", &current, &input(at, 1), at).unwrap();
+    runtime.recognize(&ticket).unwrap();
+    assert_eq!(runtime.recognition_candidates.len(), 1);
+    runtime.clear_capabilities();
+    runtime.set_clock(at + Duration::from_secs(1)).unwrap();
+    gate.retire_source(&current.source);
+    let cancellation = gate.take_cancellations().pop().unwrap();
+    assert_eq!(
+        runtime.cancel_recognition(&cancellation).unwrap()[0].message,
+        "cleanup"
+    );
+    assert!(runtime.recognition_candidates.is_empty());
+    assert!(
+        runtime
+            .cancel_recognition(&cancellation)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        runtime
+            .dispatch(EventKind::Ready, &serde_json::json!({}))
+            .unwrap()[0]
+            .message,
+        "ordinary"
+    );
+}
+
+#[test]
+fn unknown_cleanup_does_not_invoke_lua_and_stale_or_retargeted_cleanup_retires_the_vm() {
+    for mismatch in ["fence", "revision", "source", "rule", "through", "unknown"] {
+        let mut runtime =
+            compile("if ticket.cause=='cancel' then error('must not enter') end; return nil")
+                .instantiate()
+                .unwrap();
+        let at = Duration::from_secs(1);
+        authorize(&mut runtime, at);
+        let mut gate = Gate::new(fence(), vec![declaration()]).unwrap();
+        let current = candidate(at);
+        let first = gate.offer("hold", &current, &input(at, 1), at).unwrap();
+        runtime.recognize(&first).unwrap();
+        let last = gate.offer("hold", &current, &input(at, 2), at).unwrap();
+        runtime.recognize(&last).unwrap();
+        let mut cancellation =
+            recognition::Cancellation::from_ticket(&last, recognition::Retirement::Cancelled);
+        match mismatch {
+            "fence" => cancellation.fence.session += 1,
+            "revision" => cancellation.revision -= 1,
+            "source" => cancellation.source.generation -= 1,
+            "rule" => cancellation.rule = "other".into(),
+            "through" => cancellation.through = first.id,
+            "unknown" => cancellation.candidate -= 1,
+            _ => unreachable!(),
+        }
+        if mismatch == "unknown" {
+            assert!(
+                runtime
+                    .cancel_recognition(&cancellation)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(runtime.recognition_candidates.len(), 1);
+        } else {
+            assert!(
+                runtime.cancel_recognition(&cancellation).is_err(),
+                "{mismatch}"
+            );
+            assert!(runtime.failed);
+            assert!(runtime.recognition_candidates.is_empty());
+        }
+    }
+}
+
+#[test]
+fn cleanup_cannot_yield_propose_or_survive_callback_failure() {
+    for cleanup in [
+        "return {phase='discrete'}",
+        "return nil,nil",
+        "coroutine.yield()",
+        "while true do end",
+        "error('cleanup failed')",
+    ] {
+        let mut runtime = compile(&format!(
+            "if ticket.cause=='cancel' then p.log.info('discarded'); {cleanup} end;return nil"
+        ))
+        .instantiate()
+        .unwrap();
+        let at = Duration::from_secs(1);
+        authorize(&mut runtime, at);
+        let mut gate = Gate::new(fence(), vec![declaration()]).unwrap();
+        let ticket = gate
+            .offer("hold", &candidate(at), &input(at, 1), at)
+            .unwrap();
+        runtime.recognize(&ticket).unwrap();
+        let cancellation =
+            recognition::Cancellation::from_ticket(&ticket, recognition::Retirement::ContextLost);
+        assert!(
+            runtime.cancel_recognition(&cancellation).is_err(),
+            "{cleanup}"
+        );
+        assert!(runtime.host.borrow().logs.is_empty());
+        assert!(runtime.cancel_recognition(&cancellation).is_err());
+    }
+}

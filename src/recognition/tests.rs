@@ -217,6 +217,75 @@ fn stationary_touch_wakes_do_not_replay_contact_birth_or_released_positions() {
 }
 
 #[test]
+fn retirement_is_exact_scoped_and_reserved_under_admission_pressure() {
+    let at = Duration::from_secs(1);
+    for source_lost in [false, true] {
+        let mut gate = Gate::new(fence(), vec![definition(false)]).unwrap();
+        let mut current = candidate(at);
+        for id in 1..=MAX_PENDING as u64 {
+            current.id = id;
+            gate.offer("custom", &current, &input(at, 1), at).unwrap();
+        }
+        if source_lost {
+            gate.retire_source(&current.source);
+            gate.retire_source(&current.source);
+        } else {
+            gate.expire(current.expires);
+            gate.expire(current.expires);
+        }
+        assert_eq!(gate.pending(), 0);
+        assert!(gate.active.is_empty());
+        current.id += 1;
+        assert!(gate.offer("custom", &current, &input(at, 1), at).is_err());
+        let notifications = gate.take_cancellations();
+        assert_eq!(notifications.len(), MAX_PENDING);
+        for (index, cancellation) in notifications.iter().enumerate() {
+            cancellation.validate().unwrap();
+            assert_eq!(cancellation.fence, fence());
+            assert_eq!(cancellation.candidate, index as u64 + 1);
+            assert_eq!(cancellation.through, index as u64 + 1);
+            assert_eq!(cancellation.source, current.source);
+            assert_eq!(
+                cancellation.reason,
+                if source_lost {
+                    Retirement::SourceLost
+                } else {
+                    Retirement::Expired
+                }
+            );
+        }
+        assert!(gate.take_cancellations().is_empty());
+        gate.offer("custom", &current, &input(at, 1), at).unwrap();
+    }
+}
+
+#[test]
+fn cancellation_freezes_last_issued_ticket_and_revokes_undelivered_replies() {
+    let at = Duration::from_secs(1);
+    let mut gate = Gate::new(fence(), vec![definition(false)]).unwrap();
+    let current = candidate(at);
+    let first = gate.offer("custom", &current, &input(at, 1), at).unwrap();
+    let last = gate.offer("custom", &current, &input(at, 2), at).unwrap();
+    gate.retire_with(current.id, Retirement::RuleChanged);
+    assert!(
+        gate.validate(proposal(&first, Phase::Discrete), &current, at)
+            .is_err()
+    );
+    assert!(
+        gate.validate(proposal(&last, Phase::Discrete), &current, at)
+            .is_err()
+    );
+    let cancellation = gate.take_cancellations().pop().unwrap();
+    assert_eq!(
+        cancellation,
+        Cancellation::from_ticket(&last, Retirement::RuleChanged)
+    );
+    let mut forged = serde_json::to_value(&cancellation).unwrap();
+    forged["action"] = serde_json::json!({"kind":"command"});
+    assert!(serde_json::from_value::<Cancellation>(forged).is_err());
+}
+
+#[test]
 fn only_the_winning_candidate_can_continue_a_claimed_source() {
     let at = Duration::from_secs(1);
     let mut gate = Gate::new(fence(), vec![definition(true)]).unwrap();

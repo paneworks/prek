@@ -127,12 +127,7 @@ impl Runtime {
         }
         let result = self.recognize_inner(ticket);
         if result.is_err() {
-            self.failed = true;
-            let mut host = self.host.borrow_mut();
-            host.running = false;
-            host.bytes = 0;
-            host.logs.clear();
-            host.rules.discard("Lua recognizer failed");
+            self.recognizer_failed();
         }
         result
     }
@@ -195,6 +190,16 @@ impl Runtime {
         if !self.recognition_permitted(ticket) {
             return Ok(RecognitionResult::default());
         }
+        let scope =
+            recognition::Cancellation::from_ticket(ticket, recognition::Retirement::Cancelled);
+        if let Some(current) = self.recognition_candidates.get(&ticket.candidate) {
+            if !current.same_candidate(&scope) {
+                return Err(error("recognizer candidate changed without cancellation"));
+            }
+        } else if self.recognition_candidates.len() >= recognition::MAX_PENDING {
+            return Err(error("too many delivered Lua recognizer candidates"));
+        }
+        self.recognition_candidates.insert(ticket.candidate, scope);
         self.host.borrow_mut().running = true;
         drive_budget(
             &mut self.lua,
@@ -250,6 +255,98 @@ impl Runtime {
             }),
             logs: std::mem::take(&mut host.logs),
         })
+    }
+
+    fn recognizer_failed(&mut self) {
+        self.failed = true;
+        self.recognition_candidates.clear();
+        let mut host = self.host.borrow_mut();
+        host.running = false;
+        host.bytes = 0;
+        host.logs.clear();
+        host.rules.discard("Lua recognizer failed");
+    }
+
+    /// Cleanup of previously delivered state remains possible after desktop
+    /// authority expires. This path carries no new input or proposal result.
+    pub fn cancel_recognition(
+        &mut self,
+        cancellation: &recognition::Cancellation,
+    ) -> std::result::Result<Vec<LogRecord>, ConfigError> {
+        if self.failed {
+            return Err(error("Lua runtime was retired after callback failure"));
+        }
+        let result = self.cancel_recognition_inner(cancellation);
+        if result.is_err() {
+            self.recognizer_failed();
+        }
+        result
+    }
+    fn cancel_recognition_inner(
+        &mut self,
+        cancellation: &recognition::Cancellation,
+    ) -> std::result::Result<Vec<LogRecord>, ConfigError> {
+        let started = Instant::now();
+        cancellation.validate().map_err(error)?;
+        if self
+            .recognition_last
+            .is_some_and(|(fence, _)| fence != cancellation.fence)
+        {
+            return Err(error("recognizer cancellation has a foreign fence"));
+        }
+        let Some(current) = self.recognition_candidates.get(&cancellation.candidate) else {
+            return Ok(Vec::new());
+        };
+        if !current.same_candidate(cancellation) || cancellation.through < current.through {
+            return Err(error(
+                "recognizer cancellation has a stale or changed candidate",
+            ));
+        }
+        let binding = self
+            .recognizers
+            .iter()
+            .find(|binding| binding.definition.name == cancellation.recognizer)
+            .ok_or_else(|| error("recognizer cancellation has no approved source binding"))?;
+        let subscription = binding.subscription;
+        self.recognition_candidates.remove(&cancellation.candidate);
+        let executor = self
+            .lua
+            .try_enter(|ctx| {
+                let entry: Table = ctx.fetch(&self.registry).get(ctx, subscription)?;
+                if !entry.get::<_, bool>(ctx, "active")? {
+                    return Ok(None);
+                }
+                let callback: luna::Function = entry.get(ctx, "callback")?;
+                let value = values::recognition_cancellation(ctx, cancellation)?;
+                Ok(Some(ctx.stash(Executor::start(ctx, callback, (value,)))))
+            })
+            .map_err(error)?;
+        let Some(executor) = executor else {
+            return Ok(Vec::new());
+        };
+        self.host.borrow_mut().running = true;
+        drive_budget(
+            &mut self.lua,
+            &executor,
+            started,
+            runtime::CALLBACK_TIME,
+            runtime::CALLBACK_INSTRUCTIONS,
+        )?;
+        self.lua.try_enter(|ctx| {
+            let executor = ctx.fetch(&executor);
+            let values: luna::Variadic<Vec<Value>> = executor.take_result(ctx).map_err(io::Error::other)??;
+            if executor.mode() != luna::ExecutorMode::Stopped || values.0.len() > 1 || values.0.first().is_some_and(|value| !value.is_nil()) {
+                return Err(io::Error::other("recognizer cleanup must return nil and cannot yield or propose recognition").into());
+            }
+            Ok(())
+        }).map_err(error)?;
+        if started.elapsed() >= runtime::CALLBACK_TIME {
+            return Err(error("Lua recognizer cleanup exceeded time limit"));
+        }
+        let mut host = self.host.borrow_mut();
+        host.running = false;
+        host.bytes = 0;
+        Ok(std::mem::take(&mut host.logs))
     }
 }
 
