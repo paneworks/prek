@@ -1,9 +1,11 @@
 //! Kernel/process recovery gates. Ordinary cargo test skips this executable's
-//! device cases; run only in the disposable VM with PREK_ISOLATED_ROUTING=1.
+//! device cases; the user-launched fixed probe supplies private run bindings.
 #![cfg(target_os = "linux")]
 
 #[path = "support/kernel.rs"]
 mod kernel_fixture;
+#[path = "support/recovery_control.rs"]
+mod recovery_control;
 use evdev::{KeyCode, raw_stream::RawDevice};
 use kernel_fixture::*;
 use nix::libc;
@@ -15,13 +17,14 @@ use prek::{
     kernel::{Flush, Registry, Virtual},
     supervisor::{Heartbeat, Supervisor, TerminationSignals, WorkerIdentity},
 };
+use recovery_control::{Directory, Process};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, OpenOptions},
     io,
     os::{
         fd::AsRawFd,
-        unix::fs::{OpenOptionsExt, PermissionsExt},
+        unix::{fs::OpenOptionsExt, process::CommandExt},
     },
     path::{Path, PathBuf},
     process::{Child, Command},
@@ -32,18 +35,21 @@ use std::{
 nix::ioctl_read_buf!(get_slots, b'E', 0x0a, libc::c_int);
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Setup {
     source: PathBuf,
     marker: String,
     device: Device,
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Prepared {
     output: PathBuf,
     marker: String,
     worker: WorkerIdentity,
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Finished {
     removed: usize,
     reason: String,
@@ -51,31 +57,22 @@ struct Finished {
     success: bool,
 }
 
-fn directory() -> PathBuf {
-    std::env::var_os("PREK_RECOVERY_DIRECTORY").unwrap().into()
+fn directory() -> Directory {
+    Directory::from_env().expect("fixed probe must bind a trusted private control directory")
 }
 fn write_json(name: &str, value: &impl Serialize) {
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(directory().join(name))
-        .unwrap();
-    serde_json::to_writer(&file, value).unwrap();
-    file.sync_all().unwrap();
+    directory().write(name, value).unwrap();
 }
-fn read_json<T: for<'a> Deserialize<'a>>(path: &Path) -> T {
+fn read_json<T: for<'a> Deserialize<'a>>(directory: &Directory, name: &str) -> T {
     let deadline = Instant::now() + Duration::from_secs(6);
     loop {
-        if let Ok(bytes) = fs::read(path)
-            && let Ok(value) = serde_json::from_slice(&bytes)
-        {
+        if let Some(value) = directory.read(name).unwrap() {
             return value;
         }
         assert!(
             Instant::now() < deadline,
             "fixture did not publish {}",
-            path.display()
+            name
         );
         thread::sleep(Duration::from_millis(10));
     }
@@ -83,6 +80,21 @@ fn read_json<T: for<'a> Deserialize<'a>>(path: &Path) -> T {
 fn command(role: &str) -> Command {
     let mut command = Command::new(std::env::current_exe().unwrap());
     command.env("PREK_RECOVERY_ROLE", role);
+    if role == "parent" {
+        let parent = std::process::id();
+        // SAFETY: only async-signal-safe parent-death binding before exec.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                if libc::getppid() as u32 != parent {
+                    return Err(io::Error::from_raw_os_error(libc::ESRCH));
+                }
+                Ok(())
+            });
+        }
+    }
     command
 }
 fn parent() {
@@ -104,7 +116,7 @@ fn parent() {
 fn worker() {
     let mut health = Heartbeat::connect().unwrap();
     health.progress().unwrap();
-    let setup: Setup = read_json(&directory().join("setup"));
+    let setup: Setup = read_json(&directory(), "setup");
     let registry = authorized();
     let mut output = Virtual::create(
         registry
@@ -207,19 +219,17 @@ fn neutral(raw: &RawDevice, touch: bool) -> bool {
     slots[1..].iter().all(|id| *id < 0)
 }
 
-fn open_node(path: &Path) -> RawDevice {
+fn open_node(path: &Path, marker: &str) -> RawDevice {
     let file = OpenOptions::new()
         .read(true)
         .write(true)
         .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)
         .unwrap();
-    RawDevice::from_fd(file.into()).unwrap()
-}
-fn signal(pid: u32, signal: i32) {
-    // All PIDs come from this fixture's owned parent/child binding, never input
-    // discovery or a production process. Files remain private to the VM root.
-    assert_eq!(unsafe { libc::kill(pid as i32, signal) }, 0);
+    let raw = RawDevice::from_fd(file.into()).unwrap();
+    assert_eq!(raw.physical_path(), Some(marker));
+    assert!(marker.starts_with("prek/test/"));
+    raw
 }
 struct Parent(Child);
 impl Drop for Parent {
@@ -238,11 +248,11 @@ fn gone(path: &Path, deadline: Instant) {
         thread::sleep(Duration::from_millis(10));
     }
 }
-fn gate(touch: bool, failure: &str, index: usize) {
+fn gate(base: &Directory, touch: bool, failure: &str, index: usize) {
     let registry = authorized();
-    let path = PathBuf::from(format!("/run/prek-recovery/{index}"));
-    fs::create_dir_all(&path).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    let name = format!("case-{index}");
+    let control = base.child(&name).unwrap();
+    let identity = control.identity().unwrap();
     // The external harness owns only the synthetic source generator. The real
     // supervising parent is a separate exec, inheriting no input descriptors.
     let original = fixture(touch);
@@ -266,25 +276,25 @@ fn gate(touch: bool, failure: &str, index: usize) {
         marker: source.marker().into(),
         device,
     };
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path.join("setup"))
-        .unwrap();
-    serde_json::to_writer(file, &setup).unwrap();
+    control.write("setup", &setup).unwrap();
     let mut launch = command("parent");
-    launch.env("PREK_RECOVERY_DIRECTORY", &path);
+    launch.env("PREK_RECOVERY_DIRECTORY", control.path());
+    launch.env("PREK_RECOVERY_IDENTITY", identity.encode());
     let mut parent = Parent(launch.spawn().unwrap());
-    let prepared: Prepared = read_json(&path.join("prepared"));
-    let mut probe = open_node(&source_path);
+    let parent_process = Process::pin(parent.0.id(), None).unwrap();
+    let prepared: Prepared = read_json(&control, "prepared");
+    let birth = serde_json::to_value(prepared.worker).unwrap()["birth"]
+        .as_u64()
+        .unwrap();
+    let worker_process = Process::pin(prepared.worker.pid(), Some(birth)).unwrap();
+    let mut probe = open_node(&source_path, &setup.marker);
     assert_eq!(
         probe.grab().unwrap_err().raw_os_error(),
         Some(libc::EBUSY),
         "worker did not own the source grab"
     );
     assert_eq!(
-        registry.recover_orphans().unwrap(),
+        registry.recover_orphan(prepared.worker).unwrap(),
         0,
         "live output metadata was reaped"
     );
@@ -304,14 +314,14 @@ fn gate(touch: bool, failure: &str, index: usize) {
         vec![(EV_KEY, 125, 1), (EV_KEY, 30, 1)]
     };
     send(&mut source, 1, &pressed);
-    assert!(read_json::<bool>(&path.join("held")));
-    let output = open_node(&prepared.output);
+    assert!(read_json::<bool>(&control, "held"));
+    let output = open_node(&prepared.output, &prepared.marker);
     assert!(held(&output, touch));
     match failure {
-        "orderly" => signal(parent.0.id(), libc::SIGTERM),
-        "worker" => signal(prepared.worker.pid(), libc::SIGKILL),
-        "parent" => signal(parent.0.id(), libc::SIGKILL),
-        "stall" => signal(prepared.worker.pid(), libc::SIGSTOP),
+        "orderly" => parent_process.signal(libc::SIGTERM).unwrap(),
+        "worker" => worker_process.signal(libc::SIGKILL).unwrap(),
+        "parent" => parent_process.signal(libc::SIGKILL).unwrap(),
+        "stall" => worker_process.signal(libc::SIGSTOP).unwrap(),
         _ => unreachable!(),
     }
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -340,7 +350,7 @@ fn gate(touch: bool, failure: &str, index: usize) {
         // Device destruction occurs during exit, before pidfd exit readiness.
         // A missing node alone must never acknowledge the worker's teardown.
         let removed = loop {
-            let removed = registry.recover_orphans().unwrap();
+            let removed = registry.recover_orphan(prepared.worker).unwrap();
             if removed != 0 {
                 break removed;
             }
@@ -353,9 +363,9 @@ fn gate(touch: bool, failure: &str, index: usize) {
         assert_eq!(removed, 1);
     } else {
         assert!(status.success());
-        let finished: Finished = read_json(&path.join("finished"));
+        let finished: Finished = read_json(&control, "finished");
         if failure == "orderly" {
-            assert!(read_json::<bool>(&path.join("neutral")));
+            assert!(read_json::<bool>(&control, "neutral"));
             assert!(finished.success);
             assert_eq!(finished.reason, "Requested");
             assert_eq!(finished.removed, 0);
@@ -387,34 +397,63 @@ fn gate(touch: bool, failure: &str, index: usize) {
     send(&mut source, 2, &released);
     assert!(neutral(&probe, touch));
     probe.ungrab().unwrap();
+    drop(probe);
     drop(source);
-    assert_eq!(fs::read_dir("/run/prek/devices").unwrap().count(), 0);
+    for marker in [&setup.marker, &prepared.marker] {
+        assert_eq!(
+            prek::kernel::import_metadata(marker, &mut Vec::new())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+    }
+    control.cleanup().unwrap();
+    base.remove_child(&name, identity).unwrap();
     println!(
         "kernel recovery: {} / {failure} ... ok",
         if touch { "touch" } else { "keyboard" }
     );
 }
 fn main() {
-    if std::env::var("PREK_ISOLATED_ROUTING").as_deref() != Ok("1") {
-        println!("kernel recovery gates require the explicitly isolated VM; skipped");
+    let cases: Vec<_> = [false, true]
+        .into_iter()
+        .flat_map(|touch| {
+            ["orderly", "worker", "parent", "stall"]
+                .into_iter()
+                .map(move |failure| (touch, failure))
+        })
+        .collect();
+    let names: Vec<_> = cases
+        .iter()
+        .map(|(touch, failure)| {
+            format!(
+                "recovery::{}::{failure}",
+                if *touch { "touch" } else { "keyboard" }
+            )
+        })
+        .collect();
+    if std::env::args().nth(1).as_deref() == Some("--inventory") {
+        println!("PREK_KERNEL_RECOVERY_INVENTORY_V1");
+        println!("{}", serde_json::to_string(&names).unwrap());
         return;
     }
+    if std::env::var("PREK_ISOLATED_ROUTING").as_deref() != Ok("1") {
+        println!("kernel recovery gates require the user-launched fixed isolated runner; skipped");
+        return;
+    }
+    authorized();
     match std::env::var("PREK_RECOVERY_ROLE").as_deref() {
         Ok("parent") => parent(),
         Ok("worker") => worker(),
         Err(_) => {
-            for (index, (touch, failure)) in [false, true]
-                .into_iter()
-                .flat_map(|touch| {
-                    ["orderly", "worker", "parent", "stall"]
-                        .into_iter()
-                        .map(move |failure| (touch, failure))
-                })
-                .enumerate()
-            {
-                gate(touch, failure, index);
+            let base = directory();
+            for (index, (touch, failure)) in cases.into_iter().enumerate() {
+                gate(&base, touch, failure, index);
             }
-            println!("8 isolated kernel recovery gates passed");
+            println!(
+                "PREK_KERNEL_RECOVERY_RESULT={}",
+                serde_json::json!({"version":1,"passed":8,"tests":names})
+            );
         }
         _ => panic!("invalid recovery fixture role"),
     }

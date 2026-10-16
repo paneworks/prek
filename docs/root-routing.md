@@ -7,7 +7,7 @@ From a terminal in this checkout, run as your normal user:
 ```
 
 The script first builds an immutable Nix runner, then prompts for sudo. Only
-its fixed probe is elevated. The test executable, importer and udev tool are
+its fixed probe is elevated. Both test executables, the importer and udev tool are
 pinned store paths; neither a caller-selected command nor user output path is
 passed to root. `/dev/uinput` must already exist. The probe does not load modules
 or enable production routing.
@@ -26,11 +26,28 @@ grab the node before injecting. The backlog experiment briefly releases and
 reacquires that grab while its sole test producer is idle. No test writes a key
 while that node is ungrabbed. No physical input nodes are opened.
 
-Eleven gates cover keyboard/mouse/touchpad forwarding, keyboard LED feedback,
+Eleven routing gates cover keyboard/mouse/touchpad forwarding, keyboard LED feedback,
 configured touch consumption/fallback and cadence, reader error/panic teardown,
 and two evdev boundary experiments. Desktop context in configured routing tests
 is explicitly modeled. The tests do not establish stock-compositor retirement,
 physical takeover, live broker admission or phone acceptance.
+
+Eight additional recovery gates hold a keyboard chord or touch contact while
+requesting orderly shutdown, killing the worker, killing its supervisor, or
+stopping worker progress. They check that the virtual output disappears and its
+retained event descriptor becomes unusable, the original synthetic source grab
+is released, and the source's actual held state remains intact until its producer
+releases it. Orderly shutdown must deliver neutral state before output retirement.
+Crash recovery removes only metadata matching that worker's PID, birth and epoch;
+unrelated live and dead worker lifetimes are preserved. These are kernel/device
+gates, not compositor-consumer retirement or physical keyboard/touch acceptance.
+
+Recovery processes exchange bounded control records in a private root-owned
+directory with an exact device/inode binding. Each case uses an exclusive child
+directory, retained directory descriptors and no-follow opens; cleanup validates
+every observed file before unlinking. Unknown files and replacements are retained
+and fail the run. Process signals use pinned handles rather than unverified PIDs.
+The runner compares the unrelated registry entries before and after all cases.
 
 The boundary experiments compare input queued before and after a grab with a
 separate state probe, and inspect a clock change with pending data. Linux
@@ -51,9 +68,16 @@ Logs belong to your regular user under `target/root-routing/run-*`; `latest`
 points to that attempt. `console.log` records build, wrapper and cleanup output;
 `kernel.log` retains root probe stdout. `status.json` records running/passed/failed
 and the final exit code. `receipt.json` is written only after checking one complete
-root receipt, the exact eleven-test inventory, all tests actually executed and
-passed, cleanup flags and the explicit scope limits. Skips and zero-test runs
+version-2 root receipt, the exact eleven routing and eight recovery inventories,
+all nineteen tests actually executed and passed, cleanup flags and the explicit
+scope limits. The recovery summary must match its eight per-case results.
+Skips and zero-test runs
 cannot pass. Tell the agent when the script finishes so it can inspect these files.
+
+`oslo make test-root-routing` runs the unprivileged parser, actual owned-process
+and temporary-directory safety tests plus explicitly modeled privileged
+orchestration. It does not execute the nineteen kernel cases or establish root
+acceptance. The Nix `root-routing-receipts` check also lints the launchers.
 
 The separate `tests/run-root-handoff.sh` remains the native Morf/root/logind
 probe. Ordinary builds and Cage runs execute neither root script automatically.

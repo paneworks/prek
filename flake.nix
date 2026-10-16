@@ -135,6 +135,15 @@
               done
               test "$count" -eq 1
               mkdir -p "$out/lib/udev/rules.d"
+              count=0
+              for candidate in target/*/release/deps/recovery-* target/release/deps/recovery-*; do
+                if [ -f "$candidate" ] && [ -x "$candidate" ] && \
+                  "$candidate" --inventory | ${pkgs.ripgrep}/bin/rg -Fx 'PREK_KERNEL_RECOVERY_INVENTORY_V1'; then
+                  install -m 755 "$candidate" "$nativeTests/libexec/prek-recovery-tests"
+                  count=$((count + 1))
+                fi
+              done
+              test "$count" -eq 1
               substitute ${./udev/70-prek.rules} "$out/lib/udev/rules.d/70-prek.rules" \
                 --replace-fail '@prek@' "$out/bin/prek"
               mkdir -p "$out/share/doc/prek"
@@ -263,13 +272,17 @@
             python3 -m unittest discover -s receipts -p 'test_morf*.py' -v > "$out" 2>&1
           '';
           root-routing-receipts = pkgs.runCommand "prek-root-routing-receipts-check" {
-            nativeBuildInputs = [ pkgs.python3 pkgs.bash ];
+            nativeBuildInputs = [ pkgs.python3 pkgs.bash pkgs.shellcheck ];
           } ''
             mkdir -p receipts/tests/support
             cp ${./tests/support/root_routing.py} receipts/tests/support/root_routing.py
             cp ${./tests/support/test_root_routing.py} receipts/tests/support/test_root_routing.py
             cp ${./tests/run-root-routing.sh} receipts/tests/run-root-routing.sh
             python3 -m unittest discover -s receipts/tests/support -p test_root_routing.py -v > "$out" 2>&1
+            bash -n ${./tests/run-root-routing.sh}
+            shellcheck ${./tests/run-root-routing.sh}
+            bash -n ${self.packages.${system}.root-routing-test}/bin/prek-root-routing-test
+            shellcheck ${self.packages.${system}.root-routing-test}/bin/prek-root-routing-test
           '';
           nixos-module = import ./tests/nixos-module.nix {
             inherit pkgs package;

@@ -212,6 +212,11 @@ make.recipe{ name = "test-root-session", desc = "unprivileged remote-handoff tra
                sh.python3("-m", "unittest", "discover", "-s", "tests/support", "-p", "test_root_session.py", "-v")
              end }
 
+make.recipe{ name = "test-root-routing", desc = "unprivileged kernel-runner receipts and cleanup tests",
+             run = function()
+               sh.python3("-m", "unittest", "discover", "-s", "tests/support", "-p", "test_root_routing.py", "-v")
+             end }
+
 make.recipe{ name = "check", desc = "type-check every target",
              run = function() sh.cargo("check", "--locked", "--all-targets") end }
 
@@ -248,6 +253,6 @@ make.alias("c", "compile")
 make.recipe{
   name = "verify",
   desc = "the whole local gate",
-  deps = { "fmt-check", "check-all", "test-all", "test-routing-helper", "test-root-session", "clippy", "rustdoc" },
+  deps = { "fmt-check", "check-all", "test-all", "test-routing-helper", "test-root-session", "test-root-routing", "clippy", "rustdoc" },
 }
 make.alias("v", "verify")

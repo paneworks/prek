@@ -399,16 +399,25 @@ impl Registry {
     /// A Report exists only after the supervising process has reaped its child.
     /// Unmanaged records and other worker lifetimes are preserved.
     pub fn recover_worker(&self, report: &Report) -> io::Result<usize> {
-        self.recover(Some(report.worker_identity()))
+        self.recover(Some(report.worker_identity()), true)
     }
 
     /// Restart recovery also covers supervisor death. Each persisted owner is
     /// checked against a kernel PID handle and process birth before deletion.
     pub fn recover_orphans(&self) -> io::Result<usize> {
-        self.recover(None)
+        self.recover(None, false)
     }
 
-    fn recover(&self, reported: Option<WorkerIdentity>) -> io::Result<usize> {
+    /// Recover only this persisted lifetime after confirming its kernel process
+    /// has exited. Other lifetimes and unmanaged publications are preserved.
+    pub fn recover_orphan(&self, worker: WorkerIdentity) -> io::Result<usize> {
+        if !worker.valid() {
+            return Err(invalid("invalid orphan recovery identity"));
+        }
+        self.recover(Some(worker), false)
+    }
+
+    fn recover(&self, scope: Option<WorkerIdentity>, reaped: bool) -> io::Result<usize> {
         let _mutation = self.directory.lock()?;
         let mut selected = Vec::new();
         let mut lifetimes = BTreeMap::new();
@@ -439,8 +448,11 @@ impl Registry {
             let Some(owner) = owner else {
                 continue;
             };
-            let dead = if let Some(reported) = reported {
-                owner == reported
+            if scope.is_some_and(|scope| scope != owner) {
+                continue;
+            }
+            let dead = if reaped {
+                true
             } else if let Some(dead) = lifetimes.get(&owner) {
                 *dead
             } else {
@@ -1156,6 +1168,40 @@ mod tests {
             registry.directory.read(&unmanaged.metadata.marker).unwrap(),
             unmanaged.metadata
         );
+    }
+
+    #[test]
+    fn scoped_orphan_recovery_preserves_other_dead_epochs_and_live_workers() {
+        let temporary = Temporary::new();
+        let registry = temporary.registry();
+        let mut command = Command::new("sleep");
+        command.arg("10");
+        let supervisor = crate::supervisor::Supervisor::spawn(command).unwrap();
+        let own = supervisor.worker_identity();
+        let publication = registry
+            .publish(descriptor().for_isolated().unwrap(), true, Some(own))
+            .unwrap();
+        let mut json = serde_json::to_value(own).unwrap();
+        json["epoch"] = serde_json::json!(json["epoch"].as_u64().unwrap() + 1);
+        let foreign: WorkerIdentity = serde_json::from_value(json).unwrap();
+        let name = CString::new(format!(".prek-tmp-{}-0000000000000000", foreign.tag())).unwrap();
+        let file = registry
+            .directory
+            .open_file(&name, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL)
+            .unwrap();
+        assert_eq!(registry.recover_orphan(own).unwrap(), 0);
+        drop(supervisor);
+        assert_eq!(registry.recover_orphan(own).unwrap(), 1);
+        assert!(
+            registry
+                .directory
+                .read(&publication.metadata.marker)
+                .is_err()
+        );
+        assert_eq!(file.metadata().unwrap().nlink(), 1);
+        assert_eq!(registry.recover_orphan(own).unwrap(), 0);
+        assert_eq!(registry.recover_orphan(foreign).unwrap(), 1);
+        assert_eq!(file.metadata().unwrap().nlink(), 0);
     }
 
     #[test]

@@ -6,7 +6,7 @@ if [[ ${1:-} == --help ]]; then
   cat <<'HELP'
 Usage: ./tests/run-root-routing.sh
 Launch as your regular user, without sudo. The built runner prompts when ready.
-Runs eleven isolated kernel gates on named synthetic devices ignored by libinput.
+Runs eleven routing and eight recovery gates on named synthetic test devices.
 No physical input devices are opened and no production routing is enabled.
 Temporarily installs a test-only runtime udev rule, reloads rules without a trigger,
 then removes its own rule. /dev/uinput must already exist; no module is loaded.
@@ -39,7 +39,7 @@ printf 'Isolated kernel routing gates. Started: %s\nLogs: %s\n' "$(date -u +%FT%
 git -C "$repo" rev-parse HEAD
 git -C "$repo" status --short
 nix --option eval-cache false --extra-experimental-features 'nix-command flakes' \
-  build --no-write-lock-file --out-link "$run/runner" "$repo#root-routing-test"
+  --max-jobs 1 --cores 2 build --no-write-lock-file --out-link "$run/runner" "$repo#root-routing-test"
 "$run/runner/bin/prek-root-routing-test" | tee "$run/kernel.log"
 nix --option eval-cache false --extra-experimental-features 'nix-command flakes' \
   develop "$repo" --no-write-lock-file -c python3 - "$repo" "$run" <<'PY'
