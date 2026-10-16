@@ -298,6 +298,12 @@ impl Routing {
         intent.contacts() == usize::from(fingers) || (!finished && at < first + join)
     }
     pub fn push(&mut self, record: Record) -> io::Result<()> {
+        self.push_clocked(record, None)
+    }
+    pub(crate) fn push_at(&mut self, record: Record, now: Duration) -> io::Result<()> {
+        self.push_clocked(record, Some(now))
+    }
+    fn push_clocked(&mut self, record: Record, now: Option<Duration>) -> io::Result<()> {
         let at = match &record {
             Record::Frame { frame } => frame.at,
             Record::Tick { at }
@@ -310,6 +316,10 @@ impl Routing {
                 ));
             }
         };
+        let now = now.unwrap_or(at);
+        if at > now {
+            return Err(io::Error::other("routing input watermark is in the future"));
+        }
         let source = match &record {
             Record::Frame { frame } => Some(frame.source.clone()),
             _ => None,
@@ -366,7 +376,7 @@ impl Routing {
         let deferred = std::mem::take(&mut self.deferred_custom);
         self.deferred_bytes = 0;
         for outcome in deferred {
-            if outcome.expires.is_some_and(|expiry| at >= expiry)
+            if outcome.expires.is_some_and(|expiry| now >= expiry)
                 || fresh_group && source.as_ref() == Some(outcome.intent.source())
                 || !self.custom_group_valid(&outcome.intent)
             {
@@ -410,7 +420,7 @@ impl Routing {
                 .filter(|intent| {
                     intent.sources().contains(&source)
                         && intent.rule.delivery != Delivery::Observe
-                        && self.available(intent, at)
+                        && self.available(intent, now)
                 })
                 .collect();
             choices.sort_by(|a, b| {
@@ -497,7 +507,7 @@ impl Routing {
                 }
             }
         }
-        self.resolve(at, &active, &claims, &outcomes)?;
+        self.resolve(at, now, &active, &claims, &outcomes)?;
         for intent in &active {
             if matches!(intent.rule.trigger, Trigger::Custom { .. })
                 && self.routes.get(intent.source()).is_some_and(|route| {
@@ -515,7 +525,7 @@ impl Routing {
         for outcome in outcomes {
             let id = outcome.intent.id();
             let observe = outcome.intent.rule.delivery == Delivery::Observe;
-            if self.available(&outcome.intent, at) && (observe || self.won.contains_key(&id)) {
+            if self.available(&outcome.intent, now) && (observe || self.won.contains_key(&id)) {
                 if self.dispatches.len() >= MAX_DISPATCHES {
                     let sources: Vec<_> = outcome.intent.sources().iter().cloned().collect();
                     for source in sources {
@@ -531,11 +541,11 @@ impl Routing {
                     configuration: self.engine.generation(),
                 });
             } else if matches!(outcome.intent.rule.trigger, Trigger::Custom { .. })
-                && self.available(&outcome.intent, at)
+                && self.available(&outcome.intent, now)
                 && self.custom_group_valid(&outcome.intent)
                 && self.routes[outcome.intent.source()].router.ownership()
                     == Some(Ownership::Pending)
-                && outcome.expires.is_some_and(|expiry| at < expiry)
+                && outcome.expires.is_some_and(|expiry| now < expiry)
             {
                 let bytes = crate::recognition::encoded_size(
                     &outcome.event,
@@ -607,6 +617,7 @@ impl Routing {
     fn resolve(
         &mut self,
         at: Duration,
+        now: Duration,
         active: &[RouteIntent],
         claims: &[RouteIntent],
         outcomes: &[RouteOutcome],
@@ -639,7 +650,7 @@ impl Routing {
                 && self.routes[&source]
                     .choices
                     .iter()
-                    .any(|intent| self.engine.validate_route(intent, at).is_err())
+                    .any(|intent| self.engine.validate_route(intent, now).is_err())
             {
                 self.recover(&source);
                 continue;
@@ -651,7 +662,7 @@ impl Routing {
             let route = &self.routes[&source];
             if let Some(id) = route.winner {
                 if let Some(won) = self.won.get(&id)
-                    && (!self.available(&won.intent, at)
+                    && (!self.available(&won.intent, now)
                         || !active.iter().any(|intent| intent.id() == id)
                             && !outcomes.iter().any(|outcome| outcome.intent.id() == id))
                 {
@@ -676,7 +687,7 @@ impl Routing {
                 .choices
                 .iter()
                 .find(|intent| {
-                    self.available(intent, at)
+                    self.available(intent, now)
                         && self.viable(intent, at, first, finished)
                         && (!claims.iter().any(|claim| claim.sources().contains(&source))
                             || !matches!(
@@ -790,6 +801,48 @@ impl Routing {
         }
         result
     }
+    pub(crate) fn due_after_input(
+        &mut self,
+        source: &Source,
+        now: Duration,
+    ) -> io::Result<Option<&Scheduled>> {
+        let result = self
+            .routes
+            .get_mut(source)
+            .ok_or_else(|| fault(Fault::StaleSource))?
+            .router
+            .due_after_input(now)
+            .map(|_| ())
+            .map_err(fault);
+        if let Err(error) = result {
+            self.recover(source);
+            return Err(error);
+        }
+        self.routes
+            .get_mut(source)
+            .unwrap()
+            .router
+            .due_after_input(now)
+            .map_err(fault)
+    }
+    pub(crate) fn delivered_after_input(
+        &mut self,
+        source: &Source,
+        ticket: u64,
+        now: Duration,
+    ) -> io::Result<()> {
+        let result = self
+            .routes
+            .get_mut(source)
+            .ok_or_else(|| fault(Fault::StaleSource))?
+            .router
+            .delivered_after_input(ticket, now)
+            .map_err(fault);
+        if result.is_err() {
+            self.recover(source);
+        }
+        result
+    }
     pub fn delivery_offset(&self, source: &Source) -> Option<Duration> {
         self.routes
             .get(source)
@@ -814,7 +867,14 @@ impl Routing {
         &mut self,
         at: Duration,
     ) -> io::Result<Vec<crate::recognition::Ticket>> {
-        self.push(Record::Tick { at })?;
+        self.recognition_requests_after_input(at, at)
+    }
+    pub(crate) fn recognition_requests_after_input(
+        &mut self,
+        at: Duration,
+        now: Duration,
+    ) -> io::Result<Vec<crate::recognition::Ticket>> {
+        self.push_at(Record::Tick { at }, now)?;
         let routes = &self.routes;
         let groups = &self.custom_groups;
         let tickets = self
@@ -822,7 +882,7 @@ impl Routing {
             .recognition_requests_with(at, |source, rule, id| {
                 custom_ownership(routes, groups, source, rule, id)
             })?;
-        self.push(Record::Tick { at })?;
+        self.push_at(Record::Tick { at }, now)?;
         Ok(tickets)
     }
     pub fn recognition_response(
@@ -830,16 +890,42 @@ impl Routing {
         proposal: crate::recognition::Proposal,
         at: Duration,
     ) -> io::Result<()> {
-        self.push(Record::Tick { at })?;
+        self.recognition_response_after_input(proposal, at, at)
+    }
+    pub(crate) fn recognition_response_after_input(
+        &mut self,
+        proposal: crate::recognition::Proposal,
+        input_at: Duration,
+        now: Duration,
+    ) -> io::Result<()> {
+        self.push_at(Record::Tick { at: input_at }, now)?;
         let routes = &self.routes;
         let groups = &self.custom_groups;
-        let result = self
-            .engine
-            .recognition_response_with(proposal, at, |source, rule, id| {
-                custom_ownership(routes, groups, source, rule, id)
-            });
-        let synchronized = self.push(Record::Tick { at });
+        let result = self.engine.recognition_response_clocked(
+            proposal,
+            input_at,
+            now,
+            |source, rule, id| custom_ownership(routes, groups, source, rule, id),
+        );
+        let synchronized = self.push_at(Record::Tick { at: input_at }, now);
         result.and(synchronized)
+    }
+    pub(crate) fn recognition_ready(&mut self, ready: bool, now: Duration) -> io::Result<()> {
+        let at = self.engine.input_at();
+        if at > now {
+            return Err(io::Error::other("recognizer readiness clock regressed"));
+        }
+        self.engine.recognition_ready(ready, now)?;
+        self.push_at(Record::Tick { at }, now)
+    }
+    pub(crate) fn input_states(&self, at: Duration) -> Vec<crate::input_events::Event> {
+        self.engine.input_states(at)
+    }
+    pub(crate) fn capture_input(&mut self, enabled: bool) {
+        self.engine.capture_input(enabled);
+    }
+    pub(crate) fn take_input(&mut self) -> Option<crate::input_events::Event> {
+        self.engine.take_input()
     }
     pub fn take_recognition_cancellations(&mut self) -> Vec<crate::recognition::Cancellation> {
         self.engine.take_recognition_cancellations()
@@ -886,7 +972,11 @@ impl Routing {
     pub fn take_recoveries(&mut self) -> Vec<Recovery> {
         std::mem::take(&mut self.recoveries)
     }
+    pub(crate) fn has_source(&self, source: &Source) -> bool {
+        self.routes.contains_key(source)
+    }
     pub fn recover(&mut self, source: &Source) {
+        self.engine.retire_routing_recognition(source);
         self.custom_groups
             .retain(|_, (bound, _, _)| bound != source);
         self.deferred_custom

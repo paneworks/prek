@@ -509,6 +509,9 @@ impl Engine {
     pub(crate) fn recognition_fence(&self) -> Option<crate::protocol::Fence> {
         self.custom.as_ref().map(|custom| custom.fence)
     }
+    pub(crate) fn input_at(&self) -> Duration {
+        self.last_at.unwrap_or_default()
+    }
     pub(crate) fn enable_routing(&mut self) {
         self.routing = true;
         for worker in &mut self.workers {

@@ -263,6 +263,12 @@ pub struct Registry {
 }
 
 impl Registry {
+    #[cfg(test)]
+    pub(crate) fn fixture(path: &Path) -> io::Result<Self> {
+        Ok(Self {
+            directory: Arc::new(Directory::open(path, fs::metadata(path)?.uid())?),
+        })
+    }
     pub fn system() -> io::Result<Self> {
         // SAFETY: geteuid has no pointer arguments or mutable side effects.
         if unsafe { libc::geteuid() } != 0 {

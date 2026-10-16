@@ -27,11 +27,19 @@ use std::{
     time::Duration,
 };
 
+mod recognizers;
+
 struct Seat {
     subscription: Subscription,
     routing: Routing,
     expires: Duration,
     reported: bool,
+    started: Duration,
+    recognizer_ready: Option<bool>,
+    input_enabled: bool,
+    input_started: Duration,
+    metadata_enabled: bool,
+    metadata_started: Duration,
 }
 struct Output {
     fence: Fence,
@@ -58,6 +66,22 @@ pub struct Stream {
     releases: BTreeMap<Source, (Fence, crate::supervisor::WorkerIdentity)>,
     assembly: Assembly,
     messages: Outbox,
+    pending: VecDeque<Pending>,
+    pending_bytes: usize,
+}
+struct Pending {
+    seat: String,
+    fence: Fence,
+    received_at: Duration,
+    bytes: usize,
+    operation: Operation,
+}
+enum Operation {
+    Recognition(crate::recognition::Proposal),
+    Rules {
+        id: u64,
+        transaction: crate::rule_transactions::Transaction,
+    },
 }
 #[derive(Default)]
 struct Outbox {
@@ -66,6 +90,29 @@ struct Outbox {
 }
 impl Outbox {
     fn push(&mut self, message: Message) -> io::Result<()> {
+        self.push_reserved(message, 0, 0)
+    }
+    fn push_reserved(
+        &mut self,
+        message: Message,
+        packets: usize,
+        reserved: usize,
+    ) -> io::Result<()> {
+        if let Message::Outcome {
+            report:
+                Report::RecognitionCancelled {
+                    subscription,
+                    cancellation,
+                },
+        } = &message
+        {
+            self.retain(|message| {
+                !matches!(message, Message::Outcome {
+                report: Report::Recognition { subscription: owner, ticket }
+            } if owner.same_registration(subscription) && ticket.candidate == cancellation.candidate
+                && ticket.revision == cancellation.revision && ticket.id <= cancellation.through)
+            });
+        }
         let bytes = protocol::encode(&protocol::Packet {
             version: 1,
             sequence: u64::MAX,
@@ -73,8 +120,8 @@ impl Outbox {
             message: &message,
         })?
         .len();
-        if self.messages.len() >= protocol::MAX_QUEUED_PACKETS
-            || self.bytes + bytes > protocol::MAX_QUEUED_BYTES
+        if self.messages.len() + packets >= protocol::MAX_QUEUED_PACKETS
+            || self.bytes + bytes + reserved > protocol::MAX_QUEUED_BYTES
         {
             return Err(invalid("routing outcome queue overflow"));
         }
@@ -87,6 +134,23 @@ impl Outbox {
                 return Err(invalid("configuration acknowledgements are not drained"));
             }
             self.messages.push_front((message, bytes));
+        } else if matches!(
+            message,
+            Message::RecognitionResult { .. } | Message::RulesChanged { .. }
+        ) {
+            let index = self
+                .messages
+                .iter()
+                .position(|(message, _)| {
+                    !matches!(
+                        message,
+                        Message::Configuration { .. }
+                            | Message::RecognitionResult { .. }
+                            | Message::RulesChanged { .. }
+                    )
+                })
+                .unwrap_or(self.messages.len());
+            self.messages.insert(index, (message, bytes));
         } else {
             self.messages.push_back((message, bytes));
         }
@@ -94,7 +158,7 @@ impl Outbox {
         Ok(())
     }
     fn discard_seat(&mut self, seat: &str) {
-        self.messages.retain(|(message, bytes)| {
+        self.retain(|message| {
             let discard = match message {
                 Message::Outcome { report } => report.subscription().seat == seat,
                 Message::Transport { subscription, .. } => subscription.seat == seat,
@@ -108,10 +172,16 @@ impl Outbox {
                 } => changed_seat == seat,
                 Message::Released { .. } => false,
             };
-            if discard {
+            !discard
+        });
+    }
+    fn retain(&mut self, mut keep: impl FnMut(&Message) -> bool) {
+        self.messages.retain(|(message, bytes)| {
+            let retained = keep(message);
+            if !retained {
                 self.bytes -= bytes;
             }
-            !discard
+            retained
         });
     }
     fn flush(&mut self, channel: &mut Channel) -> io::Result<()> {
@@ -129,13 +199,7 @@ impl Outbox {
     }
 }
 fn identity(subscription: &Subscription) -> Subscription {
-    Subscription {
-        seat: subscription.seat.clone(),
-        fence: subscription.fence,
-        context: None,
-        capabilities: BTreeSet::new(),
-        consumer: None,
-    }
+    subscription.identity()
 }
 fn invalid(reason: &str) -> io::Error {
     protocol::invalid(reason)
@@ -169,17 +233,20 @@ impl Stream {
             if let Some(seat) = self.seats.get_mut(&source.seat) {
                 seat.routing.recover(&source);
             }
-            self.collect(&source.seat, now)?;
+            self.collect(&source.seat, now, None)?;
             self.outputs.remove(&source);
         }
         Ok(())
     }
 
     pub fn new(config: Config, channel: Channel) -> io::Result<Self> {
+        Self::with_registry(config, channel, Registry::system()?)
+    }
+    fn with_registry(config: Config, channel: Channel, registry: Registry) -> io::Result<Self> {
         if config.mode != Mode::Route {
             return Err(invalid("routing worker requires route configuration"));
         }
-        Routing::new(config.clone())?;
+        Routing::new(crate::worker::preflight_profile(&config))?;
         let mut baseline = config.clone();
         for rule in &mut baseline.rules {
             rule.enabled = false;
@@ -193,7 +260,7 @@ impl Stream {
         })?;
         Ok(Self {
             channel,
-            registry: Registry::system()?,
+            registry,
             config,
             baseline,
             generation: 1,
@@ -204,10 +271,13 @@ impl Stream {
             releases: BTreeMap::new(),
             assembly: Assembly::default(),
             messages,
+            pending: VecDeque::new(),
+            pending_bytes: 0,
         })
     }
     fn queue(&mut self, message: Message) -> io::Result<()> {
-        self.messages.push(message)
+        self.messages
+            .push_reserved(message, self.pending.len(), self.pending_bytes)
     }
     fn retire(&mut self, recovery: crate::router::Recovery, now: Duration) {
         if let Some(mut output) = self.outputs.remove(&recovery.source) {
@@ -243,6 +313,14 @@ impl Stream {
         }
         self.outputs.retain(|source, _| source.seat != seat);
         self.messages.discard_seat(seat);
+        self.pending.retain(|pending| {
+            if pending.seat == seat {
+                self.pending_bytes -= pending.bytes;
+                false
+            } else {
+                true
+            }
+        });
     }
     fn subscriptions(&mut self, update: Subscriptions, now: Duration) -> io::Result<()> {
         if update.revision <= self.revision || update.seats.len() > crate::service::MAX_CLIENTS {
@@ -318,8 +396,10 @@ impl Stream {
         }
         for subscription in update.seats {
             if !self.seats.contains_key(&subscription.seat) {
-                let mut routing = Routing::new(self.config.clone())?;
+                let mut routing =
+                    Routing::with_recognition(self.config.clone(), subscription.fence)?;
                 routing.configuration_generation(self.generation)?;
+                routing.recognition_ready(false, now)?;
                 self.seats.insert(
                     subscription.seat.clone(),
                     Seat {
@@ -327,6 +407,12 @@ impl Stream {
                         routing,
                         expires: now + protocol::MAX_PACKET_AGE,
                         reported: false,
+                        started: now,
+                        recognizer_ready: None,
+                        input_enabled: false,
+                        input_started: now,
+                        metadata_enabled: false,
+                        metadata_started: now,
                     },
                 );
             }
@@ -339,20 +425,55 @@ impl Stream {
             );
             seat.subscription = subscription;
             seat.expires = now + protocol::MAX_PACKET_AGE;
+            let name = seat.subscription.seat.clone();
+            self.sync_seat(&name, now)?;
+            self.collect(&name, now, None)?;
         }
         self.revision = update.revision;
         Ok(())
     }
-    fn collect(&mut self, name: &str, now: Duration) -> io::Result<()> {
+    fn collect(&mut self, name: &str, now: Duration, input_at: Option<Duration>) -> io::Result<()> {
         let Some(seat) = self.seats.get_mut(name) else {
             return Ok(());
         };
         let subscription = identity(&seat.subscription);
+        let tickets = if seat.recognizer_ready == Some(true) {
+            input_at
+                .map(|at| seat.routing.recognition_requests_after_input(at, now))
+                .transpose()?
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let cancellations = seat.routing.take_recognition_cancellations();
         let diagnostics = seat.routing.take_events();
         let dispatches = seat.routing.take_dispatches(now);
         let recoveries = seat.routing.take_recoveries();
         for recovery in recoveries {
+            let source = recovery.source.clone();
             self.retire(recovery, now);
+            self.queue(Message::Outcome {
+                report: Report::SourceInvalidated {
+                    subscription: subscription.clone(),
+                    source,
+                },
+            })?;
+        }
+        for cancellation in cancellations {
+            self.queue(Message::Outcome {
+                report: Report::RecognitionCancelled {
+                    subscription: subscription.clone(),
+                    cancellation,
+                },
+            })?;
+        }
+        for ticket in tickets {
+            self.queue(Message::Outcome {
+                report: Report::Recognition {
+                    subscription: subscription.clone(),
+                    ticket: Box::new(ticket),
+                },
+            })?;
         }
         for event in diagnostics {
             self.queue(Message::Outcome {
@@ -412,7 +533,7 @@ impl InputSink for Stream {
                 if let Some(seat) = self.seats.get_mut(&device.source.seat) {
                     seat.routing.recover(&device.source);
                 }
-                self.collect(&device.source.seat, now)?;
+                self.collect(&device.source.seat, now, None)?;
                 self.outputs.remove(&device.source);
                 return Ok(ReaderDisposition::Reopen);
             }
@@ -583,52 +704,23 @@ impl InputSink for Stream {
                 report: Report::Ready { subscription },
             })?;
         }
+        self.publish_source(&device.source, now)?;
         Ok(ReaderDisposition::Keep)
     }
     fn push(&mut self, record: Record) -> io::Result<()> {
-        self.expire_admissions(monotonic()?)?;
+        let now = monotonic()?;
+        self.expire_admissions(now)?;
         if matches!(record, Record::Header { .. }) {
             return Ok(());
         }
-        self.baseline.push(record.clone())?;
-        self.baseline.take_events();
-        let source = match &record {
-            Record::Frame { frame } => Some(&frame.source),
-            Record::Remove { source, .. }
-            | Record::Mapping { source, .. }
-            | Record::Reconcile { source, .. } => Some(source),
-            _ => None,
-        };
-        let names: Vec<_> = self
-            .seats
-            .keys()
-            .filter(|name| source.is_none_or(|source| &source.seat == *name))
-            .cloned()
-            .collect();
+        let names: Vec<_> = self.seats.keys().cloned().collect();
         for name in names {
-            let seat = self.seats.get_mut(&name).unwrap();
-            let invalidated = match &record {
-                Record::Remove { source, .. }
-                | Record::Reconcile { source, .. }
-                | Record::Mapping { source, .. } => Some(source.clone()),
-                _ => None,
-            };
-            if let Some(source) = invalidated {
-                let subscription = identity(&seat.subscription);
-                self.queue(Message::Outcome {
-                    report: Report::SourceInvalidated {
-                        subscription,
-                        source,
-                    },
-                })?;
-            }
-            let seat = self.seats.get_mut(&name).unwrap();
-            if matches!(record, Record::Tick { .. })
-                || source.is_some_and(|source| self.grabbed.contains(source))
-            {
-                seat.routing.push(record.clone())?;
-                self.collect(&name, monotonic()?)?;
-            }
+            self.sync_seat(&name, now)?;
+        }
+        let inputs = self.baseline_inputs(&record, now)?;
+        self.input_reports(&record, inputs, now)?;
+        if let Record::Tick { at } = record {
+            self.apply_pending(at, monotonic()?)?;
         }
         if let Record::Remove { source, .. } = record {
             self.outputs.remove(&source);
@@ -666,6 +758,9 @@ impl InputSink for Stream {
                 break;
             };
             match packet.message {
+                command @ (Command::Recognition { .. } | Command::Rules { .. }) => {
+                    self.enqueue(command, now)?
+                }
                 Command::Subscriptions { update } => {
                     let identities: Vec<_> = update.seats.iter().map(identity).collect();
                     if let Err(error) = self.subscriptions(update, now) {
@@ -727,7 +822,7 @@ impl InputSink for Stream {
                                 rule.enabled = false;
                             }
                             let baseline = self.baseline.prepare_replacement(baseline, now)?;
-                            Routing::new(config.clone())?;
+                            Routing::new(crate::worker::preflight_profile(&config))?;
                             let names: Vec<_> = self.seats.keys().cloned().collect();
                             for name in names {
                                 self.teardown(&name, now);
@@ -745,11 +840,13 @@ impl InputSink for Stream {
                 }
             }
         }
+        self.prune_reports(now);
         Ok(())
     }
     fn flush(&mut self) -> io::Result<()> {
         let now = monotonic()?;
         self.expire_admissions(now)?;
+        self.prune_reports(now);
         let sources: Vec<_> = self
             .outputs
             .keys()
@@ -762,7 +859,7 @@ impl InputSink for Stream {
             };
             let output = self.outputs.get_mut(&source).unwrap();
             if output.in_flight.is_none()
-                && let Some(scheduled) = seat.routing.due(&source, now)?
+                && let Some(scheduled) = seat.routing.due_after_input(&source, now)?
             {
                 output.sequence = scheduled.frame.sequence;
                 output.virtual_device.enqueue(&scheduled.frame)?;
@@ -770,7 +867,8 @@ impl InputSink for Stream {
             }
             if output.in_flight.is_some() && output.virtual_device.flush()? == Flush::Complete {
                 let ticket = output.in_flight.take().unwrap();
-                seat.routing.delivered(&source, ticket, monotonic()?)?;
+                seat.routing
+                    .delivered_after_input(&source, ticket, monotonic()?)?;
             }
         }
         self.messages.flush(&mut self.channel)
@@ -792,6 +890,7 @@ impl InputSink for Stream {
                 ])
             })
             .chain(self.assembly.deadline())
+            .chain(self.pending.front().map(|pending| pending.received_at))
             .chain(
                 self.outputs
                     .values()
@@ -843,6 +942,7 @@ impl Drop for Stream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod recognizers;
 
     fn ended(seat: &str, reason_bytes: usize) -> Message {
         Message::Outcome {

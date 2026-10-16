@@ -214,6 +214,7 @@ pub struct Router {
     queue: VecDeque<Scheduled>,
     offset: Duration,
     last_at: Duration,
+    delivery_at: Duration,
     last_sequence: Option<u64>,
     next_ticket: u64,
     last_candidate: u64,
@@ -254,6 +255,7 @@ impl Router {
             queue: VecDeque::new(),
             offset: Duration::ZERO,
             last_at: at,
+            delivery_at: at,
             last_sequence: None,
             next_ticket: 0,
             last_candidate: 0,
@@ -707,13 +709,38 @@ impl Router {
 
     pub fn due(&mut self, at: Duration) -> Result<Option<&Scheduled>, Fault> {
         self.advance(at)?;
+        self.due_after_input(at)
+    }
+    pub(crate) fn due_after_input(&mut self, at: Duration) -> Result<Option<&Scheduled>, Fault> {
+        self.delivery_clock(at)?;
         Ok(self.queue.front().filter(|entry| entry.due <= at))
+    }
+    fn delivery_clock(&mut self, at: Duration) -> Result<(), Fault> {
+        if self.stopped {
+            return Err(Fault::Stopped);
+        }
+        if at < self.last_at || at < self.delivery_at {
+            return self.fail(Fault::BackwardTime);
+        }
+        if self
+            .queue
+            .front()
+            .is_some_and(|first| at.saturating_sub(first.due) > self.limits.scheduler_slack)
+        {
+            return self.fail(Fault::MissedDelivery);
+        }
+        self.delivery_at = at;
+        Ok(())
     }
 
     /// Call only after an entire frame was successfully written. An uncertain
     /// partial write is a teardown/recovery event, never an automatic retry.
     pub fn delivered(&mut self, ticket: u64, at: Duration) -> Result<(), Fault> {
         self.advance(at)?;
+        self.delivered_after_input(ticket, at)
+    }
+    pub(crate) fn delivered_after_input(&mut self, ticket: u64, at: Duration) -> Result<(), Fault> {
+        self.delivery_clock(at)?;
         let first = self.queue.front().ok_or(Fault::WrongTicket)?;
         if first.ticket != ticket || at < first.due {
             return Err(Fault::WrongTicket);

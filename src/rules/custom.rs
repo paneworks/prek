@@ -302,6 +302,19 @@ fn input_context(state: &DeviceState, at: Duration) -> InputContext<'_> {
     super::input(state, at)
 }
 impl Engine {
+    pub(crate) fn retire_routing_recognition(&mut self, source: &Source) {
+        let at = self.input_at();
+        let ids: Vec<_> = self
+            .workers
+            .iter()
+            .filter(|worker| matches!(worker.rule.trigger, Trigger::Custom { .. }))
+            .filter_map(|worker| worker.candidates.get(source).map(|candidate| candidate.id))
+            .collect();
+        for id in ids {
+            self.custom_cancel(id, at, "routing transport retired");
+        }
+        self.custom_sync(at, Retirement::SourceLost);
+    }
     pub(crate) fn recognition_ready(&mut self, ready: bool, at: Duration) -> io::Result<()> {
         let Some(custom) = self.custom.as_ref() else {
             return Ok(());
@@ -592,7 +605,7 @@ impl Engine {
     ) -> io::Result<()> {
         self.recognition_response_clocked(proposal, input_at, now, |_, _, _| (None, None))
     }
-    fn recognition_response_clocked(
+    pub(crate) fn recognition_response_clocked(
         &mut self,
         proposal: Proposal,
         input_at: Duration,

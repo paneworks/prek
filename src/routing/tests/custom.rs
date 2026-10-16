@@ -102,6 +102,122 @@ fn replacement_source(routing: &mut Routing, at: u64) -> Device {
 }
 
 #[test]
+fn clocked_replies_leave_unread_input_timers_at_the_drained_watermark() {
+    let mut routing = custom(profile(Delivery::Reserve, false, false), false);
+    press(&mut routing, 1, 0, true);
+    let first = request(&mut routing, 0);
+    routing
+        .recognition_response_after_input(reply(&first, Phase::Pending), ms(1), ms(7))
+        .unwrap();
+    assert_eq!(routing.engine.input_at(), ms(1));
+    press(&mut routing, 2, 2, false);
+    let next = request(&mut routing, 3);
+    assert_eq!(next.candidate, first.candidate);
+    assert!(routing.take_dispatches(ms(7)).is_empty());
+}
+
+#[test]
+fn output_acknowledgements_do_not_advance_physical_input_through_unread_frames() {
+    let mut routing = custom(profile(Delivery::Observe, false, false), false);
+    press(&mut routing, 1, 1, true);
+    let source = keyboard().source;
+    let first = routing
+        .due_after_input(&source, ms(7))
+        .unwrap()
+        .unwrap()
+        .clone();
+    routing
+        .delivered_after_input(&source, first.ticket, ms(7))
+        .unwrap();
+    assert_eq!(routing.engine.input_at(), ms(1));
+    press(&mut routing, 2, 2, false);
+    let second = routing
+        .due_after_input(&source, ms(8))
+        .unwrap()
+        .unwrap()
+        .clone();
+    assert_eq!(second.frame.sequence, 2);
+    routing
+        .delivered_after_input(&source, second.ticket, ms(8))
+        .unwrap();
+    assert_eq!(routing.engine.input_at(), ms(2));
+    assert!(routing.take_recoveries().is_empty());
+}
+
+#[test]
+fn independent_output_clock_still_retires_missed_delivery() {
+    let mut routing = custom(profile(Delivery::Observe, false, false), false);
+    press(&mut routing, 1, 1, true);
+    assert!(
+        routing
+            .due_after_input(&keyboard().source, ms(200))
+            .is_err()
+    );
+    assert!(routing.routes.is_empty());
+    assert_eq!(routing.take_recoveries().len(), 1);
+}
+
+#[test]
+fn clocked_replies_cannot_hide_wall_expiry_behind_old_physical_time() {
+    for expired_capability in [false, true] {
+        let mut routing = custom(profile(Delivery::Buffer, false, false), false);
+        press(&mut routing, 1, 0, true);
+        let ticket = request(&mut routing, 0);
+        let now = if expired_capability {
+            routing.capability_expires = ms(5);
+            ms(6)
+        } else {
+            ms(251)
+        };
+        assert!(
+            routing
+                .recognition_response_after_input(reply(&ticket, Phase::Discrete), ms(1), now)
+                .is_err()
+        );
+        assert_eq!(routing.engine.input_at(), ms(1));
+        assert!(routing.take_dispatches(now).is_empty());
+    }
+}
+
+#[test]
+fn future_reply_watermarks_do_not_mutate_current_tickets() {
+    let mut routing = custom(profile(Delivery::Reserve, false, false), false);
+    press(&mut routing, 1, 0, true);
+    let ticket = request(&mut routing, 0);
+    assert!(
+        routing
+            .recognition_response_after_input(reply(&ticket, Phase::Discrete), ms(2), ms(1))
+            .is_err()
+    );
+    assert_eq!(routing.engine.input_at(), ms(0));
+    routing
+        .recognition_response(reply(&ticket, Phase::Discrete), ms(1))
+        .unwrap();
+    assert_eq!(routing.take_dispatches(ms(1)).len(), 1);
+}
+
+#[test]
+fn helper_readiness_loss_cancels_claimed_work_without_skipping_unread_release() {
+    let mut routing = custom(profile(Delivery::Reserve, true, false), false);
+    press(&mut routing, 1, 0, true);
+    let ticket = request(&mut routing, 0);
+    routing
+        .recognition_response_after_input(reply(&ticket, Phase::Begin), ms(1), ms(7))
+        .unwrap();
+    routing.recognition_ready(false, ms(8)).unwrap();
+    assert_eq!(routing.engine.input_at(), ms(1));
+    assert!(routing.take_dispatches(ms(8)).is_empty());
+    assert!(!routing.take_recognition_cancellations().is_empty());
+    press(&mut routing, 2, 2, false);
+    routing.recognition_ready(true, ms(9)).unwrap();
+    press(&mut routing, 3, 3, true);
+    press(&mut routing, 4, 4, false);
+    assert!(routing.recognition_requests(ms(4)).unwrap().is_empty());
+    press(&mut routing, 5, 10, true);
+    assert!(request(&mut routing, 10).candidate > ticket.candidate);
+}
+
+#[test]
 fn routing_transactions_retain_approved_custom_declarations_through_remove_and_readd() {
     use crate::rule_transactions::{Change, Transaction};
     for explicit in [false, true] {

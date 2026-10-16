@@ -37,10 +37,10 @@ pub struct ProvidedContext {
     pub snapshot: crate::context::Snapshot,
 }
 impl Subscription {
-    fn same_registration(&self, other: &Self) -> bool {
+    pub(crate) fn same_registration(&self, other: &Self) -> bool {
         self.seat == other.seat && self.fence == other.fence
     }
-    fn identity(&self) -> Self {
+    pub(crate) fn identity(&self) -> Self {
         Self {
             seat: self.seat.clone(),
             fence: self.fence,
@@ -254,7 +254,7 @@ fn permits_input(config: &Config, subscription: &Subscription, now: Duration) ->
 }
 // Custom declarations are validated by Config; they create native candidates
 // only in a fenced seat engine. Preflight still compiles every ordinary rule.
-fn preflight_profile(config: &Config) -> Config {
+pub(crate) fn preflight_profile(config: &Config) -> Config {
     let mut profile = config.clone();
     for rule in &mut profile.rules {
         if matches!(rule.trigger, crate::config::Trigger::Custom { .. }) {

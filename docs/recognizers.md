@@ -114,8 +114,33 @@ queues are bounded; excessive metadata retires the affected observation stream,
 not the input reader. Catalog queries become unavailable when the custom
 capability view expires, even if desktop context remains fresh. There is no host
 inventory scan or atomic full-device inventory guarantee. Custom sequence steps,
-additional consuming group lifetimes and the sole routing-worker bridge remain
-unfinished. Production routing stays gated.
+additional consuming group lifetimes and live sole-worker routing acceptance
+remain unfinished. Production routing stays gated.
+
+## Private sole-worker bridge
+
+The descriptor-owning routing worker implements the same typed recognizer and
+rule commands as the observation worker. Each seat uses its exact subscription
+fence, native routing coordinator and current protected capability/context view.
+Readiness loss cancels custom work; regrant requires neutral input before another
+gesture. Device metadata is scoped to approved declarations and refreshed after
+native readiness. Ordinary normalized input retains its observe-mode restriction:
+negotiating `InputEvents` does not enable it in routing mode.
+
+Commands wait behind a drained native input watermark rather than executing in
+the private socket reader. Wall time independently checks ticket, context,
+capability and command expiry. Output polling and complete-write acknowledgments
+also use an independent monotonic clock, retaining bounded delivery-lateness
+checks without advancing physical recognizers through unread frames. The shared
+command/outcome queue is bounded; commands expire after 250 ms. Native validation
+receipts precede resulting outcomes. Successful rule edits retire old tickets and
+virtual transports; original descriptor-close acknowledgments remain separate.
+Transport recovery cancels its custom candidates and invalidates parent effects.
+
+Private-channel tests exercise this bridge with explicit context/readiness and a
+test-owned metadata directory. They open neither evdev nor uinput. This is not
+privileged integration acceptance: CLI routing remains disabled, and the native
+pre/post-grab backlog and authenticated ownership gates remain unresolved.
 
 ## Native proposal and delivery contract
 
