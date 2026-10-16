@@ -622,6 +622,160 @@ fn a_cleanup_proposal_retires_the_actual_helper_without_logs_or_effects() {
 }
 
 #[test]
+fn native_rule_engine_round_trips_a_stationary_hold_through_the_actual_luna_helper() {
+    use prek::{
+        config::Trigger,
+        input::{Device, EV_KEY, EV_SYN, Frame, RawEvent, SYN_REPORT, Source},
+        recognition::{Cause, Retirement},
+        rules::{Engine, Event, Evidence, Stage},
+    };
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut definition = Definition::compile(
+        r#"
+local p=require('prek');local calls=0
+local declaration={name='native_hold',selectors={'keyboard'},inputs={'key'},reply_within='250ms'}
+p.events.on('input',function(ticket)
+ calls=calls+1
+ if ticket.cause=='cancel' then
+  assert(ticket.input==nil and ticket.reason=='completed' and calls==3)
+  p.log.info('native-cleanup');return nil
+ end
+ assert(ticket.input.source.device=='18446744073709551615')
+ if ticket.cause=='frame' then assert(calls==1);return nil end
+ assert(ticket.cause=='timer' and calls==2 and #ticket.input.changes==0)
+ return {phase='discrete',data={calls=calls}}
+end)
+return p.config.new{
+ policy={allow_input_events=true,allowed_devices={'keyboard'}},devices={keyboard={keys={'KEY_A'}}},
+ rules={p.rules.define{id='native_hold_rule',contexts={'desktop'},
+  trigger={kind='custom',recognizer=declaration,timeout='1s',wake='20ms'},
+  action=p.actions.event{name='native_hold'}}},
+}
+"#,
+        "native-recognizer-helper.lua",
+    )
+    .unwrap();
+    let config = definition.validate().unwrap();
+    let Trigger::Custom { recognizer, .. } = &config.rules[0].trigger else {
+        unreachable!()
+    };
+    definition.bind_recognizer(1, recognizer.clone()).unwrap();
+    let mut forged = definition.clone();
+    forged.recognizers[0].definition.continuous = true;
+    assert!(forged.validate().is_err());
+    let mut session = Session::spawn(
+        Path::new(env!("CARGO_BIN_EXE_prek")),
+        fence(1),
+        "seat0",
+        definition,
+    )
+    .unwrap();
+    drain(&mut session).unwrap();
+    authorize_recognizer(&mut session);
+    let at = monotonic().unwrap();
+    let mut engine = Engine::with_recognition(config, fence(1)).unwrap();
+    // Explicit authority model; no broker, logind or compositor was verified.
+    let provided = context_view(at, 0).context.unwrap();
+    engine
+        .authority_mut()
+        .bind(provided.binding.clone(), true, false)
+        .unwrap();
+    engine
+        .authority_mut()
+        .update(provided.snapshot.clone(), at)
+        .unwrap();
+    engine
+        .push(prek::replay::Record::Header { version: 1 })
+        .unwrap();
+    let source = Source {
+        device: u64::MAX,
+        generation: u64::MAX,
+        seat: "seat0".into(),
+    };
+    engine
+        .push(prek::replay::Record::Device {
+            device: Device {
+                source: source.clone(),
+                identity: "model keyboard".into(),
+                name: "model keyboard".into(),
+                path: "/dev/input/model".into(),
+                physical: "prek/test/model".into(),
+                unique: String::new(),
+                vendor: 1,
+                product: 1,
+                properties: Vec::new(),
+                capabilities: BTreeMap::from([(EV_SYN, vec![SYN_REPORT]), (EV_KEY, vec![30])]),
+                axes: BTreeMap::new(),
+                virtual_device: false,
+            },
+            keys: BTreeSet::new(),
+            contacts: vec![],
+        })
+        .unwrap();
+    engine
+        .push(prek::replay::Record::Frame {
+            frame: Frame {
+                source,
+                at,
+                sequence: 1,
+                events: vec![
+                    RawEvent {
+                        kind: EV_KEY,
+                        code: 30,
+                        value: 1,
+                    },
+                    RawEvent {
+                        kind: EV_SYN,
+                        code: SYN_REPORT,
+                        value: 0,
+                    },
+                ],
+            },
+        })
+        .unwrap();
+    let first = engine
+        .recognition_requests(monotonic().unwrap())
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(first.cause, Cause::Frame);
+    session.request_recognition(first).unwrap();
+    drain(&mut session).unwrap();
+    engine
+        .recognition_response(
+            session.take_recognitions().pop().unwrap().1.unwrap(),
+            monotonic().unwrap(),
+        )
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(25));
+    let timer = engine
+        .recognition_requests(monotonic().unwrap())
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(timer.cause, Cause::Timer);
+    assert_eq!(timer.input.at(), at);
+    session.request_recognition(timer).unwrap();
+    drain(&mut session).unwrap();
+    engine
+        .recognition_response(
+            session.take_recognitions().pop().unwrap().1.unwrap(),
+            monotonic().unwrap(),
+        )
+        .unwrap();
+    assert!(
+        matches!(&engine.take_events()[..],[Event::Matched{stage:Stage::Discrete,ordinal:1,evidence:Evidence::Custom{data,..},..}] if data["calls"]==2)
+    );
+    let cancellation = engine.take_recognition_cancellations().pop().unwrap();
+    assert_eq!(cancellation.reason, Retirement::Completed);
+    session.cancel_recognition(cancellation.clone()).unwrap();
+    assert_eq!(drain(&mut session).unwrap()[0].message, "native-cleanup");
+    assert_eq!(session.take_recognition_cancellations(), vec![cancellation]);
+    session.stop().unwrap();
+    drain(&mut session).unwrap();
+}
+
+#[test]
 fn real_helper_receives_broker_stamped_status_with_independent_expiry_and_stop() {
     use prek::{context::State, lua::StatusView, protocol::Mode};
     use std::collections::BTreeSet;

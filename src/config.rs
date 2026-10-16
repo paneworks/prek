@@ -312,6 +312,13 @@ impl Default for Policy {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Trigger {
+    /// Requires a trusted asynchronous ticket coordinator and source binding.
+    Custom {
+        recognizer: crate::recognition::Definition,
+        timeout: Millis,
+        #[serde(default)]
+        wake: Option<Millis>,
+    },
     /// Preserve press/release ownership, primarily for remapping.
     Key {
         key: Key,
@@ -381,6 +388,7 @@ pub struct Repeat {
 impl Trigger {
     pub fn contains_touch(&self) -> bool {
         self.fingers().is_some()
+            || matches!(self, Self::Custom { recognizer, .. } if recognizer.inputs.contains(&crate::recognition::InputKind::Touch))
             || matches!(self, Self::Sequence { steps, .. } if steps.iter().any(Self::contains_touch))
     }
     pub fn fingers(&self) -> Option<u16> {
@@ -887,9 +895,45 @@ impl Config {
                 ));
             }
         }
+        let mut custom = BTreeMap::new();
         let mut ids = BTreeSet::new();
         for rule in &self.rules {
             let prefix = format!("rules.{}", rule.id);
+            if let Trigger::Custom { recognizer, .. } = &rule.trigger {
+                if recognizer.continuous
+                    && rule.delivery != Delivery::Observe
+                    && !recognizer.inputs.iter().any(|kind| {
+                        matches!(
+                            kind,
+                            crate::recognition::InputKind::Key
+                                | crate::recognition::InputKind::Touch
+                        )
+                    })
+                {
+                    return fail(format!(
+                        "{prefix}: continuous consuming custom recognition requires a physical key or contact group"
+                    ));
+                }
+                if !self.policy.allow_input_events
+                    || recognizer.selectors.iter().any(|selector| {
+                        !self.devices.contains_key(selector)
+                            || !self.policy.allowed_devices.contains(selector)
+                    })
+                {
+                    return fail(format!(
+                        "{prefix}: custom recognizers require protected input permission and permitted selectors"
+                    ));
+                }
+                if custom
+                    .insert(&recognizer.name, recognizer)
+                    .is_some_and(|old| old != recognizer)
+                    || custom.len() > crate::recognition::MAX_RECOGNIZERS
+                {
+                    return fail(format!(
+                        "{prefix}: custom recognizer declarations must be consistent and bounded"
+                    ));
+                }
+            }
             if rule.output.as_ref().is_some_and(|name| {
                 name.is_empty() || name.len() > 256 || name.chars().any(char::is_control)
             }) {
@@ -1364,6 +1408,24 @@ fn validate_trigger(
         return Err("finger count must be 1..64 and fit selected hardware".into());
     }
     match trigger {
+        Trigger::Custom {
+            recognizer,
+            timeout,
+            wake,
+        } => {
+            if depth != 0 {
+                return Err(
+                    "custom recognizers in sequences require coordinated step lifetimes".into(),
+                );
+            }
+            recognizer.validate().map_err(|error| error.to_string())?;
+            if !(1..=10_000).contains(&timeout.0)
+                || wake.is_some_and(|wake| !(5..=250).contains(&wake.0))
+            {
+                return Err("custom recognition requires a 1..10000 ms timeout and optional 5..250 ms wake interval".into());
+            }
+            Ok(())
+        }
         Trigger::ButtonHold { after, repeat, .. } => {
             validate_duration(*after)?;
             if let Some(repeat) = repeat {

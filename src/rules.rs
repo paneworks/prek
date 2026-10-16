@@ -17,6 +17,7 @@ use std::{
     io,
     time::Duration,
 };
+mod custom;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -31,6 +32,10 @@ pub enum Stage {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Evidence {
+    Custom {
+        recognizer: String,
+        data: serde_json::Value,
+    },
     Key {
         down: bool,
     },
@@ -180,14 +185,21 @@ impl RouteIntent {
 pub(crate) struct RouteOutcome {
     pub event: Event,
     pub intent: RouteIntent,
+    pub expires: Option<Duration>,
 }
 #[derive(Clone)]
 struct StepMatch {
     event: Event,
     candidate: Candidate,
     finished: Duration,
+    expires: Option<Duration>,
 }
 enum Recognizer {
+    Custom {
+        blocked: BTreeSet<Source>,
+        wakes: BTreeMap<Source, Duration>,
+        closed: BTreeSet<Source>,
+    },
     Key,
     Taps(Buttons),
     Keys(Keys),
@@ -215,16 +227,24 @@ struct Worker {
     claims: Vec<Candidate>,
 }
 
-/// All current schema triggers have an observation/replay implementation.
-pub fn unsupported(_trigger: &Trigger) -> Option<&'static str> {
-    None
+/// Custom triggers additionally require the trusted ticket coordinator.
+pub fn unsupported(trigger: &Trigger) -> Option<&'static str> {
+    matches!(trigger, Trigger::Custom { .. })
+        .then_some("custom recognizers require the trusted asynchronous coordinator")
 }
 impl Worker {
     fn new(rule: Rule, config: &Config) -> io::Result<Self> {
-        if let Some(reason) = unsupported(&rule.trigger) {
+        if let Some(reason) = unsupported(&rule.trigger)
+            && !matches!(rule.trigger, Trigger::Custom { .. })
+        {
             return Err(invalid(format!("rules.{}: {reason}", rule.id)));
         }
         let recognizer = match &rule.trigger {
+            Trigger::Custom { .. } => Recognizer::Custom {
+                blocked: BTreeSet::new(),
+                wakes: BTreeMap::new(),
+                closed: BTreeSet::new(),
+            },
             Trigger::Key { .. } => Recognizer::Key,
             Trigger::ButtonTaps { .. } => {
                 Recognizer::Taps(Buttons::new(config.timing.buttons()).map_err(invalid)?)
@@ -286,6 +306,18 @@ impl Worker {
             return Ok(());
         }
         match &mut self.recognizer {
+            Recognizer::Custom {
+                blocked,
+                wakes,
+                closed,
+            } => {
+                closed.retain(|source| source.device != state.device.source.device);
+                blocked.retain(|source| source.device != state.device.source.device);
+                wakes.retain(|source, _| source.device != state.device.source.device);
+                if !state.keys.is_empty() || !state.contacts.is_empty() {
+                    blocked.insert(state.device.source.clone());
+                }
+            }
             Recognizer::Shape { .. }
                 if !state.contacts.is_empty()
                     || matches!(self.rule.trigger, Trigger::Shape { fingers: None, button, .. } if state.keys.contains(&button.map_or(0x110, |key| key.0))) =>
@@ -352,6 +384,7 @@ impl Worker {
 }
 
 pub struct Engine {
+    custom: Option<custom::State>,
     config: Config,
     generation: u64,
     rule_revision: u64,
@@ -373,7 +406,15 @@ pub struct Engine {
 }
 impl Engine {
     pub fn new(config: Config) -> io::Result<Self> {
+        Self::build(config, None)
+    }
+    /// The embedding owns authorization, transport and helper supervision.
+    pub fn with_recognition(config: Config, fence: crate::protocol::Fence) -> io::Result<Self> {
+        Self::build(config, Some(fence))
+    }
+    fn build(config: Config, fence: Option<crate::protocol::Fence>) -> io::Result<Self> {
         config.validate().map_err(invalid)?;
+        let custom = custom::State::new(&config, fence)?;
         let mut workers = config
             .rules
             .iter()
@@ -401,8 +442,9 @@ impl Engine {
             .map(|rule| Sequence::new(rule.clone(), &config))
             .collect::<io::Result<Vec<_>>>()?;
         Ok(Self {
+            custom,
             config,
-            generation: 1,
+            generation: fence.map_or(1, |fence| fence.configuration),
             rule_revision: 1,
             next_id: 0,
             replay: Replay::default(),
@@ -512,6 +554,7 @@ impl Engine {
                     .into_iter()
                     .map(|trace| RouteOutcome {
                         event: trace.event,
+                        expires: trace.expires,
                         intent: RouteIntent {
                             rule: worker.rule.clone(),
                             candidate: trace.candidate,
@@ -662,6 +705,7 @@ impl Engine {
             .filter_map(Worker::deadline)
             .chain(self.sequences.iter().filter_map(Sequence::deadline))
             .chain(self.conditions.deadline())
+            .chain(self.custom_deadline())
             .min()
     }
     pub fn push(&mut self, record: Record) -> io::Result<()> {
@@ -823,6 +867,15 @@ impl Engine {
         if self.events.len() > 16384 {
             return Err(invalid("rule observation queue limit exceeded"));
         }
+        self.custom_sync(
+            self.last_at.unwrap_or_default(),
+            match record {
+                Record::Remove { .. } | Record::Reconcile { .. } | Record::Mapping { .. } => {
+                    crate::recognition::Retirement::SourceLost
+                }
+                _ => crate::recognition::Retirement::Cancelled,
+            },
+        );
         Ok(())
     }
     pub fn check(&self) -> io::Result<()> {
@@ -924,7 +977,20 @@ impl Engine {
         generation: u64,
         at: Duration,
     ) -> io::Result<Self> {
-        let mut next = Self::new(config)?;
+        let mut next = if let Some(custom) = &self.custom {
+            let mut fence = custom.fence;
+            fence.configuration = generation;
+            let mut next = Self::with_recognition(config, fence)?;
+            next.custom.as_mut().unwrap().gate = custom
+                .gate
+                .replacement(fence, custom::definitions(&next.config))?;
+            if generation == self.generation {
+                next.custom.as_mut().unwrap().approved = custom.approved.clone();
+            }
+            next
+        } else {
+            Self::new(config)?
+        };
         next.push(Record::Header {
             version: crate::replay::FORMAT_VERSION,
         })?;
@@ -975,6 +1041,15 @@ impl Engine {
         let config = transaction
             .prepare(&self.config, self.rule_revision)
             .map_err(invalid)?;
+        if self.custom.is_some()
+            && custom::definitions(&config)
+                .iter()
+                .any(|definition| !self.custom.as_ref().unwrap().approved.contains(definition))
+        {
+            return Err(invalid(
+                "runtime rules cannot add unapproved custom recognizer declarations",
+            ));
+        }
         let mut next = self.prepare_generation(config, self.generation, at)?;
         next.conditions = self
             .conditions
@@ -1048,6 +1123,7 @@ impl Engine {
                 );
             }
         }
+        self.custom_advance(at);
         Ok(())
     }
     fn frame(&mut self, frame: NormalizedFrame) -> io::Result<()> {
@@ -1144,6 +1220,21 @@ impl Engine {
                 }
             }
             match &worker.rule.trigger {
+                Trigger::Custom { .. } => {
+                    custom::frame(
+                        worker,
+                        state,
+                        &frame,
+                        custom::FrameContext {
+                            config: &self.config,
+                            authority: &self.authority,
+                            keys: &self.conditions,
+                            custom: self.custom.as_mut().unwrap(),
+                            next_id: &mut self.next_id,
+                            events: &mut self.events,
+                        },
+                    );
+                }
                 Trigger::Shape { .. } => {
                     shape_frame(
                         worker,
@@ -1960,6 +2051,7 @@ impl Sequence {
                     candidate.id = pending.id;
                     candidate.sources = pending.sources.clone();
                     self.outcomes.push(RouteOutcome {
+                        expires: None,
                         event: events.last().unwrap().clone(),
                         intent: RouteIntent {
                             rule: self.rule.clone(),
@@ -2043,6 +2135,7 @@ fn selected(config: &Config, rule: &Rule, device: &Device) -> bool {
         && config.devices.iter().any(|(id, selector)| {
             config.policy.allowed_devices.contains(id)
                 && (rule.devices.is_empty() || rule.devices.contains(id))
+                && !matches!(&rule.trigger, Trigger::Custom { recognizer, .. } if !recognizer.selectors.contains(id))
                 && selector.matches(device)
         })
 }
@@ -2369,7 +2462,8 @@ pub fn requires_context(rule: &Rule) -> bool {
     !context_free(rule)
 }
 fn context_free(rule: &Rule) -> bool {
-    rule.contexts.is_empty()
+    !matches!(rule.trigger, Trigger::Custom { .. })
+        && rule.contexts.is_empty()
         && rule.scope == Scope::Everywhere
         && rule.screen.is_none()
         && rule.keyboard_visible.is_none()
@@ -2521,6 +2615,15 @@ fn cancel_candidate(
         });
     }
     match &mut worker.recognizer {
+        Recognizer::Custom {
+            blocked,
+            wakes,
+            closed,
+        } => {
+            blocked.insert(source.clone());
+            wakes.remove(source);
+            closed.remove(source);
+        }
         Recognizer::Taps(buttons) => buttons.cancel_device(source.device),
         Recognizer::Keys(keys) => {
             keys.cancel_source(source);
@@ -2540,6 +2643,11 @@ fn cancel_candidate(
     }
 }
 enum Signal {
+    Custom {
+        source: Source,
+        stage: Stage,
+        data: serde_json::Value,
+    },
     Shape {
         source: Source,
         space: Space,
@@ -2595,6 +2703,21 @@ fn report_signals(
             worker.claims.push(candidate.clone());
         }
         let proposal = match (&worker.rule.trigger, signal) {
+            (
+                Trigger::Custom { recognizer, .. },
+                Signal::Custom {
+                    source,
+                    stage,
+                    data,
+                },
+            ) => Some((
+                source,
+                stage,
+                Evidence::Custom {
+                    recognizer: recognizer.name.clone(),
+                    data,
+                },
+            )),
             (
                 Trigger::Shape { name, .. },
                 Signal::Shape {
@@ -2764,6 +2887,7 @@ fn report_signals(
             });
             if worker.trace {
                 worker.matches.push(StepMatch {
+                    expires: None,
                     event: events.last().unwrap().clone(),
                     candidate: candidate.clone(),
                     finished: if matches!(

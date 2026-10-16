@@ -1,9 +1,10 @@
 # Custom recognizer proposal gate
 
 `recognition::Gate` is the Rust ticket/response component for the planned Lua
-recognizer path. An internal host binding now connects approved source callbacks
-through the supervised Lua helper. Public session requests, worker routing and
-the source-level constructor remain required; custom recognizers are not yet
+recognizer path. Internal host bindings connect approved source callbacks through
+the supervised Lua helper; opt-in native rule/routing coordinators create and
+arbitrate their tickets. The authenticated live broker/input-worker bridge and
+source-level constructor remain required; custom recognizers are not yet
 available through `prek session`.
 
 The trusted input coordinator constructs `Candidate` from its verified rule,
@@ -123,5 +124,58 @@ proof. Whole-session stop discards queues and disables the old generation; the
 supervisor owns process reaping and release of its VM state.
 
 The source constructor, authenticated broker/private input-worker path, current
-eligibility/winner integration, real cancellation causes and wake scheduling,
-reload and actual routing tests remain required.
+live registration/transport integration and physical routing acceptance remain
+required.
+
+## Native rule and routing integration
+
+The internal declarative `custom` trigger embeds a recognizer declaration, a
+1–10,000 ms recognition timeout and an optional 5–250 ms wake interval. Named
+declarations must agree across rules and remain within the protected device/input
+policy. Custom sequence steps currently fail validation: coordinated step and
+multi-group lifetimes remain required work. Continuous consuming candidates must
+start on a physical key/contact group; other declared changes may update that
+group. Continuous consumption without such a group also remains unsupported.
+
+`rules::Engine::with_recognition` and `routing::Routing::with_recognition` are
+trusted embedding constructors. Ordinary constructors reject custom triggers
+instead of silently running them without a coordinator. No Lua runs on the
+input thread. The native coordinator requires a fresh owning desktop, validates
+the normal rule activation/permit and frozen targets, filters input before
+queueing, suppresses reconciled held input until neutral and bounds queued offers
+to 64 entries / 1 MiB. Timers skip missed wakes and pause while a reply is pending.
+A queued wake retains its original request time; transport delay cannot renew it.
+
+`recognition_requests` exposes tickets; `recognition_response` rechecks the
+current native candidate, rule revision, source, context/conditions and permit.
+Successful replies emit normal typed rule evidence with Rust ordinals and the
+rule's frozen action/targets. Timeouts, source/context loss, queue exhaustion,
+invalid proposals and completion retire native candidates and generate cleanup.
+Reload and acknowledged rule edits preserve ticket monotonicity, revoke old work
+and reconcile held state. Runtime rule edits may reuse source-approved
+declarations, including restoring a removed rule, but cannot add declarations.
+Lua bindings must match any corresponding native rule declaration exactly.
+
+The routing coordinator supplies actual router ownership and winner identity.
+Each consuming candidate is additionally bound to the original source/router
+ticket/authorization; a later physical group cannot inherit old proposals. A
+completed claimed group can retain its completion identity while awaiting the
+terminal callback. Terminal completion, cancellation, expiry or fresh unrelated
+input releases that identity. Normal input can start a new group immediately.
+
+Lower-priority results wait in Rust while a higher-priority candidate remains
+eligible. Cached continuous progress preserves begin, latest update and end.
+The cache is bounded to 192 outcomes / 1 MiB and preserves each original proposal
+deadline through arbitration and dispatch. Expired or superseded groups cannot
+claim later input. Actual claims, buffering, fallback cadence, draining, dispatch
+availability and recovery use the existing router. These core tests model
+readiness and desktop authority; they establish no kernel admission or physical
+consumer retirement.
+
+The real supervised-helper test also connects an actual native observer engine
+to Luna: physical-frame model → pending → stationary timer → typed native match
+→ correlated cleanup acknowledgement. It explicitly models provider authority
+and performs no device I/O. Public source declarations, authenticated live
+broker/private-worker plumbing, helper readiness/grants, full sequence/group
+composition, offline custom replay and end-to-end reload/recovery still need
+integration. Production routing and Morf action admission remain gated.

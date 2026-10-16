@@ -53,6 +53,34 @@ fn selector(text: &str) -> bool {
     !text.is_empty() && text.len() <= 256 && !text.chars().any(char::is_control)
 }
 impl Definition {
+    pub(crate) fn interested(&self, input: &Event) -> bool {
+        let Event::Frame {
+            selectors,
+            changes,
+            contacts,
+            contacts_started,
+            contacts_ended,
+            ..
+        } = input
+        else {
+            return false;
+        };
+        selectors
+            .iter()
+            .any(|selector| self.selectors.contains(selector))
+            && (changes.iter().any(|change| {
+                self.inputs.contains(&match change {
+                    Change::Key { .. } => InputKind::Key,
+                    Change::Relative { .. } => InputKind::Relative,
+                    Change::Wheel { .. } => InputKind::Wheel,
+                    Change::Absolute { .. } => InputKind::Absolute,
+                    Change::Switch { .. } => InputKind::Switch,
+                })
+            }) || self.inputs.contains(&InputKind::Touch)
+                && (!contacts.is_empty()
+                    || !contacts_started.is_empty()
+                    || !contacts_ended.is_empty()))
+    }
     pub fn validate(&self) -> io::Result<()> {
         if !name(&self.name)
             || self.selectors.is_empty()
@@ -66,7 +94,7 @@ impl Definition {
         }
         Ok(())
     }
-    fn project(&self, input: &Event, require_change: bool) -> io::Result<Event> {
+    pub(crate) fn project(&self, input: &Event, require_change: bool) -> io::Result<Event> {
         let Event::Frame {
             source,
             at,
@@ -336,6 +364,7 @@ pub struct Validated {
     pub phase: Phase,
     pub data: Value,
     pub observed_at: Duration,
+    pub deadline: Duration,
 }
 struct Pending {
     ticket: Ticket,
@@ -364,6 +393,66 @@ pub struct Gate {
     cancellations: VecDeque<Cancellation>,
 }
 impl Gate {
+    pub(crate) fn replacement(
+        &self,
+        fence: Fence,
+        definitions: Vec<Definition>,
+    ) -> io::Result<Self> {
+        let mut next = Self::new(fence, definitions)?;
+        next.next = self.next;
+        next.cancellations = self.cancellations.clone();
+        for history in self.active.values() {
+            let candidate = &history.candidate;
+            next.cancellations.push_back(Cancellation {
+                fence: self.fence,
+                candidate: candidate.id,
+                revision: candidate.revision,
+                rule: candidate.rule.clone(),
+                recognizer: history.recognizer.clone(),
+                source: candidate.source.clone(),
+                through: history.last_ticket,
+                reason: Retirement::RuleChanged,
+            });
+        }
+        Ok(next)
+    }
+    pub(crate) fn candidate(&self, ticket: u64) -> Option<u64> {
+        self.pending
+            .get(&ticket)
+            .map(|pending| pending.candidate.id)
+    }
+    pub(crate) fn candidates(&self) -> Vec<u64> {
+        self.active.keys().copied().collect()
+    }
+    pub(crate) fn waiting(&self, candidate: u64) -> bool {
+        self.pending
+            .values()
+            .any(|pending| pending.candidate.id == candidate)
+    }
+    pub(crate) fn retiring(&self) -> usize {
+        self.cancellations.len()
+    }
+    pub(crate) fn deadline(&self) -> Option<Duration> {
+        self.pending
+            .values()
+            .map(|pending| pending.ticket.deadline)
+            .min()
+    }
+    pub(crate) fn overdue(&self, now: Duration) -> Vec<u64> {
+        self.pending
+            .values()
+            .filter_map(|pending| {
+                (pending.ticket.deadline <= now
+                    && self
+                        .active
+                        .get(&pending.candidate.id)
+                        .is_some_and(|history| pending.ticket.id > history.last_reply))
+                .then_some(pending.candidate.id)
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
     pub fn new(fence: Fence, definitions: Vec<Definition>) -> io::Result<Self> {
         fence.validate()?;
         if definitions.len() > MAX_RECOGNIZERS {
@@ -424,7 +513,15 @@ impl Gate {
         {
             return Err(invalid("too many active recognizer candidates"));
         }
-        self.issue(recognizer, candidate, input, Cause::Frame, now)
+        let requested_at = input.at();
+        self.issue(
+            recognizer,
+            candidate,
+            input,
+            Cause::Frame,
+            requested_at,
+            now,
+        )
     }
     /// Wake an existing eligible candidate without inventing a physical frame.
     /// The coordinator must recheck held state and eligibility before calling.
@@ -432,6 +529,15 @@ impl Gate {
         &mut self,
         recognizer: &str,
         candidate: &Candidate,
+        now: Duration,
+    ) -> io::Result<Ticket> {
+        self.offer_timer_at(recognizer, candidate, now, now)
+    }
+    pub(crate) fn offer_timer_at(
+        &mut self,
+        recognizer: &str,
+        candidate: &Candidate,
+        requested_at: Duration,
         now: Duration,
     ) -> io::Result<Ticket> {
         self.expire(now);
@@ -444,7 +550,8 @@ impl Gate {
             || history.recognizer != recognizer
             || history.terminal
             || history.candidate.ownership.is_none() != candidate.ownership.is_none()
-            || now <= history.last_request
+            || requested_at > now
+            || requested_at <= history.last_request
         {
             return Err(invalid("timer candidate changed or wake was replayed"));
         }
@@ -467,7 +574,14 @@ impl Gate {
         for contact in contacts {
             contact.fresh = false;
         }
-        self.issue(recognizer, candidate, input, Cause::Timer, now)
+        self.issue(
+            recognizer,
+            candidate,
+            input,
+            Cause::Timer,
+            requested_at,
+            now,
+        )
     }
     fn issue(
         &mut self,
@@ -475,13 +589,9 @@ impl Gate {
         candidate: &Candidate,
         input: Event,
         cause: Cause,
+        requested_at: Duration,
         now: Duration,
     ) -> io::Result<Ticket> {
-        let requested_at = if cause == Cause::Frame {
-            input.at()
-        } else {
-            now
-        };
         let definition = self.definitions.get(recognizer).unwrap();
         let deadline = requested_at
             .checked_add(definition.reply_within.duration())
@@ -608,6 +718,7 @@ impl Gate {
             phase: proposal.phase,
             data: proposal.data,
             observed_at: ticket.requested_at,
+            deadline: ticket.deadline,
         }))
     }
     fn discard_tickets(&mut self, candidate: u64) {
@@ -677,7 +788,7 @@ impl Gate {
         self.cancellations.drain(..).collect()
     }
 }
-fn encoded_size(value: &impl Serialize, maximum: usize) -> io::Result<usize> {
+pub(crate) fn encoded_size(value: &impl Serialize, maximum: usize) -> io::Result<usize> {
     struct Count {
         bytes: usize,
         maximum: usize,

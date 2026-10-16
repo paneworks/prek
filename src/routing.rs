@@ -39,6 +39,9 @@ struct Dispatch {
 }
 
 pub struct Routing {
+    custom_groups: BTreeMap<u64, (Source, u64, u64)>,
+    deferred_custom: VecDeque<RouteOutcome>,
+    deferred_bytes: usize,
     engine: Engine,
     routes: BTreeMap<Source, Route>,
     next_ticket: u64,
@@ -54,7 +57,45 @@ pub struct Routing {
 fn fault(error: Fault) -> io::Error {
     io::Error::other(format!("routing: {error:?}"))
 }
+fn custom_ownership(
+    routes: &BTreeMap<Source, Route>,
+    groups: &BTreeMap<u64, (Source, u64, u64)>,
+    source: &Source,
+    rule: &crate::config::Rule,
+    id: u64,
+) -> (Option<Ownership>, Option<u64>) {
+    if rule.delivery == Delivery::Observe {
+        return (None, None);
+    }
+    let Some(route) = routes.get(source) else {
+        return (Some(Ownership::Forwarded), None);
+    };
+    if !groups
+        .get(&id)
+        .is_some_and(|(bound, ticket, authorization)| {
+            bound == source && *ticket == route.ticket && *authorization == route.authorization
+        })
+    {
+        return (Some(Ownership::Forwarded), None);
+    }
+    (
+        route.router.ownership().or(Some(Ownership::Forwarded)),
+        route.winner,
+    )
+}
 impl Routing {
+    fn custom_group_valid(&self, intent: &RouteIntent) -> bool {
+        matches!(
+            custom_ownership(
+                &self.routes,
+                &self.custom_groups,
+                intent.source(),
+                &intent.rule,
+                intent.id()
+            ),
+            (Some(Ownership::Pending), None)
+        ) || matches!(custom_ownership(&self.routes, &self.custom_groups, intent.source(), &intent.rule, intent.id()), (Some(Ownership::Claimed), Some(winner)) if winner == intent.id())
+    }
     pub(crate) fn configuration_generation(&mut self, generation: u64) -> io::Result<()> {
         if generation == 0 || !self.routes.is_empty() {
             return Err(io::Error::other(
@@ -65,6 +106,13 @@ impl Routing {
         Ok(())
     }
     pub fn new(config: Config) -> io::Result<Self> {
+        Self::build(config, None)
+    }
+    /// This does not admit kernel routing or authenticate a session provider.
+    pub fn with_recognition(config: Config, fence: crate::protocol::Fence) -> io::Result<Self> {
+        Self::build(config, Some(fence))
+    }
+    fn build(config: Config, fence: Option<crate::protocol::Fence>) -> io::Result<Self> {
         if config.mode != crate::config::Mode::Route {
             return Err(io::Error::other(
                 "configured routing requires explicit route mode",
@@ -80,10 +128,17 @@ impl Routing {
                 "buffered routing requires join_window < decision_window",
             ));
         }
-        let mut engine = Engine::new(config)?;
+        let mut engine = if let Some(fence) = fence {
+            Engine::with_recognition(config, fence)?
+        } else {
+            Engine::new(config)?
+        };
         engine.push(Record::Header { version: 1 })?;
         engine.enable_routing();
         Ok(Self {
+            custom_groups: BTreeMap::new(),
+            deferred_custom: VecDeque::new(),
+            deferred_bytes: 0,
             engine,
             routes: BTreeMap::new(),
             next_ticket: 0,
@@ -257,6 +312,36 @@ impl Routing {
             Record::Frame { frame } => Some(frame.clone()),
             _ => None,
         };
+        let fresh_group = source
+            .as_ref()
+            .zip(frame.as_ref())
+            .is_some_and(|(source, frame)| {
+                self.routes.get(source).is_some_and(|route| {
+                    route.router.physical_neutral()
+                        && frame.events.iter().any(|event| {
+                            event.kind == crate::input::EV_KEY && event.value == 1
+                                || event.kind == crate::input::EV_ABS
+                                    && event.code == crate::input::ABS_MT_TRACKING_ID
+                                    && event.value >= 0
+                                || event.kind == crate::input::EV_REL && event.value != 0
+                                || event.kind == crate::input::EV_SW
+                        })
+                })
+            });
+        if fresh_group && let Some(source) = &source {
+            let previous: Vec<_> = self
+                .custom_groups
+                .iter()
+                .filter_map(|(id, (bound, _, _))| (bound == source).then_some(*id))
+                .collect();
+            for id in previous {
+                self.engine.cancel_custom(
+                    id,
+                    at,
+                    "new physical group superseded custom recognition",
+                );
+            }
+        }
         self.engine.push(record.clone())?;
         if self.engine.authority_mut().generation() != self.authority_generation {
             let sources: Vec<_> = self.routes.keys().cloned().collect();
@@ -271,7 +356,44 @@ impl Routing {
         {
             self.recover(source);
         }
-        let outcomes = self.engine.take_route_outcomes();
+        let mut outcomes = self.engine.take_route_outcomes();
+        let deferred = std::mem::take(&mut self.deferred_custom);
+        self.deferred_bytes = 0;
+        for outcome in deferred {
+            if outcome.expires.is_some_and(|expiry| at >= expiry)
+                || fresh_group && source.as_ref() == Some(outcome.intent.source())
+                || !self.custom_group_valid(&outcome.intent)
+            {
+                self.engine.cancel_custom(
+                    outcome.intent.id(),
+                    at,
+                    "deferred custom recognition expired or group changed",
+                );
+            } else {
+                outcomes.push(outcome);
+            }
+        }
+        let mut updates = BTreeMap::new();
+        for outcome in &outcomes {
+            if matches!(outcome.intent.rule.trigger, Trigger::Custom { .. })
+                && let Event::Matched {
+                    id,
+                    ordinal,
+                    stage: crate::rules::Stage::Update,
+                    ..
+                } = &outcome.event
+            {
+                updates
+                    .entry(*id)
+                    .and_modify(|old: &mut u64| *old = (*old).max(*ordinal))
+                    .or_insert(*ordinal);
+            }
+        }
+        outcomes.retain(|outcome| !matches!(&outcome.event, Event::Matched { id, ordinal, stage: crate::rules::Stage::Update, .. } if updates.get(id).is_some_and(|latest| ordinal != latest)));
+        outcomes.sort_by_key(|outcome| match &outcome.event {
+            Event::Matched { id, ordinal, .. } => (*id, *ordinal),
+            _ => (0, 0),
+        });
         let claims = self.engine.take_route_claims();
         let active = self.engine.route_intents();
         let mut intents = active.clone();
@@ -332,9 +454,27 @@ impl Routing {
                 } else if route.router.ownership() == Some(Ownership::Pending) {
                     route.choices = choices;
                 }
-                if let Err(error) = route.router.push(frame, candidate, at) {
+                let completion = route
+                    .choices
+                    .first()
+                    .is_some_and(|intent| matches!(intent.rule.trigger, Trigger::Custom { .. }));
+                if let Err(error) = route
+                    .router
+                    .push_with_completion(frame, candidate, at, completion)
+                {
                     self.recover(&source);
                     return Err(fault(error));
+                }
+                if starts {
+                    for intent in &route.choices {
+                        if matches!(intent.rule.trigger, Trigger::Custom { .. }) {
+                            self.custom_groups.entry(intent.id()).or_insert((
+                                source.clone(),
+                                route.ticket,
+                                route.authorization,
+                            ));
+                        }
+                    }
                 }
                 if starts
                     && candidate.is_some_and(|candidate| candidate.policy == Policy::Reserve)
@@ -352,6 +492,20 @@ impl Routing {
             }
         }
         self.resolve(at, &active, &claims, &outcomes)?;
+        for intent in &active {
+            if matches!(intent.rule.trigger, Trigger::Custom { .. })
+                && self.routes.get(intent.source()).is_some_and(|route| {
+                    route.router.ownership() == Some(Ownership::Claimed)
+                        && route.winner != Some(intent.id())
+                })
+            {
+                self.engine.cancel_custom(
+                    intent.id(),
+                    at,
+                    "another candidate owns the input group",
+                );
+            }
+        }
         for outcome in outcomes {
             let id = outcome.intent.id();
             let observe = outcome.intent.rule.delivery == Delivery::Observe;
@@ -370,6 +524,26 @@ impl Routing {
                     outcome,
                     configuration: self.engine.generation(),
                 });
+            } else if matches!(outcome.intent.rule.trigger, Trigger::Custom { .. })
+                && self.available(&outcome.intent, at)
+                && self.custom_group_valid(&outcome.intent)
+                && self.routes[outcome.intent.source()].router.ownership()
+                    == Some(Ownership::Pending)
+                && outcome.expires.is_some_and(|expiry| at < expiry)
+            {
+                let bytes = crate::recognition::encoded_size(
+                    &outcome.event,
+                    crate::recognition::MAX_FRAME_BYTES,
+                )?;
+                if self.deferred_custom.len() >= crate::recognition::MAX_PENDING * 3
+                    || self.deferred_bytes + bytes > crate::recognition::MAX_BYTES
+                {
+                    let source = outcome.intent.source().clone();
+                    self.recover(&source);
+                    return Err(fault(Fault::Overflow));
+                }
+                self.deferred_bytes += bytes;
+                self.deferred_custom.push_back(outcome);
             } else {
                 self.events.push(Event::Skipped {
                     version: 1,
@@ -385,6 +559,15 @@ impl Routing {
                 self.events.push(event);
             }
         }
+        for route in self.routes.values_mut() {
+            if route.router.completion_pending()
+                && route
+                    .winner
+                    .is_some_and(|id| !active.iter().any(|intent| intent.id() == id))
+            {
+                route.router.release_completion();
+            }
+        }
         let dead: Vec<_> = self
             .won
             .iter()
@@ -394,6 +577,17 @@ impl Routing {
         for id in dead {
             self.won.remove(&id);
         }
+        self.custom_groups
+            .retain(|id, (source, ticket, authorization)| {
+                self.routes.get(source).is_some_and(|route| {
+                    route.ticket == *ticket && route.authorization == *authorization
+                }) && (active.iter().any(|intent| intent.id() == *id)
+                    || self
+                        .deferred_custom
+                        .iter()
+                        .any(|outcome| outcome.intent.id() == *id)
+                    || self.won.contains_key(id))
+            });
         if self.events.len() > 16384 {
             let sources: Vec<_> = self.routes.keys().cloned().collect();
             for source in sources {
@@ -422,7 +616,10 @@ impl Routing {
                 .cloned()
                 .chain(outcomes.iter().map(|outcome| outcome.intent.clone()))
                 .filter(|intent| {
-                    intent.sources().contains(&source) && intent.rule.delivery != Delivery::Observe
+                    intent.sources().contains(&source)
+                        && intent.rule.delivery != Delivery::Observe
+                        && (!matches!(intent.rule.trigger, Trigger::Custom { .. })
+                            || self.custom_group_valid(intent))
                 })
                 .collect();
             choices.sort_by(|a, b| {
@@ -597,6 +794,7 @@ impl Routing {
         while let Some(dispatch) = self.dispatches.pop_front() {
             if dispatch.configuration == self.engine.generation()
                 && self.available(&dispatch.outcome.intent, at)
+                && dispatch.outcome.expires.is_none_or(|expiry| at < expiry)
             {
                 result.push(dispatch.outcome.event);
             }
@@ -605,6 +803,40 @@ impl Routing {
     }
     pub fn take_events(&mut self) -> Vec<Event> {
         std::mem::take(&mut self.events)
+    }
+    pub fn recognition_requests(
+        &mut self,
+        at: Duration,
+    ) -> io::Result<Vec<crate::recognition::Ticket>> {
+        self.push(Record::Tick { at })?;
+        let routes = &self.routes;
+        let groups = &self.custom_groups;
+        let tickets = self
+            .engine
+            .recognition_requests_with(at, |source, rule, id| {
+                custom_ownership(routes, groups, source, rule, id)
+            })?;
+        self.push(Record::Tick { at })?;
+        Ok(tickets)
+    }
+    pub fn recognition_response(
+        &mut self,
+        proposal: crate::recognition::Proposal,
+        at: Duration,
+    ) -> io::Result<()> {
+        self.push(Record::Tick { at })?;
+        let routes = &self.routes;
+        let groups = &self.custom_groups;
+        let result = self
+            .engine
+            .recognition_response_with(proposal, at, |source, rule, id| {
+                custom_ownership(routes, groups, source, rule, id)
+            });
+        let synchronized = self.push(Record::Tick { at });
+        result.and(synchronized)
+    }
+    pub fn take_recognition_cancellations(&mut self) -> Vec<crate::recognition::Cancellation> {
+        self.engine.take_recognition_cancellations()
     }
     pub fn rule_revision(&self) -> u64 {
         self.engine.rule_revision()
@@ -649,6 +881,21 @@ impl Routing {
         std::mem::take(&mut self.recoveries)
     }
     pub fn recover(&mut self, source: &Source) {
+        self.custom_groups
+            .retain(|_, (bound, _, _)| bound != source);
+        self.deferred_custom
+            .retain(|outcome| outcome.intent.source() != source);
+        self.deferred_bytes = self
+            .deferred_custom
+            .iter()
+            .map(|outcome| {
+                crate::recognition::encoded_size(
+                    &outcome.event,
+                    crate::recognition::MAX_FRAME_BYTES,
+                )
+                .unwrap_or(crate::recognition::MAX_FRAME_BYTES)
+            })
+            .sum();
         if let Some(mut route) = self.routes.remove(source)
             && let Some(recovery) = route.router.recover()
         {
@@ -667,6 +914,11 @@ impl Routing {
                 (!self.won.is_empty() || !self.dispatches.is_empty())
                     .then_some(self.capability_expires),
             )
+            .chain(
+                self.deferred_custom
+                    .iter()
+                    .filter_map(|outcome| outcome.expires),
+            )
             .chain(self.routes.values().flat_map(|route| {
                 route.router.next_deadline().into_iter().chain(
                     (route.router.ownership() == Some(Ownership::Pending) && !route.joined)
@@ -681,6 +933,7 @@ impl Routing {
 
 #[cfg(test)]
 mod tests {
+    mod custom;
     use super::*;
     use crate::config::Action;
     use crate::{

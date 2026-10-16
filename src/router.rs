@@ -7,8 +7,8 @@
 
 use crate::{
     input::{
-        ABS_MT_SLOT, ABS_MT_TRACKING_ID, Device, EV_ABS, EV_KEY, EV_SYN, Frame, RawEvent,
-        SYN_REPORT, Source,
+        ABS_MT_SLOT, ABS_MT_TRACKING_ID, Device, EV_ABS, EV_KEY, EV_REL, EV_SW, EV_SYN, Frame,
+        RawEvent, SYN_REPORT, Source,
     },
     transport::Ready,
 };
@@ -188,6 +188,7 @@ struct Group {
     ownership: Ownership,
     pending: Vec<Frame>,
     preview: Option<crate::input::AbsoluteState>,
+    completion: bool,
 }
 
 /// All descriptor lifetime operations remain the backend's responsibility.
@@ -266,6 +267,18 @@ impl Router {
     }
     pub fn physical_neutral(&self) -> bool {
         self.physical.neutral()
+    }
+    pub(crate) fn completion_pending(&self) -> bool {
+        self.group.as_ref().is_some_and(|group| group.completion)
+    }
+    pub(crate) fn release_completion(&mut self) {
+        if let Some(group) = &mut self.group {
+            group.completion = false;
+        }
+        if self.physical.neutral() && self.ownership() != Some(Ownership::Pending) {
+            self.group = None;
+        }
+        self.reset_epoch();
     }
     pub fn queued_frames(&self) -> usize {
         self.queue.len()
@@ -385,6 +398,7 @@ impl Router {
         }
         self.offset = self.offset.max(delay);
         group.ownership = Ownership::Forwarded;
+        group.completion = false;
         group.preview = None;
         let pending = std::mem::take(&mut group.pending);
         for frame in pending {
@@ -437,6 +451,15 @@ impl Router {
         candidate: Option<Candidate>,
         at: Duration,
     ) -> Result<(), Fault> {
+        self.push_with_completion(frame, candidate, at, false)
+    }
+    pub(crate) fn push_with_completion(
+        &mut self,
+        frame: Frame,
+        candidate: Option<Candidate>,
+        at: Duration,
+        completion: bool,
+    ) -> Result<(), Fault> {
         // A delayed old reader must not stop a newly connected stream.
         if frame.source != self.device.source {
             return Err(Fault::StaleSource);
@@ -473,12 +496,20 @@ impl Router {
                     matches!(event.kind, crate::input::EV_REL | crate::input::EV_SW)
                         && event.value != 0
                 });
+        let completed = self.physical.neutral()
+            && self.completion_pending()
+            && (begins
+                || frame
+                    .events
+                    .iter()
+                    .any(|event| event.kind == EV_REL && event.value != 0 || event.kind == EV_SW));
         // Reject caller mistakes before mutating physical state or decisions.
         if let Some(value) = candidate
             && (!begins
-                || self.group.as_ref().is_some_and(|group| {
-                    !self.physical.neutral() || group.ownership != Ownership::Pending
-                })
+                || !completed
+                    && self.group.as_ref().is_some_and(|group| {
+                        !self.physical.neutral() || group.ownership != Ownership::Pending
+                    })
                 || value.id <= self.last_candidate
                 || value.authorization != self.authorization
                 || matches!(value.policy, Policy::Buffer { join, decision }
@@ -487,6 +518,9 @@ impl Router {
             return Err(Fault::InvalidCandidate);
         }
         self.advance(frame.at)?;
+        if completed {
+            self.release_completion();
+        }
         // A completed pending tap may be followed by another group before its
         // decision deadline. Commit that tap before accepting the new start.
         if self.physical.neutral()
@@ -512,6 +546,7 @@ impl Router {
                 ownership,
                 pending: Vec::new(),
                 preview: (ownership == Ownership::Pending).then(|| self.planned_absolute.clone()),
+                completion: completion && candidate.is_some(),
             });
         } else if candidate.is_some() {
             return Err(Fault::InvalidCandidate);
@@ -556,7 +591,10 @@ impl Router {
             Some(Ownership::Claimed | Ownership::Draining) => {}
             Some(Ownership::Forwarded) | None => self.schedule(frame)?,
         }
-        if self.physical.neutral() && self.ownership() != Some(Ownership::Pending) {
+        if self.physical.neutral()
+            && self.ownership() != Some(Ownership::Pending)
+            && !self.completion_pending()
+        {
             self.group = None;
         }
         self.advance(at)
@@ -621,7 +659,7 @@ impl Router {
         group.pending.clear();
         group.preview = None;
         group.ownership = Ownership::Claimed;
-        if self.physical.neutral() {
+        if self.physical.neutral() && !group.completion {
             self.group = None;
         }
         self.reset_epoch();
@@ -656,6 +694,7 @@ impl Router {
             Some(Ownership::Pending) => self.forward(at)?,
             Some(Ownership::Claimed) => {
                 self.group.as_mut().unwrap().ownership = Ownership::Draining;
+                self.group.as_mut().unwrap().completion = false;
             }
             _ => return Err(Fault::TooLate),
         }

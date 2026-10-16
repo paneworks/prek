@@ -31,6 +31,9 @@ pub(super) fn validate(
     let mut subscriptions = BTreeSet::new();
     for binding in bindings {
         binding.definition.validate().map_err(error)?;
+        if config.rules.iter().any(|rule| matches!(&rule.trigger, crate::config::Trigger::Custom { recognizer, .. } if recognizer.name == binding.definition.name && recognizer != &binding.definition)) {
+            return Err(error("recognizer binding differs from its native rule declaration"));
+        }
         if config.mode != crate::config::Mode::Observe
             || !config.policy.allow_input_events
             || !binding.definition.selectors.iter().all(|selector| {
