@@ -510,6 +510,13 @@ nix run .#cage-test -- --layers --input --power --windows # Lua DPMS and targete
 nix run .#cage-touch-test               # direct headless Cage touch receipts
 ```
 
+On NixOS, use `oslo make test-cage-touch` and the explicitly patched
+`oslo make test-cage-wayland-fix` for hardware-rendered checks without nixGL.
+`oslo make test-cage` preserves the separate stock dependency gate. See
+[local NixOS development](docs/nixos.md#local-development-and-cage-tests) for
+the development shell, known stock startup failure, resource limits and
+user-launched privileged gates.
+
 The runner uses private Wayland sockets, a scratch home/XDG directories and a
 private session bus with service activation disabled. The system bus and seatd
 socket point to nonexistent paths. It injects B and Shift+A into the nested

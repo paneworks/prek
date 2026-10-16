@@ -19,7 +19,8 @@ Remote mode asks for sudo after building, then preflights inside its new login.
 Logs: target/root-handoff/latest/console.log and cage/run-*/morf-native-root.log
 Optional paths: PREK_MORF_REPO, PREK_MORF_BINARY, PREK_MORF_SHELL.
 Default Morf: ../morf/target/release/morf (legacy ../mold fallback).
-The local variant uses Morf's nixGL/nixVulkan wrappers and detects NVIDIA_VERSION
+On NixOS the local variant uses the system graphics driver directly.
+Elsewhere it uses Morf's nixGL/nixVulkan wrappers and detects NVIDIA_VERSION
 from the loaded kernel driver unless you supply it explicitly.
 The probe tests native Morf handoff/restoration; it opens no evdev/uinput devices.
 HELP
@@ -71,10 +72,15 @@ else
   fixture=cage-root-test-wayland-fix
   if (( remote )); then fixture=cage-root-session-test-wayland-fix; fi
   flags=(--hardware-rendering --modes --input --power)
-  gpu=(nixGL nixVulkan)
-  if [[ -z ${NVIDIA_VERSION:-} && -r /sys/module/nvidia/version ]]; then
-    NVIDIA_VERSION=$(cat /sys/module/nvidia/version)
-    export NVIDIA_VERSION
+  if [[ -e /etc/NIXOS ]]; then
+    unset NVIDIA_VERSION
+    echo 'Native NixOS graphics; nixGL/nixVulkan wrappers are disabled.'
+  else
+    gpu=(nixGL nixVulkan)
+    if [[ -z ${NVIDIA_VERSION:-} && -r /sys/module/nvidia/version ]]; then
+      NVIDIA_VERSION=$(cat /sys/module/nvidia/version)
+      export NVIDIA_VERSION
+    fi
   fi
   echo 'TEST-ONLY local Wayland dependency fix, not unmodified stock acceptance.'
 fi

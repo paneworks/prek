@@ -1,5 +1,50 @@
 # NixOS setup
 
+## Local development and Cage tests
+
+The flake supplies Rust, Python and ShellCheck; no Ubuntu packages or global
+Cage installation are needed. From this checkout:
+
+```sh
+mkdir -p target/cargo-home
+export CARGO_HOME="$PWD/target/cargo-home"
+export CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2
+nix develop --no-write-lock-file
+oslo make verify
+oslo make test-cage-touch
+oslo make test-cage-wayland-fix
+```
+
+The Cage recipes use the NixOS graphics driver directly, with one Nix build job
+and two build cores. `hardware.graphics.enable` must already be configured;
+`RENDER_NODE` overrides `/dev/dri/renderD128`. They create private headless
+compositors, homes, sockets and session buses, not a VM or a host login. Receipts
+are under `target/cage-touch/run-*` and `target/cage-host/run-*`. The touch fixture
+is a test-only Cage patch; the ordinary keyboard fixture uses stock dependencies.
+Neither opens physical input devices or enables production routing.
+
+`test-cage-wayland-fix` explicitly selects the patched Aquamarine fixture
+described in [the compositor notes](ubuntu-compositors.md#explicit-nested-wayland-test-variant).
+It passed the keyboard, Lua, mode-change and DPMS checks on NixOS with NVIDIA
+595.71.05. Its results are not unmodified stock compositor acceptance.
+`oslo make test-cage` retains the original unpatched Hyprland 0.54.3 fixture and
+adds window-action checks. On this NVIDIA setup it timed out waiting for usable
+nested output dimensions; the runner does not silently substitute the patch.
+
+Only the user launches privileged tests, as a regular user without a sudo
+prefix: `./tests/run-root-routing.sh` for isolated synthetic kernel devices, or
+`./tests/run-root-handoff.sh --remote-session` for the bounded native PAM/logind
+handoff. The latter requires a separately built Morf ELF and shell; it refuses
+an occupied local user session. NixOS skips nixGL/nixVulkan wrappers and the
+root-session coordinator uses immutable Nix paths for systemd and console tools.
+Logs remain in `target/root-routing/latest` or `target/root-handoff/latest`.
+Do not launch the remote handoff from an active desktop: it can temporarily stop
+the display manager, with an owned cleanup guard for restoration.
+
+The driver setup is described in the [NixOS graphics documentation](https://wiki.nixos.org/wiki/Graphics).
+
+## System service
+
 The upstream module currently provides supervised **observation**, approved Lua
 callbacks, permitted normalized input, and acknowledged rule/layer/mode edits.
 Production input routing and physical phone takeover remain unavailable. Enabling

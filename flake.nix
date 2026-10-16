@@ -330,7 +330,7 @@
           };
           default = pkgs.mkShell {
             packages = with pkgs; [
-              rustc cargo rustfmt clippy rust-analyzer git-cliff
+              rustc cargo rustfmt clippy rust-analyzer git-cliff python3 shellcheck
             ];
           };
         });

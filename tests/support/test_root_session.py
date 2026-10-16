@@ -18,12 +18,63 @@ from unittest import mock
 import root_session as session
 
 
+TOOLS = {name: f"/nix/store/fixed-test-tools/bin/{name}"
+         for name in ("systemctl", "loginctl", "systemd-run", "journalctl", "chvt")}
+session.configure_tools(dict(tools=TOOLS))
+
+
 spec = importlib.util.spec_from_file_location("morf_controls", Path(__file__).with_name("morf-controls.py"))
 controls = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(controls)
 
 
 class Policy(unittest.TestCase):
+    def test_tools_are_fixed_by_policy_not_path_or_usr_bin(self):
+        with mock.patch.dict(session.TOOLS, clear=True):
+            for tools in ({}, dict(TOOLS, arbitrary="/tmp/command"), dict(TOOLS, chvt="chvt"),
+                          dict(TOOLS, chvt="/fixed/../command"), dict(TOOLS, chvt=None)):
+                with self.subTest(tools=tools), self.assertRaises(ValueError):
+                    session.configure_tools(dict(tools=tools))
+            session.configure_tools(dict(tools=TOOLS))
+            with mock.patch.dict(os.environ, PATH="/attacker/bin"), \
+                    mock.patch.object(session, "command", return_value=subprocess.CompletedProcess([], 0, "[]", "")) as command:
+                self.assertEqual(session.sessions(), [])
+            self.assertEqual(command.call_args.args[0], [TOOLS["loginctl"], "list-sessions", "--json=short"])
+            self.assertEqual(session.service_command("owned.service", [], [])[0], TOOLS["systemd-run"])
+
+    def test_nixos_uses_native_graphics_and_other_hosts_keep_wrappers(self):
+        config = dict(nix="/fixed/nix", repo="/owned/morf-repo", morf="/owned/morf", shell="/owned/init.lua",
+                      output="/owned/logs", socket="/run/owned/rpc")
+        for nixos in (True, False):
+            with self.subTest(nixos=nixos):
+                call = session.fixture_command(config, dict(fixture="/fixed/fixture"), nixos=nixos)
+                command = call[call.index("-c") + 1:]
+                self.assertEqual(command[:1] if nixos else command[:3],
+                                 ["/fixed/fixture"] if nixos else ["nixGL", "nixVulkan", "/fixed/fixture"])
+                self.assertEqual(command[-2:], ["--morf-root-probe-socket", "/run/owned/rpc"])
+                self.assertIn("--hardware-rendering", command)
+
+    def test_pam_child_selects_host_graphics_without_inheriting_nvidia_wrappers(self):
+        state = dict(uid=os.getuid(), home="/owned/home", name="test-user", socket="/run/owned/rpc",
+                     child=dict(nix="/fixed/nix", repo="/owned/morf-repo", morf="/owned/morf",
+                                shell="/owned/init.lua", output="/owned/logs", nvidia="595.71.05"))
+        for nixos in (True, False):
+            with self.subTest(nixos=nixos), \
+                    mock.patch.object(session, "checked_runtime", return_value=Path("/run/owned")), \
+                    mock.patch.object(session, "read_json", return_value=state), \
+                    mock.patch.object(Path, "exists", return_value=nixos), \
+                    mock.patch.object(session, "exchange") as exchange, \
+                    mock.patch.object(session.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run, \
+                    mock.patch.dict(os.environ, NVIDIA_VERSION="foreign-driver"):
+                self.assertEqual(session.child(mock.Mock(child=Path("/run/owned")),
+                                               dict(probe="/fixed/probe", fixture="/fixed/fixture")), 0)
+                self.assertEqual(run.call_count, 3)
+                call = run.call_args.args[0]
+                self.assertEqual(call[call.index("-c") + 1], "/fixed/fixture" if nixos else "nixGL")
+                self.assertEqual(run.call_args.kwargs["env"].get("NVIDIA_VERSION"),
+                                 None if nixos else "595.71.05")
+                self.assertEqual(exchange.call_args.args, (state["socket"], dict(op="done", code=0)))
+
     def state(self):
         return dict(uid=1000, gid=1000, vt=9, leader=123, session="c99", scope="session-c99.scope",
                     child=dict(morf="/owned/morf"), user_unit="prek-owned.service", original_vt=1,
@@ -198,7 +249,7 @@ class CleanupModel(unittest.TestCase):
                 raise RuntimeError("modeled host failure")
             if "terminate-session" in arguments:
                 alive[0] = False
-            if "/usr/bin/chvt" in arguments:
+            if TOOLS["chvt"] in arguments:
                 current_vt[0] = int(arguments[-1])
             return subprocess.CompletedProcess(arguments, 0, "", "")
 
@@ -222,10 +273,10 @@ class CleanupModel(unittest.TestCase):
     def test_success_stops_only_owned_unit_session_and_restores_dm_vt(self):
         code, calls, snapshots, marker, ioctl = self.run_cleanup()
         self.assertEqual(code, 0)
-        self.assertIn(["/usr/bin/systemctl", "stop", "prek-owned.service"], calls)
-        self.assertIn(["/usr/bin/loginctl", "terminate-session", "c99"], calls)
-        self.assertIn(["/usr/bin/chvt", "1"], calls)
-        self.assertIn(["/usr/bin/systemctl", "start", "display-manager.service"], calls)
+        self.assertIn([TOOLS["systemctl"], "stop", "prek-owned.service"], calls)
+        self.assertIn([TOOLS["loginctl"], "terminate-session", "c99"], calls)
+        self.assertIn([TOOLS["chvt"], "1"], calls)
+        self.assertIn([TOOLS["systemctl"], "start", "display-manager.service"], calls)
         self.assertEqual(snapshots[-1]["cleanup"]["status"], "passed")
         self.assertFalse(snapshots[-1]["cleanup"]["ssh_sessions_touched"])
         self.assertFalse(snapshots[-1]["cleanup"]["sudoers_modified"])
@@ -233,11 +284,11 @@ class CleanupModel(unittest.TestCase):
         self.assertEqual(ioctl.call_args.args[1:], (0x5608, 9))
 
     def test_every_prior_cleanup_failure_still_attempts_display_manager_restore(self):
-        for failure in ("stop", "terminate-session", "/usr/bin/chvt"):
+        for failure in ("stop", "terminate-session", TOOLS["chvt"]):
             with self.subTest(failure=failure):
                 code, calls, snapshots, marker, _ioctl = self.run_cleanup(fail=failure)
                 self.assertEqual(code, 1)
-                self.assertIn(["/usr/bin/systemctl", "start", "display-manager.service"], calls)
+                self.assertIn([TOOLS["systemctl"], "start", "display-manager.service"], calls)
                 self.assertEqual(snapshots[-1]["cleanup"]["status"], "failed")
                 marker.unlink.assert_not_called()
 
@@ -245,19 +296,19 @@ class CleanupModel(unittest.TestCase):
         code, calls, _snapshots, _marker, _ioctl = self.run_cleanup(foreign=True)
         self.assertEqual(code, 1)
         self.assertFalse(any("terminate-session" in call for call in calls))
-        self.assertIn(["/usr/bin/systemctl", "start", "display-manager.service"], calls)
+        self.assertIn([TOOLS["systemctl"], "start", "display-manager.service"], calls)
 
     def test_unowned_console_is_not_switched(self):
         code, calls, _snapshots, _marker, _ioctl = self.run_cleanup(initial_vt=8)
         self.assertEqual(code, 1)
-        self.assertFalse(any("/usr/bin/chvt" in call for call in calls))
+        self.assertFalse(any(TOOLS["chvt"] in call for call in calls))
 
     def test_initially_inactive_dm_and_unstarted_user_are_left_untouched(self):
         state = self.state()
         state.update(session=None, leader=None, user_started=False, activated=False, dm=dict(ActiveState="inactive"))
         code, calls, _snapshots, marker, ioctl = self.run_cleanup(state, initial_vt=1)
         self.assertEqual(code, 0)
-        self.assertFalse(any("start" in call or "terminate-session" in call or "/usr/bin/chvt" in call for call in calls))
+        self.assertFalse(any("start" in call or "terminate-session" in call or TOOLS["chvt"] in call for call in calls))
         ioctl.assert_not_called()
         marker.unlink.assert_called_once()
 
@@ -307,7 +358,7 @@ class ProtocolModel(unittest.TestCase):
 
             def command(arguments, **_kwargs):
                 calls.append(arguments)
-                if arguments[0] == "/usr/bin/systemd-run":
+                if arguments[0] == TOOLS["systemd-run"]:
                     thread = threading.Thread(target=client)
                     threads.append(thread)
                     thread.start()

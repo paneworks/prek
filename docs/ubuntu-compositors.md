@@ -64,8 +64,10 @@ nix build .#cage-test-wayland-fix --out-link target/cage-wayland-fix
 target/cage-wayland-fix/bin/prek-cage-host-test --modes --input --power
 ```
 
-For NVIDIA hardware, launch that command through a matching nixGL wrapper and
-add `--hardware-rendering`. This runner changes only its process-local library
+On NixOS, run `oslo make test-cage-wayland-fix` directly with the system graphics
+driver; no nixGL wrapper is needed. For NVIDIA hardware on other distributions,
+launch that command through a matching nixGL wrapper and add
+`--hardware-rendering`. This runner changes only its process-local library
 search path; it never installs or replaces a compositor. It prints the test-only
 warning and verifies the actual loaded Aquamarine paths from its owned
 Hyprland's `/proc/PID/maps`. Each run retains `nested.json` and

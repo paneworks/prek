@@ -238,11 +238,37 @@ make.recipe{
 make.recipe{ name = "test-root-session", desc = "unprivileged remote-handoff transport and cleanup models",
              run = function()
                sh.python3("-m", "unittest", "discover", "-s", "tests/support", "-p", "test_root_session.py", "-v")
+               sh.bash("-n", "tests/run-root-handoff.sh")
+               sh.shellcheck("tests/run-root-handoff.sh")
              end }
 
 make.recipe{ name = "test-root-routing", desc = "unprivileged kernel-runner receipts and cleanup tests",
              run = function()
                sh.python3("-m", "unittest", "discover", "-s", "tests/support", "-p", "test_root_routing.py", "-v")
+               sh.bash("-n", "tests/run-root-routing.sh")
+               sh.shellcheck("tests/run-root-routing.sh")
+             end }
+
+local function cage_test(fixture, flags)
+  local command = { "nix", "--option", "eval-cache", "false", "--extra-experimental-features",
+    "nix-command flakes", "--max-jobs", "1", "--cores", "2", "run", "--no-write-lock-file",
+    ".#" .. fixture, "--", "--hardware-rendering" }
+  for _, flag in ipairs(flags) do command[#command + 1] = flag end
+  assert(oslo.run(command).ok, "local Cage fixture failed")
+end
+
+make.recipe{ name = "test-cage", desc = "local GPU Cage/Hyprland keyboard, Lua and window receipts",
+             run = function() cage_test("cage-test", { "--layers", "--input", "--power", "--windows" }) end }
+
+make.recipe{ name = "test-cage-wayland-fix", desc = "explicit test-only patched nested compositor receipts",
+             run = function() cage_test("cage-test-wayland-fix", { "--modes", "--input", "--power" }) end }
+
+make.recipe{ name = "test-cage-touch", desc = "local GPU Cage two-contact delivery and neutral releases",
+             run = function() cage_test("cage-touch-test", {}) end }
+
+make.recipe{ name = "test-cage-startup", desc = "unprivileged nested output and library-provenance checks",
+             run = function()
+               sh.python3("-m", "unittest", "discover", "-s", "tests/support", "-p", "test_cage_startup.py", "-v")
              end }
 
 make.recipe{ name = "check", desc = "type-check every target",
@@ -281,6 +307,6 @@ make.alias("c", "compile")
 make.recipe{
   name = "verify",
   desc = "the whole local gate",
-  deps = { "fmt-check", "check-all", "test-all", "test-routing-helper", "test-composition-helper", "test-root-session", "test-root-routing", "clippy", "rustdoc" },
+  deps = { "fmt-check", "check-all", "test-all", "test-routing-helper", "test-composition-helper", "test-root-session", "test-root-routing", "test-cage-startup", "clippy", "rustdoc" },
 }
 make.alias("v", "verify")

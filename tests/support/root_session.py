@@ -17,10 +17,25 @@ import time
 import uuid
 
 
-ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8"}
+ENV = {"PATH": "/run/wrappers/bin:/run/current-system/sw/bin:/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8"}
+TOOLS = {}
 MARKER = Path("/run/prek-root-handoff-active")
 MAX_MESSAGE = 1024 * 1024
 VT = 9
+
+
+def configure_tools(policy):
+    tools = policy["tools"]
+    if (not isinstance(tools, dict) or set(tools) != {"systemctl", "loginctl", "systemd-run", "journalctl", "chvt"}
+            or any(not isinstance(path, str) or not Path(path).is_absolute() or "\x00" in path
+                   or ".." in Path(path).parts for path in tools.values())):
+        raise ValueError("root-session tools must be fixed absolute paths from the Nix policy")
+    TOOLS.clear()
+    TOOLS.update(tools)
+
+
+def tool(name):
+    return TOOLS[name]
 
 
 def log(message):
@@ -79,8 +94,8 @@ def command(arguments, *, check=True, timeout=20):
 
 
 def properties(kind, name):
-    tool = "/usr/bin/loginctl" if kind == "session" else "/usr/bin/systemctl"
-    result = command([tool, "show-session" if kind == "session" else "show", name], check=False, timeout=5)
+    executable = tool("loginctl" if kind == "session" else "systemctl")
+    result = command([executable, "show-session" if kind == "session" else "show", name], check=False, timeout=5)
     if result.returncode:
         if "not found" in result.stderr or "could not be found" in result.stderr or "No session" in result.stderr:
             return {}
@@ -89,7 +104,7 @@ def properties(kind, name):
 
 
 def sessions():
-    result = json.loads(command(["/usr/bin/loginctl", "list-sessions", "--json=short"], timeout=5).stdout)
+    result = json.loads(command([tool("loginctl"), "list-sessions", "--json=short"], timeout=5).stdout)
     if not isinstance(result, list) or len(result) > 4096:
         raise ValueError("invalid logind session inventory")
     return result
@@ -218,7 +233,7 @@ def check_free_vt():
 
 
 def service_command(unit, arguments, properties_list, *, wait=False):
-    result = ["/usr/bin/systemd-run", f"--unit={unit}", "--service-type=exec"]
+    result = [tool("systemd-run"), f"--unit={unit}", "--service-type=exec"]
     if wait:
         result += ["--wait", "--pipe", "--collect"]
     result += [f"--property={value}" for value in properties_list]
@@ -310,7 +325,7 @@ def cleanup(runtime):
 
         def stop_user():
             if properties("unit", state["user_unit"]).get("ActiveState") not in (None, "inactive", "failed"):
-                command(["/usr/bin/systemctl", "stop", state["user_unit"]], timeout=15)
+                command([tool("systemctl"), "stop", state["user_unit"]], timeout=15)
         attempt("stop owned user unit", stop_user)
 
         def stop_session():
@@ -318,7 +333,7 @@ def cleanup(runtime):
                 facts = properties("session", state["session"])
                 if facts:
                     validate_session(facts, state, state["leader"])
-                    command(["/usr/bin/loginctl", "terminate-session", state["session"]], timeout=10)
+                    command([tool("loginctl"), "terminate-session", state["session"]], timeout=10)
                     until = time.monotonic() + 5
                     while properties("session", state["session"]):
                         if time.monotonic() >= until:
@@ -329,7 +344,7 @@ def cleanup(runtime):
         def restore_vt():
             current = active_vt()
             if current == VT and state["activated"]:
-                command(["/usr/bin/chvt", str(state["original_vt"])], timeout=5)
+                command([tool("chvt"), str(state["original_vt"])], timeout=5)
             elif current != state["original_vt"]:
                 raise RuntimeError("console changed outside the test; leaving the new VT untouched")
         attempt("restore original VT", restore_vt)
@@ -349,13 +364,13 @@ def cleanup(runtime):
 
         def restore_dm():
             if state["dm"].get("ActiveState") == "active":
-                command(["/usr/bin/systemctl", "start", "display-manager.service"], timeout=25)
+                command([tool("systemctl"), "start", "display-manager.service"], timeout=25)
                 if properties("unit", "display-manager.service").get("ActiveState") != "active":
                     raise RuntimeError("display manager did not become active again")
         attempt("restore display manager", restore_dm)
 
         try:
-            journal = command(["/usr/bin/journalctl", "--no-pager", "-o", "cat", "-n", "2000",
+            journal = command([tool("journalctl"), "--no-pager", "-o", "cat", "-n", "2000",
                                "-u", state["user_unit"]], check=False, timeout=3)
             log(journal.stdout)
         except Exception as error:
@@ -385,7 +400,7 @@ def supervise(args, policy):
     write_json(runtime / "state.json", state)
     if state["dm"].get("ActiveState") == "active":
         log("Stopping display-manager.service for this test; ExecStopPost will restore it.")
-        command(["/usr/bin/systemctl", "stop", "display-manager.service"])
+        command([tool("systemctl"), "stop", "display-manager.service"])
     ready = False
     probed = False
     probe_code = None
@@ -423,7 +438,7 @@ def supervise(args, policy):
                         state.update(session=facts["Id"], scope=facts["Scope"], leader=leader)
                         state["activated"] = True
                         write_json(runtime / "state.json", state)
-                        command(["/usr/bin/loginctl", "activate", state["session"]])
+                        command([tool("loginctl"), "activate", state["session"]])
                         until = time.monotonic() + 5
                         while properties("session", state["session"]).get("Active") != "yes":
                             if time.monotonic() >= until:
@@ -450,7 +465,7 @@ def supervise(args, policy):
                             if code == 0 and (not probed or probe_code != 0):
                                 raise RuntimeError("fixture reported success without one successful native probe")
                             connection.sendall(b'{"code":0}\n')
-                            journal = command(["/usr/bin/journalctl", "--no-pager", "-o", "cat", "-n", "2000",
+                            journal = command([tool("journalctl"), "--no-pager", "-o", "cat", "-n", "2000",
                                                "-u", state["user_unit"]], check=False)
                             log(journal.stdout)
                             return code
@@ -465,6 +480,16 @@ def supervise(args, policy):
     raise TimeoutError("owned local handoff session exceeded its lifetime")
 
 
+def fixture_command(config, policy, *, nixos):
+    wrappers = [] if nixos else ["nixGL", "nixVulkan"]
+    return [config["nix"], "--option", "eval-cache", "false", "--extra-experimental-features",
+            "nix-command flakes", "--max-jobs", "1", "--cores", "2", "develop", "--impure",
+            config["repo"], "--no-write-lock-file", "-c", *wrappers, policy["fixture"],
+            "--hardware-rendering", "--modes", "--input", "--power", "--morf", config["morf"],
+            "--morf-shell", config["shell"], "--output", config["output"],
+            "--morf-root-probe-socket", config["socket"]]
+
+
 def child(args, policy):
     runtime = checked_runtime(args.child)
     state = read_json(runtime / "child.json", group_readable=True)
@@ -473,18 +498,14 @@ def child(args, policy):
     exchange(state["socket"], dict(op="ready"))
     config = state["child"]
     environment = dict(ENV, HOME=state["home"], USER=state["name"], LOGNAME=state["name"])
-    if config["nvidia"]:
+    nixos = Path("/etc/NIXOS").exists()
+    if config["nvidia"] and not nixos:
         environment["NVIDIA_VERSION"] = config["nvidia"]
     code = 125
     try:
         for mode in ("--check-library", "--preflight"):
             subprocess.run([policy["probe"], mode], env=environment, check=True, timeout=10)
-        call = [config["nix"], "--option", "eval-cache", "false", "--extra-experimental-features",
-                "nix-command flakes", "--max-jobs", "1", "--cores", "2", "develop", "--impure",
-                config["repo"], "--no-write-lock-file", "-c", "nixGL", "nixVulkan", policy["fixture"],
-                "--hardware-rendering", "--modes", "--input", "--power", "--morf", config["morf"],
-                "--morf-shell", config["shell"], "--output", config["output"],
-                "--morf-root-probe-socket", state["socket"]]
+        call = fixture_command(dict(config, socket=state["socket"]), policy, nixos=nixos)
         result = subprocess.run(call, env=environment, timeout=170)
         code = result.returncode if 0 <= result.returncode <= 255 else 125
     finally:
@@ -505,6 +526,7 @@ def main():
     if not args.child:
         require_root()
     policy = json.loads(args.policy.read_text())
+    configure_tools(policy)
     if args.bootstrap:
         if any(getattr(args, name) is None for name in ("morf", "morf_shell", "morf_repo", "nix", "output")):
             parser.error("bootstrap requires explicit user fixture paths")
