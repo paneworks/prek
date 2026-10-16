@@ -308,9 +308,9 @@ outside the current grant or ownership freshness fail before submission.
 Failed mutations are never repeated. Ownership loss, retirement and release
 turn unresolved work into uncertain results; terminal outcomes are retained.
 
-This host backend does not add a public session payload request or advertise
-`MorfActions`. Agent plan transport, native rendered-context authority,
-public cancellation transport and full physical cutover remain required
+The session sends typed Morf selections and cancellation through the broker;
+it cannot supply a native payload. Public `MorfActions` negotiation stays
+gated. Native rendered-context authority and full physical cutover remain required
 before production negotiation. The opt-in root script tests the native backend
 directly, not the broker's live action-grant path; its receipt keeps
 `broker_grant_tested=false` and `native_action_rendering_tested=false`.
@@ -343,6 +343,34 @@ verifies a different gesture still dispatches on the same lease, then checks
 scope revocation before worker-exit restoration. Its receipt records
 `native_gesture_cancel_supported`, `native_gesture_cancel_tested` and
 `native_scope_revocation_tested`; a legacy provider cannot be reported as a
-scoped-cancellation pass. Production agent transport, native rendered-context
+scoped-cancellation pass. Production negotiation, native rendered-context
 authority, full ownership orchestration and physical/phone acceptance remain
 unfinished.
+
+The session's `--morf` opt-in installs a metadata-only submission adapter. It
+opens no native socket and cannot turn provider presence into an effect grant.
+The broker currently refuses public negotiation until the rendered-context and
+physical ownership gates are complete. Typed transport and host-fixture tests
+therefore do not establish a working production route.
+
+After an exact delivered grant, the agent sends `MorfAction` with only its
+fence, action ID/ordinal and action enum. The broker reconstructs the frozen
+target, phase and logical motion, revalidates authority and submits once. Each
+offered ordinal admits at most one Morf effect. It retains up to 64 outstanding
+native submissions, and the agent counts native work against its eight-effect
+asynchronous bound. Native receipts are polled every 5 ms while work is pending;
+ownership sampling remains at 100 ms. Idle receipt polling stops when empty.
+
+`MorfResult` completes the agent's effect group only after a terminal native
+outcome. Native controller acceptance maps to `Applied`, without claiming
+presentation. Lost/ambiguous or refused native work is conservative and cannot
+manufacture success. Mixed named-handler plans join that result with their
+owned command children; partial effects remain uncertain. A missing result two seconds
+after the original grant deadline schedules cancellation and reports uncertainty, never resubmission.
+
+`MorfCancel` references only known owning gesture history and introduces no
+new effect. Repeated cleanup is suppressed. Stale generation results cannot
+complete a replacement plan; duplicate/late known results cannot decrement a
+group twice. The broker accepts a native action completion only after its
+correlated result was actually sent. Subscriber overflow removes that subscriber
+and retires its native scope while the input worker remains independent.

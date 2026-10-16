@@ -18,8 +18,10 @@ use std::{
     time::Duration,
 };
 mod hyprland;
+mod morf;
 mod power;
 pub use hyprland::HyprlandAdapter;
+pub use morf::MorfAdapter;
 pub use power::PowerAdapter;
 
 pub const MAX_RUNNING: usize = 8;
@@ -32,6 +34,7 @@ struct Pending {
     resolved: Option<Vec<Action>>,
     power_target: Option<crate::context::OutputState>,
     window_target: Option<hyprland::Target>,
+    morf_target: Option<morf::Target>,
 }
 
 struct Running {
@@ -40,6 +43,10 @@ struct Running {
     ordinal: u64,
     child: Child,
     pidfd: Option<OwnedFd>,
+}
+struct Native {
+    until: Duration,
+    cancelled: bool,
 }
 type ExecutionKey = ([u64; 2], u64, u64, u64, u64);
 struct ExecutionGroup {
@@ -72,6 +79,9 @@ pub struct Executor {
     emitted: VecDeque<(Fence, u64, u64, String)>,
     power: Option<PowerAdapter>,
     hyprland: Option<HyprlandAdapter>,
+    morf: Option<MorfAdapter>,
+    native: BTreeMap<(u64, u64), Native>,
+    native_seen: BTreeMap<u64, u64>,
 }
 impl Executor {
     pub fn new(
@@ -104,6 +114,9 @@ impl Executor {
             emitted: VecDeque::new(),
             power: None,
             hyprland: None,
+            morf: None,
+            native: BTreeMap::new(),
+            native_seen: BTreeMap::new(),
         })
     }
     pub fn transition(&mut self, fence: Fence) -> io::Result<()> {
@@ -125,6 +138,10 @@ impl Executor {
         self.emitted.clear();
         self.power = None;
         self.hyprland = None;
+        self.morf = None;
+        self.native.clear();
+        self.native_seen.clear();
+        self.groups.clear();
         // Already dispatched commands cannot be undone. Keep reaping them,
         // counting them against the bound, and discard their old completions.
         Ok(())
@@ -215,6 +232,24 @@ impl Executor {
             } else {
                 None
             };
+        let morf_target =
+            if protocol::action_capabilities(action).contains(&Capability::MorfActions) {
+                let Event::Matched {
+                    output: Some(output),
+                    ..
+                } = event.as_ref()
+                else {
+                    return Err(protocol::invalid("Morf action requires its frozen output"));
+                };
+                Some(
+                    self.morf
+                        .as_ref()
+                        .ok_or_else(|| protocol::invalid("Morf submission adapter unavailable"))?
+                        .target(output, now)?,
+                )
+            } else {
+                None
+            };
         if self.seen.get(id).is_some_and(|old| ordinal <= old)
             || (!self.seen.contains_key(id) && self.seen.len() >= MAX_GESTURES)
             || self.pending.len() >= MAX_PENDING
@@ -235,6 +270,7 @@ impl Executor {
                 resolved: None,
                 power_target,
                 window_target,
+                morf_target,
             },
         );
         Ok(())
@@ -252,6 +288,23 @@ impl Executor {
         }
         self.hyprland = Some(adapter);
         self.reported_available = None;
+        Ok(())
+    }
+    pub fn sync_morf_context(&mut self, view: crate::context_transfer::View) -> io::Result<()> {
+        if !self.capabilities.contains(&Capability::MorfActions) || view.fence != self.fence {
+            return Err(protocol::invalid("Morf context exceeds executor authority"));
+        }
+        self.reported_available = None;
+        if let Some(adapter) = self.morf.as_mut() {
+            return adapter.update_context(view);
+        }
+        let adapter = MorfAdapter::new(view)?;
+        if adapter.seat() != Some(self.seat.as_str()) || adapter.fence() != self.fence {
+            return Err(protocol::invalid(
+                "Morf adapter belongs to another seat/fence",
+            ));
+        }
+        self.morf = Some(adapter);
         Ok(())
     }
     pub fn update_hyprland_context(
@@ -483,6 +536,21 @@ impl Executor {
         if fence != self.fence || id == 0 || ordinal == 0 {
             return Err(protocol::invalid("stale action cancellation"));
         }
+        if self.seen.get(&id).is_none_or(|seen| ordinal > *seen) {
+            return Err(protocol::invalid("cancellation has no offered action"));
+        }
+        if self.native_seen.contains_key(&id) {
+            let send = self.cancelled.get(&id).is_none_or(|old| *old < ordinal);
+            for ((gesture, _), native) in &mut self.native {
+                if *gesture == id {
+                    native.cancelled = true;
+                }
+            }
+            if send {
+                self.queue(Request::MorfCancel { fence, id, ordinal })?;
+            }
+            self.remember_cancellation(id, ordinal);
+        }
         let Some(pending) = self.pending.get_mut(&(id, ordinal)) else {
             // Ordered control can repeat a cancellation while an earlier
             // acknowledgement is in flight. Already dispatched children remain
@@ -568,13 +636,19 @@ impl Executor {
                 .iter()
                 .filter(|action| matches!(action, Action::Command { .. }))
                 .count();
-            if self.running.len() + commands > MAX_RUNNING
+            let native = actions
+                .iter()
+                .filter(|action| matches!(action, Action::Morf { .. }))
+                .count();
+            if self.running.len() + self.native.len() + commands + native > MAX_RUNNING
+                || native > 1
                 || self.emitted.len() + actions.len() > MAX_PENDING
                 || actions.iter().any(|action| {
                     !matches!(
                         action,
                         Action::Command { .. }
                             | Action::Event { .. }
+                            | Action::Morf { .. }
                             | Action::Power {
                                 action: crate::config::PowerAction::Wake
                                     | crate::config::PowerAction::Blank
@@ -592,8 +666,22 @@ impl Executor {
                     && (self.power.is_none() || pending.power_target.is_none())
                 || actions.iter().any(|action| matches!(action, Action::Hyprland { .. }))
                     && (self.hyprland.is_none() || pending.window_target.is_none())
+                || native > 0 && (self.morf.is_none() || pending.morf_target.is_none())
+                || actions.iter().any(|action| matches!(action,Action::Morf {action}
+                    if crate::morf::controls::Request::from_event(self.fence,&pending.event,*action).is_err()))
             {
                 self.complete(id, ordinal, Completion::Unavailable)?;
+                continue;
+            }
+            if native > 0
+                && self
+                    .morf
+                    .as_ref()
+                    .unwrap()
+                    .check(pending.morf_target.as_ref().unwrap(), monotonic()?)
+                    .is_err()
+            {
+                self.complete(id, ordinal, Completion::Cancelled)?;
                 continue;
             }
             let mut count = 0;
@@ -613,6 +701,39 @@ impl Executor {
                     self.emitted.push_back((self.fence, id, ordinal, name));
                     applied = true;
                     emitted_event = true;
+                    continue;
+                }
+                if let Action::Morf { action } = action {
+                    if self
+                        .morf
+                        .as_ref()
+                        .unwrap()
+                        .check(pending.morf_target.as_ref().unwrap(), monotonic()?)
+                        .is_err()
+                    {
+                        result = if applied {
+                            Completion::Uncertain
+                        } else {
+                            Completion::Cancelled
+                        };
+                        break;
+                    }
+                    self.queue(Request::MorfAction {
+                        fence: self.fence,
+                        id,
+                        ordinal,
+                        action,
+                    })?;
+                    self.native.insert(
+                        (id, ordinal),
+                        Native {
+                            until: pending.expires.unwrap() + Duration::from_secs(2),
+                            cancelled: false,
+                        },
+                    );
+                    self.native_seen.insert(id, ordinal);
+                    count += 1;
+                    applied = true;
                     continue;
                 }
                 if let Action::Power { action } = action {
@@ -708,44 +829,112 @@ impl Executor {
             if let Some(status) = self.running[index].child.try_wait()? {
                 let running = self.running.remove(index);
                 if running.fence == self.fence {
-                    let group = self
-                        .groups
-                        .get_mut(&execution_key(running.fence, running.id, running.ordinal))
-                        .ok_or_else(|| protocol::invalid("missing action execution group"))?;
-                    group.remaining -= 1;
-                    if !status.success() && group.result == Completion::Applied {
-                        group.result = if group.multiple_effects {
-                            Completion::Uncertain
+                    self.finish_effect(
+                        running.id,
+                        running.ordinal,
+                        if status.success() {
+                            Completion::Applied
                         } else {
                             Completion::Unavailable
-                        };
-                    }
-                    if group.remaining != 0 {
-                        continue;
-                    }
-                    let result = group.result;
-                    self.groups
-                        .remove(&execution_key(running.fence, running.id, running.ordinal));
-                    self.complete(running.id, running.ordinal, result)?;
+                        },
+                    )?;
                 } else {
                     self.groups
                         .remove(&execution_key(running.fence, running.id, running.ordinal));
                 }
             }
         }
+        let now = monotonic()?;
+        let expired = self
+            .native
+            .iter()
+            .filter(|(_, native)| now >= native.until)
+            .map(|(key, _)| *key)
+            .collect::<Vec<_>>();
+        for (id, ordinal) in expired {
+            let native = self.native.remove(&(id, ordinal)).unwrap();
+            if !native.cancelled {
+                self.queue(Request::MorfCancel {
+                    fence: self.fence,
+                    id,
+                    ordinal,
+                })?;
+            }
+            self.finish_effect(id, ordinal, Completion::Uncertain)?;
+        }
         Ok(())
+    }
+    fn finish_effect(&mut self, id: u64, ordinal: u64, result: Completion) -> io::Result<()> {
+        let key = execution_key(self.fence, id, ordinal);
+        let group = self
+            .groups
+            .get_mut(&key)
+            .ok_or_else(|| protocol::invalid("missing action execution group"))?;
+        group.remaining -= 1;
+        if result != Completion::Applied && group.result == Completion::Applied {
+            group.result = if group.multiple_effects {
+                Completion::Uncertain
+            } else {
+                result
+            };
+        }
+        if group.remaining == 0 {
+            let result = group.result;
+            self.groups.remove(&key);
+            self.complete(id, ordinal, result)?;
+        }
+        Ok(())
+    }
+    pub fn complete_morf(
+        &mut self,
+        fence: Fence,
+        id: u64,
+        ordinal: u64,
+        mut result: Completion,
+    ) -> io::Result<()> {
+        fence.validate()?;
+        if fence != self.fence {
+            return if fence.broker == self.fence.broker
+                && fence.configuration <= self.fence.configuration
+                && fence.session <= self.fence.session
+            {
+                Ok(())
+            } else {
+                Err(protocol::invalid("foreign or future Morf result"))
+            };
+        }
+        let Some(native) = self.native.remove(&(id, ordinal)) else {
+            return if self
+                .native_seen
+                .get(&id)
+                .is_some_and(|seen| ordinal > 0 && ordinal <= *seen)
+            {
+                Ok(())
+            } else {
+                Err(protocol::invalid("Morf result has no submitted action"))
+            };
+        };
+        if native.cancelled {
+            result = if matches!(result, Completion::Cancelled | Completion::Unavailable) {
+                Completion::Cancelled
+            } else {
+                Completion::Uncertain
+            };
+        }
+        self.finish_effect(id, ordinal, result)
     }
     /// Current executor capacity; grants and fresh target authorization are
     /// still required for every effect. Shared by broker and Lua availability.
     pub fn ready_capabilities(&self, now: Duration) -> BTreeSet<Capability> {
-        let available =
-            self.mode == Mode::Route && self.running.len() + self.pending.len() < MAX_RUNNING;
+        let available = self.mode == Mode::Route
+            && self.running.len() + self.pending.len() + self.native.len() < MAX_RUNNING;
         if available {
             [
                 Capability::Commands,
                 Capability::LuaActions,
                 Capability::PowerActions,
                 Capability::HyprlandActions,
+                Capability::MorfActions,
             ]
             .into_iter()
             .filter(|capability| {
@@ -758,6 +947,8 @@ impl Executor {
                             .hyprland
                             .as_ref()
                             .is_some_and(|adapter| adapter.ready(now)))
+                    && (*capability != Capability::MorfActions
+                        || self.morf.as_ref().is_some_and(|adapter| adapter.ready(now)))
             })
             .collect()
         } else {
@@ -799,6 +990,7 @@ impl Executor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod morf_transport;
     use crate::{input::Source, rules::Evidence};
     use std::{
         fs,

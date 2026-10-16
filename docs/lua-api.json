@@ -49,7 +49,8 @@
       "commands",
       "lua_actions",
       "power_actions",
-      "hyprland_actions"
+      "hyprland_actions",
+      "morf_actions"
     ],
     "refresh_ms": 100,
     "source": "broker-negotiated registration flags and parent executor readiness; never inferred from Lua source",
@@ -258,6 +259,26 @@
     "runtime": "approved sources only; no filesystem reads",
     "source_set_bytes": 1048576,
     "symlinks": false
+  },
+  "morf_adapter": {
+    "agent_flags": [
+      "morf"
+    ],
+    "cancellation": "known owning gesture only; no uncertain retry",
+    "completion": "native controller acceptance; no rendered animation/presentation proof",
+    "morf_effects_per_ordinal": 1,
+    "named_handler_flags": [
+      "lua",
+      "morf"
+    ],
+    "native_receipt_poll_ms": 5,
+    "ownership_refresh_ms": 100,
+    "pending_agent": 8,
+    "pending_broker": 64,
+    "production_gate": "native rendered context and physical cutover",
+    "public_session_negotiation": false,
+    "result_wait_after_grant_ms": 2000,
+    "transport": "broker offer ID/ordinal and typed action only; no caller target, motion or deadline"
   },
   "morf_provider_queries": {
     "authority": "read-only connection/configure metadata; no presentation, rendered regions, authentication, recognizer ownership or action grant",

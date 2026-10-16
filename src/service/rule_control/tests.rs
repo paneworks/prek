@@ -4,6 +4,40 @@ use crate::{
     rule_transactions::{Change, Transaction},
 };
 #[test]
+fn public_morf_transport_remains_gated_before_rendered_context_and_physical_cutover() {
+    let mut config = Config::preset("desktop").unwrap();
+    config.mode = crate::config::Mode::Route;
+    config.rules[0].enabled = true;
+    config.rules[0].action = Action::Morf {
+        action: crate::config::MorfAction::KeyboardHide,
+    };
+    let caps = BTreeSet::from([Capability::Context, Capability::MorfActions]);
+    assert!(
+        registration_capabilities(Some(&config), None, false, true, Role::Agent, &caps).is_err()
+    );
+    config.rules[0].action = Action::Lua {
+        handler: "native".into(),
+        requires: BTreeSet::from([
+            crate::config::EffectKind::MorfActions,
+            crate::config::EffectKind::Commands,
+        ]),
+    };
+    let caps = BTreeSet::from([
+        Capability::Context,
+        Capability::Observations,
+        Capability::MorfActions,
+        Capability::Commands,
+        Capability::LuaActions,
+        Capability::LuaEvents,
+    ]);
+    assert!(
+        registration_capabilities(Some(&config), None, true, true, Role::Agent, &caps).is_err()
+    );
+    assert!(
+        registration_capabilities(Some(&config), None, true, true, Role::Inspect, &caps).is_err()
+    );
+}
+#[test]
 fn public_hyprland_registration_requires_protected_route_policy_declared_effects_and_context() {
     use crate::config::{EffectKind, Mode, WindowAction};
     let mut config = Config::preset("desktop").unwrap();
@@ -605,6 +639,8 @@ fn rule_retirement_removes_unsent_offers_and_cancels_delivered_work() {
         granted: true,
         grant_until: Some(RECEIPT_TIME),
         morf: None,
+        morf_submitted: false,
+        morf_result_sent: false,
         sent: delivered,
         delivered,
         cancelled: false,

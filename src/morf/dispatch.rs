@@ -316,6 +316,9 @@ impl Queue {
             .values()
             .any(|gesture| gesture.cancellation == Some(Cancellation::Pending))
     }
+    pub fn has_pending(&self) -> bool {
+        self.records.values().any(|record| record.outcome.is_none())
+    }
     pub fn cancel_ticket(&mut self, ticket: &Ticket) -> bool {
         let Some(record) = self
             .records
@@ -327,6 +330,29 @@ impl Queue {
         let key = record.gesture.clone();
         let gesture = self.gestures.get_mut(&key).unwrap();
         if gesture.cancellation.is_some() {
+            return false;
+        }
+        gesture.ended = true;
+        gesture.cancellation = Some(Cancellation::Pending);
+        for record in self
+            .records
+            .values_mut()
+            .filter(|record| record.gesture == key && record.outcome.is_none())
+        {
+            record.outcome = Some(Outcome::Uncertain);
+        }
+        true
+    }
+    pub fn cancel_gesture(&mut self, id: u64) -> bool {
+        let key = format!("{id:032x}");
+        let Some(gesture) = self.gestures.get_mut(&key) else {
+            return false;
+        };
+        let pending = self
+            .records
+            .values()
+            .any(|record| record.gesture == key && record.outcome.is_none());
+        if gesture.cancellation.is_some() || !gesture.live && !pending {
             return false;
         }
         gesture.ended = true;

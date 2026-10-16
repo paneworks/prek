@@ -728,11 +728,21 @@ Configuration-time queries raise an error.
 The session supplies the actual broker-negotiated flags after checking the
 registration reply. Lua declarations and system policy alone do not populate
 this view. Negotiated flags remain fixed within the session fence; readiness
-can change. `commands`, `lua_actions`, `power_actions` and `hyprland_actions`
+can change. `commands`, `lua_actions`, `power_actions`, `hyprland_actions` and
+the Morf submission transport's `morf_actions`
 can be ready. Window effects require protected `policy.allow_hyprland_actions`
 and `session --hyprland` on a routing broker; declarations alone grant nothing.
 Observation sessions report an empty readiness list. Source loading, executor
 capacity and adapter/context expiry can withdraw readiness.
+
+Morf readiness describes the submission transport's fresh metadata and capacity,
+not native ownership or rendered geometry. `session --morf` is an explicit
+opt-in; the current broker rejects public negotiation until native rendered
+context and physical ownership gates pass. A Lua declaration cannot enable it.
+Once negotiated, one Morf effect per offered ordinal may join a named plan's
+other permitted effects. Its completion means controller acceptance, not a
+finished animation. Cancellation, missing outcomes and partial plans cannot
+manufacture successful completion. See [Morf integration](morf.md).
 
 These queries grant no effects. A negotiated flag is registration metadata;
 current policy, fresh owning context, exact targets and a separate broker grant

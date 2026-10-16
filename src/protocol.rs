@@ -66,6 +66,7 @@ pub fn execution_capability(capability: Capability) -> bool {
             | Capability::LuaActions
             | Capability::PowerActions
             | Capability::HyprlandActions
+            | Capability::MorfActions
     )
 }
 pub fn supported_session_action(action: &crate::config::Action) -> bool {
@@ -73,6 +74,7 @@ pub fn supported_session_action(action: &crate::config::Action) -> bool {
         action,
         crate::config::Action::Command { .. }
             | crate::config::Action::Lua { .. }
+            | crate::config::Action::Morf { .. }
             | crate::config::Action::Hyprland {
                 action: crate::config::WindowAction::Close
                     | crate::config::WindowAction::MoveLeftAndFollow
@@ -169,6 +171,20 @@ pub enum Request {
         id: u64,
         ordinal: u64,
     },
+    /// Select an allowed Morf effect for an existing delivered action grant.
+    /// Target, phase and motion are reconstructed from the broker's offer.
+    MorfAction {
+        fence: Fence,
+        id: u64,
+        ordinal: u64,
+        action: crate::config::MorfAction,
+    },
+    /// Cleanup only: retire the known gesture without introducing an effect.
+    MorfCancel {
+        fence: Fence,
+        id: u64,
+        ordinal: u64,
+    },
     Availability {
         fence: Fence,
         capabilities: BTreeSet<Capability>,
@@ -197,6 +213,8 @@ impl Request {
             | Self::Context { fence, .. }
             | Self::LockRequested { fence }
             | Self::Authorize { fence, .. }
+            | Self::MorfAction { fence, .. }
+            | Self::MorfCancel { fence, .. }
             | Self::Availability { fence, .. }
             | Self::Complete { fence, .. }
             | Self::Status { fence }
@@ -242,7 +260,10 @@ impl Request {
                 }
                 snapshot.validate().map_err(io::Error::other)?;
             }
-            Self::Complete { id, ordinal, .. } | Self::Authorize { id, ordinal, .. }
+            Self::Complete { id, ordinal, .. }
+            | Self::Authorize { id, ordinal, .. }
+            | Self::MorfAction { id, ordinal, .. }
+            | Self::MorfCancel { id, ordinal, .. }
                 if *id == 0 || *ordinal == 0 =>
             {
                 return Err(invalid("invalid action completion identity"));
@@ -339,6 +360,13 @@ pub enum Reply {
         id: u64,
         ordinal: u64,
     },
+    /// Native controller outcome, not an animation/presentation acknowledgement.
+    MorfResult {
+        fence: Fence,
+        id: u64,
+        ordinal: u64,
+        result: Completion,
+    },
     Revoked {
         fence: Fence,
         reason: String,
@@ -364,6 +392,7 @@ impl Reply {
             | Self::Dispatch { fence, .. }
             | Self::Execute { fence, .. }
             | Self::ActionCancelled { fence, .. }
+            | Self::MorfResult { fence, .. }
             | Self::RulesChanged { fence, .. }
             | Self::Revoked { fence, .. } => Some(*fence),
         }
@@ -376,6 +405,9 @@ impl Reply {
             !value.is_empty() && value.len() <= 1024 && !value.chars().any(char::is_control)
         };
         match self {
+            Self::MorfResult { id, ordinal, .. } if *id == 0 || *ordinal == 0 => {
+                return Err(invalid("invalid native action result identity"));
+            }
             Self::Input { input, .. } => input.validate()?,
             Self::RulesChanged { receipt, .. }
                 if receipt.id == 0

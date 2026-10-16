@@ -341,12 +341,49 @@ struct Offered {
     granted: bool,
     grant_until: Option<Duration>,
     morf: Option<(crate::config::Action, crate::morf::controls::Request)>,
+    morf_submitted: bool,
+    morf_result_sent: bool,
     sent: bool,
     delivered: bool,
     cancelled: bool,
     required: BTreeSet<Capability>,
 }
 impl Offered {
+    fn morf_request(
+        &self,
+        selected: crate::config::MorfAction,
+    ) -> io::Result<crate::morf::controls::Request> {
+        let (action, template) = self
+            .morf
+            .as_ref()
+            .ok_or_else(|| protocol::invalid("action has no frozen Morf payload"))?;
+        if !match action {
+            crate::config::Action::Morf { action } => *action == selected,
+            crate::config::Action::Lua { requires, .. } => {
+                requires.contains(&crate::config::EffectKind::MorfActions)
+            }
+            _ => false,
+        } {
+            return Err(protocol::invalid(
+                "Morf selection exceeds its configured offer",
+            ));
+        }
+        let mut request = template.clone();
+        request.action = selected;
+        if request.phase == crate::morf::controls::Phase::Begin
+            && !matches!(
+                selected,
+                crate::config::MorfAction::Dashboard
+                    | crate::config::MorfAction::Notifications
+                    | crate::config::MorfAction::QuickSettings
+                    | crate::config::MorfAction::WorkspacePreview
+            )
+        {
+            request.phase = crate::morf::controls::Phase::Discrete;
+        }
+        request.validate()?;
+        Ok(request)
+    }
     fn target_valid(&self, snapshot: &crate::context::Snapshot, now: Duration) -> bool {
         let output = |snapshot: &crate::context::Snapshot| {
             snapshot
@@ -390,36 +427,7 @@ impl Offered {
             .ok_or_else(|| {
                 protocol::invalid("native control has no live delivered execution grant")
             })?;
-        let (action, template) = self
-            .morf
-            .as_ref()
-            .ok_or_else(|| protocol::invalid("action offer has no native control payload"))?;
-        if !match action {
-            crate::config::Action::Morf { action } => *action == request.action,
-            crate::config::Action::Lua { requires, .. } => {
-                requires.contains(&crate::config::EffectKind::MorfActions)
-            }
-            _ => false,
-        } {
-            return Err(protocol::invalid(
-                "native action exceeds its configured offer",
-            ));
-        }
-        let mut expected = template.clone();
-        expected.action = request.action;
-        if expected.phase == crate::morf::controls::Phase::Begin
-            && !matches!(
-                request.action,
-                crate::config::MorfAction::Dashboard
-                    | crate::config::MorfAction::Notifications
-                    | crate::config::MorfAction::QuickSettings
-                    | crate::config::MorfAction::WorkspacePreview
-            )
-        {
-            expected.phase = crate::morf::controls::Phase::Discrete;
-        }
-        request.validate()?;
-        if expected != *request {
+        if self.morf_request(request.action)? != *request {
             return Err(protocol::invalid(
                 "native payload differs from frozen event",
             ));
@@ -477,6 +485,8 @@ impl ActionLedger {
                 deadline: now + protocol::MAX_PACKET_AGE,
                 granted: false,
                 grant_until: None,
+                morf_submitted: false,
+                morf_result_sent: false,
                 morf: match event {
                     crate::rules::Event::Matched { action, .. }
                         if protocol::action_capabilities(action)
@@ -527,11 +537,9 @@ impl ActionLedger {
         Ok(())
     }
     fn complete(&mut self, id: u64, ordinal: u64) -> io::Result<()> {
-        if self
-            .pending
-            .get(&(id, ordinal))
-            .is_none_or(|offer| !offer.granted || !offer.sent)
-        {
+        if self.pending.get(&(id, ordinal)).is_none_or(|offer| {
+            !offer.granted || !offer.sent || offer.morf_submitted && !offer.morf_result_sent
+        }) {
             return Err(protocol::invalid("completion has no granted broker action"));
         }
         self.pending.remove(&(id, ordinal));
@@ -628,6 +636,12 @@ impl Connection {
             {
                 offer.sent = true;
             }
+            if let Reply::MorfResult { id, ordinal, .. } = &reply
+                && let Some(bound) = self.bound.as_mut()
+                && let Some(offer) = bound.actions.pending.get_mut(&(*id, *ordinal))
+            {
+                offer.morf_result_sent = true;
+            }
             self.bytes -= reply_size(&reply)?;
         }
         Ok(())
@@ -712,6 +726,7 @@ fn subscriptions_fit(seats: &[Subscription]) -> bool {
 pub struct Broker {
     input_releases: Option<crate::morf::ownership::Ledger>,
     morf_handoffs: Vec<crate::morf::handoff::Session>,
+    morf_pending: Vec<morf_handoff::Pending>,
     endpoint: Endpoint,
     logind: Logind,
     policy: Policy,
@@ -752,6 +767,7 @@ impl Broker {
         Ok(Self {
             input_releases: None,
             morf_handoffs: Vec::new(),
+            morf_pending: Vec::new(),
             endpoint,
             logind: Logind::open(library)?,
             policy,
@@ -1516,6 +1532,7 @@ impl Broker {
         }
         if self.connections.is_empty() {
             self.poll_morf_handoffs(monotonic()?);
+            self.collect_morf_controls()?;
             return Ok(());
         }
         self.cursor %= self.connections.len();
@@ -1539,6 +1556,7 @@ impl Broker {
         // A bad, stale or disconnected client loses all queued work and its
         // seat owner immediately. No raw payload is logged or returned to it.
         self.poll_morf_handoffs(monotonic()?);
+        self.collect_morf_controls()?;
         Ok(())
     }
     fn process(&mut self, connection: &mut Connection, now: Duration) -> io::Result<()> {
@@ -1701,7 +1719,7 @@ impl Broker {
                     // An in-flight status read may precede a transition notice.
                     // Discard it without acting on stale authority or closing
                     // the agent before that notice can reach it.
-                    let old_status = matches!(&request, Request::Status { fence } | Request::LuaSource { fence, .. } | Request::ContextRead { fence, .. } | Request::Rules {fence,..}
+                    let old_status = matches!(&request, Request::Status { fence } | Request::LuaSource { fence, .. } | Request::ContextRead { fence, .. } | Request::Rules {fence,..} | Request::MorfAction {fence,..} | Request::MorfCancel {fence,..}
                         if now < bound.previous.expires && bound.previous.fences.contains(fence));
                     if !current && !old_heartbeat && !old_status {
                         return Err(protocol::invalid(
@@ -1716,6 +1734,16 @@ impl Broker {
                     }
                     let fence = bound.fence;
                     match request {
+                        Request::MorfAction { .. } | Request::MorfCancel { .. } if !current => {}
+                        Request::MorfAction {
+                            id,
+                            ordinal,
+                            action,
+                            ..
+                        } => self.submit_agent_morf(connection, id, ordinal, action)?,
+                        Request::MorfCancel { id, ordinal, .. } => {
+                            self.cancel_agent_morf(connection, id, ordinal)?
+                        }
                         Request::Rules { .. } if !current => {}
                         Request::Rules {
                             fence: incoming,
@@ -2277,6 +2305,12 @@ mod tests {
             "unsent grant accepted a receipt"
         );
         actions.pending.get_mut(&(1, 1)).unwrap().sent = true;
+        actions.pending.get_mut(&(1, 1)).unwrap().morf_submitted = true;
+        assert!(
+            actions.complete(1, 1).is_err(),
+            "agent acknowledged a native action before its outcome was delivered"
+        );
+        actions.pending.get_mut(&(1, 1)).unwrap().morf_result_sent = true;
         actions.complete(1, 1).unwrap();
         assert!(actions.complete(1, 1).is_err());
 

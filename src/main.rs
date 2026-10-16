@@ -109,6 +109,10 @@ enum Command {
         /// Requires a routing broker and verified stock compositor context.
         #[arg(long)]
         hyprland: bool,
+        /// Submit typed Morf effects through the broker. Native rendered-context
+        /// and physical-cutover gates must be satisfied before negotiation.
+        #[arg(long)]
+        morf: bool,
         /// Run approved Lua callbacks, timers and named handlers in a separate VM.
         #[arg(long)]
         lua: bool,
@@ -419,6 +423,7 @@ fn run(command: Command) -> io::Result<()> {
             commands,
             power,
             hyprland,
+            morf,
             lua,
             rule_mutations,
             input,
@@ -434,6 +439,7 @@ fn run(command: Command) -> io::Result<()> {
                 commands,
                 power,
                 hyprland,
+                morf,
                 lua,
                 rule_mutations,
                 input,
@@ -1189,6 +1195,7 @@ struct SessionOptions {
     commands: bool,
     power: bool,
     hyprland: bool,
+    morf: bool,
     lua: bool,
     rule_mutations: bool,
     input: bool,
@@ -1233,11 +1240,12 @@ fn run_session(
         commands,
         power,
         hyprland,
+        morf,
         lua,
         rule_mutations,
         input,
     } = options;
-    let effects = commands || power || hyprland;
+    let effects = commands || power || hyprland || morf;
     use nix::{
         libc,
         poll::{PollFd, PollFlags, PollTimeout, poll},
@@ -1277,6 +1285,9 @@ fn run_session(
     }
     if hyprland {
         requested.insert(Capability::HyprlandActions);
+    }
+    if morf {
+        requested.insert(Capability::MorfActions);
     }
     if lua {
         requested.insert(Capability::LuaEvents);
@@ -1479,7 +1490,7 @@ fn run_session(
                         .ok_or_else(|| io::Error::other("unsolicited broker context"))?;
                     match download.push(incoming, offset, bytes, &data, now)? {
                         Some(view) => {
-                            if (power || hyprland)
+                            if (power || hyprland || morf)
                                 && let Some(executor) = executor.as_mut()
                             {
                                 let runtime = std::env::var_os("XDG_RUNTIME_DIR")
@@ -1506,6 +1517,10 @@ fn run_session(
                                     )
                                 {
                                     eprintln!("Hyprland adapter unavailable: {error}");
+                                }
+                                if morf && let Err(error) = executor.sync_morf_context(view.clone())
+                                {
+                                    eprintln!("Morf submission unavailable: {error}");
                                 }
                             }
                             if let Some(runtime) = lua_runtime.as_mut() {
@@ -1858,6 +1873,17 @@ fn run_session(
                     if let Some(runtime) = lua_runtime.as_mut() {
                         runtime.cancel_action(id, ordinal)?;
                     }
+                }
+                Reply::MorfResult {
+                    fence: incoming,
+                    id,
+                    ordinal,
+                    result,
+                } if effects => {
+                    executor
+                        .as_mut()
+                        .unwrap()
+                        .complete_morf(incoming, id, ordinal, result)?;
                 }
                 Reply::Rejected { reason } | Reply::Revoked { reason, .. } => {
                     return Err(io::Error::other(reason));

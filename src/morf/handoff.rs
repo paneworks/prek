@@ -13,6 +13,7 @@ mod tests;
 
 const REFRESH: Duration = Duration::from_millis(100);
 const RENEW: Duration = Duration::from_millis(250);
+const CONTROL_REFRESH: Duration = Duration::from_millis(5);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Phase {
@@ -44,6 +45,7 @@ pub(crate) struct Session {
     renewed: Duration,
     dispatches: super::dispatch::Queue,
     revocation: Option<super::dispatch::Cancellation>,
+    control_checked: Duration,
 }
 impl Session {
     pub fn prepare(
@@ -91,6 +93,7 @@ impl Session {
             renewed: Duration::ZERO,
             dispatches: super::dispatch::Queue::default(),
             revocation: None,
+            control_checked: Duration::ZERO,
         })
     }
     pub fn phase(&self) -> Phase {
@@ -223,11 +226,16 @@ impl Session {
         {
             return Some(Duration::ZERO);
         }
-        matches!(
+        let state = matches!(
             self.phase,
             Phase::Quiescing | Phase::Quiesced | Phase::Owned | Phase::ReleaseQueued
         )
-        .then_some(self.checked + REFRESH)
+        .then_some(self.checked + REFRESH);
+        if self.phase == Phase::Owned && self.dispatches.has_pending() {
+            state.map(|state| state.min(self.control_checked + CONTROL_REFRESH))
+        } else {
+            state
+        }
     }
     pub fn poll(&mut self, logind: &Logind, now: Duration) -> io::Result<()> {
         if self.revocation == Some(super::dispatch::Cancellation::Pending) {
@@ -258,18 +266,24 @@ impl Session {
             if self.phase != Phase::ReleaseQueued && now - self.renewed >= RENEW {
                 self.renew(logind, now)?;
             }
-            let state = self.client.handoff_state(logind, &self.compositor)?;
-            let completed = crate::ipc::monotonic()?;
-            self.phase = observed(
-                self.phase,
-                self.generation,
-                self.capabilities.ui_generation(),
-                &state,
-                completed,
-            )?;
-            self.checked = completed;
-            if self.phase == Phase::Owned {
-                self.poll_control(logind, completed)?;
+            if now >= self.checked + REFRESH {
+                let state = self.client.handoff_state(logind, &self.compositor)?;
+                let completed = crate::ipc::monotonic()?;
+                self.phase = observed(
+                    self.phase,
+                    self.generation,
+                    self.capabilities.ui_generation(),
+                    &state,
+                    completed,
+                )?;
+                self.checked = completed;
+            }
+            if self.phase == Phase::Owned
+                && (self.dispatches.has_cancellations()
+                    || now >= self.control_checked + CONTROL_REFRESH)
+            {
+                self.poll_control(logind, crate::ipc::monotonic()?)?;
+                self.control_checked = crate::ipc::monotonic()?;
             }
             Ok(())
         })();
@@ -383,6 +397,11 @@ impl Session {
     pub fn cancel_source(&mut self, source: &crate::input::Source, id: Option<u64>) {
         if self.phase == Phase::Owned && source.seat == self.seat {
             self.dispatches.cancel_source(source, id);
+        }
+    }
+    pub fn cancel_gesture(&mut self, id: u64) {
+        if self.phase == Phase::Owned && self.capabilities.can_cancel_gestures() {
+            self.dispatches.cancel_gesture(id);
         }
     }
     pub fn cancel_control(&mut self, ticket: &super::dispatch::Ticket) -> bool {
