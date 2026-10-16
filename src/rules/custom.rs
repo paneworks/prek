@@ -362,6 +362,22 @@ impl Engine {
         for id in ids {
             self.custom_cancel(id, at, "routing transport retired");
         }
+        for sequence in &mut self.sequences {
+            if sequence.has_custom
+                && sequence
+                    .pending
+                    .get(&source.seat)
+                    .is_some_and(|pending| pending.sources.contains(source))
+            {
+                sequence.cancel(
+                    &source.seat,
+                    at,
+                    "routing transport retired",
+                    &mut self.events,
+                );
+                sequence.reset.insert(source.seat.clone());
+            }
+        }
         self.custom_sync(at, Retirement::SourceLost);
     }
     pub(crate) fn recognition_ready(&mut self, ready: bool, at: Duration) -> io::Result<()> {
@@ -420,6 +436,22 @@ impl Engine {
         if let Some((sequence, step)) = location.step {
             let sequence = &self.sequences[sequence];
             let pending = sequence.pending.get(&candidate.source.seat)?;
+            let origin = self
+                .devices
+                .get(&pending.first.source.device)
+                .filter(|state| state.device.source == pending.first.source)?;
+            let first = pending.first.permit.as_ref()?;
+            if self
+                .authority
+                .validate(first, input_context(origin, at))
+                .is_err()
+                || candidate
+                    .permit
+                    .as_ref()
+                    .is_none_or(|later| !same_target(first, later))
+            {
+                return None;
+            }
             if pending.step != step
                 || !pending.sources.contains(&candidate.source)
                 || pending
@@ -742,9 +774,11 @@ impl Engine {
             .as_ref()
             .and_then(|custom| custom.gate.candidate(proposal.ticket))
             .ok_or_else(|| invalid("unknown custom recognition ticket"))?;
-        let intent = self
-            .custom_intent(id, at)
-            .ok_or_else(|| invalid("custom recognition is no longer eligible"))?;
+        let Some(intent) = self.custom_intent(id, at) else {
+            self.custom_cancel(id, at, "custom recognition is no longer eligible");
+            self.custom_sync(at, Retirement::Cancelled);
+            return Err(invalid("custom recognition is no longer eligible"));
+        };
         let (ownership, winner) = ownership(intent.source(), &intent.rule, intent.id());
         let candidate = self.custom_candidate(&intent, ownership, winner)?;
         let validation = self
@@ -835,9 +869,16 @@ impl Engine {
                 generation: self.generation,
                 at: input_at,
                 input_watermark: self.input_watermark,
+                normalized: None,
             };
             for sequence in &mut self.sequences {
-                sequence.collect(None, &context, &mut self.next_id, &mut self.events)?;
+                sequence.collect(
+                    None,
+                    &context,
+                    &mut self.next_id,
+                    &mut self.events,
+                    &mut self.custom,
+                )?;
             }
         }
         self.custom_sync(at, Retirement::Cancelled);

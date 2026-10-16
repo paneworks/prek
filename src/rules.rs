@@ -869,9 +869,16 @@ impl Engine {
             }
             _ => {}
         }
+        let mut sequence_input = None;
+        let project_sequence_input = self.sequences.iter().any(|sequence| sequence.has_custom);
         for observation in observations {
             match observation {
-                Observation::Input { frame } => self.frame(frame)?,
+                Observation::Input { frame } => {
+                    if project_sequence_input {
+                        sequence_input = Some(frame.clone());
+                    }
+                    self.frame(frame)?;
+                }
                 Observation::Cancelled { source, at, reason } => {
                     self.cancel_source(&source, at, &format!("{reason:?}"))
                 }
@@ -888,6 +895,7 @@ impl Engine {
             generation: self.generation,
             at: self.last_at.unwrap_or_default(),
             input_watermark: self.input_watermark,
+            normalized: sequence_input.as_ref(),
         };
         for sequence in &mut self.sequences {
             sequence.push(
@@ -1667,6 +1675,7 @@ struct SequenceContext<'a> {
     generation: u64,
     at: Duration,
     input_watermark: u64,
+    normalized: Option<&'a NormalizedFrame>,
 }
 struct SequenceGroup {
     first: usize,
@@ -1695,6 +1704,7 @@ struct Sequence {
     reset: BTreeSet<String>,
     routing: bool,
     outcomes: Vec<RouteOutcome>,
+    has_custom: bool,
 }
 fn flatten_sequence(
     trigger: &Trigger,
@@ -1728,6 +1738,9 @@ impl Sequence {
         let mut triggers = Vec::new();
         let mut groups = Vec::new();
         flatten_sequence(&rule.trigger, &mut triggers, &mut groups)?;
+        let has_custom = triggers
+            .iter()
+            .any(|trigger| matches!(trigger, Trigger::Custom { .. }));
         let mut steps = Vec::new();
         for (index, trigger) in triggers.iter().enumerate() {
             let mut child = config.clone();
@@ -1767,6 +1780,7 @@ impl Sequence {
             reset: BTreeSet::new(),
             routing: false,
             outcomes: Vec::new(),
+            has_custom,
         })
     }
     fn deadline(&self) -> Option<Duration> {
@@ -1923,7 +1937,7 @@ impl Sequence {
             }
             result?;
         }
-        self.collect(Some(record), context, next_id, events)
+        self.collect(Some(record), context, next_id, events, coordinator)
     }
     fn collect(
         &mut self,
@@ -1931,6 +1945,7 @@ impl Sequence {
         context: &SequenceContext<'_>,
         next_id: &mut u64,
         events: &mut Vec<Event>,
+        coordinator: &mut Option<custom::State>,
     ) -> io::Result<()> {
         let mut traces = Vec::new();
         let mut cancelled = Vec::new();
@@ -2052,6 +2067,7 @@ impl Sequence {
         // Group entry clocks are anchored to candidate input, not delayed match
         // notifications. Future recognizers can never lend an old press/path.
         traces.sort_by(|(ai, a), (bi, b)| ai.cmp(bi).then_with(|| a.finished.cmp(&b.finished)));
+        let mut activated = BTreeMap::new();
         for (index, trace) in traces {
             let seat = trace.candidate.source.seat.clone();
             if reset.contains(&seat) {
@@ -2196,6 +2212,11 @@ impl Sequence {
                 pending.previous = Some(trace.candidate.clone());
                 pending.after_input = trace.after_input.or(pending.after_input);
                 pending.step += 1;
+                if trace.after_input.is_none()
+                    && matches!(self.triggers[pending.step], Trigger::Custom { .. })
+                {
+                    activated.insert(seat.clone(), pending.step);
+                }
                 let completed_groups: Vec<_> = pending
                     .groups
                     .keys()
@@ -2220,11 +2241,105 @@ impl Sequence {
                 reset.insert(source.seat);
             }
         }
+        if let Some(frame) = context.normalized {
+            for (seat, step) in activated {
+                if reset.contains(&seat)
+                    || frame.raw.source.seat != seat
+                    || self
+                        .pending
+                        .get(&seat)
+                        .is_none_or(|pending| pending.step != step)
+                {
+                    continue;
+                }
+                if let Some(reason) =
+                    self.project_custom(step, frame, context, next_id, coordinator)?
+                {
+                    self.cancel(&seat, context.at, reason, events);
+                    reset.insert(seat);
+                }
+            }
+        }
         for seat in reset {
             self.reset_seat(&seat, context)?;
         }
         events.extend(skipped);
         Ok(())
+    }
+
+    fn project_custom(
+        &mut self,
+        step: usize,
+        frame: &NormalizedFrame,
+        context: &SequenceContext<'_>,
+        next_id: &mut u64,
+        coordinator: &mut Option<custom::State>,
+    ) -> io::Result<Option<&'static str>> {
+        let source = &frame.raw.source;
+        let pending = &self.pending[&source.seat];
+        if pending
+            .after_input
+            .is_some_and(|watermark| context.input_watermark <= watermark)
+        {
+            return Ok(None);
+        }
+        let engine = &mut self.steps[step];
+        let Some(state) = engine
+            .devices
+            .get(&source.device)
+            .filter(|state| state.device.source == *source)
+        else {
+            return Ok(None);
+        };
+        let worker = &mut engine.workers[0];
+        if worker.candidates.contains_key(source)
+            || !selected(&engine.config, &worker.rule, &state.device)
+        {
+            return Ok(None);
+        }
+        engine.next_id = *next_id;
+        custom::frame(
+            worker,
+            state,
+            frame,
+            custom::FrameContext {
+                config: &engine.config,
+                authority: context.authority,
+                keys: &engine.conditions,
+                custom: coordinator
+                    .as_mut()
+                    .ok_or_else(|| invalid("custom sequence coordinator is unavailable"))?,
+                next_id: &mut engine.next_id,
+                events: &mut engine.events,
+            },
+        );
+        *next_id = engine.next_id;
+        let Some(candidate) = worker.candidates.get(source) else {
+            return Ok(None);
+        };
+        let same = match (&pending.first.permit, &candidate.permit) {
+            (Some(first), Some(later)) => same_target(first, later),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            return Ok(Some("sequence target changed"));
+        }
+        let pending = self.pending.get_mut(&source.seat).unwrap();
+        for source in &candidate.sources {
+            if !pending.sources.contains(source) {
+                pending.sources.insert(source.clone());
+            }
+        }
+        for (index, _) in self
+            .groups
+            .iter()
+            .enumerate()
+            .filter(|(_, group)| group.first == step)
+        {
+            pending.groups.entry(index).or_insert(candidate.started);
+        }
+        Ok(None)
     }
 }
 fn same_target(first: &Permit, later: &Permit) -> bool {

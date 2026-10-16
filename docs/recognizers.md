@@ -332,8 +332,15 @@ input watermark prevents a delayed reply from borrowing already-drained input,
 including input with the same timestamp. Parent timeouts also bound step tickets.
 Private native fixtures cover these lifetimes, source replacement, sibling
 isolation, timer wakes and restoration after child failure.
+Native completion within an input record can project that record once into a
+newly active custom step. The coordinator retains one local normalized snapshot,
+not a per-step backlog; it does not replay the physical record. Source/target
+checks and nested timeout anchoring precede admission. An asynchronous reply has
+no current physical snapshot and cannot reuse the preceding record. Every step
+also rechecks its parent source/permit; losing any admitted prefix transport
+revokes the current step even when it uses another source.
 Public custom-sequence validation remains closed: consuming group/ownership
-integration, native same-frame/contact continuation, real helper integration and
+integration, held-contact continuation, real helper integration and
 offline custom replay are still required. These fixtures do not constitute that
 API, privileged, device or rendered acceptance.
 
