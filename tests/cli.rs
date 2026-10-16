@@ -613,10 +613,8 @@ fn t84_lua_modules_compile_through_the_isolated_cli_and_preserve_snapshots() {
     use prek::lua::{Definition, EventKind, Sources};
     let directory = Directory::new();
     let entry = directory.0.join("config.lua");
-    let module = directory.0.join("modules/settings.lua");
-    fs::create_dir(directory.0.join("modules")).unwrap();
+    let module = directory.lua_module("settings", "local p=require('prek'); p.events.on('ready',function()p.log.info('approved-module')end); return p.config.preset('minimal')");
     fs::write(&entry, "return require('settings')").unwrap();
-    fs::write(&module, "local p=require('prek'); p.events.on('ready',function()p.log.info('approved-module')end); return p.config.preset('minimal')").unwrap();
     let result = run(&["check", "--config", entry.to_str().unwrap(), "--json"]);
     assert!(
         result.status.success(),
@@ -642,11 +640,7 @@ fn t84_lua_modules_compile_through_the_isolated_cli_and_preserve_snapshots() {
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("changed file"));
     fs::write(&module, "return require('other')").unwrap();
-    fs::write(
-        directory.0.join("modules/other.lua"),
-        "return require('settings')",
-    )
-    .unwrap();
+    directory.lua_module("other", "return require('settings')");
     let result = run(&["check", "--config", entry.to_str().unwrap()]);
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("module cycle"));
@@ -668,10 +662,8 @@ fn t89_module_capture_refuses_unsafe_files_and_permission_expansion() {
     let directory = Directory::new();
     let entry = directory.0.join("config.lua");
     let tree = directory.0.join("modules");
-    let module = tree.join("settings.lua");
-    fs::create_dir(&tree).unwrap();
+    let module = directory.lua_module("settings", "return {version=1}");
     fs::write(&entry, "return require('settings')").unwrap();
-    fs::write(&module, "return {version=1}").unwrap();
     let capture = || Sources::capture(fs::read_to_string(&entry).unwrap(), &entry);
     assert!(capture().is_ok());
     fs::set_permissions(&module, fs::Permissions::from_mode(0o666)).unwrap();
@@ -700,8 +692,7 @@ fn t89_module_capture_refuses_unsafe_files_and_permission_expansion() {
         "special files must be refused before reading"
     );
     fs::remove_file(&module).unwrap();
-    let ambiguous = tree.join("bad.name.lua");
-    fs::write(&ambiguous, "return true").unwrap();
+    let ambiguous = directory.lua_module("bad.name", "return true");
     assert!(
         capture().is_err(),
         "module filename segments cannot alias nested paths"
@@ -768,6 +759,30 @@ return config
 }
 
 impl Directory {
+    #[cfg(target_os = "linux")]
+    fn lua_module(&self, name: &str, source: &str) -> PathBuf {
+        use std::{
+            io::Write,
+            os::unix::fs::{DirBuilderExt, OpenOptionsExt},
+        };
+        let directory = self.0.join("modules");
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&directory)
+            .unwrap();
+        let path = directory.join(format!("{name}.lua"));
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap()
+            .write_all(source.as_bytes())
+            .unwrap();
+        path
+    }
+
     fn new() -> Self {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("target/test-fixtures")
