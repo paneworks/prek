@@ -99,6 +99,11 @@ enum Work {
         event: EventKind,
         payload: serde_json::Value,
     },
+    Recognition {
+        fence: Fence,
+        sequence: u64,
+        ticket: Box<crate::recognition::Ticket>,
+    },
 }
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -138,6 +143,13 @@ enum Message {
         sequence: u64,
         logs: Vec<LogRecord>,
     },
+    Recognized {
+        fence: Fence,
+        sequence: u64,
+        ticket: u64,
+        proposal: Option<crate::recognition::Proposal>,
+        logs: Vec<LogRecord>,
+    },
     Timers {
         fence: Fence,
         logs: Vec<LogRecord>,
@@ -151,6 +163,7 @@ struct Notice {
     event: EventKind,
     payload: serde_json::Value,
     bytes: usize,
+    recognition: Option<Box<crate::recognition::Ticket>>,
 }
 struct RulePending {
     id: u64,
@@ -180,6 +193,10 @@ pub struct Session {
     pending: Option<(u64, Duration)>,
     pending_event: Option<EventKind>,
     pending_action: Option<(u64, u64)>,
+    pending_recognition: Option<u64>,
+    recognition_last: u64,
+    recognizers: std::collections::BTreeMap<String, crate::recognition::Definition>,
+    recognitions: VecDeque<(u64, Option<crate::recognition::Proposal>)>,
     initialized: bool,
     actions: VecDeque<(Box<crate::rules::Event>, Duration, usize)>,
     resolved: VecDeque<(u64, u64, Option<super::ActionResult>)>,
@@ -267,6 +284,14 @@ impl Session {
             pending: None,
             pending_event: None,
             pending_action: None,
+            pending_recognition: None,
+            recognition_last: 0,
+            recognizers: definition
+                .recognizers
+                .iter()
+                .map(|binding| (binding.definition.name.clone(), binding.definition.clone()))
+                .collect(),
+            recognitions: VecDeque::new(),
             initialized: false,
             actions: VecDeque::new(),
             resolved: VecDeque::new(),
@@ -327,6 +352,7 @@ impl Session {
             event,
             payload,
             bytes: size,
+            recognition: None,
         });
         Ok(())
     }
@@ -463,6 +489,62 @@ impl Session {
     pub fn take_actions(&mut self) -> Vec<(u64, u64, Option<super::ActionResult>)> {
         self.resolved.drain(..).collect()
     }
+    /// Private supervised transport only. The embedding must own the matching
+    /// Rust Gate and revalidate every returned proposal before arbitration.
+    pub fn request_recognition(&mut self, ticket: crate::recognition::Ticket) -> io::Result<()> {
+        if self.stopping
+            || !self.action_ready()
+            || ticket.fence != self.fence
+            || ticket.id <= self.recognition_last
+            || ticket.input.source().seat != self.seat
+        {
+            return Err(protocol::invalid(
+                "Lua recognizer VM is not ready or ticket was replayed",
+            ));
+        }
+        let definition = self
+            .recognizers
+            .get(&ticket.recognizer)
+            .ok_or_else(|| protocol::invalid("unapproved Lua recognizer"))?;
+        ticket.validate_for(definition, monotonic()?)?;
+        let bytes = protocol::encode(&protocol::Packet {
+            version: protocol::VERSION,
+            sequence: 1,
+            at: Duration::ZERO,
+            message: Work::Recognition {
+                fence: self.fence,
+                sequence: 1,
+                ticket: Box::new(ticket.clone()),
+            },
+        })?
+        .len();
+        let queued = self
+            .notices
+            .iter()
+            .filter(|notice| notice.recognition.is_some())
+            .count();
+        if self.notices.len() + self.actions.len() >= MAX_PENDING
+            || self.bytes + bytes > MAX_BYTES
+            || queued + self.recognitions.len() + usize::from(self.pending_recognition.is_some())
+                >= MAX_PENDING
+        {
+            return Err(protocol::invalid("Lua recognizer queue exceeds limit"));
+        }
+        self.recognition_last = ticket.id;
+        self.bytes += bytes;
+        self.notices.push_back(Notice {
+            event: EventKind::Input,
+            payload: serde_json::Value::Null,
+            bytes,
+            recognition: Some(Box::new(ticket)),
+        });
+        Ok(())
+    }
+    /// A missing proposal means the request expired or lost its permitted
+    /// desktop context before execution. It never means recognition succeeded.
+    pub fn take_recognitions(&mut self) -> Vec<(u64, Option<crate::recognition::Proposal>)> {
+        self.recognitions.drain(..).collect()
+    }
     pub fn update_context(&mut self, view: crate::context_transfer::View) -> io::Result<()> {
         // SAFETY: read-only query of this unprivileged session process.
         let uid = unsafe { libc::geteuid() };
@@ -531,6 +613,7 @@ impl Session {
         self.notices.clear();
         self.actions.clear();
         self.resolved.clear();
+        self.recognitions.clear();
         self.bytes = 0;
         self.notify(EventKind::Stop, serde_json::json!({"fence":self.fence}))
     }
@@ -692,7 +775,7 @@ impl Session {
                         .pending
                         .is_some_and(|(expected, _)| sequence == expected) =>
                 {
-                    if self.pending_action.is_some() {
+                    if self.pending_action.is_some() || self.pending_recognition.is_some() {
                         return Err(protocol::invalid("Lua action returned an event response"));
                     }
                     if self.pending_event.take() == Some(EventKind::Ready) {
@@ -700,6 +783,38 @@ impl Session {
                     }
                     self.pending = None;
                     logs.extend(batch);
+                }
+                Message::Recognized {
+                    fence,
+                    sequence,
+                    ticket,
+                    proposal,
+                    logs: batch,
+                } if fence == self.fence
+                    && self.ready
+                    && self
+                        .pending
+                        .is_some_and(|(expected, _)| sequence == expected)
+                    && self.pending_recognition == Some(ticket) =>
+                {
+                    if self.recognitions.len() >= MAX_PENDING
+                        || proposal.as_ref().is_some_and(|proposal| {
+                            proposal.fence != fence || proposal.ticket != ticket
+                        })
+                    {
+                        return Err(protocol::invalid(
+                            "Lua recognizer returned an invalid ticket or full result queue",
+                        ));
+                    }
+                    if let Some(proposal) = &proposal {
+                        crate::recognition::validate_data(&proposal.data)?;
+                    }
+                    self.pending = None;
+                    self.pending_recognition = None;
+                    if !self.stopping {
+                        self.recognitions.push_back((ticket, proposal));
+                        logs.extend(batch);
+                    }
                 }
                 Message::Resolved {
                     fence,
@@ -857,23 +972,31 @@ impl Session {
             && let Some(notice) = self.notices.front()
         {
             let event = notice.event;
+            let ticket = notice.recognition.as_ref().map(|ticket| ticket.id);
             let sequence = self
                 .sequence
                 .checked_add(1)
                 .ok_or_else(|| protocol::invalid("Lua event sequence exhausted"))?;
-            if self.channel.send(
-                &Work::Event {
+            let work = if let Some(ticket) = &notice.recognition {
+                Work::Recognition {
+                    fence: self.fence,
+                    sequence,
+                    ticket: ticket.clone(),
+                }
+            } else {
+                Work::Event {
                     fence: self.fence,
                     sequence,
                     event: notice.event,
                     payload: notice.payload.clone(),
-                },
-                now,
-            )? {
+                }
+            };
+            if self.channel.send(&work, now)? {
                 self.bytes -= self.notices.pop_front().unwrap().bytes;
                 self.sequence = sequence;
                 self.pending = Some((sequence, now + RESPONSE_TIMEOUT));
-                self.pending_event = Some(event);
+                self.pending_event = if ticket.is_none() { Some(event) } else { None };
+                self.pending_recognition = ticket;
             }
         }
         Ok(logs)
@@ -1121,6 +1244,37 @@ pub fn worker() -> io::Result<()> {
                                 reason: error.0.chars().take(512).collect(),
                             },
                         }
+                    });
+                }
+                Work::Recognition {
+                    fence: incoming,
+                    sequence: next,
+                    ticket,
+                } if fence == Some(incoming)
+                    && runtime.is_some()
+                    && timers_enabled
+                    && ticket.fence == incoming
+                    && next == sequence + 1 =>
+                {
+                    crate::lua_compiler::runtime_cpu_budget()?;
+                    sequence = next;
+                    runtime
+                        .as_mut()
+                        .unwrap()
+                        .set_clock(monotonic()?)
+                        .map_err(io::Error::other)?;
+                    outgoing = Some(match runtime.as_mut().unwrap().recognize(&ticket) {
+                        Ok(result) => Message::Recognized {
+                            fence: incoming,
+                            sequence,
+                            ticket: ticket.id,
+                            proposal: result.proposal,
+                            logs: result.logs,
+                        },
+                        Err(error) => Message::Failed {
+                            fence: incoming,
+                            reason: error.0.chars().take(512).collect(),
+                        },
                     });
                 }
                 Work::Event {

@@ -1,9 +1,10 @@
 # Custom recognizer proposal gate
 
 `recognition::Gate` is the Rust ticket/response component for the planned Lua
-recognizer path. It is not connected to public session requests, worker routing
-or a Lua constructor yet. Those integrations remain required; this component
-does not make custom recognizers available through `prek session`.
+recognizer path. An internal host binding now connects approved source callbacks
+through the supervised Lua helper. Public session requests, worker routing and
+the source-level constructor remain required; custom recognizers are not yet
+available through `prek session`.
 
 The trusted input coordinator constructs `Candidate` from its verified rule,
 source generation, eligibility revision, expiry and current router ownership.
@@ -26,6 +27,15 @@ declarations, 64 active candidates, 64 pending tickets, 64 KiB per encoded ticke
 and 1 MiB of pending encoded tickets. A full gate rejects new work without
 evicting live tickets.
 
+`offer_timer` wakes an existing, still eligible candidate when physical input is
+stationary. The coordinator must check the current held state and conditions.
+The ticket has `cause=timer`, a new Rust `requested_at` and response deadline,
+and retains the last physical frame's timestamp and sequence. Changes, contact
+births/releases and ended positions are cleared; retained contacts are marked
+non-fresh. This never extends a previous ticket. Repeated wake times, changed
+candidates and retired sources fail. Scheduling approved wakes and delivering
+candidate/source cancellation notifications remain coordinator integration work.
+
 `Gate::validate` consumes a known ticket and rechecks the current authoritative
 candidate, source/eligibility revision, deadline and ownership. A forwarded or
 draining source cannot validate a consuming response. A claimed source requires
@@ -44,7 +54,40 @@ JSON escaping. `retire`, `retire_source` and expiry remove pending work.
 The result is a **validated proposal**, not a claim or execution grant. The
 coordinator must still perform ordinary Rust arbitration, enforce its one-owner
 rule and action permissions, and preserve fallback/draining behavior. It must
-retire completed candidates, changed eligibility and lost sources. The Lua
-callback, source-snapshot, authenticated broker/worker transport, cancellation
-notifications and real routing integration are the next required work. Existing
+retire completed candidates, changed eligibility and lost sources. Existing
 production routing and public custom-recognizer negotiation remain disabled.
+
+The preparatory Rust embedding API, `lua::Definition::bind_recognizer`, binds an
+approved `input` subscription ID to a declaration. It requires observation mode,
+protected normalized-input permission and explicit permitted device selectors.
+Names and subscription IDs are unique, with at most 64 bindings. Bindings travel
+with the approved complete source snapshot; re-evaluation must reproduce its
+configuration and subscription metadata. This is a host API, not the finished
+Lua declaration interface. No new Lua constructor is advertised.
+
+After instantiation, the bound subscription receives only ticketed callbacks;
+ordinary input dispatch skips it. `Runtime::recognize` requires fresh owning
+desktop context, matching fence/seat, negotiated normalized-input capabilities
+and the original unexpired ticket. It checks these before execution and after
+the callback. Unknown, expired or foreign context produces no proposal without
+entering Lua. Repeated/reordered delivery is rejected before changing closure
+state. Ticket/candidate/revision/fence/source/contact identities are copied as
+exact decimal strings. Editing the copy cannot retarget the native proposal.
+
+The callback returns nil for pending, or one `{phase=..., data=...}` table. Other
+fields and yielding fail. Lua receives the existing 20 ms / 100,000-instruction
+callback budget; expanded table traversal is bounded before deserialization,
+including shared/cyclic tables. Data still obeys the Rust eight-level / 4 KiB
+limit. Callback failure or expiry during execution retires the VM, discards its
+logs/proposals and is never retried. Structured logging also preflights expanded
+tables before native allocation.
+
+`session::Session::request_recognition` and `take_recognitions` implement the
+private supervised request/response channel, with fence/sequence/ticket checks,
+bounded pending/results queues and normal stop retirement. Missing proposals
+mean no recognition. This private transport does not create authenticated public
+broker or worker admission. The caller must pass any returned proposal back to
+the owning Rust gate; even a validated result still requires real routing
+arbitration. The source constructor, authenticated broker/private input-worker
+path, current eligibility/winner integration, cancellation cleanup, wake
+scheduling, reload and actual routing tests remain required.

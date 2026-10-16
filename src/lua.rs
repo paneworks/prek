@@ -22,6 +22,7 @@ mod hooks;
 mod modules;
 #[cfg(target_os = "linux")]
 mod morf;
+mod recognizers;
 mod replay;
 mod rule_api;
 mod runtime;
@@ -40,6 +41,7 @@ pub use export::export_config;
 pub use handlers::{ActionResult, HandlerRegistration};
 pub use hooks::RuleHook;
 pub use modules::{Module, Sources};
+pub use recognizers::{Binding as RecognizerBinding, RecognitionResult};
 pub use rule_api::{RuleProposal, RuleReceipt};
 pub use runtime::{Definition, EventKind, LogRecord, MAX_SNAPSHOT_BYTES, Registration, Runtime};
 pub use scheduler::TimerRegistration;
@@ -969,6 +971,8 @@ fn instantiate(
         host,
         config,
         failed: false,
+        recognizers: Vec::new(),
+        recognition_last: None,
     };
     let handlers = runtime.handler_registrations()?;
     hooks::validate(&runtime.registrations()?, &runtime.config)?;

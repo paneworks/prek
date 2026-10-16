@@ -103,6 +103,7 @@
               cp ${./docs/nixos.md} "$out/share/doc/prek/nixos.md"
               cp ${./docs/morf.md} "$out/share/doc/prek/morf.md"
               cp ${./docs/root-routing.md} "$out/share/doc/prek/root-routing.md"
+              cp ${./docs/recognizers.md} "$out/share/doc/prek/recognizers.md"
               for preset in minimal desktop phone; do
                 "$out/bin/prek" init --preset "$preset" \
                   --output "$out/share/prek/presets/$preset.lua"

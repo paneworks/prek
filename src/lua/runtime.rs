@@ -72,6 +72,8 @@ pub struct Definition {
     pub modules: std::collections::BTreeMap<String, super::Module>,
     pub model: String,
     pub registrations: Vec<Registration>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recognizers: Vec<super::recognizers::Binding>,
     #[serde(default)]
     pub timers: Vec<super::TimerRegistration>,
     #[serde(default)]
@@ -98,6 +100,7 @@ impl Definition {
             modules: sources.modules.clone(),
             model: toml::to_string(&runtime.config).map_err(error)?,
             registrations: runtime.registrations()?,
+            recognizers: Vec::new(),
             timers: runtime.timer_registrations()?,
             handlers: runtime.handler_registrations()?,
             tasks: runtime.task_registrations()?,
@@ -115,6 +118,7 @@ impl Definition {
         let config = Config::parse(&self.model)?;
         self.validate_handlers(&config)?;
         super::hooks::validate(&self.registrations, &config)?;
+        super::recognizers::validate(&self.recognizers, &self.registrations, &config)?;
         Ok(config)
     }
     fn validate_metadata(&self) -> Result<(), ConfigError> {
@@ -169,6 +173,7 @@ impl Definition {
                 "Lua source differs from its approved model or registrations",
             ));
         }
+        runtime.recognizers = self.recognizers.clone();
         Ok(runtime)
     }
 }
@@ -233,6 +238,7 @@ pub(super) fn logger<'gc>(ctx: &Context<'gc>, host: Rc<RefCell<Host>>) -> Callba
         if message.len() > 1024 {
             return Err(io::Error::other("Lua log message exceeds byte limit").into());
         }
+        values::budget(ctx, fields, 16, 32768, MAX_LOG_BYTES * 32)?;
         let fields: serde_json::Value = luna_util::serde::from_value_with(
             ctx,
             fields,
@@ -265,6 +271,8 @@ pub struct Runtime {
     pub(super) host: Rc<RefCell<Host>>,
     pub config: Config,
     pub(super) failed: bool,
+    pub(super) recognizers: Vec<super::recognizers::Binding>,
+    pub(super) recognition_last: Option<(crate::protocol::Fence, u64)>,
 }
 impl Runtime {
     pub fn load(source: &str, name: &str) -> Result<Self, ConfigError> {
@@ -345,6 +353,13 @@ impl Runtime {
         let count = self.lua.enter(|ctx| ctx.fetch(&self.registry).length(&ctx));
         // Subscribers added by a callback start receiving the next event.
         for index in 1..=count {
+            if self
+                .recognizers
+                .iter()
+                .any(|binding| i64::from(binding.subscription) == index)
+            {
+                continue;
+            }
             let executor = self
                 .lua
                 .try_enter(|ctx| {

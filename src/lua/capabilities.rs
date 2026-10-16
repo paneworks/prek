@@ -29,7 +29,7 @@ impl CapabilityView {
     }
 }
 
-fn current(host: &runtime::Host) -> Option<&CapabilityView> {
+pub(super) fn current(host: &runtime::Host) -> Option<&CapabilityView> {
     let now = host.now?.checked_add(
         host.context_clock
             .map_or(Duration::ZERO, |clock| clock.elapsed()),

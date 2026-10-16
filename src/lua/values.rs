@@ -4,6 +4,56 @@ use super::*;
 use luna::Context;
 use serde_json::Value as Json;
 
+/// Bound expanded tables before native deserialization, including shared or
+/// cyclic values. Counting each expansion prevents alias-based allocation.
+pub(super) fn budget<'gc>(
+    ctx: Context<'gc>,
+    value: Value<'gc>,
+    depth: usize,
+    nodes: usize,
+    bytes: usize,
+) -> io::Result<()> {
+    fn visit<'gc>(
+        ctx: Context<'gc>,
+        value: Value<'gc>,
+        level: usize,
+        limits: (usize, usize, usize),
+        used: &mut (usize, usize),
+    ) -> io::Result<()> {
+        used.0 = used.0.saturating_add(1);
+        used.1 = used.1.saturating_add(match value {
+            Value::String(text) => text.as_bytes().len(),
+            _ => 16,
+        });
+        if level > limits.0 || used.0 > limits.1 || used.1 > limits.2 {
+            return Err(io::Error::other(
+                "Lua value exceeds expanded nesting/value/byte limit",
+            ));
+        }
+        if let Value::Table(table) = value {
+            for (key, value) in table.iter(ctx) {
+                visit(ctx, key, level + 1, limits, used)?;
+                visit(ctx, value, level + 1, limits, used)?;
+            }
+        }
+        Ok(())
+    }
+    visit(ctx, value, 0, (depth, nodes, bytes), &mut (0, 0))
+}
+
+pub(super) fn recognition<'gc>(
+    ctx: Context<'gc>,
+    ticket: &crate::recognition::Ticket,
+) -> Result<Value<'gc>, luna::Error<'gc>> {
+    let json = serde_json::to_value(ticket).map_err(io::Error::other)?;
+    let value = payload(ctx, &json)?;
+    let Value::Table(table) = value else {
+        unreachable!()
+    };
+    fields(ctx, table, &json, &["id", "candidate", "revision"])?;
+    Ok(value)
+}
+
 fn identity<'gc>(ctx: Context<'gc>, value: u64) -> Value<'gc> {
     Value::String(ctx.intern(value.to_string().as_bytes()))
 }

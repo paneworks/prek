@@ -46,6 +46,212 @@ fn context_view(at: Duration, windows: usize) -> prek::context_transfer::View {
     .unwrap()
 }
 
+fn recognizer_definition(body: &str) -> (Definition, prek::recognition::Definition) {
+    use prek::{
+        config::Millis,
+        recognition::{Definition as Recognizer, InputKind},
+    };
+    use std::collections::BTreeSet;
+    let mut definition = Definition::compile(&format!(r#"
+local p=require('prek'); local calls=0
+p.events.on('input',function(ticket) calls=calls+1; {body} end)
+p.events.on('ready',function()p.log.info('ready')end)
+return p.config.new{{policy={{allow_input_events=true,allowed_devices={{'keyboard'}}}},devices={{keyboard={{keys={{'KEY_A'}}}}}}}}
+"#), "recognizer-helper.lua").unwrap();
+    let recognizer = Recognizer {
+        name: "hold".into(),
+        selectors: BTreeSet::from(["keyboard".into()]),
+        inputs: BTreeSet::from([InputKind::Key]),
+        reply_within: Millis(250),
+        continuous: false,
+    };
+    definition.bind_recognizer(1, recognizer.clone()).unwrap();
+    (definition, recognizer)
+}
+
+fn recognizer_candidate(at: Duration) -> prek::recognition::Candidate {
+    prek::recognition::Candidate {
+        id: u64::MAX,
+        revision: u64::MAX,
+        rule: "hold-rule".into(),
+        source: prek::input::Source {
+            device: u64::MAX,
+            generation: u64::MAX,
+            seat: "seat0".into(),
+        },
+        ownership: Some(prek::router::Ownership::Pending),
+        winner: None,
+        expires: at + Duration::from_secs(2),
+    }
+}
+
+fn recognizer_frame(at: Duration, sequence: u64) -> prek::input_events::Event {
+    use prek::input::{Change, KeyState};
+    prek::input_events::Event::Frame {
+        source: recognizer_candidate(at).source,
+        at,
+        sequence,
+        selectors: vec!["keyboard".into()],
+        changes: vec![Change::Key {
+            code: 30,
+            state: KeyState::Press,
+        }],
+        contacts: vec![],
+        contacts_started: vec![],
+        contacts_ended: vec![],
+        ended_contacts: vec![],
+    }
+}
+
+fn authorize_recognizer(session: &mut Session) {
+    use prek::protocol::Capability;
+    use std::collections::BTreeSet;
+    session
+        .update_context(context_view(monotonic().unwrap(), 0))
+        .unwrap();
+    session
+        .update_capabilities(
+            BTreeSet::from([
+                Capability::InputEvents,
+                Capability::LuaEvents,
+                Capability::Context,
+                Capability::Observations,
+            ]),
+            BTreeSet::new(),
+        )
+        .unwrap();
+    drain(session).unwrap();
+}
+
+#[test]
+fn actual_helper_returns_only_fenced_proposals_for_frames_and_stationary_timer_wakes() {
+    use prek::recognition::{Gate, Phase};
+    let (definition, recognizer) = recognizer_definition(
+        r#"
+assert(ticket.candidate=='18446744073709551615' and ticket.revision=='18446744073709551615')
+assert(ticket.input.source.device=='18446744073709551615' and ticket.input.source.generation=='18446744073709551615')
+if ticket.cause=='frame' then assert(calls==1 and #ticket.input.changes==1);return nil end
+assert(ticket.cause=='timer' and calls==2 and #ticket.input.changes==0)
+local function seconds(t)return t.secs+t.nanos/1000000000 end
+assert(seconds(ticket.requested_at)-seconds(ticket.input.at)>0.25)
+p.log.info('hold',{calls=calls})
+return {phase='discrete',data={calls=calls}}
+"#,
+    );
+    let mut session = Session::spawn(
+        Path::new(env!("CARGO_BIN_EXE_prek")),
+        fence(1),
+        "seat0",
+        definition,
+    )
+    .unwrap();
+    assert_eq!(drain(&mut session).unwrap()[0].message, "ready");
+    authorize_recognizer(&mut session);
+    let at = monotonic().unwrap();
+    let current = recognizer_candidate(at);
+    let mut gate = Gate::new(fence(1), vec![recognizer]).unwrap();
+    let first = gate
+        .offer("hold", &current, &recognizer_frame(at, 1), at)
+        .unwrap();
+    session.request_recognition(first.clone()).unwrap();
+    assert!(session.request_recognition(first).is_err());
+    assert!(drain(&mut session).unwrap().is_empty());
+    let (id, pending) = session.take_recognitions().pop().unwrap();
+    let pending = pending.unwrap();
+    assert_eq!(id, pending.ticket);
+    assert_eq!(pending.phase, Phase::Pending);
+    assert!(
+        gate.validate(pending, &current, monotonic().unwrap())
+            .unwrap()
+            .is_none()
+    );
+    std::thread::sleep(Duration::from_millis(275));
+    authorize_recognizer(&mut session);
+    let timer = gate
+        .offer_timer("hold", &current, monotonic().unwrap())
+        .unwrap();
+    session.request_recognition(timer).unwrap();
+    assert_eq!(drain(&mut session).unwrap()[0].message, "hold");
+    let (_, proposal) = session.take_recognitions().pop().unwrap();
+    let recognized = gate
+        .validate(proposal.unwrap(), &current, monotonic().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(recognized.data["calls"], 2);
+    // The real child returned recognition; Rust still has not claimed input.
+    assert_eq!(
+        recognized.candidate.ownership,
+        Some(prek::router::Ownership::Pending)
+    );
+    session.stop().unwrap();
+    drain(&mut session).unwrap();
+}
+
+#[test]
+fn actual_helper_discards_unauthorized_requests_and_retires_forged_callback_results() {
+    use prek::recognition::Gate;
+    let (definition, recognizer) =
+        recognizer_definition("p.log.info('discard');return {phase='discrete',target='forged'}");
+    let mut session = Session::spawn(
+        Path::new(env!("CARGO_BIN_EXE_prek")),
+        fence(1),
+        "seat0",
+        definition,
+    )
+    .unwrap();
+    drain(&mut session).unwrap();
+    let at = monotonic().unwrap();
+    let current = recognizer_candidate(at);
+    let mut gate = Gate::new(fence(1), vec![recognizer]).unwrap();
+    let first = gate
+        .offer("hold", &current, &recognizer_frame(at, 1), at)
+        .unwrap();
+    session.request_recognition(first).unwrap();
+    assert!(drain(&mut session).unwrap().is_empty());
+    assert!(session.take_recognitions().pop().unwrap().1.is_none());
+    authorize_recognizer(&mut session);
+    let now = monotonic().unwrap();
+    let next = gate
+        .offer("hold", &current, &recognizer_frame(now, 2), now)
+        .unwrap();
+    session.request_recognition(next).unwrap();
+    assert!(drain(&mut session).is_err());
+    assert!(session.take_recognitions().is_empty());
+}
+
+#[test]
+fn recognizer_parent_queue_is_bounded_and_stop_retires_queued_work() {
+    use prek::recognition::Gate;
+    let (definition, recognizer) =
+        recognizer_definition("error('queued callback must be cancelled by stop')");
+    let mut session = Session::spawn(
+        Path::new(env!("CARGO_BIN_EXE_prek")),
+        fence(1),
+        "seat0",
+        definition,
+    )
+    .unwrap();
+    drain(&mut session).unwrap();
+    let at = monotonic().unwrap();
+    let current = recognizer_candidate(at);
+    let mut gate = Gate::new(fence(1), vec![recognizer]).unwrap();
+    let mut last = None;
+    for sequence in 1..=64 {
+        let ticket = gate
+            .offer("hold", &current, &recognizer_frame(at, sequence), at)
+            .unwrap();
+        session.request_recognition(ticket.clone()).unwrap();
+        last = Some(ticket);
+    }
+    let mut excess = last.unwrap();
+    excess.id += 1;
+    assert!(session.request_recognition(excess.clone()).is_err());
+    session.stop().unwrap();
+    assert!(session.request_recognition(excess).is_err());
+    assert!(drain(&mut session).unwrap().is_empty());
+    assert!(session.take_recognitions().is_empty());
+}
+
 #[test]
 fn real_helper_receives_broker_stamped_status_with_independent_expiry_and_stop() {
     use prek::{context::State, lua::StatusView, protocol::Mode};

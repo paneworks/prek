@@ -65,7 +65,7 @@ impl Definition {
         }
         Ok(())
     }
-    fn frame(&self, input: &Event) -> io::Result<Event> {
+    fn project(&self, input: &Event, require_change: bool) -> io::Result<Event> {
         let Event::Frame {
             source,
             at,
@@ -108,7 +108,8 @@ impl Definition {
         {
             return Err(invalid("nonfinite recognizer wheel input"));
         }
-        if changes.is_empty()
+        if require_change
+            && changes.is_empty()
             && !(touch
                 && (!contacts.is_empty()
                     || !contacts_started.is_empty()
@@ -185,8 +186,66 @@ pub struct Ticket {
     pub revision: u64,
     pub rule: String,
     pub recognizer: String,
+    pub cause: Cause,
+    pub requested_at: Duration,
     pub deadline: Duration,
     pub input: Event,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Cause {
+    Frame,
+    Timer,
+}
+impl Ticket {
+    /// Validate the delivery envelope, independently of current rule authority.
+    /// Only Gate can establish eligibility and ownership for the response.
+    pub fn validate_for(&self, definition: &Definition, now: Duration) -> io::Result<()> {
+        self.fence.validate()?;
+        definition.validate()?;
+        self.input.validate()?;
+        if self.id == 0
+            || self.candidate == 0
+            || self.revision == 0
+            || !selector(&self.rule)
+            || self.recognizer != definition.name
+            || self.requested_at > now
+            || now >= self.deadline
+            || self.requested_at < self.input.at()
+            || self.deadline
+                > self
+                    .requested_at
+                    .saturating_add(definition.reply_within.duration())
+            || definition.project(&self.input, self.cause == Cause::Frame)? != self.input
+        {
+            return Err(invalid("invalid or expired recognizer ticket"));
+        }
+        match &self.input {
+            Event::Frame {
+                changes,
+                contacts,
+                contacts_started,
+                contacts_ended,
+                ended_contacts,
+                ..
+            } if self.cause == Cause::Timer => {
+                if !changes.is_empty()
+                    || contacts.iter().any(|contact| contact.fresh)
+                    || !contacts_started.is_empty()
+                    || !contacts_ended.is_empty()
+                    || !ended_contacts.is_empty()
+                {
+                    return Err(invalid("timer ticket cannot repeat input transitions"));
+                }
+            }
+            _ if self.requested_at != self.input.at() || !self.input.fresh(now) => {
+                return Err(invalid("frame ticket has a changed observation time"));
+            }
+            _ => {}
+        }
+        encoded_size(self, MAX_FRAME_BYTES)?;
+        Ok(())
+    }
 }
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -226,6 +285,8 @@ struct History {
     candidate: Candidate,
     recognizer: String,
     last_frame: u64,
+    last_input: Event,
+    last_request: Duration,
     last_reply: u64,
     ordinal: u64,
     progress: bool,
@@ -277,7 +338,7 @@ impl Gate {
             .definitions
             .get(recognizer)
             .ok_or_else(|| invalid("unregistered recognizer"))?;
-        let input = definition.frame(input)?;
+        let input = definition.project(input, true)?;
         let Event::Frame { sequence, .. } = &input else {
             unreachable!()
         };
@@ -288,6 +349,7 @@ impl Gate {
                 || history.candidate.ownership.is_none() != candidate.ownership.is_none()
                 || history.terminal
                 || history.last_frame >= sequence
+                || history.last_request > input.at()
         }) {
             return Err(invalid(
                 "recognizer candidate changed or frame was replayed",
@@ -296,8 +358,66 @@ impl Gate {
         if !self.active.contains_key(&candidate.id) && self.active.len() >= MAX_PENDING {
             return Err(invalid("too many active recognizer candidates"));
         }
-        let deadline = input
-            .at()
+        self.issue(recognizer, candidate, input, Cause::Frame, now)
+    }
+    /// Wake an existing eligible candidate without inventing a physical frame.
+    /// The coordinator must recheck held state and eligibility before calling.
+    pub fn offer_timer(
+        &mut self,
+        recognizer: &str,
+        candidate: &Candidate,
+        now: Duration,
+    ) -> io::Result<Ticket> {
+        self.expire(now);
+        let history = self
+            .active
+            .get(&candidate.id)
+            .ok_or_else(|| invalid("timer requires an existing recognizer candidate"))?;
+        if !candidate.valid(now)
+            || !history.candidate.same(candidate)
+            || history.recognizer != recognizer
+            || history.terminal
+            || history.candidate.ownership.is_none() != candidate.ownership.is_none()
+            || now <= history.last_request
+        {
+            return Err(invalid("timer candidate changed or wake was replayed"));
+        }
+        let mut input = history.last_input.clone();
+        let Event::Frame {
+            changes,
+            contacts,
+            contacts_started,
+            contacts_ended,
+            ended_contacts,
+            ..
+        } = &mut input
+        else {
+            unreachable!()
+        };
+        changes.clear();
+        contacts_started.clear();
+        contacts_ended.clear();
+        ended_contacts.clear();
+        for contact in contacts {
+            contact.fresh = false;
+        }
+        self.issue(recognizer, candidate, input, Cause::Timer, now)
+    }
+    fn issue(
+        &mut self,
+        recognizer: &str,
+        candidate: &Candidate,
+        input: Event,
+        cause: Cause,
+        now: Duration,
+    ) -> io::Result<Ticket> {
+        let requested_at = if cause == Cause::Frame {
+            input.at()
+        } else {
+            now
+        };
+        let definition = self.definitions.get(recognizer).unwrap();
+        let deadline = requested_at
             .checked_add(definition.reply_within.duration())
             .ok_or_else(|| invalid("recognizer deadline overflow"))?
             .min(candidate.expires);
@@ -315,6 +435,8 @@ impl Gate {
             revision: candidate.revision,
             rule: candidate.rule.clone(),
             recognizer: recognizer.into(),
+            cause,
+            requested_at,
             deadline,
             input,
         };
@@ -326,12 +448,20 @@ impl Gate {
             candidate: candidate.clone(),
             recognizer: recognizer.into(),
             last_frame: 0,
+            last_input: ticket.input.clone(),
+            last_request: requested_at,
             last_reply: 0,
             ordinal: 0,
             progress: false,
             terminal: false,
         });
-        history.last_frame = sequence;
+        if let Event::Frame { sequence, .. } = &ticket.input {
+            history.last_frame = *sequence;
+        }
+        if cause == Cause::Frame {
+            history.last_input = ticket.input.clone();
+        }
+        history.last_request = requested_at;
         self.next = id;
         self.bytes += bytes;
         self.pending.insert(
@@ -361,7 +491,7 @@ impl Gate {
             .ok_or_else(|| invalid("unknown recognizer ticket"))?;
         self.bytes -= pending.bytes;
         let ticket = pending.ticket;
-        if now < ticket.input.at()
+        if now < ticket.requested_at
             || now >= ticket.deadline
             || !current.valid(now)
             || !pending.candidate.same(current)
@@ -409,7 +539,7 @@ impl Gate {
             ordinal,
             phase: proposal.phase,
             data: proposal.data,
-            observed_at: ticket.input.at(),
+            observed_at: ticket.requested_at,
         }))
     }
     fn discard_tickets(&mut self, candidate: u64) {

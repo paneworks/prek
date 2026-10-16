@@ -59,6 +59,53 @@ fn proposal(ticket: &Ticket, phase: Phase) -> Proposal {
     }
 }
 #[test]
+fn timer_tickets_retain_original_input_time_and_reject_replayed_or_changed_candidates() {
+    let at = Duration::from_secs(1);
+    let mut gate = Gate::new(fence(), vec![definition(false)]).unwrap();
+    let mut current = candidate(at);
+    current.expires = at + Duration::from_secs(2);
+    assert!(gate.offer_timer("custom", &current, at).is_err());
+    let first = gate.offer("custom", &current, &input(at, 1), at).unwrap();
+    assert_eq!(first.cause, Cause::Frame);
+    first.validate_for(&definition(false), at).unwrap();
+    gate.validate(proposal(&first, Phase::Pending), &current, at)
+        .unwrap();
+    let wake = at + Duration::from_secs(1);
+    let timer = gate.offer_timer("custom", &current, wake).unwrap();
+    assert_eq!(timer.input.at(), at);
+    assert_eq!(timer.requested_at, wake);
+    assert_eq!(timer.deadline, wake + Duration::from_millis(20));
+    timer.validate_for(&definition(false), wake).unwrap();
+    let Event::Frame { changes, .. } = &timer.input else {
+        unreachable!()
+    };
+    assert!(changes.is_empty());
+    assert!(gate.offer_timer("custom", &current, wake).is_err());
+    let mut forged = timer.clone();
+    if let Event::Frame { changes, .. } = &mut forged.input {
+        changes.push(Change::Key {
+            code: 30,
+            state: KeyState::Press,
+        });
+    }
+    assert!(forged.validate_for(&definition(false), wake).is_err());
+    let mut changed = current.clone();
+    changed.revision += 1;
+    assert!(
+        gate.offer_timer("custom", &changed, wake + Duration::from_millis(1))
+            .is_err()
+    );
+    let matched = gate
+        .validate(proposal(&timer, Phase::Discrete), &current, wake)
+        .unwrap()
+        .unwrap();
+    assert_eq!(matched.observed_at, wake);
+    assert!(
+        gate.offer_timer("custom", &current, wake + Duration::from_millis(1))
+            .is_err()
+    );
+}
+#[test]
 fn tickets_filter_declared_input_and_keep_original_deadlines_without_claiming() {
     let at = Duration::from_secs(1);
     let mut gate = Gate::new(fence(), vec![definition(false)]).unwrap();
@@ -96,6 +143,77 @@ fn tickets_filter_declared_input_and_keep_original_deadlines_without_claiming() 
             .is_err()
     );
     assert!(gate.offer("custom", &candidate, &input(at, 2), at).is_err());
+}
+
+#[test]
+fn stationary_touch_wakes_do_not_replay_contact_birth_or_released_positions() {
+    use crate::input::{Contact, ContactId};
+    let at = Duration::from_secs(1);
+    let mut declaration = definition(false);
+    declaration.inputs = BTreeSet::from([InputKind::Touch]);
+    let mut gate = Gate::new(fence(), vec![declaration.clone()]).unwrap();
+    let current = candidate(at);
+    let contact = Contact {
+        id: ContactId {
+            slot: 0,
+            tracking: 10,
+            generation: 4,
+        },
+        x: 10,
+        y: 20,
+        pressure: None,
+        fresh: true,
+    };
+    let mut frame = input(at, 1);
+    if let Event::Frame {
+        contacts,
+        contacts_started,
+        contacts_ended,
+        ended_contacts,
+        ..
+    } = &mut frame
+    {
+        contacts.push(contact.clone());
+        contacts_started.push(contact.id);
+        let mut ended = contact.clone();
+        ended.id.tracking += 1;
+        contacts_ended.push(ended.id);
+        ended_contacts.push(ended);
+    }
+    gate.offer("custom", &current, &frame, at).unwrap();
+    let timer = gate
+        .offer_timer("custom", &current, at + Duration::from_millis(1))
+        .unwrap();
+    timer
+        .validate_for(&declaration, at + Duration::from_millis(1))
+        .unwrap();
+    let Event::Frame {
+        changes,
+        contacts,
+        contacts_started,
+        contacts_ended,
+        ended_contacts,
+        ..
+    } = timer.input
+    else {
+        unreachable!()
+    };
+    assert!(
+        changes.is_empty()
+            && contacts_started.is_empty()
+            && contacts_ended.is_empty()
+            && ended_contacts.is_empty()
+    );
+    assert_eq!(contacts.len(), 1);
+    assert_eq!(contacts[0].id, contact.id);
+    assert_eq!((contacts[0].x, contacts[0].y), (10, 20));
+    assert!(!contacts[0].fresh);
+    gate.retire_source(&current.source);
+    assert_eq!(gate.pending(), 0);
+    assert!(
+        gate.offer_timer("custom", &current, at + Duration::from_millis(2))
+            .is_err()
+    );
 }
 
 #[test]
