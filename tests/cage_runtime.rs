@@ -267,6 +267,11 @@ fn local_cage_lua_routing_and_context() {
             Err(error) => panic!("owned compositor client did not become ready: {error}"),
         }
     };
+    fs::write(
+        output.join("hyprland-devices.json"),
+        serde_json::to_vec(&client.inventory().unwrap()).unwrap(),
+    )
+    .unwrap();
     let Consumer::Hyprland { pid, start, .. } = client.consumer() else {
         panic!("wrong consumer")
     };

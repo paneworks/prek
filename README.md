@@ -55,8 +55,8 @@ application behaviors are required before the CLI can enable routing.
 
 The Hyprland client verifies the IPC socket's owner, compositor process identity
 and executable before querying bounded device inventories. It supports the
-verified 0.54/0.55 schemas and checks virtual-device acceptance and reported
-keyboard settings. The kernel backend also verifies processed udev metadata
+verified 0.54/0.55 and exact 0.56.2 device schemas and checks virtual-device
+acceptance and reported keyboard settings. The kernel backend also verifies processed udev metadata
 and the resulting evdev capabilities. Settings absent from stock IPC and
 complete readiness handoff remain pending.
 

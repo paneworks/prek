@@ -119,6 +119,38 @@ fn test_executable() -> PathBuf {
 const EMPTY: &str = "{\"keyboards\":[],\"mice\":[],\"touch\":[],\"switches\":[],\"tablets\":[]}";
 
 #[test]
+fn verified_0562_inventory_retains_typed_identity_and_peer_checks() {
+    let server = Server::with_version(
+        |_| {
+            serde_json::json!({
+                "keyboards":[{"address":"0x1234","name":"owned-test-keyboard",
+                    "rules":"evdev","model":"pc105","layout":"us","variant":"","options":"",
+                    "active_layout_index":0,"active_keymap":"English (US)",
+                    "capsLock":false,"numLock":false,"main":true}],
+                "mice":[],"tablets":[],"touch":[],"switches":[]
+            })
+            .to_string()
+        },
+        Duration::ZERO,
+        "0.56.2",
+    );
+    let client = server.client();
+    assert_eq!((client.version().minor, client.version().patch), (56, 2));
+    assert_eq!(client.inventory().unwrap()["keyboards"][0]["layout"], "us");
+    assert!(Client::open(&server.directory, "test", uid(), Path::new("/proc/1/exe")).is_err());
+    let malformed = Server::with_version(
+        |_| {
+            serde_json::json!({"keyboards":[{"address":"0x0","name":"invalid"}],
+            "mice":[],"tablets":[],"touch":[],"switches":[]})
+            .to_string()
+        },
+        Duration::ZERO,
+        "0.56.2",
+    );
+    assert!(malformed.client().inventory().is_err());
+}
+
+#[test]
 fn private_socket_requests_verify_the_exact_peer_and_endpoint() {
     let server = Server::new(EMPTY, Duration::ZERO);
     let client = server.client();

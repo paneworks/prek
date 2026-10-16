@@ -62,7 +62,9 @@ impl Version {
                 .parse()
                 .map_err(|_| invalid("invalid Hyprland patch version"))?,
         };
-        if version.major != 0 || !matches!(version.minor, 54 | 55) {
+        if version.major != 0
+            || !(matches!(version.minor, 54 | 55) || (version.minor, version.patch) == (56, 2))
+        {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "Hyprland device schema is not verified for this version",
@@ -656,10 +658,18 @@ mod tests {
     }
     #[test]
     fn versions_are_explicit_and_unknown_schemas_refuse() {
-        for version in ["0.54.3", "0.55.4"] {
+        for version in ["0.54.3", "0.55.4", "0.56.2"] {
             assert!(Version::parse(&serde_json::json!({"version":version})).is_ok());
         }
-        for version in ["0.56.0", "0.55", "1.0.0", "0.55.4-unknown"] {
+        for version in [
+            "0.56.0",
+            "0.56.1",
+            "0.56.3",
+            "0.57.0",
+            "0.55",
+            "1.0.0",
+            "0.55.4-unknown",
+        ] {
             assert!(Version::parse(&serde_json::json!({"version":version})).is_err());
         }
     }
