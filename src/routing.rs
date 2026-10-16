@@ -1030,6 +1030,7 @@ impl Routing {
 #[cfg(test)]
 mod tests {
     mod custom;
+    mod sequence;
     use super::*;
     use crate::config::Action;
     use crate::{

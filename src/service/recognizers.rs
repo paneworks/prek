@@ -304,8 +304,22 @@ fn validate_delivery(
         .find(|binding| binding.definition.name == ticket.recognizer)
         .ok_or_else(|| protocol::invalid("unapproved recognizer source binding"))?;
     ticket.validate_for(&declaration.definition, now)?;
-    if ticket.fence != fence || ticket.input.source().seat != seat || ticket.revision != revision || !config.rules.iter().any(|rule| rule.enabled && config.mode_active(rule) && rule.id == ticket.rule && matches!(&rule.trigger, crate::config::Trigger::Custom { recognizer, .. } if recognizer == &declaration.definition)) {
-        return Err(protocol::invalid("recognizer ticket differs from current source, seat or rules"));
+    if ticket.fence != fence
+        || ticket.input.source().seat != seat
+        || ticket.revision != revision
+        || !config.rules.iter().any(|rule| {
+            rule.enabled
+                && config.mode_active(rule)
+                && rule.id == ticket.rule
+                && rule
+                    .trigger
+                    .recognizers()
+                    .any(|recognizer| recognizer == &declaration.definition)
+        })
+    {
+        return Err(protocol::invalid(
+            "recognizer ticket differs from current source, seat or rules",
+        ));
     }
     Ok(())
 }

@@ -38,7 +38,7 @@ impl State {
             if !config.rules.iter().any(|rule| {
                 rule.enabled
                     && config.mode_active(rule)
-                    && matches!(rule.trigger, Trigger::Custom { .. })
+                    && rule.trigger.recognizers().next().is_some()
             }) {
                 return Ok(None);
             }

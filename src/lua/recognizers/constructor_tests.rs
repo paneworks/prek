@@ -51,6 +51,32 @@ fn source_constructor_records_canonical_binding_and_native_trigger() {
 }
 
 #[test]
+fn nested_native_declarations_still_require_the_exact_original_source_binding() {
+    let definition = compile(DECLARE);
+    let mut config = definition.validate().unwrap();
+    let mut changed = config.rules[0].trigger.clone();
+    let Trigger::Custom { recognizer, .. } = &mut changed else {
+        unreachable!()
+    };
+    recognizer.reply_within = Millis(100);
+    config.rules[0].trigger = Trigger::Sequence {
+        steps: vec![
+            Trigger::Key {
+                key: crate::config::Key(30),
+            },
+            changed,
+        ],
+        timeout: Millis(1000),
+    };
+    assert!(
+        super::validate(&definition.recognizers, &definition.registrations, &config)
+            .unwrap_err()
+            .0
+            .contains("binding differs from its native rule declaration")
+    );
+}
+
+#[test]
 fn unused_source_declarations_survive_model_transport_and_cannot_lose_their_binding() {
     let definition = Definition::compile(&format!(r#"local p=require('prek');{DECLARE}
 return p.config.new{{policy={{allow_input_events=true,allowed_devices={{'keys'}}}},devices={{keys={{keys={{'KEY_A'}}}}}}}}

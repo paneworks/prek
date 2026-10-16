@@ -229,7 +229,10 @@ struct Worker {
 
 /// Custom triggers additionally require the trusted ticket coordinator.
 pub fn unsupported(trigger: &Trigger) -> Option<&'static str> {
-    matches!(trigger, Trigger::Custom { .. })
+    trigger
+        .recognizers()
+        .next()
+        .is_some()
         .then_some("custom recognizers require the trusted asynchronous coordinator")
 }
 impl Worker {
@@ -1870,6 +1873,7 @@ impl Sequence {
                 self.begin(trace.candidate.clone(), next_id)?;
             }
         }
+        let mut changed_targets = BTreeSet::new();
         for (seat, pending) in &mut self.pending {
             if let Some(candidate) = self.steps[pending.step].workers[0]
                 .candidates
@@ -1888,6 +1892,13 @@ impl Sequence {
                             }))
                 })
             {
+                if let (Some(first), Some(later)) = (&pending.first.permit, &candidate.permit)
+                    && !same_target(first, later)
+                {
+                    changed_targets.insert(seat.clone());
+                    continue;
+                }
+                pending.sources.extend(candidate.sources.iter().cloned());
                 for (index, _) in self
                     .groups
                     .iter()
@@ -1903,7 +1914,8 @@ impl Sequence {
             .iter()
             .filter_map(|(seat, pending)| {
                 let changed = matches!(record, Record::Mapping {source,..}|Record::Reconcile {source,..} if pending.sources.contains(source));
-                let reason = if changed {Some("sequence input mapping/state changed".into())}
+                let reason = if changed_targets.contains(seat) {Some("sequence target changed".into())}
+                else if changed {Some("sequence input mapping/state changed".into())}
                 else if pending.first.session_generation != context.authority.generation() {
                     Some("session generation changed".into())
                 } else if self.rule.keys_throughout && !conditions(&self.rule, context.keys, seat) {
@@ -2470,7 +2482,7 @@ pub fn requires_context(rule: &Rule) -> bool {
     !context_free(rule)
 }
 fn context_free(rule: &Rule) -> bool {
-    !matches!(rule.trigger, Trigger::Custom { .. })
+    rule.trigger.recognizers().next().is_none()
         && rule.contexts.is_empty()
         && rule.scope == Scope::Everywhere
         && rule.screen.is_none()

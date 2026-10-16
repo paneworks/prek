@@ -11,7 +11,7 @@ pub fn export_config(config: &Config) -> Result<String, ConfigError> {
         || config
             .rules
             .iter()
-            .any(|rule| matches!(rule.trigger, crate::config::Trigger::Custom { .. }))
+            .any(|rule| rule.trigger.recognizers().next().is_some())
     {
         return Err(error(
             "custom recognizers require their original approved source",

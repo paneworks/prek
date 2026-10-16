@@ -520,9 +520,9 @@ All IDs/generations/revisions are exact decimal strings.
 
 See [the full constructor, ticket and cleanup contract](recognizers.md) and
 [hold example](../examples/lua/custom_recognizer.lua). The real helper and
-native-worker tests use explicit context/admission models. Live privileged
-acceptance, the sole routing-worker bridge,
-sequence/group composition and offline custom replay remain required.
+native-worker tests use explicit context/admission models. The sole routing-worker
+bridge is implemented; actual privileged acceptance, full custom sequence/group
+composition and offline custom replay remain required.
 
 Constructors also retain canonical declarations in `Config.recognizers`,
 independent of the current rules. Runtime transactions can use a retained trigger

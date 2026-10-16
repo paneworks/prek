@@ -386,6 +386,23 @@ pub struct Repeat {
     pub interval: Millis,
 }
 impl Trigger {
+    pub(crate) fn recognizers(&self) -> impl Iterator<Item = &crate::recognition::Definition> {
+        let mut current = std::slice::from_ref(self).iter();
+        let mut parents = Vec::new();
+        std::iter::from_fn(move || {
+            loop {
+                match current.next() {
+                    Some(Self::Custom { recognizer, .. }) => return Some(recognizer),
+                    Some(Self::Sequence { steps, .. }) => {
+                        parents.push(std::mem::replace(&mut current, steps.iter()))
+                    }
+                    Some(_) => {}
+                    None => current = parents.pop()?,
+                }
+            }
+        })
+    }
+
     pub fn contains_touch(&self) -> bool {
         self.fingers().is_some()
             || matches!(self, Self::Custom { recognizer, .. } if recognizer.inputs.contains(&crate::recognition::InputKind::Touch))
@@ -401,6 +418,162 @@ impl Trigger {
             Self::Shape { fingers, .. } => *fingers,
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod recognizer_walk_tests {
+    use super::*;
+    use crate::recognition::{Definition, InputKind};
+
+    fn custom(name: &str) -> Trigger {
+        Trigger::Custom {
+            recognizer: Definition {
+                name: name.into(),
+                selectors: BTreeSet::from(["keyboard".into()]),
+                inputs: BTreeSet::from([InputKind::Key]),
+                reply_within: Millis(250),
+                continuous: false,
+            },
+            timeout: Millis(1000),
+            wake: None,
+        }
+    }
+    fn sequence(steps: Vec<Trigger>) -> Trigger {
+        Trigger::Sequence {
+            steps,
+            timeout: Millis(1000),
+        }
+    }
+    fn profile(trigger: Trigger) -> Config {
+        let mut config = Config::preset("desktop").unwrap();
+        config.policy.allow_input_events = true;
+        config.policy.allowed_devices = config.devices.keys().cloned().collect();
+        config.rules[0].trigger = trigger;
+        config
+    }
+
+    #[test]
+    fn nested_declarations_are_walked_in_step_order_without_ordinary_triggers() {
+        let trigger = sequence(vec![
+            Trigger::Key { key: Key(30) },
+            custom("first"),
+            sequence(vec![
+                custom("second"),
+                sequence(vec![custom("first"), custom("third")]),
+            ]),
+        ]);
+        assert_eq!(
+            trigger
+                .recognizers()
+                .map(|r| r.name.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second", "first", "third"]
+        );
+        assert!(Trigger::Key { key: Key(30) }.recognizers().next().is_none());
+    }
+
+    #[test]
+    fn source_registry_collects_nested_and_retained_declarations_canonically() {
+        let mut config = profile(sequence(vec![
+            custom("b"),
+            sequence(vec![custom("a"), custom("b")]),
+        ]));
+        config.recognizers = vec![custom("unused").recognizers().next().unwrap().clone()];
+        assert_eq!(
+            config
+                .recognizer_definitions()
+                .iter()
+                .map(|r| r.name.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b", "unused"]
+        );
+    }
+
+    #[test]
+    fn nested_permission_and_declaration_conflicts_are_not_hidden_by_composition() {
+        let trigger = sequence(vec![custom("same"), custom("same")]);
+        let mut config = profile(trigger);
+        let Trigger::Sequence { steps, .. } = &mut config.rules[0].trigger else {
+            unreachable!()
+        };
+        let Trigger::Custom { recognizer, .. } = &mut steps[1] else {
+            unreachable!()
+        };
+        recognizer.reply_within = Millis(100);
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .0
+                .contains("consistent and bounded")
+        );
+        let mut config = profile(sequence(vec![
+            Trigger::Key { key: Key(30) },
+            custom("hidden"),
+        ]));
+        config.policy.allow_input_events = false;
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .0
+                .contains("protected input permission")
+        );
+    }
+
+    #[test]
+    fn nested_walk_preserves_empty_branches_and_returns_to_parent_siblings() {
+        let trigger = sequence(vec![
+            sequence(vec![]),
+            sequence(vec![sequence(vec![]), custom("inner")]),
+            custom("last"),
+        ]);
+        assert_eq!(
+            trigger
+                .recognizers()
+                .map(|r| r.name.as_str())
+                .collect::<Vec<_>>(),
+            ["inner", "last"]
+        );
+    }
+
+    #[test]
+    fn recursive_approval_does_not_enable_uncoordinated_custom_sequence_execution() {
+        let config = profile(sequence(vec![
+            Trigger::Key { key: Key(30) },
+            custom("nested"),
+        ]));
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .0
+                .contains("coordinated step lifetimes")
+        );
+        assert!(crate::rules::unsupported(&config.rules[0].trigger).is_some());
+        assert!(crate::rules::Engine::new(config).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn nested_callbacks_require_context_and_are_excluded_from_unfenced_baselines() {
+        let mut config = profile(sequence(vec![
+            Trigger::Key { key: Key(30) },
+            custom("nested"),
+        ]));
+        let rule = &mut config.rules[0];
+        rule.enabled = true;
+        rule.contexts.clear();
+        rule.scope = Scope::Everywhere;
+        rule.action = Action::Event {
+            name: "composed".into(),
+        };
+        assert!(crate::rules::requires_context(rule));
+        let baseline = crate::worker::preflight_profile(&config);
+        assert!(!baseline.rules[0].enabled);
+        assert!(config.rules[0].enabled);
+        assert_eq!(baseline.rules[0].trigger, config.rules[0].trigger);
     }
 }
 
@@ -758,14 +931,11 @@ impl std::error::Error for ConfigError {}
 impl Config {
     pub(crate) fn recognizer_definitions(&self) -> Vec<crate::recognition::Definition> {
         let mut definitions = BTreeMap::new();
-        for definition in self
-            .recognizers
-            .iter()
-            .chain(self.rules.iter().filter_map(|rule| match &rule.trigger {
-                Trigger::Custom { recognizer, .. } => Some(recognizer),
-                _ => None,
-            }))
-        {
+        for definition in self.recognizers.iter().chain(
+            self.rules
+                .iter()
+                .flat_map(|rule| rule.trigger.recognizers()),
+        ) {
             definitions.insert(definition.name.clone(), definition.clone());
         }
         definitions.into_values().collect()
@@ -929,7 +1099,7 @@ impl Config {
         let mut ids = BTreeSet::new();
         for rule in &self.rules {
             let prefix = format!("rules.{}", rule.id);
-            if let Trigger::Custom { recognizer, .. } = &rule.trigger {
+            for recognizer in rule.trigger.recognizers() {
                 if recognizer.continuous
                     && rule.delivery != Delivery::Observe
                     && !recognizer.inputs.iter().any(|kind| {

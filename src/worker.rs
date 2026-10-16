@@ -257,7 +257,7 @@ fn permits_input(config: &Config, subscription: &Subscription, now: Duration) ->
 pub(crate) fn preflight_profile(config: &Config) -> Config {
     let mut profile = config.clone();
     for rule in &mut profile.rules {
-        if matches!(rule.trigger, crate::config::Trigger::Custom { .. }) {
+        if rule.trigger.recognizers().next().is_some() {
             rule.enabled = false;
         }
     }

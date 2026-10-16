@@ -187,6 +187,13 @@ make.recipe{ name = "test", desc = "the suite",
              run = function() sh.cargo("test", "--locked", "--all-targets") end }
 make.alias("t", "test")
 
+make.recipe{ name = "test-composition", desc = "native sequence routing and recursive recognizer approval",
+             run = function()
+               sh.cargo("test", "--locked", "--lib", "routing::tests::sequence::")
+               sh.cargo("test", "--locked", "--lib", "config::recognizer_walk_tests::")
+               sh.cargo("test", "--locked", "--lib", "lua::recognizers::constructor_tests::nested_native_declarations")
+             end }
+
 make.recipe{
   name = "test-routing-helper",
   desc = "test sole-worker callbacks with the real unprivileged Lua helper",

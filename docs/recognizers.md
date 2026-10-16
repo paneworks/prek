@@ -274,7 +274,8 @@ it only in observation mode, with protected input permission, Lua/context/observ
 capabilities and exact approved source bindings covering the configured custom
 declarations. It checks the live owning registration, exact agent executable and
 desktop lock/context again before sending input or submitting proposals.
-The sole routing worker still needs its live custom callback bridge.
+The sole routing worker carries the same typed callback bridge; actual privileged
+custom-recognizer admission remains unverified.
 
 The broker records each issued ticket, its actual delivery, the one submitted
 proposal and its native worker receipt. Client proposals cannot select a source,
@@ -304,8 +305,7 @@ These messages establish no execution, routing ownership or descriptor-release
 proof. Whole-session stop discards queues and disables the old generation; the
 supervisor owns process reaping and release of its VM state.
 
-The sole routing-worker integration and actual privileged
-broker/kernel/physical acceptance remain required. Existing root-routing and
+Actual privileged broker/kernel/physical acceptance remains required. Existing root-routing and
 native handoff scripts do not establish live custom-recognizer admission.
 
 ## Native rule and routing integration
@@ -317,6 +317,21 @@ policy. Custom sequence steps currently fail validation: coordinated step and
 multi-group lifetimes remain required work. Continuous consuming candidates must
 start on a physical key/contact group; other declared changes may update that
 group. Continuous consumption without such a group also remains unsupported.
+
+Declaration discovery and source approval walk every nested trigger, preserving
+canonical registration and exact callback matching across composition boundaries.
+Baseline preflight and context requirements use the same walk. This does not
+enable custom sequence execution: independent child coordinators would duplicate
+ticket identities/budgets and expose callbacks for steps that are not yet active.
+
+Built-in native sequences join a later step's eligible sources before its match,
+so an explicitly reserved second-device press cannot escape while a hold matures.
+The step must start after activation or satisfy the existing same-contact
+continuation rule. Earlier future-step input remains ordinary and cannot be
+claimed retroactively. A different frozen target cancels the chain before that
+source is reserved; losing an admitted source cancels the parent. These native
+routing model checks are included in `oslo make test-composition`, not claimed as
+physical multi-device or custom-callback sequence acceptance.
 
 `rules::Engine::with_recognition` and `routing::Routing::with_recognition` are
 trusted embedding constructors. Ordinary constructors reject custom triggers
