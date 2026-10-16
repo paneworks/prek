@@ -352,21 +352,12 @@ pub(super) fn continue_touch(
     {
         return Err("touch continuation is no longer eligible");
     }
-    if previous.contacts.is_empty()
-        || previous.source != state.device.source
-        || previous.contacts != state.contacts.iter().map(|contact| contact.id).collect()
-        || state
-            .last_input
-            .is_none_or(|(_, physical_at)| physical_at > at)
-        || previous.permit.as_ref().is_none_or(|permit| {
-            context
-                .authority
-                .validate(permit, input_context(state, at))
-                .is_err()
-        })
-    {
-        return Err("touch continuation held state changed");
-    }
+    let id = context
+        .next_id
+        .checked_add(1)
+        .ok_or("custom candidate IDs exhausted")?;
+    let mut candidate =
+        continuation::candidate(previous, state, context.authority, at, watermark, id)?;
     let (sequence, physical_at) = state.last_input.unwrap();
     let input = Input::Frame {
         source: state.device.source.clone(),
@@ -390,10 +381,6 @@ pub(super) fn continue_touch(
     let input = recognizer
         .project(&input, false)
         .map_err(|_| "touch continuation projection refused")?;
-    let id = context
-        .next_id
-        .checked_add(1)
-        .ok_or("custom candidate IDs exhausted")?;
     let expires = at
         .checked_add(timeout.duration())
         .ok_or("custom deadline overflow")?;
@@ -401,13 +388,6 @@ pub(super) fn continue_touch(
         .custom
         .offer(id, OfferedInput::TouchContinuation(input), at)
         .map_err(|_| "custom recognition queue exhausted")?;
-    let mut candidate = previous.clone();
-    candidate.id = id;
-    candidate.ordinal = 0;
-    candidate.progress = false;
-    candidate.started = at;
-    candidate.started_input = watermark;
-    candidate.continued_from = Some(previous.id);
     candidate.expires = Some(expires);
     context.custom.live.insert(id);
     *context.next_id = id;
@@ -999,6 +979,13 @@ impl Engine {
                     &mut self.custom,
                 )?;
             }
+        }
+        if self.shape_samples() > 65_536 || self.events.len() > 16384 {
+            self.cancel_all(at, "custom completion exceeded native observation budgets");
+            self.custom_sync(at, Retirement::Cancelled);
+            return Err(invalid(
+                "custom completion exceeded native observation budgets",
+            ));
         }
         self.custom_sync(at, Retirement::Cancelled);
         Ok(())

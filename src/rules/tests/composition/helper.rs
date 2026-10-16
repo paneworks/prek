@@ -57,7 +57,11 @@ return p.config.new{policy={allow_input_events=true,allowed_devices={'keyboard'}
             after: Millis(20),
         },
         Trigger::Sequence {
-            steps: vec![touch_custom("first"), touch_custom("last")],
+            steps: vec![
+                touch_custom("first"),
+                touch_custom("last"),
+                motion::swipe(true),
+            ],
             timeout: Millis(1000),
         },
         1,
@@ -175,11 +179,34 @@ return p.config.new{policy={allow_input_events=true,allowed_devices={'keyboard'}
         );
     }
     assert_eq!(engine.input_watermark, 1);
+    assert!(matches(&engine.events).is_empty());
+    assert_eq!(engine.sequences[0].pending["seat0"].step, 3);
+    for (sequence, x, end) in [(2, 400, false), (3, 500, false), (4, 500, true)] {
+        std::thread::sleep(Duration::from_millis(2));
+        shape_touch(
+            &mut engine,
+            millis(),
+            sequence,
+            &[(0, x, 500), (1, x + 100, 500)],
+            false,
+            end,
+        );
+    }
+    let matched = matches(&engine.events);
+    assert_eq!(matched.len(), 3, "{:?}", engine.events);
+    for (event, (ordinal, stage)) in
+        matched
+            .iter()
+            .zip([(1, Stage::Begin), (2, Stage::Update), (3, Stage::End)])
+    {
+        assert!(matches!(event,Event::Matched {
+            id,ordinal:actual,stage:actual_stage,evidence:Evidence::Sequence{steps},..
+        } if *id==outer && *actual==ordinal && *actual_stage==stage && steps.len()==4
+            && matches!(&steps[1],Evidence::Custom{data,..} if data["from"]=="actual-held-touch-helper")
+            && matches!(&steps[2],Evidence::Custom{data,..} if data["step"]=="last")
+            && matches!(&steps[3],Evidence::Touch{gesture:TouchGesture::Pan{..},..})));
+    }
+    assert_eq!(engine.input_watermark, 4);
     assert!(engine.sequences[0].pending.is_empty());
-    assert!(matches!(&matches(&engine.events)[..], [Event::Matched {
-        id,evidence:Evidence::Sequence{steps},..
-    }] if *id==outer && steps.len()==3
-        && matches!(&steps[1],Evidence::Custom{data,..} if data["from"]=="actual-held-touch-helper")
-        && matches!(&steps[2],Evidence::Custom{data,..} if data["step"]=="last")));
     session.stop().unwrap();
 }

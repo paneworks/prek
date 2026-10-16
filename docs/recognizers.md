@@ -348,12 +348,22 @@ rechecks source, contact membership, readiness, limits and parent deadlines.
 The asynchronous input-watermark exception belongs only to that newly created
 continuation identity, never an eager future-step candidate. Input loss,
 reconciliation and mapping changes invalidate retained physical metadata.
+A custom touch step can hand the same held contacts to a native swipe, pinch,
+rotation or touch-shape suffix. The suffix gets a new private candidate and
+motion origin at the actual admission time, preserving the original permit.
+Shape capture starts with one sample of the current centroid; old eager motion,
+paths and progress cannot become the suffix. A physical record timestamped before
+that activation cancels under the native backwards-time checks, rather than
+counting earlier motion. Admission does not advance the drained input clock.
+A custom step completed after the group is fully neutral may instead wait for
+a genuinely fresh group. Final custom proposals retain their original expiry
+when translated to a parent outcome.
 Public custom-sequence validation remains closed: consuming group/ownership
-integration, custom-to-native motion rebasing, full worker/helper integration and
+integration, full worker/helper integration and
 offline custom replay are still required. These fixtures do not constitute that
 API, privileged, device or rendered acceptance.
 `oslo make test-composition-helper` exercises a private native hold-to-custom-to-
-custom plan with source-bound callbacks in the actual supervised executable;
+custom-to-native-motion plan with source-bound callbacks in the actual supervised executable;
 it is not public source admission or consuming-route acceptance.
 
 Built-in native sequences join a later step's eligible sources before its match,

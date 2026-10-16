@@ -17,6 +17,7 @@ use std::{
     io,
     time::Duration,
 };
+mod continuation;
 mod custom;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2210,7 +2211,7 @@ impl Sequence {
                     candidate.id = pending.id;
                     candidate.sources = pending.sources.clone();
                     self.outcomes.push(RouteOutcome {
-                        expires: None,
+                        expires: trace.expires,
                         event: events.last().unwrap().clone(),
                         intent: RouteIntent {
                             rule: self.rule.clone(),
@@ -2232,7 +2233,10 @@ impl Sequence {
                 pending.previous = Some(trace.candidate.clone());
                 pending.after_input = trace.after_input.or(pending.after_input);
                 pending.step += 1;
-                if matches!(self.triggers[pending.step], Trigger::Custom { .. }) {
+                if matches!(self.triggers[pending.step], Trigger::Custom { .. })
+                    || matches!(&self.triggers[index], Trigger::Custom { recognizer, .. }
+                        if recognizer.inputs.contains(&crate::recognition::InputKind::Touch))
+                {
                     activated.insert(seat.clone(), (pending.step, trace.after_input.is_none()));
                 }
                 let completed_groups: Vec<_> = pending
@@ -2268,11 +2272,16 @@ impl Sequence {
             {
                 continue;
             }
-            let reason = self.continue_custom(&seat, step, context, next_id, coordinator)?;
+            let reason = if matches!(self.triggers[step], Trigger::Custom { .. }) {
+                self.continue_custom(&seat, step, context, next_id, coordinator)?
+            } else {
+                self.continue_motion(&seat, step, context, coordinator)?
+            };
             let reason = if reason.is_none()
                 && same_record
                 && let Some(frame) = context.normalized
                 && frame.raw.source.seat == seat
+                && matches!(self.triggers[step], Trigger::Custom { .. })
             {
                 self.project_custom(step, frame, context, next_id, coordinator)?
             } else {
@@ -2319,6 +2328,9 @@ impl Sequence {
         else {
             return Ok(Some("touch continuation source changed"));
         };
+        if state.contacts.is_empty() && matches!(self.triggers[step - 1], Trigger::Custom { .. }) {
+            return Ok(None);
+        }
         let engine = &mut self.steps[step];
         let worker = &mut engine.workers[0];
         if !selected(&engine.config, &worker.rule, &state.device) {
@@ -2341,6 +2353,70 @@ impl Sequence {
                 next_id,
                 events: &mut engine.events,
             },
+        ) {
+            return Ok(Some(reason));
+        }
+        let pending = self.pending.get_mut(seat).unwrap();
+        for (index, _) in self
+            .groups
+            .iter()
+            .enumerate()
+            .filter(|(_, group)| group.first == step)
+        {
+            pending.groups.entry(index).or_insert(context.admitted_at);
+        }
+        Ok(None)
+    }
+
+    fn continue_motion(
+        &mut self,
+        seat: &str,
+        step: usize,
+        context: &SequenceContext<'_>,
+        coordinator: &Option<custom::State>,
+    ) -> io::Result<Option<&'static str>> {
+        if !matches!(
+            self.triggers[step],
+            Trigger::Swipe { .. }
+                | Trigger::Pinch { .. }
+                | Trigger::Rotate { .. }
+                | Trigger::Shape {
+                    fingers: Some(_),
+                    ..
+                }
+        ) {
+            return Ok(None);
+        }
+        let previous = self.pending[seat].previous.as_ref().unwrap();
+        let Some(state) = context
+            .devices
+            .get(&previous.source.device)
+            .filter(|state| state.device.source == previous.source)
+        else {
+            return Ok(Some("touch continuation source changed"));
+        };
+        let engine = &mut self.steps[step];
+        let worker = &mut engine.workers[0];
+        if previous.contacts.is_empty()
+            || state.contacts.is_empty()
+            || state.contacts.len() != usize::from(worker.rule.trigger.fingers().unwrap())
+            || !selected(&engine.config, &worker.rule, &state.device)
+        {
+            return Ok(None);
+        }
+        let custom = coordinator
+            .as_ref()
+            .ok_or_else(|| invalid("custom sequence coordinator is unavailable"))?;
+        if !custom.ready() || context.authority.generation() != custom.fence.session {
+            return Ok(Some("touch continuation is no longer eligible"));
+        }
+        if let Err(reason) = continuation::motion(
+            worker,
+            state,
+            previous,
+            context,
+            &engine.config,
+            &mut engine.next_id,
         ) {
             return Ok(Some(reason));
         }

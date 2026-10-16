@@ -502,6 +502,62 @@ impl TouchRecognizer {
             })
         }
     }
+    /// Rebase a native-owned held group without contact births or input replay.
+    pub(crate) fn continue_contacts(
+        &mut self,
+        source: &Source,
+        mapping: &Mapping,
+        contacts: &[crate::input::Contact],
+        at: Duration,
+    ) -> Result<(), &'static str> {
+        if *source != self.source
+            || *mapping != self.mapping
+            || contacts.is_empty()
+            || contacts.len() > 64
+            || self.last_at.is_some_and(|last| at < last)
+        {
+            return Err("invalid native touch continuation");
+        }
+        let points = contacts
+            .iter()
+            .map(|contact| {
+                self.mapping
+                    .map(contact.x, contact.y)
+                    .map(|position| (contact.id, position))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        if points.len() != contacts.len() {
+            return Err("duplicate native continuation contacts");
+        }
+        let id = self.next_id.checked_add(1).ok_or("touch IDs exhausted")?;
+        self.group = Some(Group {
+            id,
+            started: at,
+            last_join: at,
+            initial: points.clone(),
+            current: points,
+            active: contacts.len(),
+            peak: contacts.len(),
+            settled: true,
+            eligible: true,
+            cancelled: false,
+            moved: false,
+            held: false,
+            pan: None,
+            pinching: false,
+            rotating: false,
+            last_total: Point::default(),
+            last_motion: at,
+            ratio: 1.0,
+            rotation: 0.0,
+            last_angle: 0.0,
+        });
+        self.taps = None;
+        self.next_id = id;
+        self.last_at = Some(at);
+        self.blocked = false;
+        Ok(())
+    }
     pub fn replace_mapping(
         &mut self,
         mapping: Mapping,
@@ -1197,6 +1253,74 @@ mod tests {
     }
     fn two(x: i32, y: i32) -> [(u16, i32, i32, i32); 2] {
         [(0, 10, x, y), (1, 11, x + 200, y)]
+    }
+
+    #[test]
+    fn native_owned_held_contacts_rebase_atomically_without_births_or_old_motion() {
+        let mut trial = Trial::new(TouchSettings::default());
+        trial.send(0, &two(100, 200));
+        let old = trial.recognizer.group.as_ref().unwrap().id;
+        let contacts: Vec<_> = trial
+            .recognizer
+            .group
+            .as_ref()
+            .unwrap()
+            .initial
+            .keys()
+            .map(|id| crate::input::Contact {
+                id: *id,
+                x: 100 + i32::from(id.slot) * 200,
+                y: 200,
+                pressure: None,
+                fresh: false,
+            })
+            .collect();
+        let source = device().source;
+        for bad in 0..5 {
+            let mut source = source.clone();
+            let mut mapping = mapping();
+            let mut contacts = contacts.clone();
+            match bad {
+                0 => source.generation += 1,
+                1 => mapping.generation += 1,
+                2 => contacts.clear(),
+                3 => contacts[1] = contacts[0].clone(),
+                _ => contacts[0].x = -1,
+            }
+            assert!(
+                trial
+                    .recognizer
+                    .continue_contacts(&source, &mapping, &contacts, ms(20))
+                    .is_err()
+            );
+            assert_eq!(trial.recognizer.group.as_ref().unwrap().id, old);
+        }
+        trial.tick(10);
+        assert!(
+            trial
+                .recognizer
+                .continue_contacts(&source, &mapping(), &contacts, ms(9))
+                .is_err()
+        );
+        trial
+            .recognizer
+            .continue_contacts(&source, &mapping(), &contacts, ms(20))
+            .unwrap();
+        assert!(trial.recognizer.group.as_ref().unwrap().id > old);
+        assert!(trial.tick(21).is_empty());
+        assert!(has(&trial.send(30, &two(200, 200)), |gesture| matches!(
+            gesture,
+            TouchGesture::Pan {
+                phase: Phase::Begin,
+                ..
+            }
+        )));
+        let mut extra = two(200, 200).to_vec();
+        extra.push((2, 12, 600, 200));
+        assert!(has(&trial.send(40, &extra), |gesture| matches!(
+            gesture,
+            TouchGesture::Cancelled { .. }
+        )));
     }
 
     #[test]

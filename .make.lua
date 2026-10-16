@@ -195,6 +195,7 @@ make.recipe{ name = "test-composition", desc = "native sequence routing and recu
                sh.cargo("test", "--locked", "--lib", "lua::recognizers::constructor_tests::nested_native_declarations")
                sh.cargo("test", "--locked", "--lib", "recognition::tests::native_touch_continuation")
                sh.cargo("test", "--locked", "--lib", "lua::recognizers::tests::an_initial_native_touch_timer")
+               sh.cargo("test", "--locked", "--lib", "gestures::tests::native_owned_held_contacts")
              end }
 
 make.recipe{

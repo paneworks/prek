@@ -1,6 +1,7 @@
 //! Private coordinator models; public nested-custom admission stays disabled.
 #[cfg(target_os = "linux")]
 mod helper;
+mod motion;
 use super::*;
 use crate::{
     protocol::{Epoch, Fence},
