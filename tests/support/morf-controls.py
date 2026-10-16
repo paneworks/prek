@@ -47,12 +47,38 @@ def native_root_receipt(stdout, *, compositor_pid, producer_pid, output, cancel_
     return receipt
 
 
+def root_probe_exchange(path, bindings):
+    with socket.socket(socket.AF_UNIX) as connection:
+        connection.settimeout(40)
+        connection.connect(str(path))
+        _pid, uid, _gid = struct.unpack("3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+        if uid != 0:
+            raise PermissionError("native test coordinator is not root")
+        connection.sendall(json.dumps(dict(op="probe", bindings=bindings)).encode() + b"\n")
+        data = bytearray()
+        while not data.endswith(b"\n"):
+            chunk = connection.recv(min(4096, 1024 * 1024 + 1 - len(data)))
+            if not chunk:
+                raise ValueError("native test coordinator closed an incomplete reply")
+            data.extend(chunk)
+            if len(data) > 1024 * 1024:
+                raise ValueError("native test coordinator reply exceeded its bound")
+        reply = json.loads(data)
+        if (not isinstance(reply, dict) or set(reply) != {"code", "stdout"}
+                or type(reply["code"]) is not int or not 0 <= reply["code"] <= 255
+                or type(reply["stdout"]) is not str):
+            raise ValueError("invalid native test coordinator reply")
+        return reply
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("morf", "shell", "socket", "hyprctl", "instance", "output"):
         parser.add_argument(f"--{name}", required=True)
     parser.add_argument("--pid", required=True, type=int)
-    parser.add_argument("--root-probe", type=Path)
+    root_probe = parser.add_mutually_exclusive_group()
+    root_probe.add_argument("--root-probe", type=Path)
+    root_probe.add_argument("--root-probe-socket", type=Path)
     parser.add_argument("--screencopy", type=Path)
     args = parser.parse_args()
     assert os.environ.get("PREK_CAGE_HOST") == "1"
@@ -429,15 +455,22 @@ def main():
             final_path, final_native = native_state()
             assert final_native == initial_native and final_path == native_path
             root_receipt = None
-            if args.root_probe:
-                command = ["sudo", "-n", "--", str(args.root_probe), str(runtime), str(os.getuid()),
-                           args.instance, os.readlink(f"/proc/{args.pid}/exe"), str(Path(args.morf).resolve()),
-                           str(args.pid), str(child.pid), name]
+            if args.root_probe or args.root_probe_socket:
+                bindings = [str(runtime), str(os.getuid()), args.instance,
+                            os.readlink(f"/proc/{args.pid}/exe"), str(Path(args.morf).resolve()),
+                            str(args.pid), str(child.pid), name]
                 root_log = output / "morf-native-root.log"
-                with root_log.open("w") as log:
-                    result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT,
-                                            text=True, timeout=30)
-                assert result.returncode == 0, "native root probe failed; see morf-native-root.log"
+                if args.root_probe_socket:
+                    reply = root_probe_exchange(args.root_probe_socket, bindings)
+                    root_log.write_text(reply["stdout"])
+                    code = reply["code"]
+                else:
+                    command = ["sudo", "-n", "--", str(args.root_probe), *bindings]
+                    with root_log.open("w") as log:
+                        result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT,
+                                                text=True, timeout=30)
+                    code = result.returncode
+                assert code == 0, "native root probe failed; see morf-native-root.log"
                 root_receipt = native_root_receipt(root_log.read_text(), compositor_pid=args.pid,
                                                   producer_pid=child.pid, output=name,
                                                   cancel_supported=capabilities.get("cancel_gesture", False))

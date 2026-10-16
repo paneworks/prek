@@ -85,6 +85,11 @@
             package = self.packages.${system}.default;
             rootProbe = nativeProbe;
           });
+          cage-root-session-test-wayland-fix = import ./tests/root-session.nix {
+            inherit pkgs;
+            probe = nativeProbe;
+            fixture = self.packages.${system}.cage-test-wayland-fix;
+          };
           root-routing-test = import ./tests/root-routing.nix {
             inherit pkgs;
             package = self.packages.${system}.default;
@@ -185,6 +190,10 @@
           type = "app";
           program = "${self.packages.${system}.cage-root-test-wayland-fix}/bin/prek-cage-root-test";
         };
+        cage-root-session-test-wayland-fix = {
+          type = "app";
+          program = "${self.packages.${system}.cage-root-session-test-wayland-fix}/bin/prek-cage-root-test";
+        };
         root-routing-test = {
           type = "app";
           program = "${self.packages.${system}.root-routing-test}/bin/prek-root-routing-test";
@@ -213,6 +222,19 @@
             bash -n ${self.packages.${system}.cage-root-test}/bin/prek-cage-root-test
             shellcheck ${self.packages.${system}.cage-root-test}/bin/prek-cage-root-test
             touch "$out"
+          '';
+          root-session = pkgs.runCommand "prek-root-session-check" {
+            nativeBuildInputs = [ pkgs.python3 pkgs.bash pkgs.shellcheck ];
+          } ''
+            mkdir models
+            cp ${./tests/support/root_session.py} models/root_session.py
+            cp ${./tests/support/test_root_session.py} models/test_root_session.py
+            cp ${./tests/support/morf-controls.py} models/morf-controls.py
+            python3 -m unittest discover -s models -p test_root_session.py -v > "$out" 2>&1
+            bash -n ${./tests/run-root-handoff.sh}
+            shellcheck ${./tests/run-root-handoff.sh}
+            bash -n ${self.packages.${system}.cage-root-session-test-wayland-fix}/bin/prek-cage-root-test
+            shellcheck ${self.packages.${system}.cage-root-session-test-wayland-fix}/bin/prek-cage-root-test
           '';
           cage-startup = pkgs.runCommand "prek-cage-startup-check" {
             nativeBuildInputs = [ pkgs.python3 ];
