@@ -5,9 +5,10 @@ recognizer path. Internal host bindings connect approved source callbacks throug
 the supervised Lua helper; opt-in native rule/routing coordinators create and
 arbitrate their tickets. The private observation worker now transports tickets,
 readiness acknowledgements, native validation receipts and cancellation identities.
-The authenticated live broker/session bridge and
-source-level constructor remain required; custom recognizers are not yet
-available through `prek session`.
+The broker/session observation path now carries these messages after protected
+source approval and verified session admission. The source-level Lua constructor
+and user-launched live root acceptance remain required. Ordinary Lua files cannot
+yet declare callback bindings; the Rust host binding API is still preparatory.
 
 The trusted input coordinator constructs `Candidate` from its verified rule,
 source generation, eligibility revision, expiry and current router ownership.
@@ -124,9 +125,29 @@ Queues and unread receipts remain bounded; congestion ends the affected stream.
 Replies wait until the reader has drained input to its timestamp watermark.
 Deadline/context checks use the current clock without advancing input timers past
 unread frames. A receipt reports native proposal validation, not an input claim.
-Public capability negotiation still refuses this capability until the broker and
-session-helper readiness/cleanup ledgers are connected; the sole routing worker
-also still needs its live custom callback bridge.
+The session agent has an explicit `--lua --recognizers` opt-in. The broker grants
+it only in observation mode, with protected input permission, Lua/context/observer
+capabilities and exact approved source bindings covering the configured custom
+declarations. It checks the live owning registration, exact agent executable and
+desktop lock/context again before sending input or submitting proposals.
+The sole routing worker still needs its live custom callback bridge.
+
+The broker records each issued ticket, its actual delivery, the one submitted
+proposal and its native worker receipt. Client proposals cannot select a source,
+candidate, target, action or new deadline. A native cancellation purges queued
+tickets and proposals. Only an exact cancellation acknowledgement releases its
+reserved candidate slot; never-delivered candidates need no VM cleanup. Known
+cancelled worker replies and in-flight client proposals retain bounded identity
+reservations, so racing messages can be discarded once without reactivating work
+or retiring unrelated callbacks. The agent also purges its unsent proposals by
+candidate. Missing receipts or cleanup
+expire the generation. Tickets and proposals share a 64-ticket / 1 MiB budget.
+The helper must actually initialize and the ordinary worker subscription must
+be acknowledged before the agent requests recognition readiness. The broker then
+waits for the worker acknowledgement before delivering tickets. Helper failure
+revokes readiness, discards unsent proposals and reaps the VM; cleanup identities
+remain outside that VM until acknowledged. Retirement cannot reactivate under
+the same fence. Whole configuration/session replacement clears the old ledgers.
 
 The embedding revokes the Rust gate before calling `Session::cancel_recognition`.
 The parent removes matching unsent work and retained results and discards any
@@ -139,9 +160,9 @@ These messages establish no execution, routing ownership or descriptor-release
 proof. Whole-session stop discards queues and disables the old generation; the
 supervisor owns process reaping and release of its VM state.
 
-The source constructor, authenticated broker/private input-worker path, current
-live registration/transport integration and physical routing acceptance remain
-required.
+The source constructor, sole routing-worker integration and actual privileged
+broker/kernel/physical acceptance remain required. Existing root-routing and
+native handoff scripts do not establish live custom-recognizer admission.
 
 ## Native rule and routing integration
 
@@ -188,10 +209,11 @@ availability and recovery use the existing router. These core tests model
 readiness and desktop authority; they establish no kernel admission or physical
 consumer retirement.
 
-The real supervised-helper test also connects an actual native observer engine
-to Luna: physical-frame model → pending → stationary timer → typed native match
+The real supervised-helper test also connects the actual private observer worker
+socket to Luna: physical-frame model → pending → stationary timer → typed native match
 → correlated cleanup acknowledgement. It explicitly models provider authority
-and performs no device I/O. Public source declarations, authenticated live
-broker/private-worker plumbing, helper readiness/grants, full sequence/group
-composition, offline custom replay and end-to-end reload/recovery still need
-integration. Production routing and Morf action admission remain gated.
+and performs no device I/O. Broker ledger and protocol tests model admission;
+they do not verify a live privileged broker/logind registration. Public source
+declarations, routing-worker callbacks, full sequence/group composition, offline
+custom replay and end-to-end reload/recovery still need implementation or live
+acceptance. Production routing and Morf action admission remain gated.

@@ -22,6 +22,14 @@ fn profile() -> Config {
     };
     config
 }
+#[test]
+fn startup_preflight_validates_declarations_without_inventing_a_coordinator_fence() {
+    let mut config = profile();
+    assert!(Engine::new(config.clone()).is_err());
+    super::super::preflight(&config).unwrap();
+    config.policy.allow_input_events = false;
+    assert!(super::super::preflight(&config).is_err());
+}
 fn owner(at: u64) -> Subscription {
     let mut owner = input_subscription("seat0", at);
     owner.capabilities.remove(&Capability::InputEvents);

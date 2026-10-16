@@ -122,6 +122,9 @@ enum Command {
         /// Deliver permitted normalized input to approved Lua subscriptions.
         #[arg(long, requires = "lua")]
         input: bool,
+        /// Run approved custom recognizers; proposals remain native validated.
+        #[arg(long, requires = "lua")]
+        recognizers: bool,
     },
     /// Query broker status from a verified compositor login session.
     Status {
@@ -427,6 +430,7 @@ fn run(command: Command) -> io::Result<()> {
             lua,
             rule_mutations,
             input,
+            recognizers,
         } => run_session(
             &socket,
             instance,
@@ -443,6 +447,7 @@ fn run(command: Command) -> io::Result<()> {
                 lua,
                 rule_mutations,
                 input,
+                recognizers,
             },
             &mut output,
         ),
@@ -489,7 +494,6 @@ fn run(command: Command) -> io::Result<()> {
             } else {
                 compile_config(read_config(&path)?, &path)?.config
             };
-            let engine = prek::rules::Engine::new(config.clone())?;
             let paths = Vec::new();
             eprintln!(
                 "Rule observation only: matches are reported; no actions are executed. Session-dependent rules require a verified provider and are skipped when unavailable."
@@ -505,6 +509,7 @@ fn run(command: Command) -> io::Result<()> {
                     &mut health,
                 );
             }
+            let engine = prek::rules::Engine::new(config)?;
             let mut sink = RuleSink {
                 engine,
                 output: &mut output,
@@ -784,7 +789,7 @@ fn run_broker(
     let compiled = compile_config(text, config_path)?;
     let (text, config, runtime_definition) = (compiled.text, compiled.config, compiled.runtime);
     // Compile before touching runtime state or starting the device worker.
-    prek::rules::Engine::new(config.clone())?;
+    prek::worker::preflight(&config)?;
     std::fs::create_dir_all(runtime)?;
     let endpoint = Endpoint::bind(runtime, true)?;
     let mut broker = Broker::open(
@@ -873,7 +878,7 @@ fn run_broker(
                         Ok(None)
                     } else {
                         let compiled = compile_config(text, config_path)?;
-                        prek::rules::Engine::new(compiled.config.clone())?;
+                        prek::worker::preflight(&compiled.config)?;
                         Ok(Some(compiled))
                     }
                 });
@@ -904,7 +909,7 @@ fn run_broker(
             match job.step() {
                 Ok(Some(compiled)) => {
                     compiler = None;
-                    match prek::rules::Engine::new(compiled.config.clone()) {
+                    match prek::worker::preflight(&compiled.config) {
                         Ok(_) => {
                             let generation =
                                 broker.configuration().checked_add(1).ok_or_else(|| {
@@ -953,6 +958,20 @@ fn run_broker(
             && !startup
             && transfer.is_none()
             && installation.is_none()
+            && let Some(command) = broker.recognition_command(monotonic()?)?
+            && control.send(&command, monotonic()?)?
+            && let prek::configuration::Command::Recognition {
+                seat,
+                fence,
+                proposal,
+            } = command
+        {
+            broker.recognition_command_sent(&seat, fence, proposal.ticket)?;
+        }
+        if !control_closed
+            && !startup
+            && transfer.is_none()
+            && installation.is_none()
             && let Some(command) = broker.rule_command(monotonic()?)?
             && control.send(&command, monotonic()?)?
             && let prek::configuration::Command::Rules {
@@ -988,8 +1007,13 @@ fn run_broker(
             }
             match control.receive::<prek::worker::Message>() {
                 Ok(Some(packet)) => match packet.message {
-                    prek::worker::Message::RecognitionResult { .. } => {
-                        return Err(io::Error::other("unsolicited worker recognizer receipt"));
+                    prek::worker::Message::RecognitionResult {
+                        seat,
+                        fence,
+                        ticket,
+                        error,
+                    } => {
+                        broker.recognition_receipt(&seat, fence, ticket, error, monotonic()?)?;
                     }
                     prek::worker::Message::Released {
                         worker,
@@ -1088,7 +1112,10 @@ fn run_broker(
             fds.push(PollFd::new(
                 control.as_fd(),
                 PollFlags::POLLIN
-                    | if subscriptions.is_some() || transfer.is_some() || broker.rules_wants_write()
+                    | if subscriptions.is_some()
+                        || transfer.is_some()
+                        || broker.rules_wants_write()
+                        || broker.recognitions_wants_write()
                     {
                         PollFlags::POLLOUT
                     } else {
@@ -1202,6 +1229,7 @@ struct SessionOptions {
     lua: bool,
     rule_mutations: bool,
     input: bool,
+    recognizers: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -1247,6 +1275,7 @@ fn run_session(
         lua,
         rule_mutations,
         input,
+        recognizers,
     } = options;
     let effects = commands || power || hyprland || morf;
     use nix::{
@@ -1304,6 +1333,9 @@ fn run_session(
     if input {
         requested.insert(Capability::InputEvents);
     }
+    if recognizers {
+        requested.insert(Capability::CustomRecognizers);
+    }
     let registration = Request::Register {
         instance: instance.clone(),
         role: if inspect { Role::Inspect } else { Role::Agent },
@@ -1333,6 +1365,7 @@ fn run_session(
     let mut lua_waiting_definition = None::<prek::lua::Definition>;
     let mut lua_rules_subscribed = false;
     let mut lua_rule_request = None::<prek::lua::RuleProposal>;
+    let mut recognizer_bridge = prek::lua::session::RecognizerBridge::default();
     let mut lua_seat = String::new();
     let mut lua_pending = prek::lua::session::PendingEvents::default();
     let mut lua_lifecycle = None;
@@ -1704,6 +1737,51 @@ fn run_session(
                     }
                     output.flush()?;
                 }
+                Reply::RecognizerReady {
+                    fence: observed,
+                    ready,
+                } if recognizers && Some(observed) == fence => {
+                    recognizer_bridge.acknowledge_ready(observed, ready);
+                }
+                Reply::Recognition {
+                    fence: observed,
+                    ticket,
+                } if recognizers && Some(observed) == fence => {
+                    if let Some(error) = recognizer_bridge.recognize(
+                        observed,
+                        *ticket,
+                        &lua_seat,
+                        &mut lua_runtime,
+                    )? {
+                        eprintln!("Lua recognizer unavailable: {error}");
+                    }
+                }
+                Reply::RecognitionCancelled {
+                    fence: observed,
+                    cancellation,
+                } if recognizers && Some(observed) == fence => {
+                    if let Some(error) =
+                        recognizer_bridge.cancel(observed, cancellation, &mut lua_runtime)?
+                    {
+                        eprintln!("Lua recognizer cleanup failed: {error}");
+                    }
+                }
+                Reply::RecognitionResult {
+                    fence: observed,
+                    ticket,
+                    error,
+                } if recognizers && Some(observed) == fence => {
+                    if json {
+                        serde_json::to_writer(
+                            &mut *output,
+                            &serde_json::json!({"version":1,"kind":"recognition_result","fence":observed,"ticket":ticket,"error":error}),
+                        )?;
+                        writeln!(output)?;
+                        output.flush()?;
+                    } else if let Some(error) = error {
+                        eprintln!("Recognizer proposal {ticket} refused: {error}");
+                    }
+                }
                 Reply::Input {
                     fence: observed,
                     input: event,
@@ -1970,6 +2048,7 @@ fn run_session(
             }
             executor.flush(&mut channel)?;
         }
+        let mut recognizer_failed = false;
         if drained && let Some(runtime) = lua_runtime.as_mut() {
             let capability_now = monotonic()?;
             let ready = executor
@@ -1986,6 +2065,9 @@ fn run_session(
             runtime.update_capabilities(requested.clone(), ready)?;
             match runtime.step(monotonic()?) {
                 Ok(mut logs) => {
+                    if recognizers {
+                        recognizer_failed = !recognizer_bridge.collect(runtime)?;
+                    }
                     if rule_mutations && lua_rule_request.is_none() {
                         let proposals = runtime.take_rule_proposals();
                         if proposals.len() > 1 {
@@ -2025,6 +2107,17 @@ fn run_session(
                     }
                 }
             }
+        }
+        if recognizer_failed {
+            lua_runtime = None;
+        }
+        if recognizers && let Some(current) = fence {
+            recognizer_bridge.flush(
+                current,
+                lua_rules_subscribed,
+                lua_runtime.as_ref(),
+                &mut channel,
+            )?;
         }
         if let Some(proposal) = lua_rule_request.as_ref()
             && channel.send(
@@ -2145,6 +2238,14 @@ fn run_session(
             channel.as_fd(),
             PollFlags::POLLIN
                 | if lua_rule_request.is_some()
+                    || recognizers
+                        && fence.is_some_and(|fence| {
+                            recognizer_bridge.wants_write(
+                                fence,
+                                lua_rules_subscribed,
+                                lua_runtime.as_ref(),
+                            )
+                        })
                     || executor
                         .as_ref()
                         .is_some_and(|executor| executor.wants_write())

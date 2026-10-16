@@ -25,6 +25,10 @@ fn session_help_documents_explicit_desktop_opt_ins_without_enabling_routing() {
     let help = String::from_utf8(output.stdout).unwrap();
     assert!(help.contains("--power") && help.contains("protected-policy DPMS"));
     assert!(help.contains("--hyprland") && help.contains("protected-policy targeted Hyprland"));
+    assert!(help.contains("--recognizers") && help.contains("native validated"));
+    let denied = run(&["session", "--recognizers"]);
+    assert!(!denied.status.success());
+    assert!(String::from_utf8_lossy(&denied.stderr).contains("--lua"));
 }
 
 #[test]

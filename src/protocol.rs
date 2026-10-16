@@ -45,8 +45,7 @@ pub enum Capability {
     Observations,
     LuaEvents,
     InputEvents,
-    /// Private recognizer coordination; public broker negotiation stays closed
-    /// until authenticated helper readiness and cleanup are connected.
+    /// Protected observation callbacks with acknowledged helper readiness.
     CustomRecognizers,
     LuaActions,
     RuntimeRules,
@@ -135,6 +134,18 @@ pub enum Completion {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
+    RecognizerReady {
+        fence: Fence,
+        ready: bool,
+    },
+    Recognize {
+        fence: Fence,
+        proposal: crate::recognition::Proposal,
+    },
+    RecognitionCancelled {
+        fence: Fence,
+        cancellation: crate::recognition::Cancellation,
+    },
     /// Administrator asks the broker to reread its own system configuration.
     /// No client-supplied path or configuration is accepted.
     Reload {},
@@ -210,6 +221,9 @@ impl Request {
         match self {
             Self::Register { .. } | Self::Reload { .. } => None,
             Self::Heartbeat { fence }
+            | Self::RecognizerReady { fence, .. }
+            | Self::Recognize { fence, .. }
+            | Self::RecognitionCancelled { fence, .. }
             | Self::LuaSource { fence, .. }
             | Self::ContextRead { fence, .. }
             | Self::Rules { fence, .. }
@@ -229,6 +243,21 @@ impl Request {
             fence.validate()?;
         }
         match self {
+            Self::Recognize { fence, proposal } => {
+                if *fence != proposal.fence || proposal.ticket == 0 {
+                    return Err(invalid("invalid recognizer proposal identity"));
+                }
+                crate::recognition::validate_data(&proposal.data)?;
+            }
+            Self::RecognitionCancelled {
+                fence,
+                cancellation,
+            } => {
+                cancellation.validate()?;
+                if *fence != cancellation.fence {
+                    return Err(invalid("foreign recognizer cleanup"));
+                }
+            }
             Self::Rules { proposal, .. } => {
                 if proposal.id == 0 {
                     return Err(invalid("invalid runtime rule proposal identity"));
@@ -280,6 +309,23 @@ impl Request {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Reply {
+    RecognizerReady {
+        fence: Fence,
+        ready: bool,
+    },
+    Recognition {
+        fence: Fence,
+        ticket: Box<crate::recognition::Ticket>,
+    },
+    RecognitionCancelled {
+        fence: Fence,
+        cancellation: crate::recognition::Cancellation,
+    },
+    RecognitionResult {
+        fence: Fence,
+        ticket: u64,
+        error: Option<String>,
+    },
     RulesChanged {
         fence: Fence,
         receipt: crate::lua::RuleReceipt,
@@ -390,6 +436,10 @@ impl Reply {
             | Self::SessionChanged { fence, .. }
             | Self::Observation { fence, .. }
             | Self::Input { fence, .. }
+            | Self::RecognizerReady { fence, .. }
+            | Self::Recognition { fence, .. }
+            | Self::RecognitionCancelled { fence, .. }
+            | Self::RecognitionResult { fence, .. }
             | Self::LuaSource { fence, .. }
             | Self::ContextData { fence, .. }
             | Self::Dispatch { fence, .. }
@@ -408,6 +458,33 @@ impl Reply {
             !value.is_empty() && value.len() <= 1024 && !value.chars().any(char::is_control)
         };
         match self {
+            Self::Recognition { fence, ticket } => {
+                if ticket.fence != *fence
+                    || ticket.id == 0
+                    || ticket.candidate == 0
+                    || ticket.revision == 0
+                {
+                    return Err(invalid("invalid recognizer ticket identity"));
+                }
+                ticket.input.validate()?;
+            }
+            Self::RecognitionCancelled {
+                fence,
+                cancellation,
+            } => {
+                cancellation.validate()?;
+                if cancellation.fence != *fence {
+                    return Err(invalid("foreign recognizer cancellation"));
+                }
+            }
+            Self::RecognitionResult { ticket, error, .. }
+                if *ticket == 0
+                    || error.as_ref().is_some_and(|error| {
+                        error.len() > 512 || error.chars().any(char::is_control)
+                    }) =>
+            {
+                return Err(invalid("invalid recognizer receipt"));
+            }
             Self::MorfResult { id, ordinal, .. } if *id == 0 || *ordinal == 0 => {
                 return Err(invalid("invalid native action result identity"));
             }

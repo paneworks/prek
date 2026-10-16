@@ -313,7 +313,7 @@ fn only_the_winning_candidate_can_continue_a_claimed_source() {
 }
 
 #[test]
-fn proposals_cannot_supply_targets_actions_or_public_broker_commands() {
+fn public_proposals_cannot_supply_targets_actions_or_native_candidate_state() {
     let at = Duration::from_secs(1);
     let candidate = candidate(at);
     let mut gate = Gate::new(fence(), vec![definition(false)]).unwrap();
@@ -324,12 +324,12 @@ fn proposals_cannot_supply_targets_actions_or_public_broker_commands() {
         forged[field] = serde_json::json!("caller-selected");
         assert!(serde_json::from_value::<Proposal>(forged).is_err());
     }
-    assert!(
-        serde_json::from_value::<crate::protocol::Request>(serde_json::json!({
-            "kind":"recognize", "fence":fence(), "proposal":original
-        }))
-        .is_err()
-    );
+    let request = serde_json::from_value::<crate::protocol::Request>(serde_json::json!({
+        "kind":"recognize", "fence":fence(), "proposal":original
+    }))
+    .unwrap();
+    request.validate().unwrap();
+    // Decoding a public proposal establishes no native eligibility or claim.
     assert_eq!(gate.pending(), 1);
     assert!(
         gate.validate(proposal(&ticket, Phase::Discrete), &candidate, at)

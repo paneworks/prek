@@ -124,6 +124,267 @@ fn authorize_recognizer(session: &mut Session) {
 }
 
 #[test]
+fn agent_bridge_uses_real_helper_readiness_public_tickets_and_exact_cleanup() {
+    use prek::{
+        ipc::Channel,
+        lua::session::RecognizerBridge,
+        protocol::{Reply, Request},
+        recognition::{Gate, Phase, Retirement},
+    };
+    // Model broker admission explicitly; both socket endpoints run as this
+    // unprivileged test user. This is not root/logind acceptance.
+    let (definition, recognizer) = recognizer_definition(
+        r#"
+if ticket.cause=='cancel' then p.log.info('bridge-cleanup');return nil end
+p.log.info('bridge-recognize');return {phase='discrete',data={calls=calls}}
+"#,
+    );
+    let mut runtime = Some(
+        Session::spawn(
+            Path::new(env!("CARGO_BIN_EXE_prek")),
+            fence(1),
+            "seat0",
+            definition,
+        )
+        .unwrap(),
+    );
+    let (mut agent, mut broker) = Channel::pair().unwrap();
+    let mut bridge = RecognizerBridge::default();
+    bridge
+        .flush(fence(1), true, runtime.as_ref(), &mut agent)
+        .unwrap();
+    assert!(matches!(
+        broker.receive::<Request>().unwrap().unwrap().message,
+        Request::RecognizerReady { ready: false, .. }
+    ));
+    drain(runtime.as_mut().unwrap()).unwrap();
+    authorize_recognizer(runtime.as_mut().unwrap());
+    bridge
+        .flush(fence(1), false, runtime.as_ref(), &mut agent)
+        .unwrap();
+    assert!(
+        broker.receive::<Request>().unwrap().is_none(),
+        "helper readiness alone cannot bypass the input worker subscription"
+    );
+    bridge
+        .flush(fence(1), true, runtime.as_ref(), &mut agent)
+        .unwrap();
+    let request = broker.receive::<Request>().unwrap().unwrap().message;
+    request.validate().unwrap();
+    assert!(matches!(
+        request,
+        Request::RecognizerReady { ready: true, .. }
+    ));
+    broker
+        .send(
+            &Reply::RecognizerReady {
+                fence: fence(1),
+                ready: true,
+            },
+            monotonic().unwrap(),
+        )
+        .unwrap();
+    let Reply::RecognizerReady {
+        fence: ready_fence,
+        ready,
+    } = agent.receive::<Reply>().unwrap().unwrap().message
+    else {
+        panic!()
+    };
+    bridge.acknowledge_ready(ready_fence, ready);
+    let at = monotonic().unwrap();
+    let current = recognizer_candidate(at);
+    let mut gate = Gate::new(fence(1), vec![recognizer]).unwrap();
+    let ticket = gate
+        .offer("hold", &current, &recognizer_frame(at, 1), at)
+        .unwrap();
+    broker
+        .send(
+            &Reply::Recognition {
+                fence: fence(1),
+                ticket: Box::new(ticket.clone()),
+            },
+            monotonic().unwrap(),
+        )
+        .unwrap();
+    let reply = agent.receive::<Reply>().unwrap().unwrap().message;
+    reply.validate().unwrap();
+    let Reply::Recognition {
+        fence,
+        ticket: delivered,
+    } = reply
+    else {
+        panic!()
+    };
+    assert!(
+        bridge
+            .recognize(fence, *delivered, "seat0", &mut runtime)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        drain(runtime.as_mut().unwrap()).unwrap()[0].message,
+        "bridge-recognize"
+    );
+    assert!(bridge.collect(runtime.as_mut().unwrap()).unwrap());
+    bridge
+        .flush(fence, true, runtime.as_ref(), &mut agent)
+        .unwrap();
+    let request = broker.receive::<Request>().unwrap().unwrap().message;
+    request.validate().unwrap();
+    let Request::Recognize { proposal, .. } = request else {
+        panic!()
+    };
+    let validated = gate
+        .validate(proposal, &current, monotonic().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(validated.phase, Phase::Discrete);
+    assert_eq!(validated.data["calls"], 1);
+    gate.retire_with(current.id, Retirement::Completed);
+    let cancellation = gate.take_cancellations().pop().unwrap();
+    broker
+        .send(
+            &Reply::RecognitionCancelled {
+                fence,
+                cancellation: cancellation.clone(),
+            },
+            monotonic().unwrap(),
+        )
+        .unwrap();
+    let reply = agent.receive::<Reply>().unwrap().unwrap().message;
+    reply.validate().unwrap();
+    let Reply::RecognitionCancelled {
+        fence,
+        cancellation: delivered,
+    } = reply
+    else {
+        panic!()
+    };
+    assert!(
+        bridge
+            .cancel(fence, delivered, &mut runtime)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        drain(runtime.as_mut().unwrap()).unwrap()[0].message,
+        "bridge-cleanup"
+    );
+    assert!(bridge.collect(runtime.as_mut().unwrap()).unwrap());
+    bridge
+        .flush(fence, true, runtime.as_ref(), &mut agent)
+        .unwrap();
+    let request = broker.receive::<Request>().unwrap().unwrap().message;
+    request.validate().unwrap();
+    assert_eq!(
+        request,
+        Request::RecognitionCancelled {
+            fence,
+            cancellation
+        }
+    );
+    runtime = None;
+    bridge
+        .flush(fence, true, runtime.as_ref(), &mut agent)
+        .unwrap();
+    assert!(matches!(
+        broker.receive::<Request>().unwrap().unwrap().message,
+        Request::RecognizerReady { ready: false, .. }
+    ));
+    assert!(!bridge.wants_write(fence, true, runtime.as_ref()));
+}
+
+#[test]
+fn agent_cancels_queued_proposals_and_preserves_cleanup_when_the_helper_fails() {
+    use prek::{
+        ipc::Channel,
+        lua::session::RecognizerBridge,
+        protocol::Request,
+        recognition::{Gate, Retirement},
+    };
+    for fail_cleanup in [false, true] {
+        let (definition, recognizer) = recognizer_definition(if fail_cleanup {
+            "if ticket.cause=='cancel' then error('cleanup crash') end; return nil"
+        } else {
+            "if ticket.cause=='cancel' then p.log.info('cleanup') end; return nil"
+        });
+        let mut runtime = Some(
+            Session::spawn(
+                Path::new(env!("CARGO_BIN_EXE_prek")),
+                fence(1),
+                "seat0",
+                definition,
+            )
+            .unwrap(),
+        );
+        drain(runtime.as_mut().unwrap()).unwrap();
+        authorize_recognizer(runtime.as_mut().unwrap());
+        let (mut agent, mut broker) = Channel::pair().unwrap();
+        let mut bridge = RecognizerBridge::default();
+        bridge
+            .flush(fence(1), true, runtime.as_ref(), &mut agent)
+            .unwrap();
+        broker.receive::<Request>().unwrap().unwrap();
+        bridge.acknowledge_ready(fence(1), true);
+        let at = monotonic().unwrap();
+        let current = recognizer_candidate(at);
+        let mut gate = Gate::new(fence(1), vec![recognizer]).unwrap();
+        let ticket = gate
+            .offer("hold", &current, &recognizer_frame(at, 1), at)
+            .unwrap();
+        assert!(
+            bridge
+                .recognize(fence(1), ticket, "seat0", &mut runtime)
+                .unwrap()
+                .is_none()
+        );
+        drain(runtime.as_mut().unwrap()).unwrap();
+        assert!(bridge.collect(runtime.as_mut().unwrap()).unwrap());
+        assert!(bridge.wants_write(fence(1), true, runtime.as_ref()));
+        gate.retire_with(current.id, Retirement::SourceLost);
+        let cancellation = gate.take_cancellations().pop().unwrap();
+        assert!(
+            bridge
+                .cancel(fence(1), cancellation.clone(), &mut runtime)
+                .unwrap()
+                .is_none()
+        );
+        if fail_cleanup {
+            assert!(drain(runtime.as_mut().unwrap()).is_err());
+            runtime = None;
+        } else {
+            assert_eq!(
+                drain(runtime.as_mut().unwrap()).unwrap()[0].message,
+                "cleanup"
+            );
+            assert!(bridge.collect(runtime.as_mut().unwrap()).unwrap());
+        }
+        bridge
+            .flush(fence(1), true, runtime.as_ref(), &mut agent)
+            .unwrap();
+        if fail_cleanup {
+            assert!(matches!(
+                broker.receive::<Request>().unwrap().unwrap().message,
+                Request::RecognizerReady { ready: false, .. }
+            ));
+        }
+        assert_eq!(
+            broker.receive::<Request>().unwrap().unwrap().message,
+            Request::RecognitionCancelled {
+                fence: fence(1),
+                cancellation
+            }
+        );
+        assert!(
+            broker.receive::<Request>().unwrap().is_none(),
+            "cancelled proposal must never cross the public socket"
+        );
+        assert!(!bridge.wants_write(fence(1), true, runtime.as_ref()));
+    }
+}
+
+#[test]
 fn actual_helper_returns_only_fenced_proposals_for_frames_and_stationary_timer_wakes() {
     use prek::recognition::{Gate, Phase};
     let (definition, recognizer) = recognizer_definition(

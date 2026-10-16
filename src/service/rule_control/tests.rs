@@ -13,7 +13,8 @@ fn public_morf_transport_remains_gated_before_rendered_context_and_physical_cuto
     };
     let caps = BTreeSet::from([Capability::Context, Capability::MorfActions]);
     assert!(
-        registration_capabilities(Some(&config), None, false, true, Role::Agent, &caps).is_err()
+        registration_capabilities(Some(&config), None, false, false, true, Role::Agent, &caps)
+            .is_err()
     );
     config.rules[0].action = Action::Lua {
         handler: "native".into(),
@@ -31,10 +32,12 @@ fn public_morf_transport_remains_gated_before_rendered_context_and_physical_cuto
         Capability::LuaEvents,
     ]);
     assert!(
-        registration_capabilities(Some(&config), None, true, true, Role::Agent, &caps).is_err()
+        registration_capabilities(Some(&config), None, true, false, true, Role::Agent, &caps)
+            .is_err()
     );
     assert!(
-        registration_capabilities(Some(&config), None, true, true, Role::Inspect, &caps).is_err()
+        registration_capabilities(Some(&config), None, true, false, true, Role::Inspect, &caps)
+            .is_err()
     );
 }
 #[test]
@@ -48,7 +51,7 @@ fn public_hyprland_registration_requires_protected_route_policy_declared_effects
     };
     let caps = BTreeSet::from([Capability::Context, Capability::HyprlandActions]);
     let accepted = |config: Option<&Config>, lua, caps: &BTreeSet<Capability>| {
-        registration_capabilities(config, None, lua, true, Role::Agent, caps)
+        registration_capabilities(config, None, lua, false, true, Role::Agent, caps)
     };
     assert!(accepted(Some(&config), false, &caps).is_err());
     config.policy.allow_hyprland_actions = true;
@@ -63,7 +66,16 @@ fn public_hyprland_registration_requires_protected_route_policy_declared_effects
         .is_err()
     );
     assert!(
-        registration_capabilities(Some(&config), None, false, true, Role::Inspect, &caps).is_err()
+        registration_capabilities(
+            Some(&config),
+            None,
+            false,
+            false,
+            true,
+            Role::Inspect,
+            &caps
+        )
+        .is_err()
     );
     for action in [
         WindowAction::ReorderUp,
@@ -102,7 +114,7 @@ fn public_power_registration_requires_route_policy_declared_effects_and_context(
     };
     let caps = BTreeSet::from([Capability::Context, Capability::PowerActions]);
     let accepted = |config: Option<&Config>, lua, caps: &BTreeSet<Capability>| {
-        registration_capabilities(config, None, lua, true, Role::Agent, caps)
+        registration_capabilities(config, None, lua, false, true, Role::Agent, caps)
     };
     assert!(accepted(Some(&config), false, &caps).is_err());
     config.policy.allow_power_actions = true;
@@ -117,7 +129,16 @@ fn public_power_registration_requires_route_policy_declared_effects_and_context(
         .is_err()
     );
     assert!(
-        registration_capabilities(Some(&config), None, false, true, Role::Inspect, &caps).is_err()
+        registration_capabilities(
+            Some(&config),
+            None,
+            false,
+            false,
+            true,
+            Role::Inspect,
+            &caps
+        )
+        .is_err()
     );
     config.rules[0].action = Action::Power {
         action: crate::config::PowerAction::LockAndBlank,

@@ -233,6 +233,11 @@ fn preflight_profile(config: &Config) -> Config {
     }
     profile
 }
+/// Validate declarations and compile ordinary recognizers without creating an
+/// unfenced custom coordinator. Seat engines require an owning subscription.
+pub fn preflight(config: &Config) -> io::Result<()> {
+    Engine::new(preflight_profile(config)).map(|_| ())
+}
 struct Registry {
     config: Config,
     baseline: Engine,
@@ -244,7 +249,7 @@ struct Registry {
 }
 impl Registry {
     fn new(config: Config) -> io::Result<Self> {
-        Engine::new(preflight_profile(&config))?;
+        preflight(&config)?;
         let mut baseline = config.clone();
         for rule in &mut baseline.rules {
             rule.enabled = false;
@@ -929,7 +934,7 @@ pub fn bootstrap(
                     return Err(protocol::invalid("invalid startup generation"));
                 }
                 let config = installation.config?;
-                Engine::new(preflight_profile(&config))?;
+                preflight(&config)?;
                 return Ok(config);
             }
         }

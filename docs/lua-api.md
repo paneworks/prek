@@ -784,7 +784,7 @@ The two capability lists are ordinary one-based arrays. Fence identities are
 exact decimal strings; sampling time uses `{secs, nanos}` on the system
 monotonic clock. Editing a returned table does not change the host view.
 
-Names are `context`, `observations`, `lua_events`, `input_events`, `lua_actions`,
+Names are `context`, `observations`, `lua_events`, `input_events`, `custom_recognizers`, `lua_actions`,
 `runtime_rules`, `hyprland_actions`, `morf_actions`, `power_actions`, `commands`
 and `synthetic_input`. Unknown names return `false` for forward feature
 detection. Nonstring, empty or greater-than-128-byte names raise an error.

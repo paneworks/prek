@@ -1624,3 +1624,5 @@ pub fn worker() -> io::Result<()> {
         }
     }
 }
+mod recognizer_bridge;
+pub use recognizer_bridge::RecognizerBridge;

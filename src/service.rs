@@ -16,6 +16,7 @@ use nix::{
     poll::{PollFd, PollFlags},
 };
 mod morf_handoff;
+mod recognizers;
 mod rule_control;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -172,6 +173,7 @@ struct Bound {
     available_actions: BTreeSet<Capability>,
     context_export: Option<crate::context_transfer::Export>,
     rules: rule_control::Rules,
+    recognizers: recognizers::Ledger,
 }
 
 fn refresh_native_shells(bound: &mut Bound, policy: &Policy, logind: &Logind, now: Duration) {
@@ -301,6 +303,7 @@ fn registration_capabilities(
     routing: Option<&crate::config::Config>,
     baseline: Option<&crate::config::Config>,
     lua: bool,
+    recognizers: bool,
     observations: bool,
     role: Role,
     capabilities: &BTreeSet<Capability>,
@@ -362,6 +365,16 @@ fn registration_capabilities(
                 && lua
                 && baseline.is_some_and(|config| {
                     config.policy.allow_input_events && config.mode == crate::config::Mode::Observe
+                })
+                && capabilities.contains(&Capability::LuaEvents)
+                && capabilities.contains(&Capability::Context)
+                && capabilities.contains(&Capability::Observations)
+            || *capability == Capability::CustomRecognizers
+                && routing.is_none()
+                && lua
+                && recognizers
+                && baseline.is_some_and(|config| {
+                    config.mode == crate::config::Mode::Observe && config.policy.allow_input_events
                 })
                 && capabilities.contains(&Capability::LuaEvents)
                 && capabilities.contains(&Capability::Context)
@@ -674,6 +687,11 @@ impl Connection {
             && self.channel.send(reply, now)?
         {
             let reply = self.outgoing.pop_front().unwrap();
+            if let Reply::Recognition { ticket, .. } = &reply
+                && let Some(bound) = self.bound.as_mut()
+            {
+                bound.recognizers.delivered(ticket.id)?;
+            }
             if let Reply::Dispatch { event, .. } = &reply
                 && let crate::rules::Event::Matched { id, ordinal, .. } = event.as_ref()
                 && let Some(bound) = self.bound.as_mut()
@@ -797,6 +815,7 @@ pub struct Broker {
     lua_source: Option<Vec<u8>>,
     rule_baseline: Option<std::sync::Arc<crate::config::Config>>,
     rule_handlers: Vec<crate::lua::HandlerRegistration>,
+    recognizer_bindings: Vec<crate::lua::RecognizerBinding>,
 }
 impl Broker {
     /// Context is sampled directly from a verified compositor. Action dispatch
@@ -838,6 +857,7 @@ impl Broker {
             lua_source: None,
             rule_baseline: None,
             rule_handlers: Vec::new(),
+            recognizer_bindings: Vec::new(),
         })
     }
     pub fn bind_input_worker(
@@ -960,9 +980,12 @@ impl Broker {
         self.lua_source = source;
         self.rule_handlers =
             definition.map_or_else(Vec::new, |definition| definition.handlers.clone());
+        self.recognizer_bindings =
+            definition.map_or_else(Vec::new, |definition| definition.recognizers.clone());
         for connection in &mut self.connections {
             if let Some(bound) = connection.bound.as_mut() {
                 bound.rules = rule_control::Rules::new(self.rule_baseline.clone());
+                bound.recognizers = Default::default();
             }
         }
         Ok(())
@@ -997,6 +1020,7 @@ impl Broker {
                     bound.context_export = None;
                     bound.observing = false;
                     bound.actions = ActionLedger::default();
+                    bound.recognizers = Default::default();
                     let fence = bound.fence;
                     connection.outgoing.clear();
                     connection.bytes = 0;
@@ -1106,6 +1130,11 @@ impl Broker {
                     .capabilities
                     .iter()
                     .filter(|capability| {
+                        if **capability == Capability::CustomRecognizers
+                            && !bound.recognizers.requested
+                        {
+                            return false;
+                        }
                         if **capability == Capability::HyprlandActions
                             && !self
                                 .routing
@@ -1180,7 +1209,10 @@ impl Broker {
                     && (bound.context.fresh(now)
                         || matches!(
                             &report,
-                            Report::ContextLost { .. } | Report::SourceInvalidated { .. }
+                            Report::ContextLost { .. }
+                                | Report::SourceInvalidated { .. }
+                                | Report::RecognitionCancelled { .. }
+                                | Report::RecognizerReady { ready: false, .. }
                         ))
             })
         }) else {
@@ -1233,7 +1265,11 @@ impl Broker {
         }
         if matches!(
             &report,
-            Report::Observation { .. } | Report::Dispatch { .. } | Report::Input { .. }
+            Report::Observation { .. }
+                | Report::Dispatch { .. }
+                | Report::Input { .. }
+                | Report::Recognition { .. }
+                | Report::RecognizerReady { ready: true, .. }
         ) && !self.guard_observation(&mut connection, now)?
         {
             self.connections.insert(index, connection);
@@ -1241,6 +1277,26 @@ impl Broker {
         }
         let bound = connection.bound.as_mut().unwrap();
         let fence = bound.fence;
+        if matches!(
+            &report,
+            Report::Recognition { .. }
+                | Report::RecognizerReady { .. }
+                | Report::RecognitionCancelled { .. }
+        ) {
+            if self
+                .recognition_report(&mut connection, report, monotonic()?)
+                .is_ok()
+            {
+                self.connections.insert(index, connection);
+            }
+            return Ok(());
+        }
+        if matches!(&report, Report::Observation { event, .. } if matches!(event.as_ref(), crate::rules::Event::Matched { evidence: crate::rules::Evidence::Custom { .. }, .. }))
+            && (!bound.recognizers.requested || !bound.recognizers.ready)
+        {
+            self.connections.insert(index, connection);
+            return Ok(());
+        }
         if bound.rules.busy()
             && (matches!(&report, Report::Dispatch { .. })
                 || matches!(&report,Report::Observation {event,..} if matches!(event.as_ref(),crate::rules::Event::Matched {..})))
@@ -1534,6 +1590,7 @@ impl Broker {
                         },
                     |bound| {
                         (bound.checked + REFRESH)
+                            .min(bound.recognizers.deadline().unwrap_or(Duration::MAX))
                             .min(bound.renewed + protocol::MAX_PACKET_AGE)
                             .min(if bound.role == Role::Agent {
                                 bound.context.checked + CONTEXT_REFRESH
@@ -1667,6 +1724,7 @@ impl Broker {
                         self.routing.as_ref(),
                         self.rule_baseline.as_deref(),
                         self.lua_source.is_some(),
+                        self.recognizers_available(),
                         self.observations,
                         role,
                         &capabilities,
@@ -1743,6 +1801,7 @@ impl Broker {
                         shell_discovered: Duration::ZERO,
                         context_export: None,
                         rules: rule_control::Rules::new(self.rule_baseline.clone()),
+                        recognizers: Default::default(),
                         actions: ActionLedger::default(),
                         available_actions: capabilities
                             .iter()
@@ -1771,7 +1830,7 @@ impl Broker {
                     // An in-flight status read may precede a transition notice.
                     // Discard it without acting on stale authority or closing
                     // the agent before that notice can reach it.
-                    let old_status = matches!(&request, Request::Status { fence } | Request::LuaSource { fence, .. } | Request::ContextRead { fence, .. } | Request::Rules {fence,..} | Request::MorfAction {fence,..} | Request::MorfCancel {fence,..}
+                    let old_status = matches!(&request, Request::Status { fence } | Request::LuaSource { fence, .. } | Request::ContextRead { fence, .. } | Request::Rules {fence,..} | Request::MorfAction {fence,..} | Request::MorfCancel {fence,..} | Request::RecognizerReady {fence,..} | Request::Recognize {fence,..} | Request::RecognitionCancelled {fence,..}
                         if now < bound.previous.expires && bound.previous.fences.contains(fence));
                     if !current && !old_heartbeat && !old_status {
                         return Err(protocol::invalid(
@@ -1786,6 +1845,22 @@ impl Broker {
                     }
                     let fence = bound.fence;
                     match request {
+                        Request::RecognizerReady { .. }
+                        | Request::Recognize { .. }
+                        | Request::RecognitionCancelled { .. }
+                            if !current => {}
+                        Request::RecognizerReady { ready, .. } => {
+                            self.recognizer_ready(connection, fence, ready, now)?
+                        }
+                        Request::Recognize { proposal, .. } => {
+                            self.prepare_recognition(connection, fence, proposal, now)?
+                        }
+                        Request::RecognitionCancelled { cancellation, .. } => {
+                            if !bound.capabilities.contains(&Capability::CustomRecognizers) {
+                                return Err(protocol::invalid("unnegotiated recognizer cleanup"));
+                            }
+                            bound.recognizers.cleaned(&cancellation)?;
+                        }
                         Request::MorfAction { .. } | Request::MorfCancel { .. } if !current => {}
                         Request::MorfAction {
                             id,
@@ -2052,6 +2127,7 @@ impl Broker {
                         | Reply::Dispatch { .. }
                         | Reply::Execute { .. }
                         | Reply::Input { .. }
+                        | Reply::Recognition { .. }
                 )
             )
         {
@@ -2088,6 +2164,17 @@ impl Broker {
             bound.context.state = State::Unknown;
             bound.context.error = Some("normalized input permit expired before send".into());
             self.advance_session(connection, monotonic()?)?;
+        }
+        if let Some(Reply::Recognition { ticket, .. }) = connection.outgoing.front() {
+            let now = monotonic()?;
+            let bound = connection.bound.as_ref().unwrap();
+            if now >= ticket.deadline
+                || !recognizers::permitted(self.rule_baseline.as_deref(), bound, now)
+                || !bound.recognizers.requested
+                || !bound.recognizers.ready
+            {
+                self.advance_session(connection, now)?;
+            }
         }
         connection.flush(monotonic()?)
     }
@@ -2144,6 +2231,7 @@ impl Broker {
         bound.observing = false;
         bound.actions = ActionLedger::default();
         bound.rules = rule_control::Rules::new(self.rule_baseline.clone());
+        bound.recognizers = Default::default();
         bound.context_export = None;
         let fence = bound.fence;
         let state = bound.context.state;

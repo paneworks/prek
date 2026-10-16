@@ -35,6 +35,12 @@ pub(super) struct Rules {
     pending: Option<Pending>,
 }
 impl Rules {
+    pub(super) fn current(&self) -> Option<&crate::config::Config> {
+        self.config.as_deref()
+    }
+    pub(super) fn revision(&self) -> u64 {
+        self.revision
+    }
     pub(super) fn new(config: Option<Arc<crate::config::Config>>) -> Self {
         Self {
             config,
