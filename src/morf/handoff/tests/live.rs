@@ -67,7 +67,8 @@ fn owned_native_handoff() {
     let expected_compositor = number("PREK_NATIVE_COMPOSITOR_PID");
     let expected_producer = number("PREK_NATIVE_PRODUCER_PID");
     let output = value("PREK_NATIVE_OUTPUT");
-    let logind = Logind::open(Path::new(&value("PREK_NATIVE_LIBRARY"))).unwrap();
+    let (library, logind) = crate::session::native_probe::load().unwrap();
+    println!("Native handoff logind library: {}", library.display());
     let compositor = hyprland::Client::open(
         &runtime,
         &value("PREK_NATIVE_INSTANCE"),

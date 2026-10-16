@@ -21,13 +21,29 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
           compositorPkgs = compositor-nixpkgs.legacyPackages.${system};
+          nativeLibraries = pkgs.lib.concatStringsSep ":" [
+            "/usr/lib/${pkgs.stdenv.hostPlatform.parsed.cpu.name}-linux-gnu/libsystemd.so.0"
+            "/usr/lib64/libsystemd.so.0"
+            "/usr/lib/libsystemd.so.0"
+            "${pkgs.systemd}/lib/libsystemd.so.0"
+          ];
           nativeProbe = pkgs.writeShellScript "prek-native-root-probe" ''
+            if [ "$#" -eq 1 ]; then
+              case "$1" in
+                --check-library) probe=session::native_probe::library_preflight ;;
+                --preflight) probe=session::native_probe::session_preflight ;;
+                *) echo 'Expected --check-library, --preflight or eight owned-session bindings.' >&2; exit 2 ;;
+              esac
+              exec ${pkgs.coreutils}/bin/env -i PREK_NATIVE_LIBRARIES=${nativeLibraries} \
+                ${self.packages.${system}.default.nativeTests}/libexec/prek-native-tests \
+                --exact "$probe" --ignored --nocapture --test-threads=1
+            fi
             test "$#" -eq 8 || { echo 'native probe needs its eight owned-session bindings' >&2; exit 2; }
             exec ${pkgs.coreutils}/bin/env -i \
               PREK_NATIVE_HANDOFF=1 PREK_NATIVE_RUNTIME="$1" PREK_NATIVE_UID="$2" \
               PREK_NATIVE_INSTANCE="$3" PREK_NATIVE_COMPOSITOR="$4" PREK_NATIVE_MORF="$5" \
               PREK_NATIVE_COMPOSITOR_PID="$6" PREK_NATIVE_PRODUCER_PID="$7" PREK_NATIVE_OUTPUT="$8" \
-              PREK_NATIVE_LIBRARY=${pkgs.systemd}/lib/libsystemd.so.0 \
+              PREK_NATIVE_LIBRARIES=${nativeLibraries} \
               ${self.packages.${system}.default.nativeTests}/libexec/prek-native-tests \
               --exact morf::handoff::tests::live::owned_native_handoff --ignored --nocapture --test-threads=1
           '';
@@ -36,10 +52,13 @@
               echo 'Run this as your regular user; only the native probe uses sudo.' >&2
               exit 2
             fi
+            ${nativeProbe} --check-library || exit $?
+            ${nativeProbe} --preflight || exit $?
             sudo -v || exit $?
             exec ${fixture}/bin/prek-cage-host-test "$@"
           '';
         in {
+          native-root-probe = nativeProbe;
           cage-touch-test = import ./tests/cage-touch.nix { inherit pkgs; };
           cage-test = import ./tests/cage-host.nix {
             inherit pkgs;
@@ -93,6 +112,9 @@
               for candidate in target/*/release/deps/prek-* target/release/deps/prek-*; do
                 if [ -f "$candidate" ] && [ -x "$candidate" ] && \
                   "$candidate" --list | ${pkgs.ripgrep}/bin/rg -Fx 'morf::handoff::tests::live::owned_native_handoff: test'; then
+                  for probe in library_preflight session_preflight; do
+                    "$candidate" --list --ignored | ${pkgs.ripgrep}/bin/rg -Fx "session::native_probe::$probe: test"
+                  done
                   install -m 755 "$candidate" "$nativeTests/libexec/prek-native-tests"
                   count=$((count + 1))
                 fi
@@ -186,6 +208,10 @@
           } ''
             bash -n ${./tests/run-root-handoff.sh}
             shellcheck ${./tests/run-root-handoff.sh}
+            bash -n ${self.packages.${system}.native-root-probe}
+            shellcheck ${self.packages.${system}.native-root-probe}
+            bash -n ${self.packages.${system}.cage-root-test}/bin/prek-cage-root-test
+            shellcheck ${self.packages.${system}.cage-root-test}/bin/prek-cage-root-test
             touch "$out"
           '';
           cage-startup = pkgs.runCommand "prek-cage-startup-check" {

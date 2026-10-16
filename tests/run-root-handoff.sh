@@ -10,8 +10,10 @@ Usage: ./tests/run-root-handoff.sh [--local-wayland-fix]
 Launch as your regular user, not with sudo.
 Default: visible nested desktop, original unpatched compositor dependencies.
 --local-wayland-fix: private headless Cage, explicit test-only Aquamarine patch;
-  no desktop/display required, no window-action adapter test on Hyprland0.56.2.
-The runner asks for your sudo password when the build is ready.
+  no existing display required, no window-action adapter test on Hyprland0.56.2.
+Both modes require an active local Wayland or TTY login; SSH alone is insufficient.
+Library compatibility and local login are checked unprivileged before sudo.
+The runner asks for your sudo password after the build and preflight pass.
 Logs: target/root-handoff/latest/console.log and cage/run-*/morf-native-root.log
 Optional paths: PREK_MORF_REPO, PREK_MORF_BINARY, PREK_MORF_SHELL.
 Default Morf: ../morf/target/release/morf (legacy ../mold fallback).

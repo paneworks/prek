@@ -473,6 +473,9 @@ impl Registration {
 }
 
 #[cfg(test)]
+pub(crate) mod native_probe;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::net::UnixStream;
