@@ -22,6 +22,7 @@ use std::{
 };
 
 mod context;
+pub mod layers;
 pub use context::ContextSampler;
 
 const MAX_REPLY: usize = 2 * 1024 * 1024;

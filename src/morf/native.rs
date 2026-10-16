@@ -55,6 +55,10 @@ pub struct Capabilities {
     rendered_context: bool,
     #[serde(default)]
     semantic_regions: bool,
+    #[serde(default)]
+    layer_space: bool,
+    #[serde(default)]
+    keyboard_registry: bool,
 }
 impl Capabilities {
     pub fn epoch(&self) -> &str {
@@ -83,6 +87,12 @@ impl Capabilities {
     }
     pub fn has_semantic_regions(&self) -> bool {
         self.semantic_regions
+    }
+    pub fn has_layer_space(&self) -> bool {
+        self.layer_space
+    }
+    pub fn has_keyboard_registry(&self) -> bool {
+        self.keyboard_registry
     }
     fn validate(&self, state: &ShellState, previous: Option<u64>) -> io::Result<()> {
         if self.version != 1

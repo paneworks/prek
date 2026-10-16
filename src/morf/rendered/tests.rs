@@ -9,6 +9,8 @@ pub(crate) fn sample(at: Duration) -> Context {
         sampled_ns: at.as_nanos().try_into().unwrap(),
         coverage: Coverage::PrimarySurfaceNamedBounds,
         frame: Some(Frame {
+            surface: None,
+            keyboard: None,
             width: 1000,
             height: 800,
             scale_120: 120,
@@ -73,6 +75,57 @@ fn state() -> ShellState {
         compositor_uid: 1000,
         output: "fixture-output".into(),
     }
+}
+#[test]
+fn registered_keyboard_and_surface_metadata_reject_contradictions_without_claiming_global_absence()
+{
+    let at = Duration::from_secs(1);
+    let mut context = sample(at);
+    let frame = context.frame.as_mut().unwrap();
+    frame.surface = Some(SurfaceSpace {
+        namespace: "shell".into(),
+        width: 1000,
+        height: 800,
+        local_scale: 1.0,
+    });
+    frame.regions[0].semantic = Some(Semantic {
+        role: SemanticRole::Keyboard,
+        layout: Some("full".into()),
+    });
+    frame.keyboard = Some(KeyboardRegistry {
+        scope: RegistryScope::RegisteredMorfPrimary,
+        registered: 1,
+        state: KeyboardState::Visible,
+        node: Some(u64::MAX.to_string()),
+        layout: Some("full".into()),
+    });
+    context.validate(&state(), at, None).unwrap();
+    for case in 0..6 {
+        let mut bad = context.clone();
+        let frame = bad.frame.as_mut().unwrap();
+        match case {
+            0 => frame.keyboard.as_mut().unwrap().state = KeyboardState::Hidden,
+            1 => frame.keyboard.as_mut().unwrap().registered = 0,
+            2 => frame.keyboard.as_mut().unwrap().node = Some("01".into()),
+            3 => frame.keyboard.as_mut().unwrap().layout = Some("dev".into()),
+            4 => frame.surface.as_mut().unwrap().local_scale = f64::NAN,
+            _ => frame.surface.as_mut().unwrap().width = 1001 + 2,
+        }
+        assert!(bad.validate(&state(), at, None).is_err());
+    }
+    let frame = context.frame.as_mut().unwrap();
+    frame.regions.clear();
+    frame.keyboard.as_mut().unwrap().state = KeyboardState::Hidden;
+    context.validate(&state(), at, None).unwrap();
+    let frame = context.frame.as_mut().unwrap();
+    frame.keyboard = Some(KeyboardRegistry {
+        scope: RegistryScope::RegisteredMorfPrimary,
+        registered: 2,
+        state: KeyboardState::Unknown,
+        node: None,
+        layout: None,
+    });
+    context.validate(&state(), at, None).unwrap();
 }
 #[test]
 fn native_bounds_reject_freshness_identity_regression_and_fabricated_geometry() {

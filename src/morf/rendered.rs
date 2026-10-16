@@ -3,6 +3,8 @@
 //! acknowledgement. They cannot establish a keyboard's absence or a safe scope.
 use super::*;
 use std::collections::BTreeSet;
+mod projection;
+pub use projection::{LayoutProjection, ProjectedRegion};
 
 pub const MAX_BYTES: usize = 128 * 1024;
 pub const MAX_REGIONS: usize = 256;
@@ -89,6 +91,99 @@ pub struct Frame {
     pub height: u32,
     pub scale_120: u32,
     pub regions: Vec<Region>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<SurfaceSpace>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keyboard: Option<KeyboardRegistry>,
+}
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SurfaceSpace {
+    pub namespace: String,
+    pub width: u32,
+    pub height: u32,
+    pub local_scale: f64,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegistryScope {
+    RegisteredMorfPrimary,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyboardState {
+    Unknown,
+    Hidden,
+    Visible,
+}
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyboardRegistry {
+    pub scope: RegistryScope,
+    pub registered: usize,
+    pub state: KeyboardState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<String>,
+}
+impl KeyboardRegistry {
+    fn validate(&self, regions: &[Region]) -> io::Result<()> {
+        let visible_count = regions
+            .iter()
+            .filter(|region| {
+                region
+                    .semantic
+                    .as_ref()
+                    .is_some_and(|s| s.role == SemanticRole::Keyboard)
+            })
+            .count();
+        if self.registered < visible_count {
+            return Err(invalid("keyboard registry omits visible declarations"));
+        }
+        if self.registered > 65_536 {
+            return Err(invalid("excessive keyboard registry"));
+        }
+        if self.state == KeyboardState::Unknown {
+            return if self.node.is_none() && self.layout.is_none() {
+                Ok(())
+            } else {
+                Err(invalid("unknown keyboard carries a target"))
+            };
+        }
+        let node = self
+            .node
+            .as_ref()
+            .and_then(|node| {
+                node.parse::<u64>()
+                    .ok()
+                    .filter(|value| *value > 0 && value.to_string() == *node)
+            })
+            .ok_or_else(|| invalid("invalid registered keyboard node"))?;
+        Semantic {
+            role: SemanticRole::Keyboard,
+            layout: self.layout.clone(),
+        }
+        .validate()?;
+        let visible = regions.iter().find(|region| region.node == node);
+        if self.registered != 1
+            || match self.state {
+                KeyboardState::Hidden => visible.is_some() || visible_count != 0,
+                KeyboardState::Visible => {
+                    visible_count != 1
+                        || visible.is_none_or(|region| {
+                            region.semantic.as_ref().is_none_or(|s| {
+                                s.role != SemanticRole::Keyboard || s.layout != self.layout
+                            })
+                        })
+                }
+                KeyboardState::Unknown => unreachable!(),
+            }
+        {
+            return Err(invalid("keyboard registry contradicts its frame"));
+        }
+        Ok(())
+    }
 }
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -100,6 +195,8 @@ pub enum Coverage {
 pub struct OutputContext {
     pub output: String,
     pub context: Context,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<LayoutProjection>,
 }
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -148,6 +245,29 @@ impl Context {
             ));
         }
         if let Some(frame) = &self.frame {
+            if let Some(surface) = &frame.surface
+                && (surface.namespace.is_empty()
+                    || surface.namespace.len() > 256
+                    || surface.namespace.chars().any(char::is_control)
+                    || surface.width == 0
+                    || surface.height == 0
+                    || surface.width > 1_000_000
+                    || surface.height > 1_000_000
+                    || !surface.local_scale.is_finite()
+                    || surface.local_scale <= 0.0
+                    || surface.local_scale > 64.0
+                    || (f64::from(frame.width) * surface.local_scale - f64::from(surface.width))
+                        .abs()
+                        > surface.local_scale + 1e-6
+                    || (f64::from(frame.height) * surface.local_scale - f64::from(surface.height))
+                        .abs()
+                        > surface.local_scale + 1e-6)
+            {
+                return Err(invalid("invalid native surface coordinate space"));
+            }
+            if let Some(keyboard) = &frame.keyboard {
+                keyboard.validate(&frame.regions)?;
+            }
             if self.revision == 0
                 || !self.fresh(now)
                 || frame.width == 0
@@ -215,6 +335,14 @@ impl Client<ShellState> {
                 MAX_BYTES,
             )?;
             let context: Context = serde_json::from_slice(&bytes)?;
+            if context.frame.as_ref().is_some_and(|frame| {
+                frame.surface.is_some() && !capabilities.has_layer_space()
+                    || frame.keyboard.is_some() != capabilities.has_keyboard_registry()
+            }) {
+                return Err(invalid(
+                    "native surface/registry metadata was not negotiated",
+                ));
+            }
             if !capabilities.has_semantic_regions()
                 && context.frame.as_ref().is_some_and(|frame| {
                     frame.regions.iter().any(|region| region.semantic.is_some())

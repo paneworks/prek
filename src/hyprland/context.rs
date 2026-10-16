@@ -22,6 +22,14 @@ pub struct ContextSampler {
     inhibited: bool,
 }
 impl ContextSampler {
+    pub(crate) fn sample_layers(
+        &mut self,
+        client: &Client,
+        outputs: &[OutputState],
+        until: Instant,
+    ) -> io::Result<Vec<super::layers::Layer>> {
+        super::layers::sample(client, outputs, until, &mut self.inhibited)
+    }
     /// Broker calls this only after accepting the bound native provider's
     /// completed unlock and independently verifying compositor unlock.
     pub(crate) fn provider_unlock_completed(&mut self) {
@@ -153,7 +161,19 @@ fn next_reply(replies: &mut impl Iterator<Item = serde_json::Result<Value>>) -> 
         .ok_or_else(|| invalid("incomplete context batch reply"))?
         .map_err(io::Error::other)
 }
-fn locked(value: &Value) -> io::Result<bool> {
+pub(super) fn parse_outputs(monitors: &Value) -> io::Result<Vec<OutputState>> {
+    Ok(parse(
+        monitors,
+        &Value::Array(vec![]),
+        &serde_json::json!({}),
+        &serde_json::json!({}),
+        1,
+        1,
+        Duration::ZERO,
+    )?
+    .outputs)
+}
+pub(super) fn locked(value: &Value) -> io::Result<bool> {
     value
         .get("locked")
         .and_then(Value::as_bool)

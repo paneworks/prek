@@ -129,6 +129,9 @@ pub struct Client<S: NativeState = State> {
     rendered: Option<rendered::Context>,
 }
 impl<S: NativeState> Client<S> {
+    pub(crate) fn producer(&self) -> (u32, u64) {
+        (self.pid, self.start)
+    }
     pub(crate) fn last_state(&self) -> Option<&S> {
         self.last.as_ref()
     }

@@ -236,13 +236,48 @@ fn refresh_native_shells(bound: &mut Bound, policy: &Policy, logind: &Logind, no
             }
         }
         let mut rendered = Vec::new();
+        let before = bound
+            .context
+            .sampler
+            .sample_layers(&bound.client, &snapshot.outputs, until)
+            .ok();
+        let mut producers = Vec::new();
         for client in &mut bound.native_shells {
             let Some(state) = client.last_state().filter(|state| visible.contains(state)) else {
                 continue;
             };
             let output = state.output.clone();
             if let Some(context) = client.rendered_context_until(logind, &bound.client, until)? {
-                rendered.push(crate::morf::rendered::OutputContext { output, context });
+                producers.push(client.producer());
+                rendered.push(crate::morf::rendered::OutputContext {
+                    output,
+                    context,
+                    layout: None,
+                });
+            }
+        }
+        if let Some(before) = before
+            && let Ok(after) =
+                bound
+                    .context
+                    .sampler
+                    .sample_layers(&bound.client, &snapshot.outputs, until)
+        {
+            let sampled = monotonic()?;
+            for (view, producer) in rendered.iter_mut().zip(producers) {
+                let output = snapshot
+                    .outputs
+                    .iter()
+                    .find(|output| output.geometry.name == view.output)
+                    .unwrap();
+                view.layout = crate::morf::rendered::LayoutProjection::from_samples(
+                    &view.context,
+                    output,
+                    &before,
+                    &after,
+                    producer,
+                    sampled,
+                )?;
             }
         }
         Ok((visible, rendered))
@@ -2254,6 +2289,13 @@ impl Broker {
             }
         }
         refresh_native_shells(bound, &self.policy, &self.logind, checked);
+        if bound.context.sampler.inhibited() {
+            if self.inhibited.len() >= 4096 && !self.inhibited.contains(&bound.compositor) {
+                return Err(protocol::invalid("locked compositor history exhausted"));
+            }
+            self.inhibited.insert(bound.compositor);
+            bound.context.inhibit();
+        }
         checked = monotonic()?;
         bound.context.checked = checked;
         if bound.context.value.as_ref().is_some_and(|value| {

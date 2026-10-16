@@ -667,6 +667,29 @@ function MorfAPI.providers() error("Prek editor definition") end
 ---@field height integer Surface-local logical height.
 ---@field scale_120 integer Actual surface scale in units of 1/120.
 ---@field regions prek.MorfNamedBounds[] At most 256 named scene bounds from a submitted GPU frame.
+---@field surface? {namespace:string,width:integer,height:integer,local_scale:number} Immutable native layer namespace, viewport and compositor logical units per Morf layout unit.
+---@field keyboard? prek.MorfKeyboardRegistry Scoped declaration coverage; no global keyboard absence proof.
+---@class (exact) prek.MorfKeyboardRegistry
+---@field scope 'registered_morf_primary'
+---@field registered integer Number of declared keyboards across native scene roots.
+---@field state 'unknown'|'hidden'|'visible'
+---@field node? prek.Identity Present only for a known state.
+---@field layout? string Present only for a known state.
+---@class (exact) prek.MorfProjectedRegion
+---@field node prek.Identity
+---@field id string
+---@field bounds? {origin:{x:number,y:number},size:{x:number,y:number}} Global logical layout box; nil when fully clipped by the native viewport.
+---@field interactive boolean
+---@field semantic? prek.MorfSemanticRegion
+---@class (exact) prek.MorfLayoutProjection
+---@field basis 'stock_layer_layout' Does not describe animated rendered position or presentation.
+---@field producer_pid integer
+---@field producer_start prek.Identity
+---@field output prek.Output
+---@field geometry_generation prek.Identity
+---@field sampled_ns prek.Identity
+---@field surface {output:string,address:string,namespace:string,pid:integer,level:integer,rect:{origin:{x:number,y:number},size:{x:number,y:number}}}
+---@field regions prek.MorfProjectedRegion[]
 ---@class (exact) prek.MorfFrameContext
 ---@field version integer Currently 1.
 ---@field epoch string Native connection identity.
@@ -679,6 +702,7 @@ function MorfAPI.providers() error("Prek editor definition") end
 ---@field output string Verified native output binding.
 ---@field context prek.MorfFrameContext
 ---@field fence prek.Fence
+---@field layout? prek.MorfLayoutProjection Stable compositor layout mapping, never gesture authority.
 ---Fresh submitted-frame inspection only. Bounds do not grant input scopes, prove keyboard absence, authenticate a surface, or acknowledge compositor presentation.
 ---@return prek.MorfRenderedContext[]|nil
 function MorfAPI.regions() error("Prek editor definition") end

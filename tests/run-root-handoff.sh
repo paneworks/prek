@@ -55,6 +55,9 @@ fi
 if [[ -x "$morf_repo/target/semantic-context-verified/morf" ]]; then
   morf_default="$morf_repo/target/semantic-context-verified/morf"
 fi
+if [[ -x "$morf_repo/target/native-layout-verified/morf" ]]; then
+  morf_default="$morf_repo/target/native-layout-verified/morf"
+fi
 morf_binary=${PREK_MORF_BINARY:-"$morf_default"}
 morf_shell=${PREK_MORF_SHELL:-"$morf_repo/examples/shells/caelestia/shell/init.lua"}
 if [[ ! -x "$morf_binary" || ! -f "$morf_shell" ]]; then

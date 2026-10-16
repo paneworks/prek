@@ -58,6 +58,32 @@ input ownership. Prek's output snapshots now retain `keyboard_known=false` for
 missing keyboard context; awake spatial/visibility-dependent rules then pass
 through with `KeyboardUnavailable` rather than treating missing data as hidden.
 
+Providers advertising `layer_space` include `frame.surface` with the immutable
+Wayland namespace, native logical viewport size and `local_scale` (compositor
+logical units per Morf layout unit). Prek samples stock layer inventories around
+the native read and matches exactly one output, producer PID and namespace with
+an unchanged address, level and box. A matching report includes an optional
+`layout` projection with `basis="stock_layer_layout"`, the producer's process
+birth, output geometry generation and projected global logical bounds.
+
+These coordinates describe the compositor's layout box. Hyprland's stock
+[`layers` IPC](https://github.com/hyprwm/Hyprland/blob/v0.54.3/src/debug/HyprCtl.cpp)
+exports `m_geometry`; its
+[renderer](https://github.com/hyprwm/Hyprland/blob/v0.54.3/src/render/Renderer.cpp)
+arranges that box in global logical coordinates. The
+[rendered surface box](https://github.com/hyprwm/Hyprland/blob/v0.54.3/src/desktop/view/LayerSurface.cpp)
+uses animated position and size instead. A layout projection therefore cannot
+establish the surface's current animated position or grant gesture authority.
+
+The separate `keyboard_registry` capability supplies `frame.keyboard` with
+`scope="registered_morf_primary"`, a declaration count and `state` of `unknown`,
+`hidden` or `visible`. Known states require one declared keyboard under the
+primary root and include its native `node` and `layout`. Extra declarations,
+foreign roots, exiting nodes and incomplete visible geometry remain unknown.
+Hidden describes that registered node only; another program's keyboard remains
+outside this coverage. Neither this registry nor the layout projection changes
+`keyboard_known` in a gesture snapshot.
+
 The optional owned local test is:
 
 ```sh
@@ -279,8 +305,8 @@ clears its environment, uses the packaged libsystemd, and selects one exact
 ignored test; it cannot select an arbitrary command or test filter.
 
 The local default prefers the frozen Morf executable in
-`../mold/target/native-cancel-verified/morf`, falling back to
-`../mold/target/async-wallpaper-verified/morf`, and the Caelestia shell in that
+`../mold/target/native-layout-verified/morf`, falling back to the newest available
+verified context, cancellation or wallpaper build, and the Caelestia shell in that
 checkout. Override `PREK_MORF_REPO`, `PREK_MORF_BINARY` or `PREK_MORF_SHELL` for
 another local build. The script enters the Morf development environment for its
 graphics dependencies. It uses the existing visible nested session with parent

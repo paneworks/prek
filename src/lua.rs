@@ -384,7 +384,24 @@ pub fn api() -> serde_json::Value {
         "integers":"node identity, UI generation, revision and sampled_ns are canonical decimal strings",
         "unavailable":"nil without a fresh owning desktop; empty array when no fresh native frame is available",
         "authority":"inspection only; no input-mask, keyboard-absence, authentication, stacking or presentation proof",
-        "scopes":false
+        "scopes":false,
+        "layout_projection":{
+            "basis":"stock_layer_layout",
+            "coordinates":"global logical layout boxes; not animated rendered positions",
+            "identity":"unique stable native producer PID, process birth, output, layer namespace/address/level/box and geometry generation",
+            "missing_bounds":"viewport-clipped rows retain their native identities with null bounds",
+            "optional":true
+        },
+        "keyboard_registry":{
+            "capability":"keyboard_registry","scope":"registered_morf_primary",
+            "states":["unknown","hidden","visible"],
+            "known":"one declared keyboard under the primary root, with node and layout",
+            "absence":"hidden applies only to the registered Morf node; does not set snapshot keyboard_known"
+        },
+        "surface_space":{
+            "capability":"layer_space","fields":["namespace","width","height","local_scale"],
+            "local_scale":"compositor logical units per native Morf layout unit"
+        }
     });
     manifest["morf_rendered_queries"]["semantic"] = serde_json::json!({
         "capability":"semantic_regions","property":"input_context","fields":["role","layout"],

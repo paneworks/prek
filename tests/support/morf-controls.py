@@ -205,12 +205,15 @@ def main():
             assert (capabilities["queue"], capabilities["receipts"], capabilities["lease_ms"],
                     capabilities["grant_ms"]) == (8, 64, 1000, 250)
             rendered_observations = []
+            layout_observations = []
             def rendered_frame(keyboard=None, layout=None):
                 if not capabilities.get("rendered_context", False):
                     return None
                 until = time.monotonic() + 5
                 while True:
+                    before_layers = stock("layers") if capabilities.get("layer_space", False) else None
                     value = native_rpc(dict(version=1, op="rendered-context"), 128 * 1024)
+                    after_layers = stock("layers") if before_layers is not None else None
                     with (output / "morf-rendered-observations.jsonl").open("a") as log:
                         log.write(json.dumps(dict(expected_keyboard=keyboard, expected_layout=layout, report=value)) + "\n")
                     assert set(value) == {"version", "epoch", "ui_generation", "revision", "sampled_ns", "coverage", "frame"}
@@ -256,6 +259,36 @@ def main():
                         if keyboard is None or ("drawer-keyboard" in ids) == keyboard:
                             if capabilities.get("semantic_regions", False):
                                 assert bool(keyboard_regions) == ("drawer-keyboard" in ids)
+                            if capabilities.get("keyboard_registry", False):
+                                registry = frame["keyboard"]
+                                assert registry["scope"] == "registered_morf_primary"
+                                assert registry["registered"] == 1
+                                expected = "visible" if "drawer-keyboard" in ids else "hidden"
+                                if registry["state"] != expected or (layout is not None and registry.get("layout") != layout):
+                                    assert time.monotonic() < until, "registered keyboard state did not converge"
+                                    time.sleep(.025)
+                                    continue
+                                assert set(registry) == {"scope", "registered", "state", "node", "layout"}
+                                assert str(int(registry["node"])) == registry["node"] and int(registry["node"]) > 0
+                                assert (registry["node"] in nodes) == (expected == "visible")
+                            if before_layers is not None:
+                                space = frame["surface"]
+                                assert set(space) == {"namespace", "width", "height", "local_scale"}
+                                scale = space["local_scale"]
+                                assert math.isfinite(scale) and 0 < scale <= 64
+                                assert abs(frame["width"] * scale - space["width"]) <= scale + 1e-6
+                                assert abs(frame["height"] * scale - space["height"]) <= scale + 1e-6
+                                def matching_layers(inventory):
+                                    return [dict(layer, level=level) for level, items in inventory[name]["levels"].items()
+                                            for layer in items if layer["pid"] == producer and layer["namespace"] == space["namespace"]]
+                                before = matching_layers(before_layers)
+                                after = matching_layers(after_layers)
+                                if len(before) != 1 or before != after or (before[0]["w"], before[0]["h"]) != (space["width"], space["height"]):
+                                    assert time.monotonic() < until, "owning compositor layer layout did not converge"
+                                    time.sleep(.025)
+                                    continue
+                                layout_observations.append(dict(basis="stock_layer_layout", producer_pid=producer,
+                                                                output=name, surface=space, layer=before[0]))
                             rendered_observations.append(value)
                             return value
                     assert time.monotonic() < until, "native submitted-frame geometry did not converge"
@@ -390,6 +423,9 @@ def main():
                 native_control_capabilities=capabilities,
                 native_rendered_context_tested=bool(rendered_observations),
                 native_semantic_regions_tested=bool(rendered_observations) and capabilities.get("semantic_regions", False),
+                native_keyboard_registry_tested=bool(rendered_observations) and capabilities.get("keyboard_registry", False),
+                native_layer_space_tested=bool(layout_observations),
+                native_layer_layout_observations=layout_observations,
                 native_rendered_context_broker_tested=False,
                 native_rendered_observations=rendered_observations,
                 native_handoff_state=handoff, native_handoff_operations_refused=True,

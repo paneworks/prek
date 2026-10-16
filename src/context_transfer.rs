@@ -77,6 +77,18 @@ impl View {
                 return Err(protocol::invalid("duplicate rendered output context"));
             }
             rendered.context.validate(state, self.sampled_at, None)?;
+            if let Some(layout) = &rendered.layout {
+                let output = self
+                    .context
+                    .as_ref()
+                    .unwrap()
+                    .snapshot
+                    .outputs
+                    .iter()
+                    .find(|output| output.geometry.name == rendered.output)
+                    .unwrap();
+                layout.validate(&rendered.context, output, self.sampled_at)?;
+            }
         }
         if self
             .error
@@ -263,6 +275,7 @@ pub(crate) mod tests {
         current
             .morf_rendered
             .push(crate::morf::rendered::OutputContext {
+                layout: None,
                 output: "fixture-output".into(),
                 context: crate::morf::rendered::tests::sample(at),
             });

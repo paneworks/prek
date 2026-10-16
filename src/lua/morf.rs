@@ -84,10 +84,19 @@ p.events.on('ready',function()
   assert(c.frame.regions[1].id=='drawer-keyboard' and c.frame.regions[1].bounds.x==10.25)
   assert(c.frame.regions[1].node=='18446744073709551615')
   assert(c.frame.regions[1].semantic.role=='keyboard' and c.frame.regions[1].semantic.layout=='dev')
+  assert(c.frame.surface.namespace=='shell' and c.frame.surface.local_scale==1)
+  assert(c.frame.keyboard.scope=='registered_morf_primary' and c.frame.keyboard.state=='visible')
+  assert(c.frame.keyboard.node=='18446744073709551615')
+  assert(reports[1].layout.basis=='stock_layer_layout' and reports[1].layout.producer_start=='18446744073709551615')
+  assert(reports[1].layout.regions[1].bounds.origin.x==10.25)
   c.frame.regions[1].id='forged'
   c.frame.regions[1].semantic.layout='forged'
+  c.frame.keyboard.layout='forged'
+  reports[1].layout.regions[1].bounds.origin.x=999
   assert(p.morf.regions()[1].context.frame.regions[1].id=='drawer-keyboard')
   assert(p.morf.regions()[1].context.frame.regions[1].semantic.layout=='dev')
+  assert(p.morf.regions()[1].context.frame.keyboard.layout=='dev')
+  assert(p.morf.regions()[1].layout.regions[1].bounds.origin.x==10.25)
   p.log.info('frame')
 end)
 return {version=1}
@@ -120,6 +129,7 @@ return {version=1}
         current
             .morf_rendered
             .push(crate::morf::rendered::OutputContext {
+                layout: None,
                 output: "fixture-output".into(),
                 context: crate::morf::rendered::tests::sample(at),
             });
@@ -133,6 +143,39 @@ return {version=1}
             role: crate::morf::rendered::SemanticRole::Keyboard,
             layout: Some("dev".into()),
         });
+        let report = &mut current.morf_rendered[0];
+        let frame = report.context.frame.as_mut().unwrap();
+        frame.surface = Some(crate::morf::rendered::SurfaceSpace {
+            namespace: "shell".into(),
+            width: 1000,
+            height: 800,
+            local_scale: 1.0,
+        });
+        frame.keyboard = Some(crate::morf::rendered::KeyboardRegistry {
+            scope: crate::morf::rendered::RegistryScope::RegisteredMorfPrimary,
+            registered: 1,
+            state: crate::morf::rendered::KeyboardState::Visible,
+            node: Some(u64::MAX.to_string()),
+            layout: Some("dev".into()),
+        });
+        let output = &current.context.as_ref().unwrap().snapshot.outputs[0];
+        let layer = crate::hyprland::layers::Layer {
+            output: output.geometry.name.clone(),
+            address: "0x123".into(),
+            namespace: "shell".into(),
+            pid: Some(4321),
+            level: 2,
+            rect: output.rect(),
+        };
+        report.layout = crate::morf::rendered::LayoutProjection::from_samples(
+            &report.context,
+            output,
+            std::slice::from_ref(&layer),
+            std::slice::from_ref(&layer),
+            (4321, u64::MAX),
+            at,
+        )
+        .unwrap();
         runtime.set_context(current.clone(), at).unwrap();
         assert_eq!(
             runtime

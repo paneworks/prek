@@ -65,6 +65,25 @@ masked and exiting subtrees. They are bounding boxes, including for curved or
 rotated items. `interactive` describes an enabled native input target itself;
 it does not describe the exact hit shape or the compositor input mask.
 
+With native `layer_space` support, `frame.surface={namespace,width,height,local_scale}`
+identifies the immutable Wayland layer namespace and native logical viewport;
+multiply Morf local coordinates by `local_scale` to obtain compositor logical
+units. An optional report-level `layout` contains `basis="stock_layer_layout"`,
+`producer_pid`, exact decimal-string `producer_start`, `geometry_generation`
+and `sampled_ns`, owning output geometry, matched `surface` and projected
+`regions`. Each projected row preserves its native identity and metadata;
+`bounds={origin={x,y},size={x,y}}` is global logical layout geometry, or `nil`
+when the native viewport clips it completely. This mapping requires one stable
+compositor layer with the same native producer, namespace, output and viewport.
+Stock layout coordinates do not track animated rendered position.
+
+With `keyboard_registry` support, `frame.keyboard` contains
+`{scope="registered_morf_primary",registered,state,node?,layout?}`. `state` is
+`unknown`, `hidden` or `visible`. Known states identify exactly one declared
+keyboard on the primary scene. A hidden registered keyboard says nothing about
+other programs' keyboards. These fields remain inspection data and do not set
+snapshot `keyboard_known` or authorize gestures.
+
 The native host records a successful GPU submission, then refreshes unchanged
 geometry only while the current scene, surface size/scale and Lua generation
 still match it. A query cannot refresh itself. Busy, skipped, layout-only, stale

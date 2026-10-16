@@ -446,6 +446,7 @@ return {version=1}
     // native GPU observations are exercised separately in the owned Cage run.
     view.morf_rendered
         .push(prek::morf::rendered::OutputContext {
+            layout: None,
             output: "fixture-output".into(),
             context: serde_json::from_value(serde_json::json!({
                 "version":1,"epoch":"a".repeat(32),"ui_generation":"2","revision":"7",
