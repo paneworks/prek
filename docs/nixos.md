@@ -90,7 +90,9 @@ acceptance uses explicit model seat authority and separate owned sockets.
 
 `services.prek.session.input = true` adds `--input`; the protected Lua policy
 must also set `allow_input_events=true`. `session.ruleMutations = true` adds
-`--rule-mutations`, requiring `allow_runtime_rules=true`. Both require
+`--rule-mutations`, requiring `allow_runtime_rules=true`.
+`session.recognizers = true` adds `--recognizers` for source-bound custom
+callbacks under the same protected input permission. All three options require
 `session.lua=true`; they default false. These options cannot widen protected
 source policy. `session.enable=false` omits the launcher from the system profile
 while retaining the broker, useful when an existing session hook starts the

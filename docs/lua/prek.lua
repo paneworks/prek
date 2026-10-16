@@ -20,6 +20,8 @@
 ---@alias prek.EffectKind 'observations'|'commands'|'synthetic_input'|'hyprland_actions'|'morf_actions'|'power_actions'
 ---@alias prek.Capability 'context'|'observations'|'lua_events'|'input_events'|'custom_recognizers'|'lua_actions'|'runtime_rules'|'hyprland_actions'|'morf_actions'|'power_actions'|'commands'|'synthetic_input'
 ---@alias prek.EventKind 'input'|'matched'|'begin'|'update'|'end'|'cancel'|'skipped'|'ready'|'reload'|'stop'|'recovery'|'session_changed'|'context_changed'|'rules_changed'
+---@alias prek.RecognizerInput 'key'|'relative'|'wheel'|'absolute'|'switch'|'touch'
+---@alias prek.RecognizerPhase 'pending'|'discrete'|'begin'|'update'|'end'|'cancel'
 ---@alias prek.MorfAction 'dashboard'|'notifications'|'quick_settings'|'workspace_preview'|'keyboard_show'|'keyboard_hide'|'keyboard_toggle_layout'|'apps'|'web'|'reveal_clock_form'
 ---@alias prek.WindowAction 'reorder_up'|'reorder_down'|'move_left_and_follow'|'move_right_and_follow'|'close'|'scroll_stack'
 ---@alias prek.PowerAction 'lock_and_blank'|'wake'|'blank'
@@ -50,7 +52,7 @@
 ---@field allowed_devices? string[]
 ---@field allowed_seats? string[]
 ---@field allow_runtime_rules? boolean Default false; only protected system policy grants permission.
----@field allow_input_events? boolean Default false; requires protected policy, --lua --input and fresh desktop context.
+---@field allow_input_events? boolean Default false; protected opt-in for --lua --input or --lua --recognizers with fresh desktop context.
 ---@field allow_power_actions? boolean Default false; protected permission for --power on a routing broker.
 ---@field allow_hyprland_actions? boolean Default false; protected permission for --hyprland on a routing broker.
 
@@ -143,6 +145,25 @@
 ---@field steps prek.Trigger[]
 ---@field timeout prek.Duration
 
+---@class (exact) prek.RecognizerOptions
+---@field selectors string[] Explicit protected device selector IDs; nonempty, at most 64.
+---@field inputs prek.RecognizerInput[] Explicit normalized input kinds; nonempty.
+---@field reply_within prek.Duration Required, 1..250ms, never renewed by transport delay.
+---@field continuous? boolean Default false; requires begin/update/end ordering when true.
+---@field timeout? prek.Duration Default 1s; native lifetime bound 1..10000ms.
+---@field wake? prek.Duration Optional stationary wake interval 5..250ms.
+---@class (exact) prek.RecognizerDeclaration
+---@field name string
+---@field selectors string[]
+---@field inputs prek.RecognizerInput[]
+---@field reply_within prek.Duration
+---@field continuous boolean
+---@class (exact) prek.CustomTrigger
+---@field kind 'custom'
+---@field recognizer prek.RecognizerDeclaration Copied declaration; edits must still match the private source binding.
+---@field timeout prek.Duration
+---@field wake? prek.Duration
+
 ---@class (exact) prek.KeyTrigger: prek.KeyTriggerFields
 ---@field kind 'key'
 ---@class (exact) prek.ButtonTapsTrigger: prek.ButtonTapsFields
@@ -167,7 +188,7 @@
 ---@field kind 'shape'
 ---@class (exact) prek.SequenceTrigger: prek.SequenceFields
 ---@field kind 'sequence'
----@alias prek.Trigger prek.KeyTrigger|prek.ButtonTapsTrigger|prek.ButtonHoldTrigger|prek.ChordTrigger|prek.WheelTrigger|prek.TouchTapsTrigger|prek.TouchHoldTrigger|prek.SwipeTrigger|prek.PinchTrigger|prek.RotateTrigger|prek.ShapeTrigger|prek.SequenceTrigger
+---@alias prek.Trigger prek.KeyTrigger|prek.ButtonTapsTrigger|prek.ButtonHoldTrigger|prek.ChordTrigger|prek.WheelTrigger|prek.TouchTapsTrigger|prek.TouchHoldTrigger|prek.SwipeTrigger|prek.PinchTrigger|prek.RotateTrigger|prek.ShapeTrigger|prek.SequenceTrigger|prek.CustomTrigger
 
 ---@class (exact) prek.EventFields
 ---@field kind? 'event' Matching explicit kind is accepted; constructors supply it if absent.
@@ -490,6 +511,30 @@
 ---@field keys integer[] Already held evdev codes; no invented press events.
 ---@field contacts prek.Contact[] Already held contacts have fresh=false. Removal/loss clears state.
 ---@field metadata? prek.DeviceInfo Permitted metadata for present sources; absent on removal.
+---@class (exact) prek.RecognitionTicket
+---@field fence prek.Fence
+---@field id prek.Identity
+---@field candidate prek.Identity
+---@field revision prek.Identity
+---@field rule string
+---@field recognizer string
+---@field cause 'frame'|'timer'
+---@field requested_at prek.MonotonicTime Original request time; timer wakes retain the last physical input time separately.
+---@field deadline prek.MonotonicTime
+---@field input prek.InputFrame Only declared selectors and input kinds; timer transitions are empty.
+---@class (exact) prek.RecognitionCancellation
+---@field fence prek.Fence
+---@field candidate prek.Identity
+---@field revision prek.Identity
+---@field rule string
+---@field recognizer string
+---@field source prek.Source
+---@field through prek.Identity Last issued ticket covered by this retirement.
+---@field reason 'cancelled'|'completed'|'source_lost'|'context_lost'|'rule_changed'|'expired'
+---@field cause 'cancel'
+---@class (exact) prek.RecognitionReply
+---@field phase prek.RecognizerPhase
+---@field data? unknown Plain JSON-compatible data; at most eight levels and 4KiB encoded.
 ---@class (exact) prek.Axis
 ---@field minimum integer
 ---@field maximum integer
@@ -618,6 +663,8 @@ local LayersAPI = {}
 local ModesAPI = {}
 ---@class prek.TriggersAPI
 local TriggersAPI = {}
+---@class prek.RecognizersAPI
+local RecognizersAPI = {}
 ---@class prek.ActionsAPI
 local ActionsAPI = {}
 ---@class prek.UnitsAPI
@@ -734,6 +781,7 @@ local PolicyAPI = {}
 ---@field layers prek.LayersAPI
 ---@field modes prek.ModesAPI
 ---@field triggers prek.TriggersAPI
+---@field recognizers prek.RecognizersAPI
 ---@field actions prek.ActionsAPI
 ---@field units prek.UnitsAPI
 ---@field events prek.EventsAPI
@@ -752,7 +800,7 @@ local PolicyAPI = {}
 ---@field policy prek.PolicyAPI
 local prek = {
     api_version = 1, version = "0.1.0", api = {},
-    config = ConfigAPI, rules = RulesAPI, layers = LayersAPI, modes = ModesAPI, triggers = TriggersAPI, actions = ActionsAPI,
+    config = ConfigAPI, rules = RulesAPI, layers = LayersAPI, modes = ModesAPI, triggers = TriggersAPI, recognizers = RecognizersAPI, actions = ActionsAPI,
     units = UnitsAPI, events = EventsAPI, log = LogAPI, scheduler = SchedulerAPI, context = ContextAPI,
     capabilities = CapabilitiesAPI,
     morf = MorfAPI,
@@ -1003,6 +1051,15 @@ function CoordinatesAPI.convert(reference, point, from, to) error("Prek editor d
 ---@param fields prek.KeyTriggerFields
 ---@return prek.KeyTrigger
 function TriggersAPI.key(fields) error("Prek editor definition") end
+
+---Configuration only. Register one callback and return a reusable native trigger.
+---Requires protected allow_input_events, permitted selectors and --lua --recognizers.
+---Return nil for pending or a phase/data proposal. On cause=cancel, release state and return nil.
+---@param name string Unique, 1..128 bytes without control characters.
+---@param options prek.RecognizerOptions
+---@param callback fun(event: prek.RecognitionTicket|prek.RecognitionCancellation): prek.RecognitionReply?
+---@return prek.CustomTrigger
+function RecognizersAPI.define(name, options, callback) error("Prek editor definition") end
 ---@param fields prek.ButtonTapsFields
 ---@return prek.ButtonTapsTrigger
 function TriggersAPI.button_taps(fields) error("Prek editor definition") end

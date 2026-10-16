@@ -497,6 +497,33 @@ state and subscriptions restart. Failed configuration reloads retain the current
 source generation. Input events arriving during source loading are queued with
 byte/count bounds. Progress may be coalesced; overflow retires the Lua component.
 
+## Custom Lua recognizers
+
+`recognizers.define(name, options, callback)` is a configuration-time constructor
+that returns a reusable native trigger for `rules.define`. Options require
+explicit selector IDs, input kinds and a 1–250 ms reply budget. Optional
+`continuous`, `timeout` and `wake` control phase ordering, native lifetime and
+stationary callbacks. The source registry keeps a separate canonical declaration;
+altering the returned declaration cannot widen its binding. Custom rules without
+their exact source callback fail compilation. Callback-bearing configurations
+require their original source; declarative export fails.
+
+An observation session opts in with `--lua --recognizers`; protected
+`policy.allow_input_events=true`, allowed devices and fresh owning desktop
+context are also required. Ordinary `--input` is independent. The callback gets
+only the declared normalized input under a native ticket. It returns nil while
+pending or a strict phase/data proposal; cancellation carries identity/reason
+only and returns nil. Native rules retain activation, frozen target, arbitration
+and effect authority. No Lua runs on the input thread. Each callback has a
+20 ms / 100,000-instruction budget; data is limited to eight levels and 4 KiB.
+All IDs/generations/revisions are exact decimal strings.
+
+See [the full constructor, ticket and cleanup contract](recognizers.md) and
+[hold example](../examples/lua/custom_recognizer.lua). The real helper and
+native-worker tests use explicit context/admission models. Live privileged
+acceptance, the sole routing-worker bridge, custom-only device metadata delivery,
+sequence/group composition and offline custom replay remain required.
+
 ## Permitted normalized input
 
 `events.on("input", callback)` observes normalized input from the owning seat.
@@ -1281,9 +1308,10 @@ See [offline_replay.lua](../examples/lua/offline_replay.lua) for both modes.
 
 The configuration VM includes Luna's core libraries and the `prek` module.
 Ambient `io`, `os`, `package` and `debug` are absent. `print`, `warn`, `dofile`,
-`loadfile`, `load` and `collectgarbage` are disabled. Other modules are unavailable
-until a controlled module loader is implemented. The initial random seed is
-deterministic. A configuration cannot yield or return multiple values.
+`loadfile`, `load` and `collectgarbage` are disabled. Additional imports use the
+captured module loader described above; ambient search paths are unavailable.
+The initial random seed is deterministic. A configuration cannot yield or return
+multiple values.
 
 Source is limited to 1 MiB, execution to 1,000,000 instruction-fuel units and
 250 ms for user source evaluation, arena memory to a 32 MiB check between VM slices, and returned values to

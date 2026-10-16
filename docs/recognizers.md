@@ -1,14 +1,93 @@
 # Custom recognizer proposal gate
 
-`recognition::Gate` is the Rust ticket/response component for the planned Lua
-recognizer path. Internal host bindings connect approved source callbacks through
-the supervised Lua helper; opt-in native rule/routing coordinators create and
+`recognizers.define` declares a Lua callback and returns its native trigger.
+`recognition::Gate` is the Rust ticket/response component. Source bindings connect
+approved callbacks through the supervised Lua helper; opt-in native rule/routing coordinators create and
 arbitrate their tickets. The private observation worker now transports tickets,
 readiness acknowledgements, native validation receipts and cancellation identities.
 The broker/session observation path now carries these messages after protected
-source approval and verified session admission. The source-level Lua constructor
-and user-launched live root acceptance remain required. Ordinary Lua files cannot
-yet declare callback bindings; the Rust host binding API is still preparatory.
+source approval and verified session admission. Live privileged admission and
+physical routing acceptance remain unverified; source, native coordinator and
+real helper tests use explicit admission/context models.
+
+## Lua constructor
+
+```lua
+local p = require('prek')
+local trigger = p.recognizers.define('my_recognizer', {
+    selectors = {'keyboard'},
+    inputs = {'key'},
+    reply_within = '250ms',
+    timeout = '1s',
+    wake = '20ms',
+}, function(event)
+    if event.cause == 'cancel' then
+        -- Release private state for event.candidate, then return nil.
+        return nil
+    end
+    -- Return nil while pending, or {phase='discrete', data={...}}.
+    return nil
+end)
+```
+
+Use `trigger` in `rules.define {trigger=trigger, ...}`; one declaration can serve
+multiple rules. Names are unique within the source snapshot. The declaration
+has no effects during configuration evaluation and cannot register at runtime.
+The [complete hold example](../examples/lua/custom_recognizer.lua) uses native
+activation conditions, stationary wakes, a semantic match and cleanup.
+
+| Option | Contract |
+| --- | --- |
+| `selectors` | Required nonempty list of at most 64 device selector IDs, all configured and permitted by protected policy. |
+| `inputs` | Required nonempty list from `key`, `relative`, `wheel`, `absolute`, `switch`, `touch`. |
+| `reply_within` | Required explicitly qualified duration, 1–250 ms. Queueing never renews it. |
+| `continuous` | Optional boolean, default false. True requires begin before updates/end. |
+| `timeout` | Optional native candidate lifetime, default 1s, allowed 1–10,000 ms. |
+| `wake` | Optional stationary wake interval, 5–250 ms. Missed wakes are skipped. |
+
+Selector/input lists represent sets and are copied into canonical native order.
+Lists must have consecutive integer keys and string values; unknown options,
+holes, named list fields and mistyped values fail. Protected policy flags also
+require actual booleans; strings such as `"false"` cannot enable a permission.
+The constructor returns a plain native trigger with separate private binding
+metadata. Editing input options later does not change either copy. Changing the
+returned declaration so it differs from its private binding fails compilation;
+rule-local timeout/wake changes still undergo normal native validation.
+
+`cause=frame` and `cause=timer` receive a `RecognitionTicket`: `fence`, `id`,
+`candidate`, `revision`, `rule`, `recognizer`, `requested_at`, `deadline` and
+`input`. The input is a normalized frame containing only declared kinds and
+selectors. IDs, generations, revisions and fence components are exact decimal
+strings. Timer input retains the previous physical timestamp/sequence, clears
+transitions and marks retained contacts non-fresh. Return nil for pending or a
+strict `{phase=..., data=...}` table. Phases are pending/discrete/cancel for a
+discrete declaration, or pending/begin/update/end/cancel for a continuous one.
+Data is plain JSON-compatible data, limited to eight levels and 4 KiB encoded.
+
+`cause=cancel` receives `RecognitionCancellation`: the same fence, candidate,
+revision, rule and recognizer, plus `source`, `through` and `reason`. It has no
+input or new ticket. Reasons include completion, source/context loss, rule edits,
+expiry and cancellation; exact wire values are listed below. Clear private
+candidate state and return nil. Cleanup cannot produce a proposal or effect.
+
+Callbacks cannot yield and have a 20 ms / 100,000-instruction budget. Failures
+retire the VM without retrying. Native rules own activation conditions, frozen
+targets, arbitration and effects; a Lua result is a proposal. The callback is
+private to ticket dispatch and receives no ordinary `events.on('input')` events.
+Every custom rule must have its exact source callback binding, including disabled
+templates. Modules and complete source/snapshot metadata are checked again on
+VM reconstruction. `config.export` rejects callback-bearing custom rules;
+retain the original Lua source.
+
+An owning observation session uses `prek session --lua --recognizers`; protected
+system policy must enable `allow_input_events` and the selected devices. This
+permission defaults to false. Ordinary `--input` is a separate opt-in. Device
+catalog queries currently need separately received ordinary input-reset metadata;
+custom-only tickets do not populate that catalog. Custom sequence steps,
+additional consuming group lifetimes and the sole routing-worker bridge remain
+unfinished. Production routing stays gated.
+
+## Native proposal and delivery contract
 
 The trusted input coordinator constructs `Candidate` from its verified rule,
 source generation, eligibility revision, expiry and current router ownership.
@@ -67,15 +146,15 @@ The result is a **validated proposal**, not a claim or execution grant. The
 coordinator must still perform ordinary Rust arbitration, enforce its one-owner
 rule and action permissions, and preserve fallback/draining behavior. It must
 retire completed candidates, changed eligibility and lost sources. Existing
-production routing and public custom-recognizer negotiation remain disabled.
+production routing remains disabled; observation negotiation requires the
+protected source binding and session opt-in described above.
 
-The preparatory Rust embedding API, `lua::Definition::bind_recognizer`, binds an
-approved `input` subscription ID to a declaration. It requires protected
-normalized-input permission and explicit permitted device selectors.
-Names and subscription IDs are unique, with at most 64 bindings. Bindings travel
-with the approved complete source snapshot; re-evaluation must reproduce its
-configuration and subscription metadata. This is a host API, not the finished
-Lua declaration interface. No new Lua constructor is advertised.
+Source constructors create bindings automatically. The older Rust embedding
+API, `lua::Definition::bind_recognizer`, remains available for host-approved input
+subscriptions in protocol embeddings; native custom rules require canonical
+source constructor metadata. At most 64 names/subscription IDs can be bound.
+Bindings travel with the complete approved source snapshot; re-evaluation must
+reproduce configuration and subscription metadata exactly.
 
 After instantiation, the bound subscription receives only ticketed callbacks;
 ordinary input dispatch skips it. `Runtime::recognize` requires fresh owning
@@ -160,7 +239,7 @@ These messages establish no execution, routing ownership or descriptor-release
 proof. Whole-session stop discards queues and disables the old generation; the
 supervisor owns process reaping and release of its VM state.
 
-The source constructor, sole routing-worker integration and actual privileged
+The sole routing-worker integration and actual privileged
 broker/kernel/physical acceptance remain required. Existing root-routing and
 native handoff scripts do not establish live custom-recognizer admission.
 
@@ -213,7 +292,7 @@ The real supervised-helper test also connects the actual private observer worker
 socket to Luna: physical-frame model → pending → stationary timer → typed native match
 → correlated cleanup acknowledgement. It explicitly models provider authority
 and performs no device I/O. Broker ledger and protocol tests model admission;
-they do not verify a live privileged broker/logind registration. Public source
-declarations, routing-worker callbacks, full sequence/group composition, offline
+they do not verify a live privileged broker/logind registration. Routing-worker
+callbacks, full sequence/group composition, offline
 custom replay and end-to-end reload/recovery still need implementation or live
 acceptance. Production routing and Morf action admission remain gated.

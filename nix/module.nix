@@ -69,6 +69,7 @@ let
     ++ lib.optional cfg.session.context "--context"
     ++ lib.optional cfg.session.lua "--lua"
     ++ lib.optional cfg.session.input "--input"
+    ++ lib.optional cfg.session.recognizers "--recognizers"
     ++ lib.optional cfg.session.ruleMutations "--rule-mutations";
   sessionPackage = pkgs.writeShellScriptBin "prek-session" ''
     exec ${lib.escapeShellArgs sessionArgs} "$@"
@@ -137,6 +138,7 @@ in {
       context = mkOption { type = types.bool; default = true; description = "Request broker-verified compositor context."; };
       lua = mkOption { type = types.bool; default = true; description = "Run approved callbacks in the unprivileged session helper."; };
       input = mkEnableOption "permitted normalized Lua input events; protected Lua policy must also allow them";
+      recognizers = mkEnableOption "source-bound custom Lua recognizers; protected input policy and owning desktop context are required";
       ruleMutations = mkEnableOption "acknowledged Lua rule/layer/mode transactions; protected Lua policy must also allow them";
       package = mkOption {
         type = types.package;
@@ -150,7 +152,7 @@ in {
       { assertion = cfg.mode == "observe"; message = "services.prek: production route mode is unavailable; takeover/recovery gates remain pending."; }
       { assertion = cfg.configFile == null || cfg.luaConfig == null && cfg.luaModules == { }; message = "services.prek: choose configFile or inline luaConfig/luaModules."; }
       { assertion = lib.all moduleName (builtins.attrNames cfg.luaModules); message = "services.prek.luaModules: use bounded dotted identifiers outside the reserved prek namespace."; }
-      { assertion = cfg.session.lua || !(cfg.session.input || cfg.session.ruleMutations); message = "services.prek.session: input and ruleMutations require lua."; }
+      { assertion = cfg.session.lua || !(cfg.session.input || cfg.session.recognizers || cfg.session.ruleMutations); message = "services.prek.session: input, recognizers and ruleMutations require lua."; }
     ];
     services.prek.configurationPackage = configuration;
     services.prek.session.package = sessionPackage;

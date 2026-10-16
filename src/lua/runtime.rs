@@ -60,6 +60,8 @@ pub struct Registration {
     pub active: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule: Option<super::hooks::RuleHook>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recognizer: Option<crate::recognition::Definition>,
 }
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -100,7 +102,7 @@ impl Definition {
             modules: sources.modules.clone(),
             model: toml::to_string(&runtime.config).map_err(error)?,
             registrations: runtime.registrations()?,
-            recognizers: Vec::new(),
+            recognizers: runtime.recognizers.clone(),
             timers: runtime.timer_registrations()?,
             handlers: runtime.handler_registrations()?,
             tasks: runtime.task_registrations()?,
@@ -208,6 +210,7 @@ pub(super) struct Host {
     pub(super) configuring: bool,
     pub(super) running: bool,
     pub(super) rule_hooks: bool,
+    pub(super) recognizer_callbacks: bool,
     pub(super) logs: Vec<LogRecord>,
     pub(super) bytes: usize,
     pub(super) now: Option<Duration>,
@@ -298,6 +301,12 @@ impl Runtime {
                         rule: luna_util::serde::from_value_with(
                             ctx,
                             entry.get(ctx, "rule")?,
+                            luna_util::serde::DeOptions::default().max_depth(4),
+                        )
+                        .map_err(io::Error::other)?,
+                        recognizer: luna_util::serde::from_value_with(
+                            ctx,
+                            entry.get(ctx, "recognizer")?,
                             luna_util::serde::DeOptions::default().max_depth(4),
                         )
                         .map_err(io::Error::other)?,

@@ -1393,7 +1393,7 @@ impl Config {
     }
 }
 
-fn validate_trigger(
+pub(crate) fn validate_trigger(
     trigger: &Trigger,
     shapes: &BTreeSet<&String>,
     depth: usize,

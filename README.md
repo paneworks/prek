@@ -255,8 +255,13 @@ fields, constructors, libraries and limits. `prek api --lua` exports the shipped
 at the installed `share/prek/lua` directory for completion and type checking.
 Supervised session callbacks and timers
 are implemented. Named action handlers return bounded command/event plans under
-fresh broker grants; `session --lua --commands` opts into that executor. Custom
-recognizers and live adapter APIs remain required work.
+fresh broker grants; `session --lua --commands` opts into that executor.
+`recognizers.define(name, options, callback)` declares a custom native trigger
+with a supervised Lua callback. Observation sessions opt in with
+`--lua --recognizers` under protected input policy. See the
+[hold example](examples/lua/custom_recognizer.lua) and
+[recognizer API](docs/recognizers.md). Live privileged acceptance, consuming
+custom routing and additional adapter APIs remain required work.
 
 Named operating modes use `modes.define {id, active=false}` and `Rule.when_mode`.
 `modes.list/get/current/revision` inspect the acknowledged selection;

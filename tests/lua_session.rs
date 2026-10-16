@@ -933,11 +933,12 @@ fn private_input_worker_round_trips_a_stationary_hold_through_the_actual_luna_he
         assert!(messages.iter().any(|message| matches!(message, Message::RecognitionResult { ticket, fence: actual, error: None, .. } if *ticket == id && *actual == fence(1))));
         messages
     }
-    let mut definition = Definition::compile(
+    let definition = Definition::compile(
         r#"
 local p=require('prek');local calls=0
-local declaration={name='native_hold',selectors={'keyboard'},inputs={'key'},reply_within='250ms'}
-p.events.on('input',function(ticket)
+local trigger=p.recognizers.define('native_hold',{
+ selectors={'keyboard'},inputs={'key'},reply_within='250ms',wake='20ms',
+},function(ticket)
  calls=calls+1
  if ticket.cause=='cancel' then
   assert(ticket.input==nil and ticket.reason=='completed' and calls==3)
@@ -951,7 +952,7 @@ end)
 return p.config.new{
  policy={allow_input_events=true,allowed_devices={'keyboard'}},devices={keyboard={keys={'KEY_A'}}},
  rules={p.rules.define{id='native_hold_rule',contexts={'desktop'},
-  trigger={kind='custom',recognizer=declaration,timeout='1s',wake='20ms'},
+  trigger=trigger,
   action=p.actions.event{name='native_hold'}}},
 }
 "#,
@@ -962,7 +963,7 @@ return p.config.new{
     let Trigger::Custom { recognizer, .. } = &config.rules[0].trigger else {
         unreachable!()
     };
-    definition.bind_recognizer(1, recognizer.clone()).unwrap();
+    assert_eq!(&definition.recognizers[0].definition, recognizer);
     let mut forged = definition.clone();
     forged.recognizers[0].definition.continuous = true;
     assert!(forged.validate().is_err());

@@ -66,6 +66,7 @@ pub fn api() -> serde_json::Value {
         serde_json::json!({"name":"units.duration", "signature":"units.duration(string) -> string", "description":"Declare an explicitly unit-qualified duration."}),
         serde_json::json!({"name":"units.distance", "signature":"units.distance(string) -> string", "description":"Declare an explicitly unit-qualified distance."}),
         serde_json::json!({"name":"events.on", "signature":"events.on(kind, callback) -> Subscription", "description":"Subscribe to approved semantic or lifecycle events in this session generation; registration has no evaluation effects."}),
+        serde_json::json!({"name":"recognizers.define", "signature":"recognizers.define(name, options, callback) -> CustomTrigger", "phase":"configuration", "description":"Declare a source-bound recognizer with explicit permitted selectors, normalized input kinds and reply budget; callbacks return proposals to the native coordinator."}),
         serde_json::json!({"name":"Subscription.dispose", "receiver":"Subscription", "signature":"subscription:dispose() -> nil", "description":"Idempotently disable this subscription before its next invocation."}),
         serde_json::json!({"name":"log.info", "signature":"log.info(message, fields = nil) -> nil", "description":"Append a bounded structured log in an event callback; unavailable during configuration evaluation."}),
         serde_json::json!({"name":"scheduler.after", "signature":"scheduler.after(duration, callback) -> Timer", "description":"Schedule one callback after an explicitly unit-qualified monotonic delay in this VM generation."}),
@@ -369,6 +370,7 @@ pub fn api() -> serde_json::Value {
         "grant_time_ms":250
     });
     let morf_adapter = serde_json::json!({"agent_flags":["morf"],"named_handler_flags":["lua","morf"],"public_session_negotiation":false,"production_gate":"native rendered context and physical cutover","transport":"broker offer ID/ordinal and typed action only; no caller target, motion or deadline","completion":"native controller acceptance; no rendered animation/presentation proof","pending_agent":8,"pending_broker":64,"morf_effects_per_ordinal":1,"result_wait_after_grant_ms":2000,"native_receipt_poll_ms":5,"ownership_refresh_ms":100,"cancellation":"known owning gesture only; no uncertain retry"});
+    let custom_recognizers = serde_json::json!({"constructor":"recognizers.define","agent_flags":["lua","recognizers"],"capability":"custom_recognizers","system_permission":"policy.allow_input_events","production_broker":"observation_mode","context":"fresh owning desktop without secure overlay","inputs":["key","relative","wheel","absolute","switch","touch"],"maximum_declarations":64,"maximum_candidates_and_cleanup":64,"maximum_pending_tickets":64,"ticket_bytes":65536,"pending_bytes":1048576,"reply_ms":[1,250],"timeout_ms":[1,10000],"wake_ms":[5,250],"callback_ms":20,"callback_instructions":100000,"data_bytes":4096,"data_depth":8,"identities":"canonical decimal strings","result":"nil for pending or a strict phase/data table; cancellation returns nil","source":"private canonical declaration, exact rule binding and complete approved snapshot parity","claims":false,"raw_frames":false,"routing":"unavailable","custom_sequences":"unavailable","device_catalog":"currently populated through separately opted-in ordinary input resets","root_acceptance":"pending user-launched live tests"});
     let capability_queries = serde_json::json!({"source":"broker-negotiated registration flags and parent executor readiness; never inferred from Lua source","freshness_ms":250,"refresh_ms":100,"queued_snapshots":1,"in_flight_snapshots":1,"ready_families":["commands","lua_actions","power_actions","hyprland_actions","morf_actions"],"hyprland":"protected policy.allow_hyprland_actions and session --hyprland on a routing broker; production takeover remains unavailable","unavailable":"current returns nil; has and ready return false","unknown_names":"false; names must be strings of 1 to 128 bytes","grants":false,"lifetime":"negotiated flags immutable within the owning fence; stop clears metadata"});
     let mut manifest = serde_json::json!({"api_version":API_VERSION,"schema_version":crate::config::SCHEMA_VERSION,
         "engine":"onix-os/luna", "engine_version":"0.5.1", "phase":"configuration_and_session_actions",
@@ -394,6 +396,7 @@ pub fn api() -> serde_json::Value {
         "editor":{"format":"LuaCATS","module":"prek","cli":["prek","api","--lua"],"path":"share/prek/lua/prek.lua","scope":"implemented_configuration_and_runtime"},
         "device_queries":{"catalog":"permitted metadata received through input reset notifications; no host inventory scan","maximum_sources":256,"maximum_bytes":4194304,"lookup":"exact Source device/generation/seat with canonical decimal strings","nil":"no received metadata, unknown source, missing mapping or unavailable/stale desktop context","empty_list":"all known sources removed while context remains usable","revision":"decimal string; metadata changes/removals only","map_keys":"numeric evdev type/axis keys in Lua","position":"validated device counts to normalized/mm/output-local/global coordinates; no action authority","seat":"current fresh desktop binding/fence only; no other-seat enumeration"},
         "runtime_api":"partial"});
+    manifest["custom_recognizers"] = custom_recognizers;
     manifest["morf_adapter"] = morf_adapter;
     manifest["service_inspection"] = serde_json::json!({
         "configuration":"acknowledged Rust model and canonical decimal-string rule revision; closures require original source",
@@ -551,6 +554,23 @@ local function subscribe(kind, callback, rule)
     return {dispose=function(self) entry.active=false end}
 end
 function api.events.on(kind, callback) return subscribe(kind,callback,nil) end
+local recognizer_guard=api.recognizers.__define
+api.recognizers.__define=nil
+local recognizer_names={}
+local recognizer_count=0
+function api.recognizers.define(name, options, callback)
+    assert(type(name)=="string", "recognizer name must be a string")
+    assert(type(callback)=="function", "recognizer expects a callback")
+    assert(not recognizer_names[name], "duplicate recognizer name")
+    assert(recognizer_count<64, "Lua recognizer limit exceeded")
+    assert(#registrations<256, "Lua subscription limit exceeded")
+    local trigger, declaration=recognizer_guard(name,options)
+    local entry={id=#registrations+1,kind="input",callback=callback,active=true,recognizer=declaration}
+    registrations[entry.id]=entry
+    recognizer_names[name]=true
+    recognizer_count=recognizer_count+1
+    return trigger
+end
 local hook_guard=api.rules.__hook_guard
 api.rules.__hook_guard=nil
 local rule_phases={discrete=true,begin=true,update=true,["end"]=true,cancel=true}
@@ -753,6 +773,7 @@ fn instantiate(
                 "layers",
                 "modes",
                 "triggers",
+                "recognizers",
                 "actions",
                 "units",
                 "events",
@@ -803,7 +824,11 @@ fn instantiate(
                     if export_host.borrow().rule_hooks {
                         return Err(io::Error::other("rule callbacks require original Lua source; declarative export would discard them").into());
                     }
+                    if export_host.borrow().recognizer_callbacks {
+                        return Err(io::Error::other("recognizer callbacks require original Lua source; declarative export would discard them").into());
+                    }
                     let value: Value = stack.consume(ctx)?;
+                    values::policy_booleans(ctx, value)?;
                     let config: Config = luna_util::serde::from_value_with(
                         ctx,
                         value,
@@ -818,6 +843,8 @@ fn instantiate(
             ctx.globals().set(ctx, "__prek", module)?;
             let registry = Table::new(&ctx);
             ctx.globals().set(ctx, "__prek_registry", registry)?;
+            let recognizers: Table = module.get(ctx, "recognizers")?;
+            recognizers.set(ctx, "__define", self::recognizers::constructor(&ctx, host.clone()))?;
             let timers = Table::new(&ctx);
             ctx.globals().set(ctx, "__prek_timers", timers)?;
             let tasks = Table::new(&ctx);
@@ -950,6 +977,7 @@ fn instantiate(
             if values.0.len() != 1 {
                 return Err(io::Error::other("Lua configuration must return one table").into());
             }
+            self::values::policy_booleans(ctx, values.0[0])?;
             let config: Config = luna_util::serde::from_value_with(
                 ctx,
                 values.0[0],
@@ -976,7 +1004,10 @@ fn instantiate(
         recognition_candidates: Default::default(),
     };
     let handlers = runtime.handler_registrations()?;
-    hooks::validate(&runtime.registrations()?, &runtime.config)?;
+    let registrations = runtime.registrations()?;
+    hooks::validate(&registrations, &runtime.config)?;
+    runtime.recognizers = recognizers::bindings(&registrations);
+    recognizers::validate(&runtime.recognizers, &registrations, &runtime.config)?;
     runtime
         .host
         .borrow_mut()

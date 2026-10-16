@@ -1,12 +1,12 @@
-//! Host-approved callback bindings. No public Lua constructor or live routing
-//! admission is provided here; the trusted coordinator still owns arbitration.
+//! Source-approved recognizer declarations and bounded callback execution.
+//! Native coordinators retain authority over eligibility, claims and effects.
 use super::*;
 use crate::recognition::{self, Phase, Proposal, Ticket};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 /// Associate an approved source subscription with an immutable declaration.
-/// This host API is preparatory plumbing for the source-level constructor.
+/// Source constructors populate these immutable bindings automatically.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Binding {
@@ -17,6 +17,109 @@ pub struct Binding {
 pub struct RecognitionResult {
     pub proposal: Option<Proposal>,
     pub logs: Vec<LogRecord>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Options {
+    selectors: BTreeSet<String>,
+    inputs: BTreeSet<recognition::InputKind>,
+    reply_within: crate::config::Millis,
+    #[serde(default)]
+    continuous: bool,
+    #[serde(default = "timeout")]
+    timeout: crate::config::Millis,
+    #[serde(default)]
+    wake: Option<crate::config::Millis>,
+}
+fn timeout() -> crate::config::Millis {
+    crate::config::Millis(1000)
+}
+fn string_list<'gc>(ctx: luna::Context<'gc>, value: Value<'gc>, max: i64) -> io::Result<()> {
+    let Value::Table(table) = value else {
+        return Err(io::Error::other(
+            "recognizer selectors and inputs require nonempty lists",
+        ));
+    };
+    let length = table.length(&ctx);
+    if length == 0 || length > max {
+        return Err(io::Error::other("recognizer list exceeds bounds"));
+    }
+    let mut count = 0;
+    for (key, value) in table.iter(ctx) {
+        if !matches!(key, Value::Integer(index) if (1..=length).contains(&index))
+            || !matches!(value, Value::String(_))
+        {
+            return Err(io::Error::other(
+                "recognizer lists require consecutive integer keys and string values",
+            ));
+        }
+        count += 1;
+    }
+    if count != length {
+        return Err(io::Error::other("recognizer list contains holes"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod constructor_tests;
+pub(super) fn constructor<'gc>(
+    ctx: &luna::Context<'gc>,
+    host: std::rc::Rc<std::cell::RefCell<runtime::Host>>,
+) -> Callback<'gc> {
+    Callback::from_fn(ctx, move |ctx, _, mut stack| {
+        if !host.borrow().configuring {
+            return Err(io::Error::other(
+                "recognizer registration requires configuration evaluation",
+            )
+            .into());
+        }
+        let (name, options): (luna::String, Value) = stack.consume(ctx)?;
+        values::budget(ctx, options, 4, 4096, 64 * 1024)?;
+        let Value::Table(table) = options else {
+            return Err(io::Error::other("recognizer options must be a table").into());
+        };
+        values::optional_boolean(ctx, table, "continuous")?;
+        string_list(ctx, table.get(ctx, "selectors")?, 64)?;
+        string_list(ctx, table.get(ctx, "inputs")?, 6)?;
+        let options: Options = luna_util::serde::from_value_with(
+            ctx,
+            options,
+            luna_util::serde::DeOptions::default().max_depth(4),
+        )
+        .map_err(io::Error::other)?;
+        let definition = recognition::Definition {
+            name: name.to_str().map_err(io::Error::other)?.into(),
+            selectors: options.selectors,
+            inputs: options.inputs,
+            reply_within: options.reply_within,
+            continuous: options.continuous,
+        };
+        let trigger = crate::config::Trigger::Custom {
+            recognizer: definition.clone(),
+            timeout: options.timeout,
+            wake: options.wake,
+        };
+        crate::config::validate_trigger(&trigger, &BTreeSet::new(), 0).map_err(io::Error::other)?;
+        // Separate serializations keep the registry independent of the table
+        // returned to user code, including its nested selector/input arrays.
+        let public = luna_util::serde::to_value(ctx, &trigger).map_err(io::Error::other)?;
+        let private = luna_util::serde::to_value(ctx, &definition).map_err(io::Error::other)?;
+        host.borrow_mut().recognizer_callbacks = true;
+        stack.replace(ctx, (public, private));
+        Ok(CallbackReturn::Return)
+    })
+}
+pub(super) fn bindings(registrations: &[Registration]) -> Vec<Binding> {
+    registrations
+        .iter()
+        .filter_map(|entry| {
+            entry.recognizer.as_ref().map(|definition| Binding {
+                subscription: entry.id,
+                definition: definition.clone(),
+            })
+        })
+        .collect()
 }
 
 pub(super) fn validate(
@@ -46,12 +149,20 @@ pub(super) fn validate(
                     && entry.kind == EventKind::Input
                     && entry.active
                     && entry.rule.is_none()
+                    && entry
+                        .recognizer
+                        .as_ref()
+                        .is_none_or(|declared| declared == &binding.definition)
             })
         {
             return Err(error(
                 "recognizer binding requires a unique approved input subscription and permitted selectors",
             ));
         }
+    }
+    if registrations.iter().any(|entry| entry.recognizer.as_ref().is_some_and(|definition| !bindings.iter().any(|binding| binding.subscription == entry.id && &binding.definition == definition)))
+        || config.rules.iter().any(|rule| matches!(&rule.trigger, crate::config::Trigger::Custom { recognizer, .. } if !bindings.iter().any(|binding| &binding.definition == recognizer && registrations.iter().any(|entry| entry.id == binding.subscription && entry.recognizer.as_ref() == Some(recognizer))))) {
+        return Err(error("custom recognizer rules and source registrations require exact approved callback bindings"));
     }
     Ok(())
 }

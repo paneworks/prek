@@ -32,15 +32,22 @@ let
     '';
     luaModules."bindings.keyboard" = ''
       local p = require("prek")
+      local trigger = p.recognizers.define("module_key", {
+        selectors={"keyboard"},inputs={"key"},reply_within="250ms",
+      }, function(event)
+        if event.cause == "frame" then return {phase="discrete"} end
+        return nil
+      end)
       return p.config.new {
         policy = {allowed_devices={"keyboard"}},
         devices = {keyboard={keys={"KEY_A"}}},
         modes = {p.modes.define{id="normal",active=true}},
         rules = {p.rules.define{id="a",when_mode="normal",
-          trigger=p.triggers.key{key="KEY_A"},action=p.actions.event{name="a"}}},
+          trigger=trigger,action=p.actions.event{name="a"}}},
       }
     '';
     session.input = true;
+    session.recognizers = true;
     session.ruleMutations = true;
   };
   fromFile = evaluate { configFile = ../examples/lua/modular/config.lua; };
@@ -77,6 +84,7 @@ let
     { luaModules."../escape" = "return {}"; }
     { luaModules."prek.hidden" = "return {}"; }
     { session.lua = false; session.input = true; }
+    { session.lua = false; session.recognizers = true; }
     { session.lua = false; session.ruleMutations = true; }
   ];
 in

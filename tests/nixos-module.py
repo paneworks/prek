@@ -50,7 +50,7 @@ def main():
             module = root / "modules/bindings/keyboard.lua"
             assert module.is_file() and not module.is_symlink()
             text = launcher.read_text()
-            assert "--input" in text and "--rule-mutations" in text
+            assert "--input" in text and "--rule-mutations" in text and "--recognizers" in text
             assert "/run/prek-test/control.sock" in text
         if name == "fromFile":
             assert result["rules"] > 0
@@ -96,7 +96,7 @@ def main():
                             "verify", "prek.service" if system_units else str(path)],
                            env=verify_env, check=True, timeout=20)
     Path(sys.argv[3]).write_text(json.dumps({"status": "passed", "cases": list(cases),
-        "negative_evaluations": 7, "devices_opened": False, "services_started": False,
+        "negative_evaluations": 8, "devices_opened": False, "services_started": False,
         "unit_scope": "system" if system_units else "user_syntax"}) + "\n")
 
 

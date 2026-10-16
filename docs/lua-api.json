@@ -66,6 +66,55 @@
     "snapshot_bytes": 4194304,
     "transfer_time_ms": 1000
   },
+  "custom_recognizers": {
+    "agent_flags": [
+      "lua",
+      "recognizers"
+    ],
+    "callback_instructions": 100000,
+    "callback_ms": 20,
+    "capability": "custom_recognizers",
+    "claims": false,
+    "constructor": "recognizers.define",
+    "context": "fresh owning desktop without secure overlay",
+    "custom_sequences": "unavailable",
+    "data_bytes": 4096,
+    "data_depth": 8,
+    "device_catalog": "currently populated through separately opted-in ordinary input resets",
+    "identities": "canonical decimal strings",
+    "inputs": [
+      "key",
+      "relative",
+      "wheel",
+      "absolute",
+      "switch",
+      "touch"
+    ],
+    "maximum_candidates_and_cleanup": 64,
+    "maximum_declarations": 64,
+    "maximum_pending_tickets": 64,
+    "pending_bytes": 1048576,
+    "production_broker": "observation_mode",
+    "raw_frames": false,
+    "reply_ms": [
+      1,
+      250
+    ],
+    "result": "nil for pending or a strict phase/data table; cancellation returns nil",
+    "root_acceptance": "pending user-launched live tests",
+    "routing": "unavailable",
+    "source": "private canonical declaration, exact rule binding and complete approved snapshot parity",
+    "system_permission": "policy.allow_input_events",
+    "ticket_bytes": 65536,
+    "timeout_ms": [
+      1,
+      10000
+    ],
+    "wake_ms": [
+      5,
+      250
+    ]
+  },
   "device_queries": {
     "catalog": "permitted metadata received through input reset notifications; no host inventory scan",
     "empty_list": "all known sources removed while context remains usable",
@@ -605,6 +654,12 @@
       "description": "Subscribe to approved semantic or lifecycle events in this session generation; registration has no evaluation effects.",
       "name": "events.on",
       "signature": "events.on(kind, callback) -> Subscription"
+    },
+    {
+      "description": "Declare a source-bound recognizer with explicit permitted selectors, normalized input kinds and reply budget; callbacks return proposals to the native coordinator.",
+      "name": "recognizers.define",
+      "phase": "configuration",
+      "signature": "recognizers.define(name, options, callback) -> CustomTrigger"
     },
     {
       "description": "Idempotently disable this subscription before its next invocation.",

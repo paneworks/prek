@@ -10,6 +10,15 @@ pub fn export_config(config: &Config) -> Result<String, ConfigError> {
     if config
         .rules
         .iter()
+        .any(|rule| matches!(rule.trigger, crate::config::Trigger::Custom { .. }))
+    {
+        return Err(error(
+            "custom recognizers require their original approved source",
+        ));
+    }
+    if config
+        .rules
+        .iter()
         .any(|rule| matches!(rule.action, Action::Lua { .. }))
     {
         return Err(error(

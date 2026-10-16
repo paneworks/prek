@@ -4,6 +4,36 @@ use super::*;
 use luna::Context;
 use serde_json::Value as Json;
 
+pub(super) fn optional_boolean<'gc>(
+    ctx: Context<'gc>,
+    table: Table<'gc>,
+    field: &str,
+) -> io::Result<()> {
+    let value: Value = table.get(ctx, field).map_err(io::Error::other)?;
+    if !matches!(value, Value::Nil | Value::Boolean(_)) {
+        return Err(io::Error::other(format!("{field} must be a boolean")));
+    }
+    Ok(())
+}
+
+/// Lua truthiness must never turn a mistyped protected opt-in into permission.
+pub(super) fn policy_booleans<'gc>(ctx: Context<'gc>, value: Value<'gc>) -> io::Result<()> {
+    if let Value::Table(config) = value {
+        let policy: Value = config.get(ctx, "policy").map_err(io::Error::other)?;
+        if let Value::Table(policy) = policy {
+            for field in [
+                "allow_runtime_rules",
+                "allow_input_events",
+                "allow_power_actions",
+                "allow_hyprland_actions",
+            ] {
+                optional_boolean(ctx, policy, field)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Bound expanded tables before native deserialization, including shared or
 /// cyclic values. Counting each expansion prevents alias-based allocation.
 pub(super) fn budget<'gc>(
