@@ -1,22 +1,33 @@
 #!/usr/bin/env bash
-# Launch as the desktop user. The packaged runner prompts for sudo only after
+# Launch as the regular user. The packaged runner prompts for sudo only after
 # building, and elevates only the fixed native handoff probe.
 set -euo pipefail
 
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 if [[ ${1:-} == --help ]]; then
   cat <<'HELP'
-Usage: ./tests/run-root-handoff.sh
-Run from your Wayland desktop terminal as your regular user, not with sudo.
+Usage: ./tests/run-root-handoff.sh [--local-wayland-fix]
+Launch as your regular user, not with sudo.
+Default: visible nested desktop, original unpatched compositor dependencies.
+--local-wayland-fix: private headless Cage, explicit test-only Aquamarine patch;
+  no desktop/display required, no window-action adapter test on Hyprland0.56.2.
 The runner asks for your sudo password when the build is ready.
 Logs: target/root-handoff/latest/console.log and cage/run-*/morf-native-root.log
 Optional paths: PREK_MORF_REPO, PREK_MORF_BINARY, PREK_MORF_SHELL.
+Default Morf: ../morf/target/release/morf (legacy ../mold fallback).
+The local variant uses Morf's nixGL/nixVulkan wrappers and detects NVIDIA_VERSION
+from the loaded kernel driver unless you supply it explicitly.
 The probe tests native Morf handoff/restoration; it opens no evdev/uinput devices.
 HELP
   exit 0
 fi
+mode=desktop
+if [[ ${1:-} == --local-wayland-fix && $# == 1 ]]; then
+  mode=local-wayland-fix
+  shift
+fi
 if (( EUID == 0 || $# != 0 )); then
-  echo 'Launch ./tests/run-root-handoff.sh as your desktop user, without sudo or arguments.' >&2
+  echo 'Launch as your regular user, without sudo; only --local-wayland-fix is optional.' >&2
   exit 2
 fi
 
@@ -42,21 +53,36 @@ printf 'Prek revision: '
 git -C "$repo" rev-parse HEAD
 git -C "$repo" status --short
 
-: "${WAYLAND_DISPLAY:?Run this from your Wayland desktop terminal}"
-: "${XDG_RUNTIME_DIR:?Run this from your Wayland desktop terminal}"
-morf_repo=${PREK_MORF_REPO:-"$repo/../mold"}
-morf_default="$morf_repo/target/async-wallpaper-verified/morf"
-if [[ -x "$morf_repo/target/native-cancel-verified/morf" ]]; then
-  morf_default="$morf_repo/target/native-cancel-verified/morf"
+fixture=cage-root-test
+flags=(--visible --modes --input --power --windows)
+gpu=()
+if [[ $mode == desktop ]]; then
+  : "${WAYLAND_DISPLAY:?Run from your Wayland desktop, or pass --local-wayland-fix}"
+  : "${XDG_RUNTIME_DIR:?Run from your Wayland desktop, or pass --local-wayland-fix}"
+else
+  fixture=cage-root-test-wayland-fix
+  flags=(--hardware-rendering --modes --input --power)
+  gpu=(nixGL nixVulkan)
+  if [[ -z ${NVIDIA_VERSION:-} && -r /sys/module/nvidia/version ]]; then
+    NVIDIA_VERSION=$(cat /sys/module/nvidia/version)
+    export NVIDIA_VERSION
+  fi
+  echo 'TEST-ONLY local Wayland dependency fix, not unmodified stock acceptance.'
 fi
-if [[ -x "$morf_repo/target/rendered-context-verified/morf" ]]; then
-  morf_default="$morf_repo/target/rendered-context-verified/morf"
-fi
-if [[ -x "$morf_repo/target/semantic-context-verified/morf" ]]; then
-  morf_default="$morf_repo/target/semantic-context-verified/morf"
-fi
-if [[ -x "$morf_repo/target/native-layout-verified/morf" ]]; then
-  morf_default="$morf_repo/target/native-layout-verified/morf"
+printf 'Fixture: %s; NVIDIA_VERSION=%s\n' "$fixture" "${NVIDIA_VERSION:-not-selected}"
+
+morf_repo=${PREK_MORF_REPO:-"$repo/../morf"}
+if [[ -z ${PREK_MORF_REPO:-} && ! -d $morf_repo ]]; then morf_repo="$repo/../mold"; fi
+morf_repo=$(realpath -e -- "$morf_repo")
+morf_default="$morf_repo/target/release/morf"
+if [[ ! -x $morf_default ]]; then
+  for build in native-layout-verified semantic-context-verified rendered-context-verified \
+               native-cancel-verified async-wallpaper-verified; do
+    if [[ -x $morf_repo/target/$build/morf ]]; then
+      morf_default="$morf_repo/target/$build/morf"
+      break
+    fi
+  done
 fi
 morf_binary=${PREK_MORF_BINARY:-"$morf_default"}
 morf_shell=${PREK_MORF_SHELL:-"$morf_repo/examples/shells/caelestia/shell/init.lua"}
@@ -65,14 +91,20 @@ if [[ ! -x "$morf_binary" || ! -f "$morf_shell" ]]; then
   echo 'Set PREK_MORF_BINARY and PREK_MORF_SHELL to your local build paths.' >&2
   exit 2
 fi
+morf_binary=$(realpath -e -- "$morf_binary")
+morf_shell=$(realpath -e -- "$morf_shell")
+if [[ $(head -c 4 -- "$morf_binary") != $'\x7fELF' ]]; then
+  echo 'PREK_MORF_BINARY must be the actual ELF, not a shell wrapper.' >&2
+  exit 2
+fi
 printf 'Morf executable: '
 sha256sum -- "$morf_binary"
 
-nix --option eval-cache false --extra-experimental-features 'nix-command flakes' \
-  build --no-write-lock-file --out-link "$run/runner" "$repo#cage-root-test"
-nix --option eval-cache false --extra-experimental-features 'nix-command flakes' \
-  develop "$morf_repo" --no-write-lock-file -c \
-  "$run/runner/bin/prek-cage-root-test" --visible --modes --input --power --windows \
+nix --option eval-cache false --extra-experimental-features 'nix-command flakes' --max-jobs 1 --cores 2 \
+  build --no-write-lock-file --out-link "$run/runner" "$repo#$fixture"
+nix --option eval-cache false --extra-experimental-features 'nix-command flakes' --max-jobs 1 --cores 2 \
+  develop --impure "$morf_repo" --no-write-lock-file -c "${gpu[@]}" \
+  "$run/runner/bin/prek-cage-root-test" "${flags[@]}" \
   --morf "$morf_binary" --morf-shell "$morf_shell" --output "$run/cage"
 
 shopt -s nullglob

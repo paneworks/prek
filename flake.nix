@@ -31,6 +31,14 @@
               ${self.packages.${system}.default.nativeTests}/libexec/prek-native-tests \
               --exact morf::handoff::tests::live::owned_native_handoff --ignored --nocapture --test-threads=1
           '';
+          rootRunner = fixture: pkgs.writeShellScriptBin "prek-cage-root-test" ''
+            if [ "$(${pkgs.coreutils}/bin/id -u)" -eq 0 ]; then
+              echo 'Run this as your regular user; only the native probe uses sudo.' >&2
+              exit 2
+            fi
+            sudo -v || exit $?
+            exec ${fixture}/bin/prek-cage-host-test "$@"
+          '';
         in {
           cage-touch-test = import ./tests/cage-touch.nix { inherit pkgs; };
           cage-test = import ./tests/cage-host.nix {
@@ -46,18 +54,18 @@
             aquamarine = self.packages.${system}.aquamarine-wayland-test;
             package = self.packages.${system}.default;
           };
-          cage-root-test = pkgs.writeShellScriptBin "prek-cage-root-test" ''
-            if [ "$(${pkgs.coreutils}/bin/id -u)" -eq 0 ]; then
-              echo 'Run this from the desktop user terminal; only the native probe uses sudo.' >&2
-              exit 2
-            fi
-            sudo -v || exit $?
-            exec ${import ./tests/cage-host.nix {
-              inherit pkgs;
-              package = self.packages.${system}.default;
-              rootProbe = nativeProbe;
-            }}/bin/prek-cage-host-test "$@"
-          '';
+          cage-root-test = rootRunner (import ./tests/cage-host.nix {
+            inherit pkgs;
+            package = self.packages.${system}.default;
+            rootProbe = nativeProbe;
+          });
+          cage-root-test-wayland-fix = rootRunner (import ./tests/cage-host.nix {
+            inherit pkgs;
+            inherit (compositorPkgs) cage hyprland;
+            aquamarine = self.packages.${system}.aquamarine-wayland-test;
+            package = self.packages.${system}.default;
+            rootProbe = nativeProbe;
+          });
           root-routing-test = import ./tests/root-routing.nix {
             inherit pkgs;
             package = self.packages.${system}.default;
@@ -151,6 +159,10 @@
           type = "app";
           program = "${self.packages.${system}.cage-root-test}/bin/prek-cage-root-test";
         };
+        cage-root-test-wayland-fix = {
+          type = "app";
+          program = "${self.packages.${system}.cage-root-test-wayland-fix}/bin/prek-cage-root-test";
+        };
         root-routing-test = {
           type = "app";
           program = "${self.packages.${system}.root-routing-test}/bin/prek-root-routing-test";
@@ -162,6 +174,13 @@
           pkgs = nixpkgs.legacyPackages.${system};
           package = self.packages.${system}.default;
         in {
+          root-handoff-launcher = pkgs.runCommand "prek-root-handoff-launcher-check" {
+            nativeBuildInputs = [ pkgs.bash pkgs.shellcheck ];
+          } ''
+            bash -n ${./tests/run-root-handoff.sh}
+            shellcheck ${./tests/run-root-handoff.sh}
+            touch "$out"
+          '';
           cage-startup = pkgs.runCommand "prek-cage-startup-check" {
             nativeBuildInputs = [ pkgs.python3 ];
           } ''
