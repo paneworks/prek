@@ -25,6 +25,11 @@ struct Offer {
     at: Duration,
     bytes: usize,
 }
+#[derive(Clone, Copy)]
+struct Location {
+    step: Option<(usize, usize)>,
+    worker: usize,
+}
 pub(super) fn definitions(config: &Config) -> Vec<recognition::Definition> {
     config.recognizer_definitions()
 }
@@ -302,11 +307,55 @@ fn input_context(state: &DeviceState, at: Duration) -> InputContext<'_> {
     super::input(state, at)
 }
 impl Engine {
+    fn recognition_workers(&self) -> impl Iterator<Item = &Worker> {
+        self.workers
+            .iter()
+            .chain(self.sequences.iter().flat_map(|sequence| {
+                sequence
+                    .steps
+                    .iter()
+                    .flat_map(|engine| engine.workers.iter())
+            }))
+    }
+    fn custom_location(&self, id: u64) -> Option<Location> {
+        let contains = |worker: &Worker| {
+            matches!(worker.rule.trigger, Trigger::Custom { .. })
+                && worker
+                    .candidates
+                    .values()
+                    .any(|candidate| candidate.id == id)
+        };
+        if let Some(worker) = self.workers.iter().position(contains) {
+            return Some(Location { step: None, worker });
+        }
+        for (sequence, plan) in self.sequences.iter().enumerate() {
+            for (step, engine) in plan.steps.iter().enumerate() {
+                if let Some(worker) = engine.workers.iter().position(contains) {
+                    return Some(Location {
+                        step: Some((sequence, step)),
+                        worker,
+                    });
+                }
+            }
+        }
+        None
+    }
+    fn custom_engine(&self, location: Location) -> &Self {
+        match location.step {
+            None => self,
+            Some((sequence, step)) => &self.sequences[sequence].steps[step],
+        }
+    }
+    fn custom_engine_mut(&mut self, location: Location) -> &mut Self {
+        match location.step {
+            None => self,
+            Some((sequence, step)) => &mut self.sequences[sequence].steps[step],
+        }
+    }
     pub(crate) fn retire_routing_recognition(&mut self, source: &Source) {
         let at = self.input_at();
         let ids: Vec<_> = self
-            .workers
-            .iter()
+            .recognition_workers()
             .filter(|worker| matches!(worker.rule.trigger, Trigger::Custom { .. }))
             .filter_map(|worker| worker.candidates.get(source).map(|candidate| candidate.id))
             .collect();
@@ -324,17 +373,30 @@ impl Engine {
         }
         if !ready {
             let ids: Vec<_> = self
-                .workers
-                .iter()
+                .recognition_workers()
                 .filter(|worker| matches!(worker.rule.trigger, Trigger::Custom { .. }))
                 .flat_map(|worker| worker.candidates.values().map(|candidate| candidate.id))
                 .collect();
             for id in ids {
                 self.custom_cancel(id, at, "recognizer helper is unavailable");
             }
+            for sequence in &mut self.sequences {
+                if sequence.rule.trigger.recognizers().next().is_some() {
+                    sequence.cancel_all(at, "recognizer helper is unavailable", &mut self.events);
+                }
+            }
             self.custom_sync(at, Retirement::Cancelled);
         } else {
-            for worker in &mut self.workers {
+            for worker in self
+                .workers
+                .iter_mut()
+                .chain(self.sequences.iter_mut().flat_map(|sequence| {
+                    sequence
+                        .steps
+                        .iter_mut()
+                        .flat_map(|engine| engine.workers.iter_mut())
+                }))
+            {
                 if matches!(worker.rule.trigger, Trigger::Custom { .. }) {
                     for state in self.devices.values() {
                         worker.register(state, &self.config)?;
@@ -349,13 +411,27 @@ impl Engine {
         Ok(())
     }
     fn custom_intent(&self, id: u64, at: Duration) -> Option<RouteIntent> {
-        let (worker, candidate) = self.workers.iter().find_map(|worker| {
-            worker
-                .candidates
-                .values()
-                .find(|candidate| candidate.id == id)
-                .map(|candidate| (worker, candidate))
-        })?;
+        let location = self.custom_location(id)?;
+        let worker = &self.custom_engine(location).workers[location.worker];
+        let candidate = worker
+            .candidates
+            .values()
+            .find(|candidate| candidate.id == id)?;
+        if let Some((sequence, step)) = location.step {
+            let sequence = &self.sequences[sequence];
+            let pending = sequence.pending.get(&candidate.source.seat)?;
+            if pending.step != step
+                || !pending.sources.contains(&candidate.source)
+                || pending
+                    .groups
+                    .iter()
+                    .any(|(index, started)| at >= *started + sequence.groups[*index].timeout)
+                || sequence.rule.keys_throughout
+                    && !conditions(&sequence.rule, &self.conditions, &candidate.source.seat)
+            {
+                return None;
+            }
+        }
         let custom = self.custom.as_ref()?;
         let state = self.devices.get(&candidate.source.device)?;
         let intent = RouteIntent {
@@ -374,12 +450,9 @@ impl Engine {
         .then_some(intent)
     }
     fn custom_cancel(&mut self, id: u64, at: Duration, reason: &str) {
-        if let Some(worker) = self.workers.iter_mut().find(|worker| {
-            worker
-                .candidates
-                .values()
-                .any(|candidate| candidate.id == id)
-        }) {
+        if let Some(location) = self.custom_location(id) {
+            let engine = self.custom_engine_mut(location);
+            let worker = &mut engine.workers[location.worker];
             let source = worker
                 .candidates
                 .values()
@@ -387,20 +460,35 @@ impl Engine {
                 .unwrap()
                 .source
                 .clone();
-            cancel_candidate(worker, &source, at, reason, &mut self.events);
+            cancel_candidate(worker, &source, at, reason, &mut engine.events);
+            if let Some((sequence, step)) = location.step
+                && self.sequences[sequence]
+                    .pending
+                    .get(&source.seat)
+                    .is_some_and(|pending| {
+                        pending.step == step && pending.sources.contains(&source)
+                    })
+            {
+                self.sequences[sequence].cancel(&source.seat, at, reason, &mut self.events);
+                self.sequences[sequence].reset.insert(source.seat);
+            }
         }
     }
     pub(super) fn custom_sync(&mut self, at: Duration, reason: Retirement) {
-        let Some(custom) = self.custom.as_mut() else {
-            return;
-        };
         let live: BTreeSet<_> = self
-            .workers
-            .iter()
+            .recognition_workers()
             .filter(|worker| matches!(worker.rule.trigger, Trigger::Custom { .. }))
             .flat_map(|worker| worker.candidates.values().map(|candidate| candidate.id))
             .collect();
-        for id in custom.gate.candidates() {
+        let Some(custom) = self.custom.as_mut() else {
+            return;
+        };
+        let owned = if self.coordinated_step {
+            self.custom_owned.iter().copied().collect()
+        } else {
+            custom.gate.candidates()
+        };
+        for id in owned {
             if !live.contains(&id) {
                 custom.gate.retire_with(
                     id,
@@ -410,9 +498,15 @@ impl Engine {
                         reason
                     },
                 );
+                custom.live.remove(&id);
             }
         }
-        custom.live = live;
+        if self.coordinated_step {
+            custom.live.extend(live.iter().copied());
+        } else {
+            custom.live = live.clone();
+        }
+        self.custom_owned = live;
         custom
             .offers
             .retain(|offer| custom.live.contains(&offer.candidate));
@@ -439,6 +533,7 @@ impl Engine {
         let overdue = self
             .custom
             .as_ref()
+            .filter(|_| !self.coordinated_step)
             .map_or_else(Vec::new, |custom| custom.gate.overdue(at));
         for id in overdue {
             self.custom_cancel(id, at, "custom recognizer response expired");
@@ -447,11 +542,22 @@ impl Engine {
         let Some(custom) = self.custom.as_mut() else {
             return;
         };
-        custom.gate.expire(at);
+        if !self.coordinated_step {
+            custom.gate.expire(at);
+        }
         if !custom.ready {
             return;
         }
-        for worker in &mut self.workers {
+        for worker in self
+            .workers
+            .iter_mut()
+            .chain(self.sequences.iter_mut().flat_map(|sequence| {
+                sequence
+                    .steps
+                    .iter_mut()
+                    .flat_map(|engine| engine.workers.iter_mut())
+            }))
+        {
             let Trigger::Custom {
                 wake: Some(interval),
                 ..
@@ -486,7 +592,7 @@ impl Engine {
             .gate
             .deadline()
             .into_iter()
-            .chain(self.workers.iter().filter_map(|worker| {
+            .chain(self.recognition_workers().filter_map(|worker| {
                 let Recognizer::Custom { wakes, closed, .. } = &worker.recognizer else {
                     return None;
                 };
@@ -571,6 +677,24 @@ impl Engine {
         ownership: Option<Ownership>,
         winner: Option<u64>,
     ) -> io::Result<recognition::Candidate> {
+        let mut expires = intent
+            .candidate
+            .expires
+            .ok_or_else(|| invalid("custom candidate has no expiry"))?;
+        if let Some(Location {
+            step: Some((sequence, _)),
+            ..
+        }) = self.custom_location(intent.id())
+        {
+            let sequence = &self.sequences[sequence];
+            let pending = sequence
+                .pending
+                .get(&intent.source().seat)
+                .ok_or_else(|| invalid("custom parent was retired"))?;
+            for (index, started) in &pending.groups {
+                expires = expires.min(*started + sequence.groups[*index].timeout);
+            }
+        }
         Ok(recognition::Candidate {
             id: intent.id(),
             revision: self.rule_revision,
@@ -578,10 +702,7 @@ impl Engine {
             source: intent.source().clone(),
             ownership,
             winner,
-            expires: intent
-                .candidate
-                .expires
-                .ok_or_else(|| invalid("custom candidate has no expiry"))?,
+            expires,
         })
     }
     pub fn recognition_response(&mut self, proposal: Proposal, at: Duration) -> io::Result<()> {
@@ -650,17 +771,19 @@ impl Engine {
             recognition::Phase::End => Stage::End,
             recognition::Phase::Cancel => Stage::Cancel,
         };
+        let location = self
+            .custom_location(id)
+            .ok_or_else(|| invalid("custom candidate was retired"))?;
         if matches!(phase, Stage::Begin | Stage::Update)
-            && self.workers.iter().find(|worker| worker.rule.id == intent.rule.id).is_some_and(|worker| matches!(&worker.recognizer, Recognizer::Custom { closed, .. } if closed.contains(intent.source()))) {
+            && matches!(&self.custom_engine(location).workers[location.worker].recognizer, Recognizer::Custom { closed, .. } if closed.contains(intent.source()))
+        {
             self.custom_cancel(id, at, "custom progress arrived after physical completion");
             self.custom_sync(at, Retirement::Cancelled);
             return Err(invalid("custom progress arrived after physical completion"));
         }
-        let worker = self
-            .workers
-            .iter_mut()
-            .find(|worker| worker.rule.id == intent.rule.id)
-            .unwrap();
+        let input_watermark = self.input_watermark;
+        let engine = self.custom_engine_mut(location);
+        let worker = &mut engine.workers[location.worker];
         if worker.candidates[intent.source()].ordinal.checked_add(1) != Some(validated.ordinal) {
             return Err(invalid("custom ordinal diverged from native rule"));
         }
@@ -671,14 +794,17 @@ impl Engine {
                 stage: phase,
                 data: validated.data,
             }],
-            self.generation,
+            engine.generation,
             validated.observed_at,
-            &mut self.events,
+            &mut engine.events,
         );
         if let Some(trace) = worker.matches.last_mut()
             && matches!(&trace.event, Event::Matched { id, ordinal, .. } if *id == intent.id() && *ordinal == validated.ordinal)
         {
             trace.expires = Some(validated.deadline);
+            if location.step.is_some() {
+                trace.after_input = Some(input_watermark);
+            }
         }
         if matches!(phase, Stage::Discrete | Stage::End | Stage::Cancel) {
             worker.candidates.remove(intent.source());
@@ -700,6 +826,19 @@ impl Engine {
                     Retirement::Completed
                 },
             );
+        }
+        if location.step.is_some() {
+            let context = SequenceContext {
+                devices: &self.devices,
+                authority: &self.authority,
+                keys: &self.conditions,
+                generation: self.generation,
+                at: input_at,
+                input_watermark: self.input_watermark,
+            };
+            for sequence in &mut self.sequences {
+                sequence.collect(None, &context, &mut self.next_id, &mut self.events)?;
+            }
         }
         self.custom_sync(at, Retirement::Cancelled);
         Ok(())

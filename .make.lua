@@ -189,6 +189,7 @@ make.alias("t", "test")
 
 make.recipe{ name = "test-composition", desc = "native sequence routing and recursive recognizer approval",
              run = function()
+               sh.cargo("test", "--locked", "--lib", "rules::tests::composition::")
                sh.cargo("test", "--locked", "--lib", "routing::tests::sequence::")
                sh.cargo("test", "--locked", "--lib", "config::recognizer_walk_tests::")
                sh.cargo("test", "--locked", "--lib", "lua::recognizers::constructor_tests::nested_native_declarations")

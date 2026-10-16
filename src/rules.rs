@@ -114,6 +114,7 @@ impl Event {
 #[derive(Clone)]
 struct DeviceState {
     device: Device,
+    input_watermark: u64,
     mapping: Option<Mapping>,
     keys: BTreeSet<u16>,
     contacts: Vec<Contact>,
@@ -128,6 +129,7 @@ struct Candidate {
     progress: bool,
     expires: Option<Duration>,
     started: Duration,
+    started_input: u64,
     contacts: BTreeSet<crate::input::ContactId>,
     sources: BTreeSet<Source>,
     peak_contacts: usize,
@@ -193,6 +195,7 @@ struct StepMatch {
     candidate: Candidate,
     finished: Duration,
     expires: Option<Duration>,
+    after_input: Option<u64>,
 }
 enum Recognizer {
     Custom {
@@ -388,6 +391,10 @@ impl Worker {
 
 pub struct Engine {
     custom: Option<custom::State>,
+    coordinated_step: bool,
+    custom_owned: BTreeSet<u64>,
+    custom_seats: BTreeSet<String>,
+    input_watermark: u64,
     config: Config,
     generation: u64,
     rule_revision: u64,
@@ -442,10 +449,14 @@ impl Engine {
                     && config.mode_active(rule)
                     && matches!(rule.trigger, Trigger::Sequence { .. })
             })
-            .map(|rule| Sequence::new(rule.clone(), &config))
+            .map(|rule| Sequence::new(rule.clone(), &config, fence))
             .collect::<io::Result<Vec<_>>>()?;
         Ok(Self {
             custom,
+            coordinated_step: false,
+            custom_owned: BTreeSet::new(),
+            custom_seats: BTreeSet::new(),
+            input_watermark: 0,
             config,
             generation: fence.map_or(1, |fence| fence.configuration),
             rule_revision: 1,
@@ -740,7 +751,15 @@ impl Engine {
         // Validate metadata/normalization first. An invalid registration cannot
         // replace the current generation or a working recognizer.
         self.prepare_registration(&record)?;
+        let input_watermark = if !self.coordinated_step && matches!(record, Record::Frame { .. }) {
+            self.input_watermark
+                .checked_add(1)
+                .ok_or_else(|| invalid("input watermark exhausted"))?
+        } else {
+            self.input_watermark
+        };
         self.replay.push(record.clone())?;
+        self.input_watermark = input_watermark;
         let observations = self.replay.take_observations();
         match &record {
             Record::Device {
@@ -758,6 +777,7 @@ impl Engine {
                 }
                 let state = DeviceState {
                     device: device.clone(),
+                    input_watermark: self.input_watermark,
                     keys: keys.clone(),
                     contacts: contacts.clone(),
                     mapping: Mapping::from_device(device).ok(),
@@ -867,9 +887,16 @@ impl Engine {
             keys: &self.conditions,
             generation: self.generation,
             at: self.last_at.unwrap_or_default(),
+            input_watermark: self.input_watermark,
         };
         for sequence in &mut self.sequences {
-            sequence.push(&record, &context, &mut self.next_id, &mut self.events)?;
+            sequence.push(
+                &record,
+                &context,
+                &mut self.next_id,
+                &mut self.events,
+                &mut self.custom,
+            )?;
         }
         if self.shape_samples() > 65_536 {
             return Err(invalid("total shape sample budget exceeded"));
@@ -934,6 +961,7 @@ impl Engine {
                 contacts,
             } => DeviceState {
                 device: device.clone(),
+                input_watermark: self.input_watermark,
                 mapping: Mapping::from_device(device).ok(),
                 keys: keys.clone(),
                 contacts: contacts.clone(),
@@ -1161,6 +1189,7 @@ impl Engine {
             .devices
             .get_mut(&source.device)
             .ok_or_else(|| invalid("unregistered frame source"))?;
+        state.input_watermark = self.input_watermark;
         for change in &frame.changes {
             if let Change::Key {
                 code,
@@ -1232,6 +1261,9 @@ impl Engine {
             }
             match &worker.rule.trigger {
                 Trigger::Custom { .. } => {
+                    if self.coordinated_step && !self.custom_seats.contains(&source.seat) {
+                        continue;
+                    }
                     custom::frame(
                         worker,
                         state,
@@ -1634,6 +1666,7 @@ struct SequenceContext<'a> {
     keys: &'a Keys,
     generation: u64,
     at: Duration,
+    input_watermark: u64,
 }
 struct SequenceGroup {
     first: usize,
@@ -1651,6 +1684,7 @@ struct PendingSequence {
     groups: BTreeMap<usize, Duration>,
     progress: bool,
     previous: Option<Candidate>,
+    after_input: Option<u64>,
 }
 struct Sequence {
     rule: Rule,
@@ -1690,7 +1724,7 @@ fn flatten_sequence(
     Ok(())
 }
 impl Sequence {
-    fn new(rule: Rule, config: &Config) -> io::Result<Self> {
+    fn new(rule: Rule, config: &Config, fence: Option<crate::protocol::Fence>) -> io::Result<Self> {
         let mut triggers = Vec::new();
         let mut groups = Vec::new();
         flatten_sequence(&rule.trigger, &mut triggers, &mut groups)?;
@@ -1699,6 +1733,9 @@ impl Sequence {
             let mut child = config.clone();
             let mut leaf = rule.clone();
             leaf.trigger = trigger.clone();
+            if rule.trigger.recognizers().next().is_some() && leaf.contexts.is_empty() {
+                leaf.contexts.push(crate::config::Context::Desktop);
+            }
             if index != 0 {
                 leaf.require_keys.clear();
                 leaf.layer = None;
@@ -1715,7 +1752,9 @@ impl Sequence {
                 leaf.require_keys = vec![button.unwrap_or(crate::config::Key(0x110))];
             }
             child.rules = vec![leaf];
-            let mut engine = Engine::new(child)?;
+            let mut engine = Engine::build(child, fence)?;
+            engine.custom = None;
+            engine.coordinated_step = true;
             engine.workers[0].trace = true;
             steps.push(engine);
         }
@@ -1758,6 +1797,19 @@ impl Sequence {
                 at,
                 reason: reason.into(),
             });
+            for engine in &mut self.steps {
+                for worker in &mut engine.workers {
+                    let sources: Vec<_> = worker
+                        .candidates
+                        .keys()
+                        .filter(|source| source.seat == seat)
+                        .cloned()
+                        .collect();
+                    for source in sources {
+                        cancel_candidate(worker, &source, at, reason, &mut engine.events);
+                    }
+                }
+            }
         }
     }
     fn reset_seat(&mut self, seat: &str, context: &SequenceContext<'_>) -> io::Result<()> {
@@ -1821,6 +1873,7 @@ impl Sequence {
                 groups,
                 progress: false,
                 previous: None,
+                after_input: None,
             },
         );
         Ok(())
@@ -1831,17 +1884,58 @@ impl Sequence {
         context: &SequenceContext<'_>,
         next_id: &mut u64,
         events: &mut Vec<Event>,
+        coordinator: &mut Option<custom::State>,
     ) -> io::Result<()> {
         let queued = std::mem::take(&mut self.reset);
         for seat in queued {
             self.reset_seat(&seat, context)?;
         }
+        for (index, engine) in self.steps.iter_mut().enumerate() {
+            engine.authority = context.authority.clone();
+            engine.input_watermark = context.input_watermark;
+            let custom = matches!(engine.workers[0].rule.trigger, Trigger::Custom { .. });
+            if custom {
+                if coordinator.is_none() {
+                    return Err(invalid("custom sequence coordinator is unavailable"));
+                }
+                engine.custom_seats = context
+                    .devices
+                    .values()
+                    .map(|state| &state.device.source.seat)
+                    .filter(|seat| {
+                        self.pending
+                            .get(*seat)
+                            .map_or(index == 0, |pending| pending.step == index)
+                    })
+                    .cloned()
+                    .collect();
+                engine.next_id = *next_id;
+            }
+            if custom {
+                std::mem::swap(&mut engine.custom, coordinator);
+            }
+            let result = engine.push(record.clone());
+            if custom {
+                std::mem::swap(&mut engine.custom, coordinator);
+            }
+            if custom {
+                *next_id = engine.next_id;
+            }
+            result?;
+        }
+        self.collect(Some(record), context, next_id, events)
+    }
+    fn collect(
+        &mut self,
+        record: Option<&Record>,
+        context: &SequenceContext<'_>,
+        next_id: &mut u64,
+        events: &mut Vec<Event>,
+    ) -> io::Result<()> {
         let mut traces = Vec::new();
         let mut cancelled = Vec::new();
         let mut skipped = Vec::new();
         for (index, engine) in self.steps.iter_mut().enumerate() {
-            engine.authority = context.authority.clone();
-            engine.push(record.clone())?;
             for worker in &mut engine.workers {
                 traces.extend(worker.matches.drain(..).map(|trace| (index, trace)));
                 worker.claims.clear();
@@ -1880,6 +1974,9 @@ impl Sequence {
                 .values()
                 .find(|candidate| {
                     candidate.source.seat == *seat
+                        && pending
+                            .after_input
+                            .is_none_or(|watermark| candidate.started_input > watermark)
                         && (pending.step == 0
                             || candidate.started >= pending.finished
                             || pending.previous.as_ref().is_some_and(|previous| {
@@ -1913,7 +2010,7 @@ impl Sequence {
             .pending
             .iter()
             .filter_map(|(seat, pending)| {
-                let changed = matches!(record, Record::Mapping {source,..}|Record::Reconcile {source,..} if pending.sources.contains(source));
+                let changed = matches!(record, Some(Record::Mapping {source,..}|Record::Reconcile {source,..}) if pending.sources.contains(source));
                 let reason = if changed_targets.contains(seat) {Some("sequence target changed".into())}
                 else if changed {Some("sequence input mapping/state changed".into())}
                 else if pending.first.session_generation != context.authority.generation() {
@@ -1964,6 +2061,12 @@ impl Sequence {
                 continue;
             };
             if pending.step != index {
+                continue;
+            }
+            if pending
+                .after_input
+                .is_some_and(|watermark| trace.candidate.started_input <= watermark)
+            {
                 continue;
             }
             let Event::Matched {
@@ -2091,6 +2194,7 @@ impl Sequence {
                 pending.evidence.push(evidence.clone());
                 pending.finished = trace.finished;
                 pending.previous = Some(trace.candidate.clone());
+                pending.after_input = trace.after_input.or(pending.after_input);
                 pending.step += 1;
                 let completed_groups: Vec<_> = pending
                     .groups
@@ -2110,7 +2214,7 @@ impl Sequence {
             if self
                 .pending
                 .get(&source.seat)
-                .is_some_and(|pending| pending.step == index)
+                .is_some_and(|pending| pending.step == index && pending.sources.contains(&source))
             {
                 self.cancel(&source.seat, context.at, &reason, events);
                 reset.insert(source.seat);
@@ -2534,6 +2638,7 @@ fn start_candidate(
                     progress: false,
                     expires: None,
                     started: at,
+                    started_input: state.input_watermark,
                     contacts: state.contacts.iter().map(|contact| contact.id).collect(),
                     sources: BTreeSet::from([source.clone()]),
                     peak_contacts: state.contacts.len(),
@@ -2908,6 +3013,7 @@ fn report_signals(
             if worker.trace {
                 worker.matches.push(StepMatch {
                     expires: None,
+                    after_input: None,
                     event: events.last().unwrap().clone(),
                     candidate: candidate.clone(),
                     finished: if matches!(
@@ -2952,6 +3058,7 @@ fn invalid(message: impl std::fmt::Display) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    mod composition;
     use super::*;
     use crate::{
         config::{

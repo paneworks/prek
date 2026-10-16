@@ -324,6 +324,19 @@ Baseline preflight and context requirements use the same walk. This does not
 enable custom sequence execution: independent child coordinators would duplicate
 ticket identities/budgets and expose callbacks for steps that are not yet active.
 
+The private composition coordinator now lends the root's single native gate to
+active custom steps, sharing candidate IDs, request/cancellation budgets and
+readiness. Native built-in sequences retain their existing external identities.
+Validated step results are collected without replaying physical records. An
+input watermark prevents a delayed reply from borrowing already-drained input,
+including input with the same timestamp. Parent timeouts also bound step tickets.
+Private native fixtures cover these lifetimes, source replacement, sibling
+isolation, timer wakes and restoration after child failure.
+Public custom-sequence validation remains closed: consuming group/ownership
+integration, native same-frame/contact continuation, real helper integration and
+offline custom replay are still required. These fixtures do not constitute that
+API, privileged, device or rendered acceptance.
+
 Built-in native sequences join a later step's eligible sources before its match,
 so an explicitly reserved second-device press cannot escape while a hold matures.
 The step must start after activation or satisfy the existing same-contact
