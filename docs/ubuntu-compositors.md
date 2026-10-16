@@ -42,3 +42,9 @@ GPU drivers to make a nested test work. Software-rendered isolated tests and
 native GPU use must be verified separately. See the official
 [Hyprland instructions for other distributions](https://wiki.hypr.land/nix/hyprland-on-any-distro-using-nix/)
 and [Cage releases](https://github.com/cage-kiosk/cage/releases).
+
+The Cage test drivers default to software rendering. `--hardware-rendering`
+stops forcing Mesa software rendering when using a matching GPU wrapper. Their
+headless parent explicitly creates one output; startup requires positive output
+dimensions and a rendered receiver frame before injecting test input. A mapped
+surface or a successful compositor process exit alone is not a rendering pass.

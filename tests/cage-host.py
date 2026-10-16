@@ -26,6 +26,8 @@ def main():
                         help="verify a Lua mode switch while its rule and layer stay enabled")
     parser.add_argument("--input", action="store_true",
                         help="verify normalized source observations through worker IPC and Lua")
+    parser.add_argument("--hardware-rendering", action="store_true",
+                        help="use the selected GPU driver instead of forcing Mesa software rendering")
     parser.add_argument("--power", action="store_true",
                         help="verify Lua-planned DPMS blank/wake on the owned nested output")
     parser.add_argument("--windows", action="store_true",
@@ -70,9 +72,9 @@ def main():
                XDG_STATE_HOME=str(home / ".local/state"), XDG_CACHE_HOME=str(home / ".cache"),
                DBUS_SYSTEM_BUS_ADDRESS=f"unix:path={runtime}/no-system-bus",
                DBUS_SESSION_BUS_ADDRESS=os.environ.get("PREK_TEST_SESSION_BUS", f"unix:path={runtime}/no-session-bus"),
-               WLR_BACKENDS="wayland" if args.visible else "headless", WLR_RENDERER="gles2",
+               WLR_BACKENDS="wayland" if args.visible else "headless", WLR_HEADLESS_OUTPUTS="1", WLR_RENDERER="gles2",
                WLR_RENDER_DRM_DEVICE=os.environ.get("RENDER_NODE", "/dev/dri/renderD128"),
-               WLR_LIBINPUT_NO_DEVICES="1", LIBGL_ALWAYS_SOFTWARE="1", PREK_CAGE_HOST="1")
+               WLR_LIBINPUT_NO_DEVICES="1", LIBGL_ALWAYS_SOFTWARE="0" if args.hardware_rendering else "1", PREK_CAGE_HOST="1")
     env["PREK_CAGE_VISIBLE"] = "1" if args.visible else "0"
     if args.visible:
         env["WAYLAND_DISPLAY"] = upstream
@@ -100,6 +102,10 @@ def main():
             while not any(row["event"] == "configured" for row in rows()):
                 if cage.poll() is not None or time.monotonic() >= deadline:
                     raise RuntimeError(f"Cage startup failed; see {output / 'cage.log'}")
+                time.sleep(0.02)
+            while not any(row["event"] == "rendered" for row in rows()):
+                if cage.poll() is not None or time.monotonic() >= deadline:
+                    raise RuntimeError(f"owned receiver never rendered; see {output / 'cage.log'}")
                 time.sleep(0.02)
             socket = Path(json.loads((output / "nested.json").read_text())["socket"])
             if socket.parent != runtime or not socket.is_socket():

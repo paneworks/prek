@@ -147,6 +147,14 @@
           pkgs = nixpkgs.legacyPackages.${system};
           package = self.packages.${system}.default;
         in {
+          cage-startup = pkgs.runCommand "prek-cage-startup-check" {
+            nativeBuildInputs = [ pkgs.python3 ];
+          } ''
+            mkdir -p fixtures/tests/support
+            cp ${./tests/cage-inner.py} fixtures/tests/cage-inner.py
+            cp ${./tests/support/test_cage_startup.py} fixtures/tests/support/test_cage_startup.py
+            python3 -m unittest discover -s fixtures/tests/support -p test_cage_startup.py -v > "$out" 2>&1
+          '';
           wayland-proxy = pkgs.runCommand "prek-wayland-proxy-check" {
             nativeBuildInputs = [ pkgs.python3 ];
           } ''

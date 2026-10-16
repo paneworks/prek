@@ -15,6 +15,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cage", required=True)
     parser.add_argument("--receiver", required=True)
+    parser.add_argument("--hardware-rendering", action="store_true",
+                        help="use the selected GPU driver instead of forcing Mesa software rendering")
     parser.add_argument("--output", default="target/cage-touch")
     args = parser.parse_args()
     output = Path(args.output).resolve()
@@ -35,10 +37,10 @@ def main():
                XDG_STATE_HOME=str(home / ".local/state"), XDG_CACHE_HOME=str(home / ".cache"),
                DBUS_SYSTEM_BUS_ADDRESS=f"unix:path={runtime}/no-system-bus",
                DBUS_SESSION_BUS_ADDRESS=os.environ.get("PREK_TEST_SESSION_BUS", f"unix:path={runtime}/no-session-bus"),
-               WLR_BACKENDS="headless", WLR_RENDERER="gles2", WLR_LIBINPUT_NO_DEVICES="1",
+               WLR_BACKENDS="headless", WLR_HEADLESS_OUTPUTS="1", WLR_RENDERER="gles2", WLR_LIBINPUT_NO_DEVICES="1",
                LIBSEAT_BACKEND="seatd", SEATD_SOCK=str(runtime / "no-seatd"),
                WLR_RENDER_DRM_DEVICE=os.environ.get("RENDER_NODE", "/dev/dri/renderD128"),
-               LIBGL_ALWAYS_SOFTWARE="1", PREK_CAGE_HOST="1", PREK_TEST_TOUCH_FD=str(child.fileno()))
+               LIBGL_ALWAYS_SOFTWARE="0" if args.hardware_rendering else "1", PREK_CAGE_HOST="1", PREK_TEST_TOUCH_FD=str(child.fileno()))
     receipts = output / "receipts.jsonl"
 
     def rows():

@@ -10,6 +10,12 @@ import sys
 import time
 
 
+def usable_outputs(monitors):
+    active = [item for item in (monitors or []) if not item.get("disabled", False)]
+    return bool(active) and all(item.get("width", 0) > 0 and item.get("height", 0) > 0
+                                for item in active)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hyprland", required=True)
@@ -74,7 +80,7 @@ def main():
                 subprocess.run(command,env=control_env,check=True,stdout=hypr_log,stderr=hypr_log,timeout=3)
             # As in Mold, the nested compositor gets an explicit output rather
             # than relying on Hyprland's unreported fallback monitor (-1).
-            wait_for(lambda:bool(monitors()),hyprland)
+            wait_for(lambda:usable_outputs(monitors()),hyprland)
             report = output / "nested.json"
             temporary = output / "nested.json.new"
             temporary.write_text(json.dumps({"socket":str(nested), "hyprland_pid":hyprland.pid}))
