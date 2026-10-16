@@ -26,6 +26,10 @@ pub const MAX_DATA_BYTES: usize = 4096;
 pub const MAX_CANCELLATION_BYTES: usize = 2048;
 pub const MAX_REPLY: Duration = Duration::from_millis(250);
 
+mod metadata;
+pub use metadata::Metadata;
+pub(crate) use metadata::metadata_selectors;
+
 #[cfg(target_os = "linux")]
 pub(crate) fn permitted_subscription(
     config: &crate::config::Config,

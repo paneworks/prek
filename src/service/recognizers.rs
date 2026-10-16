@@ -310,9 +310,28 @@ fn validate_delivery(
     }
     Ok(())
 }
+fn validate_metadata(
+    config: &crate::config::Config,
+    bindings: &[crate::lua::RecognizerBinding],
+    seat: &str,
+    metadata: &crate::recognition::Metadata,
+    now: Duration,
+) -> io::Result<()> {
+    let scope = crate::recognition::metadata_selectors(config);
+    if metadata.source.seat != seat || !bindings_available(Some(config), bindings) {
+        return Err(protocol::invalid(
+            "unapproved recognizer metadata source or scope",
+        ));
+    }
+    metadata.validate_for(config, &scope, now)
+}
 impl Connection {
     fn purge_recognitions(&mut self, candidate: Option<u64>) -> io::Result<()> {
         self.outgoing.retain(|reply| !matches!(reply, Reply::Recognition { ticket, .. } if candidate.is_none_or(|id| ticket.candidate == id)));
+        if candidate.is_none() {
+            self.outgoing
+                .retain(|reply| !matches!(reply, Reply::RecognizerMetadata { .. }));
+        }
         self.bytes = self
             .outgoing
             .iter()
@@ -409,7 +428,29 @@ impl Broker {
                     return Err(protocol::invalid("unnegotiated recognizer readiness"));
                 }
                 let ready = bound.recognizers.acknowledge_ready(ready);
+                if !ready {
+                    connection.purge_recognitions(None)?;
+                }
                 connection.push(Reply::RecognizerReady { fence, ready })
+            }
+            Report::RecognizerMetadata { metadata, .. } => {
+                if !permitted(self.rule_baseline.as_deref(), bound, now)
+                    || !bound.recognizers.ready
+                    || !bound.recognizers.requested
+                {
+                    return Ok(());
+                }
+                let config = self.rule_baseline.as_deref().ok_or_else(|| {
+                    protocol::invalid("recognizer metadata lacks approved configuration")
+                })?;
+                validate_metadata(
+                    config,
+                    &self.recognizer_bindings,
+                    &bound.seat,
+                    &metadata,
+                    now,
+                )?;
+                connection.push(Reply::RecognizerMetadata { fence, metadata })
             }
             Report::Recognition { ticket, .. } => {
                 if !permitted(self.rule_baseline.as_deref(), bound, now)

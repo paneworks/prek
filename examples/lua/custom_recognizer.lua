@@ -24,6 +24,8 @@ local hold = p.recognizers.define("example_hold", {
         return nil
     end
     ---@cast event prek.RecognitionTicket
+    local device = p.devices.get(event.input.source)
+    if not device then return { phase = "cancel" } end
     if event.cause == "frame" then
         for _, change in ipairs(event.input.changes) do
             if change.kind == "key" and change.code == 30 then -- KEY_A

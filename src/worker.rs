@@ -59,6 +59,10 @@ pub struct Subscriptions {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Report {
+    RecognizerMetadata {
+        subscription: Subscription,
+        metadata: Box<crate::recognition::Metadata>,
+    },
     RecognizerReady {
         subscription: Subscription,
         ready: bool,
@@ -139,6 +143,7 @@ impl Report {
     pub fn subscription(&self) -> &Subscription {
         match self {
             Self::Ready { subscription }
+            | Self::RecognizerMetadata { subscription, .. }
             | Self::RecognizerReady { subscription, .. }
             | Self::Recognition { subscription, .. }
             | Self::RecognitionCancelled { subscription, .. }
@@ -160,6 +165,7 @@ struct Observer {
     input_enabled: bool,
     input_started: Duration,
     recognizer_ready: Option<bool>,
+    metadata_enabled: bool,
 }
 
 impl Observer {
@@ -172,21 +178,45 @@ impl Observer {
             self.subscription.fence.session,
             now,
         );
-        if self.recognizer_ready == Some(ready)
-            || self.recognizer_ready.is_none()
-                && !self
+        let mut reports = Vec::new();
+        if self.recognizer_ready != Some(ready)
+            && (self.recognizer_ready.is_some()
+                || self
                     .subscription
                     .capabilities
-                    .contains(&crate::protocol::Capability::CustomRecognizers)
+                    .contains(&crate::protocol::Capability::CustomRecognizers))
         {
-            return Ok(Vec::new());
+            self.engine.recognition_ready(ready, now)?;
+            self.recognizer_ready = Some(ready);
+            reports.push(Report::RecognizerReady {
+                subscription: self.subscription.identity(),
+                ready,
+            });
         }
-        self.engine.recognition_ready(ready, now)?;
-        self.recognizer_ready = Some(ready);
-        Ok(vec![Report::RecognizerReady {
+        let metadata_enabled = ready && !self.input_enabled;
+        if metadata_enabled && !self.metadata_enabled {
+            for input in self.engine.input_states(now) {
+                if let Some(report) = self.metadata_report(config, input)? {
+                    reports.push(report);
+                }
+            }
+        }
+        self.metadata_enabled = metadata_enabled;
+        Ok(reports)
+    }
+    fn metadata_report(
+        &self,
+        config: &Config,
+        input: crate::input_events::Event,
+    ) -> io::Result<Option<Report>> {
+        Ok(crate::recognition::Metadata::project(
+            input,
+            &crate::recognition::metadata_selectors(config),
+        )?
+        .map(|metadata| Report::RecognizerMetadata {
             subscription: self.subscription.identity(),
-            ready,
-        }])
+            metadata: Box::new(metadata),
+        }))
     }
     fn take_recognition_reports(&mut self, input_at: Option<Duration>) -> io::Result<Vec<Report>> {
         let tickets = if let Some(at) = input_at.filter(|_| self.recognizer_ready == Some(true)) {
@@ -379,15 +409,17 @@ impl Registry {
                 subscription.same_registration(report.subscription())
                     && (!matches!(report, Report::Input { .. })
                         || permits_input(&self.config, subscription, now))
-                    && (!matches!(report, Report::Recognition { .. })
-                        || crate::recognition::permitted_subscription(
-                            &self.config,
-                            &subscription.capabilities,
-                            subscription.context.as_deref(),
-                            &subscription.seat,
-                            subscription.fence.session,
-                            now,
-                        ))
+                    && (!matches!(
+                        report,
+                        Report::Recognition { .. } | Report::RecognizerMetadata { .. }
+                    ) || crate::recognition::permitted_subscription(
+                        &self.config,
+                        &subscription.capabilities,
+                        subscription.context.as_deref(),
+                        &subscription.seat,
+                        subscription.fence.session,
+                        now,
+                    ))
             })
         });
         self.bytes = self.reports.iter().map(|(_, bytes)| bytes).sum();
@@ -451,6 +483,7 @@ impl Registry {
                     input_enabled,
                     input_started: now,
                     recognizer_ready: None,
+                    metadata_enabled: false,
                 },
             );
             self.queue(
@@ -541,6 +574,15 @@ impl Registry {
         )
     }
     fn queue(&mut self, report: Report, now: Duration) -> io::Result<()> {
+        if let Report::RecognizerMetadata { metadata, .. } = &report
+            && metadata.validate().is_err()
+        {
+            return self.end(
+                report.subscription().clone(),
+                "invalid or excessive recognizer metadata",
+                now,
+            );
+        }
         // Assign transport sequence numbers only on successful sends. Account
         // for the largest number when bounding serialized retained bytes.
         let encoded = protocol::encode(&protocol::Packet {
@@ -556,7 +598,10 @@ impl Registry {
             Err(_)
                 if matches!(
                     report,
-                    Report::Observation { .. } | Report::Input { .. } | Report::Recognition { .. }
+                    Report::Observation { .. }
+                        | Report::Input { .. }
+                        | Report::Recognition { .. }
+                        | Report::RecognizerMetadata { .. }
                 ) =>
             {
                 return self.end(
@@ -682,7 +727,7 @@ impl Registry {
                 _ => None,
             };
             use crate::input_events::ResetReason;
-            let before = if input_enabled {
+            let before = if input_enabled || observer.metadata_enabled {
                 match &record {
                     Record::Remove { source, at } => {
                         observer
@@ -710,7 +755,7 @@ impl Registry {
             observer.engine.capture_input(input_enabled);
             observer.engine.push(record.clone())?;
             let mut inputs: Vec<_> = before.into_iter().collect();
-            if input_enabled {
+            if input_enabled || observer.metadata_enabled {
                 match &record {
                     Record::Device { device, .. } => inputs.extend(observer.engine.input_reset(
                         &device.source,
@@ -727,7 +772,9 @@ impl Registry {
                             .engine
                             .input_reset(source, *at, ResetReason::MappingChanged),
                     ),
-                    Record::Frame { frame } if frame.at >= observer.input_started => {
+                    Record::Frame { frame }
+                        if input_enabled && frame.at >= observer.input_started =>
+                    {
                         if let Some(input) = observer.engine.take_input() {
                             inputs.push(input);
                         } else {
@@ -742,10 +789,17 @@ impl Registry {
                 }
             }
             for input in inputs {
-                reports.push(Report::Input {
-                    subscription: observer.subscription.identity(),
-                    input: Box::new(input),
-                });
+                if observer.metadata_enabled
+                    && let Some(report) = observer.metadata_report(&self.config, input.clone())?
+                {
+                    reports.push(report);
+                }
+                if input_enabled {
+                    reports.push(Report::Input {
+                        subscription: observer.subscription.identity(),
+                        input: Box::new(input),
+                    });
+                }
             }
             if let Some(source) = invalidated {
                 reports.push(Report::SourceInvalidated {

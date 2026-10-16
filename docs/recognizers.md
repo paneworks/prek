@@ -81,9 +81,21 @@ retain the original Lua source.
 
 An owning observation session uses `prek session --lua --recognizers`; protected
 system policy must enable `allow_input_events` and the selected devices. This
-permission defaults to false. Ordinary `--input` is a separate opt-in. Device
-catalog queries currently need separately received ordinary input-reset metadata;
-custom-only tickets do not populate that catalog. Custom sequence steps,
+permission defaults to false. Ordinary `--input` is a separate opt-in. Custom-only
+sessions receive device metadata scoped to the union of approved native custom
+declarations' selectors, including disabled templates. Initial metadata precedes
+tickets; attach, reconciliation, mapping, replacement and removal update the same
+`p.devices` catalog. This channel carries no held keys, contacts or transitions
+and invokes no ordinary input handlers. When ordinary input is also enabled,
+its existing reset notifications populate the catalog instead.
+
+Metadata requires current owning desktop context, negotiated recognizer
+capabilities and helper readiness. Delivery and helper execution recheck fence,
+seat, declaration scope and the original 250 ms freshness limit. Packets and
+queues are bounded; excessive metadata retires the affected observation stream,
+not the input reader. Catalog queries become unavailable when the custom
+capability view expires, even if desktop context remains fresh. There is no host
+inventory scan or atomic full-device inventory guarantee. Custom sequence steps,
 additional consuming group lifetimes and the sole routing-worker bridge remain
 unfinished. Production routing stays gated.
 

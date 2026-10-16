@@ -32,6 +32,28 @@ impl RecognizerBridge {
         self.scope(fence);
         self.acknowledged = ready;
     }
+    pub fn metadata(
+        &mut self,
+        fence: Fence,
+        metadata: crate::recognition::Metadata,
+        seat: &str,
+        runtime: &mut Option<Session>,
+    ) -> io::Result<Option<String>> {
+        self.scope(fence);
+        if !self.acknowledged || metadata.source.seat != seat {
+            return Err(io::Error::other(
+                "recognizer metadata preceded readiness or belongs to another seat",
+            ));
+        }
+        let result = runtime
+            .as_mut()
+            .ok_or_else(|| io::Error::other("recognizer helper is absent"))
+            .and_then(|runtime| runtime.recognizer_metadata(metadata));
+        Ok(result.err().map(|error| {
+            *runtime = None;
+            error.to_string()
+        }))
+    }
     /// An inner helper failure retires that VM; malformed broker identity fails
     /// the outer result. Neither creates a claim or an execution grant.
     pub fn recognize(

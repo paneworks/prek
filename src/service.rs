@@ -1268,6 +1268,7 @@ impl Broker {
             Report::Observation { .. }
                 | Report::Dispatch { .. }
                 | Report::Input { .. }
+                | Report::RecognizerMetadata { .. }
                 | Report::Recognition { .. }
                 | Report::RecognizerReady { ready: true, .. }
         ) && !self.guard_observation(&mut connection, now)?
@@ -1280,6 +1281,7 @@ impl Broker {
         if matches!(
             &report,
             Report::Recognition { .. }
+                | Report::RecognizerMetadata { .. }
                 | Report::RecognizerReady { .. }
                 | Report::RecognitionCancelled { .. }
         ) {
@@ -2127,6 +2129,7 @@ impl Broker {
                         | Reply::Dispatch { .. }
                         | Reply::Execute { .. }
                         | Reply::Input { .. }
+                        | Reply::RecognizerMetadata { .. }
                         | Reply::Recognition { .. }
                 )
             )
@@ -2164,6 +2167,17 @@ impl Broker {
             bound.context.state = State::Unknown;
             bound.context.error = Some("normalized input permit expired before send".into());
             self.advance_session(connection, monotonic()?)?;
+        }
+        if let Some(Reply::RecognizerMetadata { metadata, .. }) = connection.outgoing.front() {
+            let now = monotonic()?;
+            let bound = connection.bound.as_ref().unwrap();
+            if !recognizers::permitted(self.rule_baseline.as_deref(), bound, now)
+                || !bound.recognizers.requested
+                || !bound.recognizers.ready
+                || !metadata.fresh(now)
+            {
+                self.advance_session(connection, now)?;
+            }
         }
         if let Some(Reply::Recognition { ticket, .. }) = connection.outgoing.front() {
             let now = monotonic()?;

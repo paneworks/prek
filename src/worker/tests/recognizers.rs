@@ -58,6 +58,154 @@ fn clear(registry: &mut Registry) {
     registry.reports.clear();
     registry.bytes = 0;
 }
+fn metadata(registry: &Registry) -> Vec<crate::recognition::Metadata> {
+    registry
+        .reports
+        .iter()
+        .filter_map(|(report, _)| match report {
+            Report::RecognizerMetadata { metadata, .. } => Some(metadata.as_ref().clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn custom_metadata_projects_only_declared_selectors_without_held_state() {
+    let mut config = profile();
+    config
+        .devices
+        .insert("broader".into(), config.devices["keyboard"].clone());
+    config.policy.allowed_devices.push("broader".into());
+    let mut registry = registry(config);
+    key(&mut registry, source(1, "seat0"), 90, 1, true, 90);
+    update(&mut registry, 1, vec![owner(100)], 100);
+    let info = metadata(&registry).pop().unwrap();
+    assert_eq!(info.selectors, ["keyboard"]);
+    assert_eq!(info.metadata.as_ref().unwrap().selectors, ["keyboard"]);
+    assert_eq!(info.source, source(1, "seat0"));
+    assert!(inputs(&registry).is_empty());
+    let wire = serde_json::to_value(&info).unwrap();
+    assert!(wire.get("keys").is_none() && wire.get("contacts").is_none());
+    clear(&mut registry);
+    key(&mut registry, source(1, "seat0"), 101, 2, false, 101);
+    tick(&mut registry, 102);
+    assert!(metadata(&registry).is_empty());
+}
+
+#[test]
+fn custom_catalog_reconciles_replacements_and_exact_removals_before_tickets() {
+    let mut registry = registry(profile());
+    update(&mut registry, 1, vec![owner(100)], 100);
+    let mut device = metadata(&registry)[0]
+        .metadata
+        .as_ref()
+        .unwrap()
+        .device
+        .clone();
+    clear(&mut registry);
+    registry
+        .push(
+            Record::Reconcile {
+                source: device.source.clone(),
+                at: ms(101),
+                keys: BTreeSet::from([30]),
+                contacts: vec![],
+            },
+            ms(101),
+        )
+        .unwrap();
+    assert_eq!(
+        metadata(&registry)[0].reason,
+        crate::input_events::ResetReason::Reconciled
+    );
+    clear(&mut registry);
+    device.source.generation = 2;
+    registry
+        .push(
+            Record::Device {
+                device: device.clone(),
+                keys: BTreeSet::new(),
+                contacts: vec![],
+            },
+            ms(102),
+        )
+        .unwrap();
+    let updates = metadata(&registry);
+    assert_eq!(updates.len(), 2);
+    assert_eq!(updates[0].source.generation, 1);
+    assert_eq!(updates[0].reason, crate::input_events::ResetReason::Removed);
+    assert!(updates[0].metadata.is_none());
+    assert_eq!(updates[1].source.generation, 2);
+    assert_eq!(
+        updates[1].reason,
+        crate::input_events::ResetReason::Attached
+    );
+    clear(&mut registry);
+    registry
+        .push(
+            Record::Remove {
+                source: device.source,
+                at: ms(103),
+            },
+            ms(103),
+        )
+        .unwrap();
+    assert_eq!(
+        metadata(&registry)[0].reason,
+        crate::input_events::ResetReason::Removed
+    );
+    assert!(inputs(&registry).is_empty());
+}
+
+#[test]
+fn custom_metadata_requires_every_capability_and_does_not_duplicate_ordinary_resets() {
+    for denied in [
+        Capability::CustomRecognizers,
+        Capability::Context,
+        Capability::Observations,
+        Capability::LuaEvents,
+    ] {
+        let mut registry = registry(profile());
+        let mut subscription = owner(100);
+        subscription.capabilities.remove(&denied);
+        update(&mut registry, 1, vec![subscription], 100);
+        assert!(metadata(&registry).is_empty());
+    }
+    let mut registry = registry(profile());
+    let mut subscription = owner(100);
+    subscription.capabilities.insert(Capability::InputEvents);
+    update(&mut registry, 1, vec![subscription], 100);
+    assert!(!inputs(&registry).is_empty());
+    assert!(metadata(&registry).is_empty());
+}
+
+#[test]
+fn excessive_custom_metadata_ends_only_its_registration() {
+    let mut registry = registry(profile());
+    let mut other = owner(100);
+    other.seat = "seat1".into();
+    other.context.as_mut().unwrap().binding.seat = "seat1".into();
+    update(&mut registry, 1, vec![owner(100), other], 100);
+    let mut info = metadata(&registry)
+        .into_iter()
+        .find(|info| info.source.seat == "seat0")
+        .unwrap();
+    info.metadata.as_mut().unwrap().device.capabilities =
+        (0..32).map(|kind| (kind, (0..4096).collect())).collect();
+    clear(&mut registry);
+    registry
+        .queue(
+            Report::RecognizerMetadata {
+                subscription: owner(100).identity(),
+                metadata: Box::new(info),
+            },
+            ms(101),
+        )
+        .unwrap();
+    assert!(!registry.observers.contains_key("seat0"));
+    assert!(registry.observers.contains_key("seat1"));
+    assert!(matches!(&registry.reports[0].0, Report::Ended { .. }));
+}
 fn issued() -> (Registry, Ticket) {
     let mut registry = registry(profile());
     update(&mut registry, 1, vec![owner(100)], 100);
@@ -112,6 +260,7 @@ fn revocation_purges_unsent_tickets_and_reenable_suppresses_held_input() {
     denied.context.as_mut().unwrap().snapshot.revision = 2;
     update(&mut registry, 2, vec![denied], 104);
     assert!(tickets(&registry).is_empty());
+    assert!(metadata(&registry).is_empty());
     assert!(
         registry
             .reports
@@ -133,6 +282,7 @@ fn revocation_purges_unsent_tickets_and_reenable_suppresses_held_input() {
     let mut enabled = owner(106);
     enabled.context.as_mut().unwrap().snapshot.revision = 3;
     update(&mut registry, 3, vec![enabled], 106);
+    assert_eq!(metadata(&registry).len(), 1);
     clear(&mut registry);
     tick(&mut registry, 130);
     assert!(tickets(&registry).is_empty());

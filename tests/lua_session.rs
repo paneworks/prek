@@ -103,6 +103,40 @@ fn recognizer_frame(at: Duration, sequence: u64) -> prek::input_events::Event {
     }
 }
 
+fn recognizer_device_metadata(at: Duration) -> prek::recognition::Metadata {
+    use prek::{
+        input::{Device, EV_KEY},
+        input_events::{DeviceInfo, ResetReason},
+    };
+    use std::collections::BTreeMap;
+    let source = recognizer_candidate(at).source;
+    let device = Device {
+        source: source.clone(),
+        identity: "catalog-model".into(),
+        name: "catalog-model".into(),
+        path: "fixture".into(),
+        physical: String::new(),
+        unique: String::new(),
+        vendor: 1,
+        product: 1,
+        properties: vec![],
+        axes: BTreeMap::new(),
+        capabilities: BTreeMap::from([(EV_KEY, vec![30])]),
+        virtual_device: false,
+    };
+    prek::recognition::Metadata {
+        source,
+        at,
+        selectors: vec!["keyboard".into()],
+        reason: ResetReason::Attached,
+        metadata: Some(Box::new(DeviceInfo {
+            device,
+            selectors: vec!["keyboard".into()],
+            mapping: None,
+        })),
+    }
+}
+
 fn authorize_recognizer(session: &mut Session) {
     use prek::protocol::Capability;
     use std::collections::BTreeSet;
@@ -136,6 +170,7 @@ fn agent_bridge_uses_real_helper_readiness_public_tickets_and_exact_cleanup() {
     let (definition, recognizer) = recognizer_definition(
         r#"
 if ticket.cause=='cancel' then p.log.info('bridge-cleanup');return nil end
+assert(p.devices.get(ticket.input.source).device.name=='catalog-model')
 p.log.info('bridge-recognize');return {phase='discrete',data={calls=calls}}
 "#,
     );
@@ -193,6 +228,30 @@ p.log.info('bridge-recognize');return {phase='discrete',data={calls=calls}}
     };
     bridge.acknowledge_ready(ready_fence, ready);
     let at = monotonic().unwrap();
+    broker
+        .send(
+            &Reply::RecognizerMetadata {
+                fence: fence(1),
+                metadata: Box::new(recognizer_device_metadata(at)),
+            },
+            at,
+        )
+        .unwrap();
+    let reply = agent.receive::<Reply>().unwrap().unwrap().message;
+    reply.validate().unwrap();
+    let Reply::RecognizerMetadata {
+        fence: observed,
+        metadata,
+    } = reply
+    else {
+        panic!()
+    };
+    assert!(
+        bridge
+            .metadata(observed, *metadata, "seat0", &mut runtime)
+            .unwrap()
+            .is_none()
+    );
     let current = recognizer_candidate(at);
     let mut gate = Gate::new(fence(1), vec![recognizer]).unwrap();
     let ticket = gate
@@ -510,6 +569,68 @@ fn recognizer_parent_queue_is_bounded_and_stop_retires_queued_work() {
     session.stop().unwrap();
     assert!(session.request_recognition(excess).is_err());
     assert!(drain(&mut session).unwrap().is_empty());
+    assert!(session.take_recognitions().is_empty());
+}
+
+#[test]
+fn custom_metadata_parent_queue_is_bounded_and_stop_purges_catalog_work() {
+    let (definition, _) = recognizer_definition("error('metadata invoked recognizer')");
+    let mut session = Session::spawn(
+        Path::new(env!("CARGO_BIN_EXE_prek")),
+        fence(1),
+        "seat0",
+        definition,
+    )
+    .unwrap();
+    let at = monotonic().unwrap();
+    assert!(
+        session
+            .recognizer_metadata(recognizer_device_metadata(at))
+            .is_err()
+    );
+    drain(&mut session).unwrap();
+    let metadata = recognizer_device_metadata(monotonic().unwrap());
+    for _ in 0..64 {
+        session.recognizer_metadata(metadata.clone()).unwrap();
+    }
+    assert!(session.recognizer_metadata(metadata.clone()).is_err());
+    session.stop().unwrap();
+    assert!(session.recognizer_metadata(metadata).is_err());
+    assert!(drain(&mut session).unwrap().is_empty());
+}
+
+#[test]
+fn custom_metadata_helper_rechecks_original_age_after_parent_queueing() {
+    let (definition, _) = recognizer_definition("error('metadata invoked recognizer')");
+    let mut session = Session::spawn(
+        Path::new(env!("CARGO_BIN_EXE_prek")),
+        fence(1),
+        "seat0",
+        definition,
+    )
+    .unwrap();
+    drain(&mut session).unwrap();
+    authorize_recognizer(&mut session);
+    session
+        .recognizer_metadata(recognizer_device_metadata(monotonic().unwrap()))
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(275));
+    session
+        .update_context(context_view(monotonic().unwrap(), 0))
+        .unwrap();
+    session
+        .update_capabilities(
+            std::collections::BTreeSet::from([
+                prek::protocol::Capability::CustomRecognizers,
+                prek::protocol::Capability::LuaEvents,
+                prek::protocol::Capability::Context,
+                prek::protocol::Capability::Observations,
+            ]),
+            std::collections::BTreeSet::new(),
+        )
+        .unwrap();
+    let error = drain(&mut session).unwrap_err();
+    assert!(error.to_string().contains("scope or freshness"), "{error}");
     assert!(session.take_recognitions().is_empty());
 }
 
@@ -936,6 +1057,7 @@ fn private_input_worker_round_trips_a_stationary_hold_through_the_actual_luna_he
     let definition = Definition::compile(
         r#"
 local p=require('prek');local calls=0
+p.events.on('input',function()error('custom metadata invoked ordinary input')end)
 local trigger=p.recognizers.define('native_hold',{
  selectors={'keyboard'},inputs={'key'},reply_within='250ms',wake='20ms',
 },function(ticket)
@@ -945,6 +1067,12 @@ local trigger=p.recognizers.define('native_hold',{
   p.log.info('native-cleanup');return nil
  end
  assert(ticket.input.source.device=='18446744073709551615')
+ local info=p.devices.get(ticket.input.source)
+ assert(info and #p.devices.list()==1 and info.device.name=='model keyboard')
+ assert(info.device.source.generation=='18446744073709551615')
+ assert(#info.selectors==1 and info.selectors[1]=='keyboard' and p.devices.revision()=='1')
+ info.device.name='forged'
+ assert(p.devices.get(ticket.input.source).device.name=='model keyboard')
  if ticket.cause=='frame' then assert(calls==1);return nil end
  assert(ticket.cause=='timer' and calls==2 and #ticket.input.changes==0)
  return {phase='discrete',data={calls=calls}}
@@ -1041,6 +1169,27 @@ return p.config.new{
             report: Report::RecognizerReady { ready: true, .. }
         }
     )));
+    assert!(!initial.iter().any(|message| matches!(
+        message,
+        Message::Outcome {
+            report: Report::Input { .. }
+        }
+    )));
+    let metadata: Vec<_> = initial
+        .into_iter()
+        .filter_map(|message| match message {
+            Message::Outcome {
+                report: Report::RecognizerMetadata { metadata, .. },
+            } => Some(*metadata),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(metadata.len(), 1);
+    let encoded = serde_json::to_value(&metadata[0]).unwrap();
+    assert!(encoded.get("keys").is_none() && encoded.get("contacts").is_none());
+    session
+        .recognizer_metadata(metadata.into_iter().next().unwrap())
+        .unwrap();
     let press_at = monotonic().unwrap();
     stream
         .push(prek::replay::Record::Frame {

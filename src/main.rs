@@ -1743,6 +1743,19 @@ fn run_session(
                 } if recognizers && Some(observed) == fence => {
                     recognizer_bridge.acknowledge_ready(observed, ready);
                 }
+                Reply::RecognizerMetadata {
+                    fence: observed,
+                    metadata,
+                } if recognizers && Some(observed) == fence => {
+                    if let Some(error) = recognizer_bridge.metadata(
+                        observed,
+                        *metadata,
+                        &lua_seat,
+                        &mut lua_runtime,
+                    )? {
+                        eprintln!("Lua recognizer metadata unavailable: {error}");
+                    }
+                }
                 Reply::Recognition {
                     fence: observed,
                     ticket,

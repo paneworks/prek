@@ -80,7 +80,7 @@
     "custom_sequences": "unavailable",
     "data_bytes": 4096,
     "data_depth": 8,
-    "device_catalog": "currently populated through separately opted-in ordinary input resets",
+    "device_catalog": "independent declaration-scoped metadata without held state or ordinary input callbacks; ordinary resets when --input is also enabled",
     "identities": "canonical decimal strings",
     "inputs": [
       "key",
@@ -116,7 +116,8 @@
     ]
   },
   "device_queries": {
-    "catalog": "permitted metadata received through input reset notifications; no host inventory scan",
+    "catalog": "permitted metadata received through input resets or declaration-scoped custom recognizer metadata; no host inventory scan",
+    "delivery": "ordinary --input resets, or independent --recognizers metadata without held state or ordinary input callbacks; current owning context and capabilities required",
     "empty_list": "all known sources removed while context remains usable",
     "lookup": "exact Source device/generation/seat with canonical decimal strings",
     "map_keys": "numeric evdev type/axis keys in Lua",

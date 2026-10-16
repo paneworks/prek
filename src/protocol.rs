@@ -309,6 +309,10 @@ impl Request {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Reply {
+    RecognizerMetadata {
+        fence: Fence,
+        metadata: Box<crate::recognition::Metadata>,
+    },
     RecognizerReady {
         fence: Fence,
         ready: bool,
@@ -437,6 +441,7 @@ impl Reply {
             | Self::Observation { fence, .. }
             | Self::Input { fence, .. }
             | Self::RecognizerReady { fence, .. }
+            | Self::RecognizerMetadata { fence, .. }
             | Self::Recognition { fence, .. }
             | Self::RecognitionCancelled { fence, .. }
             | Self::RecognitionResult { fence, .. }
@@ -458,6 +463,7 @@ impl Reply {
             !value.is_empty() && value.len() <= 1024 && !value.chars().any(char::is_control)
         };
         match self {
+            Self::RecognizerMetadata { metadata, .. } => metadata.validate()?,
             Self::Recognition { fence, ticket } => {
                 if ticket.fence != *fence
                     || ticket.id == 0

@@ -1003,6 +1003,7 @@ function CapabilitiesAPI.has(name) error("Prek editor definition") end
 function CapabilitiesAPI.ready(name) error("Prek editor definition") end
 
 ---Runtime only. Owned permitted metadata received in this VM, at most 256 entries / 4 MiB.
+---Delivered by ordinary input resets or declaration-scoped recognizer metadata without ordinary input callbacks.
 ---Nil before metadata arrives or when context is unavailable/stale; empty after all known sources are removed.
 ---@return prek.DeviceInfo[]?
 function DevicesAPI.list() error("Prek editor definition") end

@@ -544,6 +544,19 @@ fn cancelling_one_candidate_removes_only_its_queued_public_input() {
         administrator: false,
         waiting_reload: false,
     };
+    let metadata = crate::recognition::Metadata {
+        source: ticket(1, 1).input.source().clone(),
+        at: ms(100),
+        selectors: vec!["keyboard".into()],
+        reason: crate::input_events::ResetReason::Removed,
+        metadata: None,
+    };
+    connection
+        .push(Reply::RecognizerMetadata {
+            fence: fence(),
+            metadata: Box::new(metadata),
+        })
+        .unwrap();
     connection
         .push(Reply::Recognition {
             fence: fence(),
@@ -563,8 +576,8 @@ fn cancelling_one_candidate_removes_only_its_queued_public_input() {
         })
         .unwrap();
     connection.purge_recognitions(Some(1)).unwrap();
-    assert_eq!(connection.outgoing.len(), 2);
-    assert!(matches!(&connection.outgoing[0], Reply::Recognition { ticket, .. } if ticket.id == 2));
+    assert_eq!(connection.outgoing.len(), 3);
+    assert!(matches!(&connection.outgoing[1], Reply::Recognition { ticket, .. } if ticket.id == 2));
     connection.purge_recognitions(None).unwrap();
     assert_eq!(connection.outgoing.len(), 1);
     assert_eq!(
@@ -575,5 +588,101 @@ fn cancelling_one_candidate_removes_only_its_queued_public_input() {
             .map(reply_size)
             .sum::<io::Result<usize>>()
             .unwrap()
+    );
+}
+
+#[test]
+fn metadata_delivery_requires_exact_source_bindings_scope_seat_and_original_age() {
+    use crate::{
+        input::{Device, EV_KEY},
+        input_events::{DeviceInfo, ResetReason},
+        recognition::Metadata,
+    };
+    let mut config = Config::preset("desktop").unwrap();
+    config.policy.allow_input_events = true;
+    config.devices.get_mut("keyboard").unwrap().keys = vec![crate::config::Key(30)];
+    let definition = Definition {
+        name: "hold".into(),
+        selectors: BTreeSet::from(["keyboard".into()]),
+        inputs: BTreeSet::from([InputKind::Key]),
+        reply_within: Millis(100),
+        continuous: false,
+    };
+    config.rules[0].trigger = crate::config::Trigger::Custom {
+        recognizer: definition.clone(),
+        timeout: Millis(1000),
+        wake: None,
+    };
+    let binding = crate::lua::RecognizerBinding {
+        subscription: 1,
+        definition,
+    };
+    let source = ticket(1, 1).input.source().clone();
+    let device = Device {
+        source: source.clone(),
+        identity: "model".into(),
+        name: "model".into(),
+        path: "model".into(),
+        physical: String::new(),
+        unique: String::new(),
+        vendor: 1,
+        product: 1,
+        properties: vec![],
+        axes: BTreeMap::new(),
+        capabilities: BTreeMap::from([(EV_KEY, vec![30])]),
+        virtual_device: false,
+    };
+    let metadata = Metadata {
+        source,
+        at: ms(100),
+        selectors: vec!["keyboard".into()],
+        reason: ResetReason::Attached,
+        metadata: Some(Box::new(DeviceInfo {
+            device,
+            selectors: vec!["keyboard".into()],
+            mapping: None,
+        })),
+    };
+    validate_metadata(
+        &config,
+        std::slice::from_ref(&binding),
+        "seat0",
+        &metadata,
+        ms(101),
+    )
+    .unwrap();
+    assert!(validate_metadata(&config, &[], "seat0", &metadata, ms(101)).is_err());
+    let mut changed = binding.clone();
+    changed.definition.continuous = true;
+    assert!(validate_metadata(&config, &[changed], "seat0", &metadata, ms(101)).is_err());
+    assert!(
+        validate_metadata(
+            &config,
+            std::slice::from_ref(&binding),
+            "seat1",
+            &metadata,
+            ms(101)
+        )
+        .is_err()
+    );
+    assert!(
+        validate_metadata(
+            &config,
+            std::slice::from_ref(&binding),
+            "seat0",
+            &metadata,
+            ms(351)
+        )
+        .is_err()
+    );
+    let reply = Reply::RecognizerMetadata {
+        fence: fence(),
+        metadata: Box::new(metadata),
+    };
+    reply.validate().unwrap();
+    assert_eq!(reply.fence(), Some(fence()));
+    assert_eq!(
+        serde_json::from_slice::<Reply>(&serde_json::to_vec(&reply).unwrap()).unwrap(),
+        reply
     );
 }

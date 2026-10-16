@@ -521,7 +521,7 @@ All IDs/generations/revisions are exact decimal strings.
 See [the full constructor, ticket and cleanup contract](recognizers.md) and
 [hold example](../examples/lua/custom_recognizer.lua). The real helper and
 native-worker tests use explicit context/admission models. Live privileged
-acceptance, the sole routing-worker bridge, custom-only device metadata delivery,
+acceptance, the sole routing-worker bridge,
 sequence/group composition and offline custom replay remain required.
 
 ## Permitted normalized input
@@ -663,9 +663,13 @@ routing, shell controller effects or authentication ownership.
 
 These runtime queries return owned copies; changing a returned table changes
 neither the worker nor future query results. Device queries describe metadata
-actually received in permitted input reset notifications. They perform no host
-device scan and open no device nodes. The same protected policy, allowlists and
-`session --lua --input` capability gates apply to that metadata delivery.
+actually received in permitted input reset notifications or through the
+declaration-scoped custom recognizer metadata channel. They perform no host
+device scan and open no device nodes. Both require protected policy and device
+allowlists. `session --lua --input` delivers ordinary reset metadata;
+`session --lua --recognizers` independently delivers metadata only for approved
+native custom declarations' selectors, with no held state or ordinary input
+callbacks. If both flags are present, ordinary resets supply the catalog.
 
 | Function | Result |
 | --- | --- |
@@ -688,7 +692,8 @@ Before the first metadata arrives, `devices.list()` returns nil. After all known
 sources are removed, it returns an empty array while context remains usable.
 This is the received permitted catalog, not a claim that every host device has
 been enumerated or that startup delivery is an atomic inventory snapshot. All
-queries require runtime evaluation and fresh desktop context. Copies that expire
+queries require runtime evaluation and fresh desktop context. Custom-only
+catalogs additionally require current recognizer capabilities. Copies that expire
 during serialization are discarded. `seats.current()` uses the verified context
 binding without requiring device access; it cannot enumerate other seats.
 

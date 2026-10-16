@@ -16,6 +16,7 @@ pub(super) struct Catalog {
     revision: u64,
     bytes: usize,
     received: bool,
+    custom: bool,
 }
 impl Catalog {
     pub(super) fn apply(
@@ -42,6 +43,21 @@ impl Catalog {
         else {
             unreachable!()
         };
+        if metadata
+            .as_ref()
+            .is_some_and(|info| Event::selected(config, &info.device) != info.selectors)
+        {
+            return Err(error("device metadata exceeds approved selectors"));
+        }
+        self.apply_info(fence, source, reason, metadata)
+    }
+    fn apply_info(
+        &mut self,
+        fence: Fence,
+        source: Source,
+        reason: ResetReason,
+        metadata: Option<Box<DeviceInfo>>,
+    ) -> Result<(), ConfigError> {
         if self.fence.is_some_and(|current| current != fence) {
             *self = Self::default();
         }
@@ -67,9 +83,6 @@ impl Catalog {
             .any(|key| key.device == source.device && key.generation > source.generation)
         {
             return Err(error("device catalog generation regressed"));
-        }
-        if Event::selected(config, &info.device) != info.selectors {
-            return Err(error("device metadata exceeds approved selectors"));
         }
         if self
             .entries
@@ -159,7 +172,21 @@ pub(super) fn getter<'gc>(
             return Ok(CallbackReturn::Return);
         };
         let provided = view.context.as_ref().unwrap();
-        let available = host.devices.received && host.devices.fence == Some(view.fence);
+        let available = host.devices.received
+            && host.devices.fence == Some(view.fence)
+            && (!host.devices.custom
+                || super::capabilities::current(&host).is_some_and(|caps| {
+                    use crate::protocol::Capability;
+                    caps.fence == view.fence
+                        && [
+                            Capability::CustomRecognizers,
+                            Capability::LuaEvents,
+                            Capability::Observations,
+                            Capability::Context,
+                        ]
+                        .iter()
+                        .all(|cap| caps.negotiated.contains(cap))
+                }));
         let entry = requested
             .as_ref()
             .filter(|source| source.seat == provided.binding.seat)
@@ -204,7 +231,11 @@ pub(super) fn getter<'gc>(
             "list" | "get" | "revision" | "position" => Value::Nil,
             _ => return Err(io::Error::other("unknown permitted device query").into()),
         };
-        if context::desktop(&host).is_none() {
+        if context::desktop(&host).is_none()
+            || field != "seat"
+                && host.devices.custom
+                && super::capabilities::current(&host).is_none()
+        {
             value = Value::Nil;
         }
         stack.replace(ctx, value);
@@ -212,9 +243,80 @@ pub(super) fn getter<'gc>(
     })
 }
 
+#[cfg(target_os = "linux")]
+impl Runtime {
+    /// Update the received catalog without dispatching an input callback.
+    pub fn recognizer_metadata(
+        &mut self,
+        fence: Fence,
+        metadata: &crate::recognition::Metadata,
+    ) -> Result<(), ConfigError> {
+        let result = self.recognizer_metadata_inner(fence, metadata);
+        if result.is_err() {
+            self.failed = true;
+        }
+        result
+    }
+    fn recognizer_metadata_inner(
+        &mut self,
+        fence: Fence,
+        metadata: &crate::recognition::Metadata,
+    ) -> Result<(), ConfigError> {
+        if self.failed {
+            return Err(error("Lua runtime was retired after callback failure"));
+        }
+        fence.validate().map_err(error)?;
+        let mut host = self.host.borrow_mut();
+        let now = host
+            .now
+            .and_then(|now| {
+                now.checked_add(
+                    host.context_clock
+                        .map_or(Duration::ZERO, |clock| clock.elapsed()),
+                )
+            })
+            .ok_or_else(|| error("recognizer metadata requires a monotonic clock"))?;
+        let context = context::desktop(&host)
+            .ok_or_else(|| error("recognizer metadata requires owning desktop context"))?;
+        let caps = super::capabilities::current(&host)
+            .ok_or_else(|| error("recognizer metadata requires current capabilities"))?;
+        if context.fence != fence
+            || caps.fence != fence
+            || !crate::recognition::permitted_subscription(
+                &self.config,
+                &caps.negotiated,
+                context.context.as_deref(),
+                &metadata.source.seat,
+                fence.session,
+                now,
+            )
+        {
+            return Err(error("recognizer metadata lacks current owning authority"));
+        }
+        let scope = self
+            .recognizers
+            .iter()
+            .flat_map(|binding| binding.definition.selectors.iter().cloned())
+            .collect();
+        metadata
+            .validate_for(&self.config, &scope, now)
+            .map_err(error)?;
+        host.devices.apply_info(
+            fence,
+            metadata.source.clone(),
+            metadata.reason,
+            metadata.metadata.clone(),
+        )?;
+        host.devices.custom = true;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    mod recognizer_metadata;
     use crate::{
         input::{ABS_MT_POSITION_X, ABS_MT_POSITION_Y, Axis, Device, EV_ABS},
         input_events::ResetReason,

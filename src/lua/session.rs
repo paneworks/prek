@@ -61,6 +61,11 @@ impl PendingEvents {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Work {
+    RecognizerMetadata {
+        fence: Fence,
+        sequence: u64,
+        metadata: Box<crate::recognition::Metadata>,
+    },
     Capabilities {
         view: CapabilityView,
         status: Option<StatusView>,
@@ -176,6 +181,7 @@ struct Notice {
     payload: serde_json::Value,
     bytes: usize,
     recognition: Option<Box<crate::recognition::Ticket>>,
+    metadata: Option<Box<crate::recognition::Metadata>>,
 }
 struct RulePending {
     id: u64,
@@ -184,6 +190,7 @@ struct RulePending {
     sent: bool,
 }
 pub struct Session {
+    config: crate::config::Config,
     supervisor: Supervisor,
     channel: Channel,
     fence: Fence,
@@ -262,7 +269,7 @@ impl Session {
             ));
         }
         fence.validate()?;
-        definition.validate().map_err(io::Error::other)?;
+        let config = definition.validate().map_err(io::Error::other)?;
         let source = serde_json::to_vec(&definition).map_err(io::Error::other)?;
         if source.len() > super::MAX_SNAPSHOT_BYTES {
             return Err(protocol::invalid("Lua runtime snapshot exceeds byte limit"));
@@ -281,6 +288,7 @@ impl Session {
             .stderr(Stdio::null());
         let (supervisor, channel) = Supervisor::spawn_controlled(command)?;
         let mut session = Self {
+            config,
             supervisor,
             channel,
             fence,
@@ -377,6 +385,7 @@ impl Session {
             payload,
             bytes: size,
             recognition: None,
+            metadata: None,
         });
         Ok(())
     }
@@ -513,6 +522,46 @@ impl Session {
     pub fn take_actions(&mut self) -> Vec<(u64, u64, Option<super::ActionResult>)> {
         self.resolved.drain(..).collect()
     }
+    pub fn recognizer_metadata(
+        &mut self,
+        metadata: crate::recognition::Metadata,
+    ) -> io::Result<()> {
+        if self.stopping || !self.action_ready() || metadata.source.seat != self.seat {
+            return Err(protocol::invalid(
+                "recognizer metadata requires the ready owning helper",
+            ));
+        }
+        let scope = self
+            .recognizers
+            .values()
+            .flat_map(|definition| definition.selectors.iter().cloned())
+            .collect();
+        metadata.validate_for(&self.config, &scope, monotonic()?)?;
+        let bytes = protocol::encode(&protocol::Packet {
+            version: protocol::VERSION,
+            sequence: 1,
+            at: Duration::ZERO,
+            message: Work::RecognizerMetadata {
+                fence: self.fence,
+                sequence: 1,
+                metadata: Box::new(metadata.clone()),
+            },
+        })?
+        .len();
+        if self.notices.len() + self.actions.len() >= MAX_PENDING || self.bytes + bytes > MAX_BYTES
+        {
+            return Err(protocol::invalid("recognizer metadata queue exceeds limit"));
+        }
+        self.bytes += bytes;
+        self.notices.push_back(Notice {
+            event: EventKind::Input,
+            payload: serde_json::Value::Null,
+            bytes,
+            recognition: None,
+            metadata: Some(Box::new(metadata)),
+        });
+        Ok(())
+    }
     /// Private supervised transport only. The embedding must own the matching
     /// Rust Gate and revalidate every returned proposal before arbitration.
     pub fn request_recognition(&mut self, ticket: crate::recognition::Ticket) -> io::Result<()> {
@@ -583,6 +632,7 @@ impl Session {
             payload: serde_json::Value::Null,
             bytes,
             recognition: Some(Box::new(ticket)),
+            metadata: None,
         });
         Ok(())
     }
@@ -1159,7 +1209,13 @@ impl Session {
                 .sequence
                 .checked_add(1)
                 .ok_or_else(|| protocol::invalid("Lua event sequence exhausted"))?;
-            let work = if let Some(ticket) = &notice.recognition {
+            let work = if let Some(metadata) = &notice.metadata {
+                Work::RecognizerMetadata {
+                    fence: self.fence,
+                    sequence,
+                    metadata: metadata.clone(),
+                }
+            } else if let Some(ticket) = &notice.recognition {
                 Work::Recognition {
                     fence: self.fence,
                     sequence,
@@ -1460,6 +1516,30 @@ pub fn worker() -> io::Result<()> {
                             },
                         },
                     );
+                }
+                Work::RecognizerMetadata {
+                    fence: incoming,
+                    sequence: next,
+                    metadata,
+                } if fence == Some(incoming)
+                    && runtime.is_some()
+                    && timers_enabled
+                    && next == sequence + 1 =>
+                {
+                    sequence = next;
+                    let runtime = runtime.as_mut().unwrap();
+                    runtime.set_clock(monotonic()?).map_err(io::Error::other)?;
+                    outgoing = Some(match runtime.recognizer_metadata(incoming, &metadata) {
+                        Ok(()) => Message::Logs {
+                            fence: incoming,
+                            sequence,
+                            logs: vec![],
+                        },
+                        Err(error) => Message::Failed {
+                            fence: incoming,
+                            reason: error.0.chars().take(512).collect(),
+                        },
+                    });
                 }
                 Work::Recognition {
                     fence: incoming,
