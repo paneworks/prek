@@ -30,6 +30,7 @@ pub(super) struct State {
     revision: u64,
     enabled: bool,
     handlers: Vec<HandlerRegistration>,
+    recognizers: Vec<crate::recognition::Definition>,
     next_id: u64,
     builders: Vec<Weak<RefCell<Builder>>>,
     pending: Option<(RuleProposal, Rc<RefCell<Builder>>)>,
@@ -43,6 +44,7 @@ struct Builder {
 }
 impl State {
     pub(super) fn initialize(&mut self, config: Config, handlers: Vec<HandlerRegistration>) {
+        self.recognizers = config.recognizer_definitions();
         self.config = Some(config);
         self.handlers = handlers;
         self.revision = 1;
@@ -60,6 +62,15 @@ impl State {
         self.pending.as_ref().map(|(proposal, _)| proposal.id)
     }
     fn validate_handlers(&self, config: &Config) -> io::Result<()> {
+        if config
+            .recognizer_definitions()
+            .iter()
+            .any(|definition| !self.recognizers.contains(definition))
+        {
+            return Err(io::Error::other(
+                "runtime rules cannot add unapproved custom recognizer declarations",
+            ));
+        }
         for rule in &config.rules {
             if let crate::config::Action::Lua { handler, requires } = &rule.action
                 && !self

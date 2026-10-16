@@ -23,6 +23,10 @@ fn source_constructor_records_canonical_binding_and_native_trigger() {
     let definition = compile(DECLARE);
     let config = definition.validate().unwrap();
     assert_eq!(definition.recognizers.len(), 1);
+    assert_eq!(
+        config.recognizers,
+        vec![definition.recognizers[0].definition.clone()]
+    );
     let binding = &definition.recognizers[0];
     assert_eq!(binding.subscription, 1);
     assert_eq!(binding.definition.name, "hold");
@@ -44,6 +48,88 @@ fn source_constructor_records_canonical_binding_and_native_trigger() {
         serde_json::from_slice(&serde_json::to_vec(&definition).unwrap()).unwrap();
     assert_eq!(snapshot, definition);
     snapshot.instantiate().unwrap();
+}
+
+#[test]
+fn unused_source_declarations_survive_model_transport_and_cannot_lose_their_binding() {
+    let definition = Definition::compile(&format!(r#"local p=require('prek');{DECLARE}
+return p.config.new{{policy={{allow_input_events=true,allowed_devices={{'keys'}}}},devices={{keys={{keys={{'KEY_A'}}}}}}}}
+"#), "unused.lua").unwrap();
+    let config = definition.validate().unwrap();
+    assert!(config.rules.is_empty());
+    assert_eq!(
+        config.recognizers,
+        vec![definition.recognizers[0].definition.clone()]
+    );
+    assert_eq!(
+        Config::parse(&toml::to_string(&config).unwrap()).unwrap(),
+        config
+    );
+    definition.instantiate().unwrap();
+    assert!(super::super::export_config(&config).is_err());
+    for change in ["missing", "changed", "unbound"] {
+        let mut changed = definition.clone();
+        let mut model = config.clone();
+        match change {
+            "missing" => model.recognizers.clear(),
+            "changed" => model.recognizers[0].reply_within = Millis(1),
+            "unbound" => changed.recognizers.clear(),
+            _ => unreachable!(),
+        }
+        changed.model = toml::to_string(&model).unwrap();
+        assert!(changed.validate().is_err(), "{change}");
+        assert!(changed.instantiate().is_err(), "{change}");
+    }
+}
+
+#[test]
+fn declaration_registry_rejects_duplicates_conflicts_and_permission_expansion() {
+    let mut config = compile(DECLARE).validate().unwrap();
+    let declaration = config.recognizers[0].clone();
+    config.recognizers.push(declaration.clone());
+    assert!(config.validate().is_err());
+    config.recognizers.pop();
+    config.recognizers[0].continuous = true;
+    assert!(config.validate().is_err());
+    config.rules.clear();
+    config.recognizers[0] = declaration;
+    config.recognizers[0].selectors.insert("foreign".into());
+    assert!(config.validate().is_err());
+    config.recognizers[0].selectors.remove("foreign");
+    config.policy.allow_input_events = false;
+    assert!(config.validate().is_err());
+}
+
+#[test]
+fn lua_rule_preparation_accepts_unused_source_definition_and_rejects_a_forged_name() {
+    let source = format!(
+        r#"local p=require('prek');{DECLARE}
+p.events.on('ready',function()
+ local function rule()return p.rules.define{{id='dynamic',trigger=trigger,action=p.actions.event{{name='dynamic'}}}}end
+ trigger.recognizer.name='forged'
+ local bad=p.rules.transaction();bad:replace(rule())
+ assert(not pcall(function()bad:commit()end))
+ assert(bad:status().state=='open');bad:cancel()
+ trigger.recognizer.name='hold'
+ local good=p.rules.transaction();good:replace(rule());good:commit()
+ assert(good:status().state=='pending' and #p.rules.list()==0)
+end)
+return p.config.new{{policy={{allow_runtime_rules=true,allow_input_events=true,allowed_devices={{'keys'}}}},devices={{keys={{keys={{'KEY_A'}}}}}}}}
+"#
+    );
+    let mut runtime = Definition::compile(&source, "dynamic-source.lua")
+        .unwrap()
+        .instantiate()
+        .unwrap();
+    runtime.enable_rule_transactions();
+    runtime
+        .dispatch(EventKind::Ready, &serde_json::json!({}))
+        .unwrap();
+    let proposal = runtime.take_rule_proposal().unwrap();
+    assert_eq!(proposal.transaction.revision, 1);
+    let next = proposal.transaction.prepare(&runtime.config, 1).unwrap();
+    assert_eq!(next.rules.len(), 1);
+    assert_eq!(next.recognizers, runtime.config.recognizers);
 }
 
 #[test]

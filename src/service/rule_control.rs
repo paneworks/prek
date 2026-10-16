@@ -29,6 +29,7 @@ pub(super) struct Pending {
     sent: bool,
 }
 pub(super) struct Rules {
+    recognizers: Vec<crate::recognition::Definition>,
     config: Option<Arc<crate::config::Config>>,
     revision: u64,
     last_id: u64,
@@ -43,6 +44,9 @@ impl Rules {
     }
     pub(super) fn new(config: Option<Arc<crate::config::Config>>) -> Self {
         Self {
+            recognizers: config
+                .as_ref()
+                .map_or_else(Vec::new, |config| config.recognizer_definitions()),
             config,
             revision: 1,
             last_id: 0,
@@ -74,6 +78,15 @@ impl Rules {
             .transaction
             .prepare(current, self.revision)
             .map_err(io::Error::other)?;
+        if next
+            .recognizer_definitions()
+            .iter()
+            .any(|definition| !self.recognizers.contains(definition))
+        {
+            return Err(protocol::invalid(
+                "runtime rules cannot add unapproved custom recognizer declarations",
+            ));
+        }
         for change in &proposal.transaction.changes {
             let edited: Vec<_> = match change {
                 crate::rule_transactions::Change::Replace { rule } => vec![rule.as_ref()],

@@ -112,6 +112,208 @@ fn apply(parent: &mut Channel, worker: &mut Stream, proposal: RuleProposal) -> R
         }
     }
 }
+
+#[test]
+fn unused_source_recognizer_is_installed_by_real_helper_and_native_worker_receipt() {
+    use prek::{
+        input::{Device, EV_KEY, EV_SYN, Frame, RawEvent, SYN_REPORT, Source},
+        protocol::Capability,
+        replay::Record,
+        rules::{Event, Evidence},
+        worker::Report,
+    };
+    use std::collections::{BTreeMap, BTreeSet};
+    let definition = Definition::compile(r#"
+local p=require('prek')
+local trigger=p.recognizers.define('dynamic',{selectors={'keyboard'},inputs={'key'},reply_within='250ms'},function(ticket)
+ if ticket.cause=='cancel' then return nil end
+ local info=p.devices.get(ticket.input.source)
+ assert(info and info.device.name=='approved dynamic keyboard')
+ assert(ticket.revision=='2' and ticket.input.source.device=='18446744073709551615')
+ return {phase='discrete',data={source=info.device.source.device}}
+end)
+p.events.on('input',function()error('ordinary input is not enabled')end)
+p.events.on('ready',function()
+ local tx=p.rules.transaction()
+ tx:replace(p.rules.define{id='dynamic-rule',devices={'keyboard'},contexts={'desktop'},trigger=trigger,action=p.actions.event{name='dynamic'}})
+ tx:commit()
+end)
+p.events.on('rules_changed',function(event)
+ assert(event.accepted and p.rules.revision()=='2' and #p.rules.list()==1)
+ assert(p.config.current().config.recognizers[1].name=='dynamic')
+ p.log.info('dynamic-installed')
+end)
+return p.config.new{policy={allow_input_events=true,allow_runtime_rules=true,allowed_devices={'keyboard'}},devices={keyboard={keys={'KEY_A'}}}}
+"#, "dynamic-recognizer.lua").unwrap();
+    let config = definition.validate().unwrap();
+    assert!(config.rules.is_empty());
+    assert_eq!(config.recognizers.len(), 1);
+    let mut session = Session::spawn_with_rule_transactions(
+        Path::new(env!("CARGO_BIN_EXE_prek")),
+        fence(),
+        "seat0",
+        definition,
+    )
+    .unwrap();
+    let proposal = proposal(&mut session);
+    let now = monotonic().unwrap();
+    let context = serde_json::from_value::<prek::context_transfer::View>(serde_json::json!({
+        "fence":fence(),"sampled_at":now,"state":"desktop","error":null,
+        "context":{"binding":{"seat":"seat0","session":"model","uid":1000,"compositor_pid":123,"compositor_start":456,"kind":"user"},
+        "snapshot":{"generation":1,"revision":1,"captured_at":now,"state":"desktop","secure_overlay":false,"regions":[],"windows":[],"outputs":[]}}
+    })).unwrap();
+    let capabilities = BTreeSet::from([
+        Capability::Context,
+        Capability::Observations,
+        Capability::LuaEvents,
+        Capability::CustomRecognizers,
+        Capability::RuntimeRules,
+    ]);
+    let (mut parent, child) = Channel::pair().unwrap();
+    let mut worker = Stream::new(config, child).unwrap();
+    let source = Source {
+        device: u64::MAX,
+        generation: u64::MAX,
+        seat: "seat0".into(),
+    };
+    worker.push(Record::Header { version: 1 }).unwrap();
+    worker
+        .push(Record::Device {
+            device: Device {
+                source: source.clone(),
+                identity: "dynamic".into(),
+                name: "approved dynamic keyboard".into(),
+                path: "fixture".into(),
+                physical: String::new(),
+                unique: String::new(),
+                vendor: 1,
+                product: 1,
+                properties: vec![],
+                axes: BTreeMap::new(),
+                capabilities: BTreeMap::from([(EV_KEY, vec![30])]),
+                virtual_device: false,
+            },
+            keys: BTreeSet::new(),
+            contacts: vec![],
+        })
+        .unwrap();
+    parent
+        .send(
+            &Command::Subscriptions {
+                update: Subscriptions {
+                    revision: 1,
+                    seats: vec![Subscription {
+                        seat: "seat0".into(),
+                        fence: fence(),
+                        context: context.context.clone(),
+                        capabilities: capabilities.clone(),
+                        consumer: None,
+                    }],
+                },
+            },
+            monotonic().unwrap(),
+        )
+        .unwrap();
+    worker.service().unwrap();
+    worker.flush().unwrap();
+    let mut metadata = Vec::new();
+    while let Some(packet) = parent.receive::<Message>().unwrap() {
+        match packet.message {
+            Message::Outcome {
+                report: Report::RecognizerMetadata { metadata: info, .. },
+            } => metadata.push(*info),
+            Message::Outcome {
+                report: Report::Input { .. },
+            } => panic!("ordinary input was not negotiated"),
+            _ => {}
+        }
+    }
+    assert_eq!(metadata.len(), 1);
+    let receipt = apply(&mut parent, &mut worker, proposal);
+    assert_eq!(receipt.revision, 2);
+    assert!(receipt.error.is_none());
+    session.acknowledge_rules(fence(), receipt).unwrap();
+    session.update_context(context).unwrap();
+    session
+        .update_capabilities(capabilities, BTreeSet::new())
+        .unwrap();
+    session
+        .recognizer_metadata(metadata.pop().unwrap())
+        .unwrap();
+    assert_eq!(drain(&mut session)[0].message, "dynamic-installed");
+    let at = monotonic().unwrap();
+    worker
+        .push(Record::Frame {
+            frame: Frame {
+                source,
+                at,
+                sequence: 1,
+                events: vec![
+                    RawEvent {
+                        kind: EV_KEY,
+                        code: 30,
+                        value: 1,
+                    },
+                    RawEvent {
+                        kind: EV_SYN,
+                        code: SYN_REPORT,
+                        value: 0,
+                    },
+                ],
+            },
+        })
+        .unwrap();
+    worker
+        .push(Record::Tick {
+            at: monotonic().unwrap(),
+        })
+        .unwrap();
+    worker.flush().unwrap();
+    let mut ticket = None;
+    while let Some(packet) = parent.receive::<Message>().unwrap() {
+        if let Message::Outcome {
+            report: Report::Recognition { ticket: issued, .. },
+        } = packet.message
+        {
+            ticket = Some(*issued);
+        }
+    }
+    let ticket = ticket.unwrap();
+    assert_eq!(ticket.revision, 2);
+    assert_eq!(ticket.rule, "dynamic-rule");
+    session.request_recognition(ticket).unwrap();
+    assert!(drain(&mut session).is_empty());
+    let response = session.take_recognitions().pop().unwrap().1.unwrap();
+    parent
+        .send(
+            &Command::Recognition {
+                seat: "seat0".into(),
+                fence: fence(),
+                proposal: response,
+            },
+            monotonic().unwrap(),
+        )
+        .unwrap();
+    worker.service().unwrap();
+    worker
+        .push(Record::Tick {
+            at: monotonic().unwrap(),
+        })
+        .unwrap();
+    worker.flush().unwrap();
+    let mut matched = false;
+    while let Some(packet) = parent.receive::<Message>().unwrap() {
+        if let Message::Outcome {
+            report: Report::Observation { event, .. },
+        } = packet.message
+        {
+            matched |= matches!(*event, Event::Matched { evidence: Evidence::Custom { data, .. }, .. } if data["source"].as_str() == Some("18446744073709551615"));
+        }
+    }
+    assert!(matched);
+    session.stop().unwrap();
+    assert!(drain(&mut session).is_empty());
+}
 #[test]
 fn real_helper_layer_receipts_change_recognition_only_in_the_owning_seat() {
     exercise_seat_activation(

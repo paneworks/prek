@@ -79,11 +79,29 @@ templates. Modules and complete source/snapshot metadata are checked again on
 VM reconstruction. `config.export` rejects callback-bearing custom rules;
 retain the original Lua source.
 
+Every constructor declaration is retained in the canonical native
+`Config.recognizers` list, even when no rule uses it yet. The list is bounded to
+64 unique names and contains metadata, not closures. Editing or adding entries
+does not register a callback; all entries must match private source bindings.
+`config.current().config.recognizers` returns an owned copy of this registry.
+Runtime rule transactions may install a rule using a retained trigger without a
+disabled template. They cannot declare another recognizer, change its selectors,
+inputs, continuous flag or reply budget, or mutate the registry. Removing all
+rules that use a declaration does not retire its source approval. Reload replaces
+the approved registry together with the source fence.
+
+The [runtime rule example](../examples/lua/custom_runtime.lua) uses
+`session --lua --recognizers --rule-mutations` and protected
+`allow_runtime_rules=true`. Lua preparation, broker preparation and native
+activation each check original declaration approval; only an accepted native
+receipt advances the rule revision. This is observation-mode functionality, not
+production routing admission.
+
 An owning observation session uses `prek session --lua --recognizers`; protected
 system policy must enable `allow_input_events` and the selected devices. This
 permission defaults to false. Ordinary `--input` is a separate opt-in. Custom-only
 sessions receive device metadata scoped to the union of approved native custom
-declarations' selectors, including disabled templates. Initial metadata precedes
+declarations' selectors, including unused declarations and disabled templates. Initial metadata precedes
 tickets; attach, reconciliation, mapping, replacement and removal update the same
 `p.devices` catalog. This channel carries no held keys, contacts or transitions
 and invokes no ordinary input handlers. When ordinary input is also enabled,

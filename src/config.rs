@@ -730,6 +730,8 @@ pub struct Config {
     pub modes: Vec<NamedMode>,
     #[serde(default)]
     pub shapes: Vec<ShapeTemplate>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recognizers: Vec<crate::recognition::Definition>,
     #[serde(default)]
     pub rules: Vec<Rule>,
 }
@@ -754,6 +756,20 @@ impl fmt::Display for ConfigError {
 impl std::error::Error for ConfigError {}
 
 impl Config {
+    pub(crate) fn recognizer_definitions(&self) -> Vec<crate::recognition::Definition> {
+        let mut definitions = BTreeMap::new();
+        for definition in self
+            .recognizers
+            .iter()
+            .chain(self.rules.iter().filter_map(|rule| match &rule.trigger {
+                Trigger::Custom { recognizer, .. } => Some(recognizer),
+                _ => None,
+            }))
+        {
+            definitions.insert(definition.name.clone(), definition.clone());
+        }
+        definitions.into_values().collect()
+    }
     /// Lua is selected by its explicit file suffix; legacy TOML remains a
     /// compatibility format. Worker snapshots use the compiled TOML model.
     pub fn parse_named(text: &str, name: &str) -> Result<Self, ConfigError> {
@@ -783,6 +799,7 @@ impl Config {
             || self.devices.len() > 256
             || self.layers.len() > 64
             || self.shapes.len() > 128
+            || self.recognizers.len() > crate::recognition::MAX_RECOGNIZERS
         {
             return fail("configuration collection limit exceeded".into());
         }
@@ -896,6 +913,19 @@ impl Config {
             }
         }
         let mut custom = BTreeMap::new();
+        for definition in &self.recognizers {
+            definition
+                .validate()
+                .map_err(|error| ConfigError(error.to_string()))?;
+            if !self.policy.allow_input_events
+                || definition.selectors.iter().any(|id| {
+                    !self.devices.contains_key(id) || !self.policy.allowed_devices.contains(id)
+                })
+                || custom.insert(&definition.name, definition).is_some()
+            {
+                return fail("recognizers: declarations require unique names, protected input permission and permitted selectors".into());
+            }
+        }
         let mut ids = BTreeSet::new();
         for rule in &self.rules {
             let prefix = format!("rules.{}", rule.id);
@@ -1093,6 +1123,7 @@ impl Config {
 
     pub fn preset(name: &str) -> Result<Self, ConfigError> {
         let mut config = Self {
+            recognizers: Vec::new(),
             version: 1,
             mode: Mode::Observe,
             timing: Timings::default(),

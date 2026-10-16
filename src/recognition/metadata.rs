@@ -1,20 +1,15 @@
 //! Declaration-scoped device metadata without held input state.
 use super::*;
 use crate::{
-    config::{Config, Trigger},
+    config::Config,
     input_events::{DeviceInfo, ResetReason},
 };
 
 pub(crate) fn metadata_selectors(config: &Config) -> BTreeSet<String> {
     config
-        .rules
-        .iter()
-        .filter_map(|rule| match &rule.trigger {
-            Trigger::Custom { recognizer, .. } => Some(&recognizer.selectors),
-            _ => None,
-        })
-        .flatten()
-        .cloned()
+        .recognizer_definitions()
+        .into_iter()
+        .flat_map(|definition| definition.selectors)
         .collect()
 }
 

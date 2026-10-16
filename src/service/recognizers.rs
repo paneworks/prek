@@ -283,11 +283,10 @@ fn bindings_available(
 ) -> bool {
     !bindings.is_empty()
         && config.is_some_and(|config| {
-            config.rules.iter().all(|rule| match &rule.trigger {
-                crate::config::Trigger::Custom { recognizer, .. } => bindings
+            config.recognizer_definitions().iter().all(|recognizer| {
+                bindings
                     .iter()
-                    .any(|binding| &binding.definition == recognizer),
-                _ => true,
+                    .any(|binding| &binding.definition == recognizer)
             })
         })
 }

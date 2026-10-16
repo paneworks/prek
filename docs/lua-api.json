@@ -78,6 +78,7 @@
     "constructor": "recognizers.define",
     "context": "fresh owning desktop without secure overlay",
     "custom_sequences": "unavailable",
+    "declaration_registry": "Config.recognizers; canonical source-approved definitions persist without rules; runtime additions need no template and cannot add or alter definitions",
     "data_bytes": 4096,
     "data_depth": 8,
     "device_catalog": "independent declaration-scoped metadata without held state or ordinary input callbacks; ordinary resets when --input is also enabled",

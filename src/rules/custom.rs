@@ -26,13 +26,7 @@ struct Offer {
     bytes: usize,
 }
 pub(super) fn definitions(config: &Config) -> Vec<recognition::Definition> {
-    let mut definitions = BTreeMap::new();
-    for rule in &config.rules {
-        if let Trigger::Custom { recognizer, .. } = &rule.trigger {
-            definitions.insert(recognizer.name.clone(), recognizer.clone());
-        }
-    }
-    definitions.into_values().collect()
+    config.recognizer_definitions()
 }
 impl State {
     pub(super) fn ready(&self) -> bool {

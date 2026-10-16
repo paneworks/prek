@@ -67,7 +67,22 @@ mod tests {
                 })
                 .collect()
         }
-        let config = Config::preset("desktop").unwrap();
+        let mut config = Config::preset("desktop").unwrap();
+        assert!(
+            serde_json::to_value(&config)
+                .unwrap()
+                .get("recognizers")
+                .is_none()
+        );
+        config.policy.allow_input_events = true;
+        config.recognizers.push(crate::recognition::Definition {
+            name: "editor".into(),
+            selectors: BTreeSet::from(["keyboard".into()]),
+            inputs: BTreeSet::from([crate::recognition::InputKind::Key]),
+            reply_within: crate::config::Millis(100),
+            continuous: false,
+        });
+        config.validate().unwrap();
         let layer = Layer {
             id: "test".into(),
             key: Key(30),
@@ -76,6 +91,10 @@ mod tests {
         };
         for (name, model) in [
             ("Config", serde_json::to_value(&config).unwrap()),
+            (
+                "RecognizerDeclaration",
+                serde_json::to_value(&config.recognizers[0]).unwrap(),
+            ),
             ("Rule", serde_json::to_value(&config.rules[0]).unwrap()),
             ("Layer", serde_json::to_value(layer).unwrap()),
             (

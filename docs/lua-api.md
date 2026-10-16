@@ -524,6 +524,12 @@ native-worker tests use explicit context/admission models. Live privileged
 acceptance, the sole routing-worker bridge,
 sequence/group composition and offline custom replay remain required.
 
+Constructors also retain canonical declarations in `Config.recognizers`,
+independent of the current rules. Runtime transactions can use a retained trigger
+without a disabled template; they cannot add or alter recognizer declarations.
+Removal/readdition preserves approval, while a source reload replaces it.
+See [the runtime installation example](../examples/lua/custom_runtime.lua).
+
 ## Permitted normalized input
 
 `events.on("input", callback)` observes normalized input from the owning seat.

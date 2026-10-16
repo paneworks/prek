@@ -3,6 +3,104 @@ use crate::{
     config::{Action, Config},
     rule_transactions::{Change, Transaction},
 };
+
+#[test]
+fn broker_rule_edits_use_retained_source_definitions_not_client_declarations() {
+    use crate::{
+        config::{Millis, Trigger},
+        recognition::{Definition, InputKind},
+    };
+    let mut config = Config::preset("desktop").unwrap();
+    config.policy.allow_input_events = true;
+    config.policy.allow_runtime_rules = true;
+    let declaration = Definition {
+        name: "approved".into(),
+        selectors: BTreeSet::from(["keyboard".into()]),
+        inputs: BTreeSet::from([InputKind::Key]),
+        reply_within: Millis(100),
+        continuous: false,
+    };
+    config.recognizers.push(declaration.clone());
+    let mut rule = config.rules.remove(0);
+    rule.enabled = true;
+    rule.trigger = Trigger::Custom {
+        recognizer: declaration,
+        timeout: Millis(1000),
+        wake: None,
+    };
+    let caps = BTreeSet::from([Capability::Observations]);
+    let mut legacy = config.clone();
+    legacy.recognizers.clear();
+    legacy.rules.push(rule.clone());
+    for config in [config, legacy] {
+        let mut rule = rule.clone();
+        let mut rules = Rules::new(Some(Arc::new(config)));
+        let proposal = |id, revision, change| RuleProposal {
+            id,
+            transaction: Transaction {
+                revision,
+                changes: vec![change],
+            },
+        };
+        for (id, change) in [
+            (
+                1,
+                Change::Replace {
+                    rule: Box::new(rule.clone()),
+                },
+            ),
+            (
+                2,
+                Change::Remove {
+                    id: rule.id.clone(),
+                },
+            ),
+            (
+                3,
+                Change::Replace {
+                    rule: Box::new(rule.clone()),
+                },
+            ),
+        ] {
+            rules
+                .prepare(proposal(id, id, change), &caps, &[], Duration::ZERO)
+                .unwrap();
+            rules.pending.as_mut().unwrap().sent = true;
+            rules
+                .receipt(
+                    &RuleReceipt {
+                        id,
+                        revision: id + 1,
+                        error: None,
+                    },
+                    Duration::ZERO,
+                )
+                .unwrap();
+        }
+        let Trigger::Custom { recognizer, .. } = &mut rule.trigger else {
+            unreachable!()
+        };
+        recognizer.name = "unapproved".into();
+        assert!(
+            rules
+                .prepare(
+                    proposal(
+                        4,
+                        4,
+                        Change::Replace {
+                            rule: Box::new(rule)
+                        }
+                    ),
+                    &caps,
+                    &[],
+                    Duration::ZERO
+                )
+                .is_err()
+        );
+        assert!(!rules.busy());
+        assert_eq!(rules.revision(), 4);
+    }
+}
 #[test]
 fn public_morf_transport_remains_gated_before_rendered_context_and_physical_cutover() {
     let mut config = Config::preset("desktop").unwrap();

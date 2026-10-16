@@ -266,6 +266,7 @@
 ---@field layers? prek.Layer[] At most 64 declarations.
 ---@field modes? prek.NamedMode[] At most 64 declarations and one active selection.
 ---@field shapes? prek.ShapeTemplate[]
+---@field recognizers? prek.RecognizerDeclaration[] Canonical source-approved declarations retained for runtime rule additions; at most 64.
 ---@field rules? prek.Rule[]
 ---@class (exact) prek.Preset: prek.Config
 ---@field version integer

@@ -7,10 +7,11 @@ use serde_json::Value;
 /// Closures and runtime registrations require their original approved source.
 pub fn export_config(config: &Config) -> Result<String, ConfigError> {
     config.validate()?;
-    if config
-        .rules
-        .iter()
-        .any(|rule| matches!(rule.trigger, crate::config::Trigger::Custom { .. }))
+    if !config.recognizers.is_empty()
+        || config
+            .rules
+            .iter()
+            .any(|rule| matches!(rule.trigger, crate::config::Trigger::Custom { .. }))
     {
         return Err(error(
             "custom recognizers require their original approved source",

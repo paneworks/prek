@@ -121,6 +121,25 @@ pub(super) fn bindings(registrations: &[Registration]) -> Vec<Binding> {
         })
         .collect()
 }
+pub(super) fn merge(config: &mut Config, bindings: &[Binding]) -> Result<(), ConfigError> {
+    for binding in bindings {
+        if let Some(existing) = config
+            .recognizers
+            .iter()
+            .find(|definition| definition.name == binding.definition.name)
+        {
+            if existing != &binding.definition {
+                return Err(error(
+                    "recognizer registry differs from its canonical source declaration",
+                ));
+            }
+        } else {
+            config.recognizers.push(binding.definition.clone());
+        }
+    }
+    config.recognizers.sort_by(|a, b| a.name.cmp(&b.name));
+    config.validate()
+}
 
 pub(super) fn validate(
     bindings: &[Binding],
@@ -160,9 +179,25 @@ pub(super) fn validate(
             ));
         }
     }
-    if registrations.iter().any(|entry| entry.recognizer.as_ref().is_some_and(|definition| !bindings.iter().any(|binding| binding.subscription == entry.id && &binding.definition == definition)))
-        || config.rules.iter().any(|rule| matches!(&rule.trigger, crate::config::Trigger::Custom { recognizer, .. } if !bindings.iter().any(|binding| &binding.definition == recognizer && registrations.iter().any(|entry| entry.id == binding.subscription && entry.recognizer.as_ref() == Some(recognizer))))) {
-        return Err(error("custom recognizer rules and source registrations require exact approved callback bindings"));
+    if registrations.iter().any(|entry| {
+        entry.recognizer.as_ref().is_some_and(|definition| {
+            !config.recognizers.contains(definition)
+                || !bindings.iter().any(|binding| {
+                    binding.subscription == entry.id && &binding.definition == definition
+                })
+        })
+    }) || config.recognizer_definitions().iter().any(|recognizer| {
+        !bindings.iter().any(|binding| {
+            &binding.definition == recognizer
+                && registrations.iter().any(|entry| {
+                    entry.id == binding.subscription
+                        && entry.recognizer.as_ref() == Some(recognizer)
+                })
+        })
+    }) {
+        return Err(error(
+            "custom recognizer rules and source registrations require exact approved callback bindings",
+        ));
     }
     Ok(())
 }

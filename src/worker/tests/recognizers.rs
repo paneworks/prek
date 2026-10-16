@@ -30,6 +30,79 @@ fn startup_preflight_validates_declarations_without_inventing_a_coordinator_fenc
     config.policy.allow_input_events = false;
     assert!(super::super::preflight(&config).is_err());
 }
+
+#[test]
+fn unused_declarations_support_atomic_add_remove_and_readd_without_a_template() {
+    use crate::rule_transactions::{Change, Transaction};
+    let mut config = profile();
+    let rule = config.rules[0].clone();
+    let Trigger::Custom { recognizer, .. } = &rule.trigger else {
+        unreachable!()
+    };
+    config.recognizers = vec![recognizer.clone()];
+    config.rules.clear();
+    let mut registry = registry(config);
+    update(&mut registry, 1, vec![owner(100)], 100);
+    assert_eq!(metadata(&registry).len(), 1);
+    let transaction = |revision, changes| Transaction { revision, changes };
+    for (revision, changes) in [
+        (
+            1,
+            vec![Change::Replace {
+                rule: Box::new(rule.clone()),
+            }],
+        ),
+        (
+            2,
+            vec![Change::Remove {
+                id: rule.id.clone(),
+            }],
+        ),
+        (
+            3,
+            vec![Change::Replace {
+                rule: Box::new(rule.clone()),
+            }],
+        ),
+    ] {
+        assert_eq!(
+            registry
+                .transact_rules(
+                    "seat0",
+                    owner(100).fence,
+                    &transaction(revision, changes),
+                    ms(101)
+                )
+                .unwrap(),
+            revision + 1
+        );
+    }
+    let mut forged = rule;
+    let Trigger::Custom { recognizer, .. } = &mut forged.trigger else {
+        unreachable!()
+    };
+    recognizer.reply_within = Millis(1);
+    assert!(
+        registry
+            .transact_rules(
+                "seat0",
+                owner(100).fence,
+                &transaction(
+                    4,
+                    vec![Change::Replace {
+                        rule: Box::new(forged)
+                    }]
+                ),
+                ms(102)
+            )
+            .is_err()
+    );
+    assert_eq!(registry.observers["seat0"].engine.rule_revision(), 4);
+    clear(&mut registry);
+    key(&mut registry, source(1, "seat0"), 103, 1, true, 103);
+    tick(&mut registry, 104);
+    assert_eq!(tickets(&registry)[0].revision, 4);
+}
 fn owner(at: u64) -> Subscription {
     let mut owner = input_subscription("seat0", at);
     owner.capabilities.remove(&Capability::InputEvents);
