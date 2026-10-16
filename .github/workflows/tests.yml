@@ -21,10 +21,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@main
-      - name: Check installed module, Lua editor and private Wayland proxy
+      - name: Check installed module, Lua editor, routing helper and Wayland proxy
         run: |
           prek_system="$(nix eval --impure --raw --expr builtins.currentSystem)"
-          nix build --no-write-lock-file ".#checks.${prek_system}.nixos-module" ".#checks.${prek_system}.lua-editor" ".#checks.${prek_system}.wayland-proxy"
+          nix build --no-write-lock-file ".#checks.${prek_system}.nixos-module" ".#checks.${prek_system}.lua-editor" ".#checks.${prek_system}.native-routing-helper" ".#checks.${prek_system}.wayland-proxy"
 
   verify:
     env:
@@ -52,11 +52,16 @@ jobs:
             cargo-${{ runner.os }}-${{ runner.arch }}-${{ matrix.rust }}-
       - name: Verify
         run: |
+          set -euo pipefail
           cargo fmt --all -- --check
           cargo check --locked --all-targets --all-features
           cargo clippy --locked --all-targets --all-features -- -Dwarnings
           cargo test --locked --all-targets --all-features
           RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps
           cargo build --locked --bin prek
+          PREK_TEST_LUA_BINARY="$PWD/target/debug/prek" cargo test --locked --lib \
+            route_worker::tests::recognizers::actual::supervised_callbacks_cross_the_sole_worker_protocol_with_native_ownership \
+            -- --exact --ignored --test-threads=1 | tee target/native-routing-helper.log
+          grep -F 'test result: ok. 1 passed; 0 failed;' target/native-routing-helper.log
           cargo run --locked -- --help
 

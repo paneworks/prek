@@ -596,6 +596,7 @@ oslo make run
 oslo make run --device /dev/input/by-id/YOUR-DEVICE
 oslo make example
 oslo make verify
+oslo make test-routing-helper
 ```
 
 Direct checks are `cargo fmt --all -- --check`,

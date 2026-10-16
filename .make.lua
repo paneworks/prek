@@ -187,6 +187,23 @@ make.recipe{ name = "test", desc = "the suite",
              run = function() sh.cargo("test", "--locked", "--all-targets") end }
 make.alias("t", "test")
 
+make.recipe{
+  name = "test-routing-helper",
+  desc = "test sole-worker callbacks with the real unprivileged Lua helper",
+  deps = { "build" },
+  run = function()
+    local binary = project_root() .. "/target/debug/" .. NAME
+    local tested = oslo.run{ "env", "PREK_TEST_LUA_BINARY=" .. binary,
+      "cargo", "test", "--locked", "--lib",
+      "route_worker::tests::recognizers::actual::supervised_callbacks_cross_the_sole_worker_protocol_with_native_ownership",
+      "--", "--exact", "--ignored", "--test-threads=1", capture = true }
+    io.write(tested.out or "")
+    io.stderr:write(tested.err or "")
+    assert(tested.ok and (tested.out or ""):find("test result: ok. 1 passed;", 1, true),
+           "native routing helper test failed or selected no case")
+  end,
+}
+
 make.recipe{ name = "test-all", desc = "the suite, with every feature on",
              run = function() sh.cargo("test", "--locked", "--all-targets", "--all-features") end }
 
@@ -226,6 +243,6 @@ make.alias("c", "compile")
 make.recipe{
   name = "verify",
   desc = "the whole local gate",
-  deps = { "fmt-check", "check-all", "test-all", "clippy", "rustdoc" },
+  deps = { "fmt-check", "check-all", "test-all", "test-routing-helper", "clippy", "rustdoc" },
 }
 make.alias("v", "verify")

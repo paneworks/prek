@@ -5,6 +5,8 @@ use prek::{
     protocol::{Epoch, Fence},
 };
 use std::{path::Path, time::Duration};
+#[path = "lua_session/routing.rs"]
+mod native_routing;
 fn fence(generation: u64) -> Fence {
     Fence {
         broker: Epoch([1, 2]),

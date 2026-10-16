@@ -1,4 +1,5 @@
 //! Private-channel fixtures model native readiness without opening device nodes.
+mod actual;
 use super::*;
 use crate::{
     config::{Action, Delivery, Millis, Scope, Selector, Trigger},

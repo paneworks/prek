@@ -138,7 +138,17 @@ virtual transports; original descriptor-close acknowledgments remain separate.
 Transport recovery cancels its custom candidates and invalidates parent effects.
 
 Private-channel tests exercise this bridge with explicit context/readiness and a
-test-owned metadata directory. They open neither evdev nor uinput. This is not
+test-owned metadata directory. `oslo make test-routing-helper` builds the matching
+executable and runs the sole-worker protocol through its actual separately
+supervised Luna helper: begin/update/end, exact source identities, native
+consumption, ordered validation receipts and acknowledged closure cleanup.
+The same check ships as `checks.<system>.native-routing-helper`; local `verify`
+and native x86-64/ARM64 CI include it. The executable-provisioned case is ignored
+by ordinary unit invocations; both explicit gates reject a zero-test selection.
+Three ordinary helper integration cases also verify native continuous phase order,
+late results after transport loss and exact-once unmatched raw fallback.
+
+These tests open neither evdev nor uinput. This is not
 privileged integration acceptance: CLI routing remains disabled, and the native
 pre/post-grab backlog and authenticated ownership gates remain unresolved.
 

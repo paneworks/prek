@@ -174,6 +174,13 @@
           pkgs = nixpkgs.legacyPackages.${system};
           package = self.packages.${system}.default;
         in {
+          native-routing-helper = pkgs.runCommand "prek-native-routing-helper-check" {} ''
+            PREK_TEST_LUA_BINARY=${package}/bin/prek \
+              ${package.nativeTests}/libexec/prek-native-tests \
+              --exact route_worker::tests::recognizers::actual::supervised_callbacks_cross_the_sole_worker_protocol_with_native_ownership \
+              --ignored --test-threads=1 > "$out" 2>&1 || { cat "$out"; exit 1; }
+            ${pkgs.gnugrep}/bin/grep -F 'test result: ok. 1 passed; 0 failed;' "$out" || { cat "$out"; exit 1; }
+          '';
           root-handoff-launcher = pkgs.runCommand "prek-root-handoff-launcher-check" {
             nativeBuildInputs = [ pkgs.bash pkgs.shellcheck ];
           } ''
