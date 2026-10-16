@@ -302,6 +302,14 @@ and reconcile held state. Runtime rule edits may reuse source-approved
 declarations, including restoring a removed rule, but cannot add declarations.
 Lua bindings must match any corresponding native rule declaration exactly.
 
+Routing preflight retains the existing coordinator fence during valid edits and
+reloads. Rule edits keep the configuration fence; a source reload advances it
+and can replace the approved declarations. Successful changes retire every
+attached routing transport and queued dispatch. The embedding must consume the
+recoveries and establish fresh neutral readiness with a newer source incarnation
+before reattaching. Rejected edits preserve the old routes, tickets and model.
+An internal generation override cannot disagree with a custom ticket fence.
+
 The routing coordinator supplies actual router ownership and winner identity.
 Each consuming candidate is additionally bound to the original source/router
 ticket/authorization; a later physical group cannot inherit old proposals. A

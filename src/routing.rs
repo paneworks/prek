@@ -97,7 +97,13 @@ impl Routing {
         ) || matches!(custom_ownership(&self.routes, &self.custom_groups, intent.source(), &intent.rule, intent.id()), (Some(Ownership::Claimed), Some(winner)) if winner == intent.id())
     }
     pub(crate) fn configuration_generation(&mut self, generation: u64) -> io::Result<()> {
-        if generation == 0 || !self.routes.is_empty() {
+        if generation == 0
+            || !self.routes.is_empty()
+            || self
+                .engine
+                .recognition_fence()
+                .is_some_and(|fence| fence.configuration != generation)
+        {
             return Err(io::Error::other(
                 "routing generation requires a fresh coordinator",
             ));
@@ -854,7 +860,7 @@ impl Routing {
             .prepare(self.engine.config(), self.engine.rule_revision())
             .map_err(io::Error::other)?;
         // Includes the transport-specific timing checks before any retirement.
-        Self::new(config)?;
+        Self::build(config, self.engine.recognition_fence())?;
         let revision = self.engine.transact_rules(transaction, at)?;
         let sources: Vec<_> = self.routes.keys().cloned().collect();
         for source in sources {
@@ -868,7 +874,7 @@ impl Routing {
     pub fn reload(&mut self, config: Config, at: Duration) -> io::Result<()> {
         // Compile/validate first. An invalid replacement preserves both the
         // old model and every transport's pending/claimed ownership.
-        Self::new(config.clone())?;
+        Self::build(config.clone(), self.engine.recognition_fence())?;
         self.engine.reload(config, at)?;
         let sources: Vec<_> = self.routes.keys().cloned().collect();
         for source in sources {

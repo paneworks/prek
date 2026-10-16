@@ -71,6 +71,189 @@ fn reply(ticket: &Ticket, phase: Phase) -> Proposal {
         data: serde_json::json!({"native":"validated"}),
     }
 }
+fn replacement_source(routing: &mut Routing, at: u64) -> Device {
+    let mut device = keyboard();
+    device.source.generation += 1;
+    routing
+        .attach(device.clone(), &ready(&device), None, ms(at))
+        .unwrap();
+    routing
+        .push(Record::Frame {
+            frame: Frame {
+                source: device.source.clone(),
+                at: ms(at + 1),
+                sequence: 1,
+                events: vec![
+                    RawEvent {
+                        kind: EV_KEY,
+                        code: 30,
+                        value: 1,
+                    },
+                    RawEvent {
+                        kind: EV_SYN,
+                        code: SYN_REPORT,
+                        value: 0,
+                    },
+                ],
+            },
+        })
+        .unwrap();
+    device
+}
+
+#[test]
+fn routing_transactions_retain_approved_custom_declarations_through_remove_and_readd() {
+    use crate::rule_transactions::{Change, Transaction};
+    for explicit in [false, true] {
+        let mut profile = profile(Delivery::Reserve, false, false);
+        if explicit && let Trigger::Custom { recognizer, .. } = &profile.rules[0].trigger {
+            profile.recognizers.push(recognizer.clone());
+        }
+        let original = profile.rules[0].clone();
+        let mut routing = custom(profile, false);
+        press(&mut routing, 1, 0, true);
+        let old = request(&mut routing, 0);
+        assert_eq!(
+            routing
+                .transact_rules(
+                    &Transaction {
+                        revision: 1,
+                        changes: vec![Change::Remove {
+                            id: original.id.clone()
+                        }],
+                    },
+                    ms(1)
+                )
+                .unwrap(),
+            2
+        );
+        assert_eq!(routing.take_recoveries().len(), 1);
+        assert_eq!(
+            routing.take_recognition_cancellations()[0].candidate,
+            old.candidate
+        );
+        assert!(routing.routes.is_empty() && routing.take_dispatches(ms(1)).is_empty());
+        assert_eq!(
+            routing
+                .transact_rules(
+                    &Transaction {
+                        revision: 2,
+                        changes: vec![Change::Replace {
+                            rule: Box::new(original)
+                        }],
+                    },
+                    ms(2)
+                )
+                .unwrap(),
+            3
+        );
+        let device = replacement_source(&mut routing, 3);
+        let fresh = request(&mut routing, 4);
+        assert_eq!(fresh.input.source(), &device.source);
+        assert_eq!(fresh.revision, 3);
+        assert!(fresh.id > old.id);
+        assert!(
+            routing
+                .recognition_response(reply(&old, Phase::Discrete), ms(5))
+                .is_err()
+        );
+        routing
+            .recognition_response(reply(&fresh, Phase::Discrete), ms(5))
+            .unwrap();
+        assert_eq!(routing.take_dispatches(ms(5)).len(), 1);
+    }
+}
+
+#[test]
+fn routing_custom_reload_advances_fence_and_retires_old_transport_and_ticket() {
+    let profile = profile(Delivery::Buffer, false, false);
+    let mut routing = custom(profile.clone(), false);
+    press(&mut routing, 1, 0, true);
+    let old = request(&mut routing, 0);
+    let mut replacement = profile;
+    replacement.rules[0].id = "after-reload".into();
+    if let Trigger::Custom { recognizer, .. } = &mut replacement.rules[0].trigger {
+        recognizer.name = "after-source-reload".into();
+    }
+    routing.reload(replacement, ms(1)).unwrap();
+    assert!(routing.routes.is_empty());
+    assert_eq!(routing.take_recoveries().len(), 1);
+    assert_eq!(
+        routing.take_recognition_cancellations()[0].candidate,
+        old.candidate
+    );
+    replacement_source(&mut routing, 2);
+    let fresh = request(&mut routing, 3);
+    assert_eq!(fresh.recognizer, "after-source-reload");
+    assert_eq!(fresh.fence.configuration, 2);
+    assert_eq!(fresh.fence.session, old.fence.session);
+    assert_eq!(fresh.fence.broker, old.fence.broker);
+    assert!(fresh.id > old.id);
+    assert!(
+        routing
+            .recognition_response(reply(&old, Phase::Discrete), ms(4))
+            .is_err()
+    );
+    routing
+        .recognition_response(reply(&fresh, Phase::Discrete), ms(4))
+        .unwrap();
+    assert!(
+        matches!(&routing.take_dispatches(ms(4))[..], [Event::Matched {
+        rule, config_generation: 2, ..
+    }] if rule == "after-reload")
+    );
+}
+
+#[test]
+fn routing_custom_generation_cannot_diverge_from_its_ticket_fence() {
+    let mut routing =
+        Routing::with_recognition(profile(Delivery::Buffer, false, false), fence()).unwrap();
+    assert!(routing.configuration_generation(0).is_err());
+    assert!(routing.configuration_generation(2).is_err());
+    assert_eq!(routing.engine.generation(), 1);
+    assert_eq!(routing.engine.recognition_fence(), Some(fence()));
+    routing.configuration_generation(1).unwrap();
+    let mut ordinary = Routing::new(config()).unwrap();
+    ordinary.configuration_generation(2).unwrap();
+    assert_eq!(ordinary.engine.generation(), 2);
+}
+
+#[test]
+fn routing_rejects_unapproved_custom_edits_without_retiring_pending_input() {
+    use crate::rule_transactions::{Change, Transaction};
+    let profile = profile(Delivery::Buffer, false, false);
+    let mut routing = custom(profile.clone(), false);
+    press(&mut routing, 1, 0, true);
+    let old = request(&mut routing, 0);
+    let mut rule = profile.rules[0].clone();
+    if let Trigger::Custom { recognizer, .. } = &mut rule.trigger {
+        recognizer.name = "unapproved".into();
+    }
+    assert!(
+        routing
+            .transact_rules(
+                &Transaction {
+                    revision: 1,
+                    changes: vec![Change::Replace {
+                        rule: Box::new(rule)
+                    }],
+                },
+                ms(1)
+            )
+            .is_err()
+    );
+    let mut bad_reload = profile;
+    bad_reload.timing.join_window = bad_reload.timing.decision_window;
+    assert!(routing.reload(bad_reload, ms(1)).is_err());
+    assert_eq!(routing.rule_revision(), 1);
+    assert_eq!(routing.routes.len(), 1);
+    assert!(routing.take_recoveries().is_empty());
+    assert!(routing.take_recognition_cancellations().is_empty());
+    routing
+        .recognition_response(reply(&old, Phase::Discrete), ms(2))
+        .unwrap();
+    assert_eq!(routing.take_dispatches(ms(2)).len(), 1);
+}
 fn press(routing: &mut Routing, sequence: u64, at: u64, down: bool) {
     frame(routing, sequence, at, &[(EV_KEY, 30, i32::from(down))]);
 }

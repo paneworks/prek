@@ -506,6 +506,9 @@ impl Engine {
     pub fn rule_revision(&self) -> u64 {
         self.rule_revision
     }
+    pub(crate) fn recognition_fence(&self) -> Option<crate::protocol::Fence> {
+        self.custom.as_ref().map(|custom| custom.fence)
+    }
     pub(crate) fn enable_routing(&mut self) {
         self.routing = true;
         for worker in &mut self.workers {
