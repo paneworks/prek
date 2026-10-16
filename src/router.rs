@@ -16,6 +16,9 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     time::Duration,
 };
+mod chain;
+use chain::Retention;
+pub use chain::{ChainAdmission, ChainToken, ClaimedChain};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Policy {
@@ -189,6 +192,10 @@ struct Group {
     pending: Vec<Frame>,
     preview: Option<crate::input::AbsoluteState>,
     completion: bool,
+    chain: bool,
+    first_segment: u64,
+    last_segment: u64,
+    last_first: Duration,
 }
 
 /// All descriptor lifetime operations remain the backend's responsibility.
@@ -218,6 +225,7 @@ pub struct Router {
     last_sequence: Option<u64>,
     next_ticket: u64,
     last_candidate: u64,
+    next_segment: u64,
     stopped: bool,
     recovered: bool,
 }
@@ -259,6 +267,7 @@ impl Router {
             last_sequence: None,
             next_ticket: 0,
             last_candidate: 0,
+            next_segment: 0,
             stopped: false,
             recovered: false,
         })
@@ -276,6 +285,7 @@ impl Router {
     pub(crate) fn release_completion(&mut self) {
         if let Some(group) = &mut self.group {
             group.completion = false;
+            group.chain = false;
         }
         if self.physical.neutral() && self.ownership() != Some(Ownership::Pending) {
             self.group = None;
@@ -401,6 +411,7 @@ impl Router {
         self.offset = self.offset.max(delay);
         group.ownership = Ownership::Forwarded;
         group.completion = false;
+        group.chain = false;
         group.preview = None;
         let pending = std::mem::take(&mut group.pending);
         for frame in pending {
@@ -462,6 +473,15 @@ impl Router {
         at: Duration,
         completion: bool,
     ) -> Result<(), Fault> {
+        self.push_inner(frame, candidate, at, Retention::Single(completion))
+    }
+    fn push_inner(
+        &mut self,
+        frame: Frame,
+        candidate: Option<Candidate>,
+        at: Duration,
+        retention: Retention<'_>,
+    ) -> Result<(), Fault> {
         // A delayed old reader must not stop a newly connected stream.
         if frame.source != self.device.source {
             return Err(Fault::StaleSource);
@@ -493,7 +513,7 @@ impl Router {
             Err(error) => return self.fail(error),
         };
         let begins = starts
-            || candidate.is_some()
+            || (candidate.is_some() || matches!(retention, Retention::Continue(_)))
                 && frame.events.iter().any(|event| {
                     matches!(event.kind, crate::input::EV_REL | crate::input::EV_SW)
                         && event.value != 0
@@ -505,6 +525,22 @@ impl Router {
                     .events
                     .iter()
                     .any(|event| event.kind == EV_REL && event.value != 0 || event.kind == EV_SW));
+        match retention {
+            Retention::Start => {
+                if candidate.is_none_or(|candidate| candidate.policy == Policy::Observe)
+                    || self.group.as_ref().is_some_and(|group| group.chain)
+                {
+                    return Err(Fault::InvalidCandidate);
+                }
+            }
+            Retention::Continue(token) => {
+                self.continuation(token)?;
+                if candidate.is_some() || !self.physical.neutral() || !begins {
+                    return Err(Fault::InvalidCandidate);
+                }
+            }
+            Retention::Single(_) => {}
+        }
         // Reject caller mistakes before mutating physical state or decisions.
         if let Some(value) = candidate
             && (!begins
@@ -520,18 +556,33 @@ impl Router {
             return Err(Fault::InvalidCandidate);
         }
         self.advance(frame.at)?;
-        if completed {
+        let joining = matches!(retention,Retention::Continue(token)
+            if self.chain_ownership(token,frame.at).is_some());
+        if completed && !joining {
             self.release_completion();
         }
         // A completed pending tap may be followed by another group before its
         // decision deadline. Commit that tap before accepting the new start.
         if self.physical.neutral()
+            && !joining
             && self
                 .group
                 .as_ref()
                 .is_some_and(|group| group.ownership == Ownership::Pending)
         {
             self.forward(frame.at)?;
+        }
+        if joining {
+            let group = self.group.as_mut().unwrap();
+            if group.last_segment - group.first_segment + 1 >= self.limits.frames as u64 {
+                return self.fail(Fault::Overflow);
+            }
+            let Some(serial) = self.next_segment.checked_add(1) else {
+                return self.fail(Fault::Overflow);
+            };
+            self.next_segment = serial;
+            group.last_segment = serial;
+            group.last_first = frame.at;
         }
         if self.group.is_none() && begins {
             if let Some(value) = candidate {
@@ -542,13 +593,21 @@ impl Router {
                 Some(Policy::Reserve) => Ownership::Claimed,
                 Some(Policy::Observe) | None => Ownership::Forwarded,
             };
+            let Some(serial) = self.next_segment.checked_add(1) else {
+                return self.fail(Fault::Overflow);
+            };
+            self.next_segment = serial;
             self.group = Some(Group {
                 candidate,
                 first: frame.at,
                 ownership,
                 pending: Vec::new(),
                 preview: (ownership == Ownership::Pending).then(|| self.planned_absolute.clone()),
-                completion: completion && candidate.is_some(),
+                completion: retention.retains() && candidate.is_some(),
+                chain: matches!(retention, Retention::Start),
+                first_segment: serial,
+                last_segment: serial,
+                last_first: frame.at,
             });
         } else if candidate.is_some() {
             return Err(Fault::InvalidCandidate);
@@ -654,7 +713,7 @@ impl Router {
             ..
         }) = group.candidate
             && !finished
-            && at.saturating_sub(group.first) < join
+            && at.saturating_sub(group.last_first) < join
         {
             return Err(Fault::TooLate);
         }
@@ -681,7 +740,8 @@ impl Router {
             policy: Policy::Buffer { join, decision },
             ..
         }) = group.candidate
-            && (at >= group.first + decision || !self.physical.neutral() && at < group.first + join)
+            && (at >= group.first + decision
+                || !self.physical.neutral() && at < group.last_first + join)
         {
             return Err(Fault::TooLate);
         }
@@ -697,6 +757,7 @@ impl Router {
             Some(Ownership::Claimed) => {
                 self.group.as_mut().unwrap().ownership = Ownership::Draining;
                 self.group.as_mut().unwrap().completion = false;
+                self.group.as_mut().unwrap().chain = false;
             }
             _ => return Err(Fault::TooLate),
         }
@@ -779,6 +840,7 @@ impl Router {
 
 #[cfg(test)]
 mod tests {
+    mod chain;
     use super::*;
     use crate::{
         input::{ABS_MT_POSITION_X, ABS_MT_POSITION_Y},
