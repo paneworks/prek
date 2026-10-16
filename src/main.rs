@@ -988,6 +988,9 @@ fn run_broker(
             }
             match control.receive::<prek::worker::Message>() {
                 Ok(Some(packet)) => match packet.message {
+                    prek::worker::Message::RecognitionResult { .. } => {
+                        return Err(io::Error::other("unsolicited worker recognizer receipt"));
+                    }
                     prek::worker::Message::Released {
                         worker,
                         fence,

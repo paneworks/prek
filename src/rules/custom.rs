@@ -13,6 +13,8 @@ pub(super) struct State {
     pub fence: Fence,
     pub gate: Gate,
     pub approved: Vec<recognition::Definition>,
+    ready: bool,
+    ready_at: Duration,
     live: BTreeSet<u64>,
     offers: VecDeque<Offer>,
     bytes: usize,
@@ -33,10 +35,17 @@ pub(super) fn definitions(config: &Config) -> Vec<recognition::Definition> {
     definitions.into_values().collect()
 }
 impl State {
+    pub(super) fn ready(&self) -> bool {
+        self.ready
+    }
     pub fn new(config: &Config, fence: Option<Fence>) -> io::Result<Option<Self>> {
         let definitions = definitions(config);
         let Some(fence) = fence else {
-            if definitions.is_empty() {
+            if !config.rules.iter().any(|rule| {
+                rule.enabled
+                    && config.mode_active(rule)
+                    && matches!(rule.trigger, Trigger::Custom { .. })
+            }) {
                 return Ok(None);
             }
             return Err(invalid(
@@ -47,6 +56,8 @@ impl State {
             fence,
             gate: Gate::new(fence, definitions.clone())?,
             approved: definitions,
+            ready: true,
+            ready_at: Duration::ZERO,
             live: BTreeSet::new(),
             offers: VecDeque::new(),
             bytes: 0,
@@ -86,6 +97,16 @@ pub(super) fn frame(
     frame: &NormalizedFrame,
     context: FrameContext<'_>,
 ) {
+    if !context.custom.ready || frame.raw.at < context.custom.ready_at {
+        if let Recognizer::Custom { blocked, .. } = &mut worker.recognizer {
+            if !state.keys.is_empty() || !state.contacts.is_empty() {
+                blocked.insert(state.device.source.clone());
+            } else {
+                blocked.remove(&state.device.source);
+            }
+        }
+        return;
+    }
     let Trigger::Custom {
         recognizer,
         timeout,
@@ -287,6 +308,39 @@ fn input_context(state: &DeviceState, at: Duration) -> InputContext<'_> {
     super::input(state, at)
 }
 impl Engine {
+    pub(crate) fn recognition_ready(&mut self, ready: bool, at: Duration) -> io::Result<()> {
+        let Some(custom) = self.custom.as_ref() else {
+            return Ok(());
+        };
+        if custom.ready == ready {
+            return Ok(());
+        }
+        if !ready {
+            let ids: Vec<_> = self
+                .workers
+                .iter()
+                .filter(|worker| matches!(worker.rule.trigger, Trigger::Custom { .. }))
+                .flat_map(|worker| worker.candidates.values().map(|candidate| candidate.id))
+                .collect();
+            for id in ids {
+                self.custom_cancel(id, at, "recognizer helper is unavailable");
+            }
+            self.custom_sync(at, Retirement::Cancelled);
+        } else {
+            for worker in &mut self.workers {
+                if matches!(worker.rule.trigger, Trigger::Custom { .. }) {
+                    for state in self.devices.values() {
+                        worker.register(state, &self.config)?;
+                    }
+                }
+            }
+        }
+        self.custom.as_mut().unwrap().ready = ready;
+        if ready {
+            self.custom.as_mut().unwrap().ready_at = at;
+        }
+        Ok(())
+    }
     fn custom_intent(&self, id: u64, at: Duration) -> Option<RouteIntent> {
         let (worker, candidate) = self.workers.iter().find_map(|worker| {
             worker
@@ -387,6 +441,9 @@ impl Engine {
             return;
         };
         custom.gate.expire(at);
+        if !custom.ready {
+            return;
+        }
         for worker in &mut self.workers {
             let Trigger::Custom {
                 wake: Some(interval),
@@ -529,10 +586,29 @@ impl Engine {
         at: Duration,
         ownership: impl Fn(&Source, &Rule, u64) -> (Option<Ownership>, Option<u64>),
     ) -> io::Result<()> {
-        if self.last_at.is_some_and(|last| at < last) {
+        self.recognition_response_clocked(proposal, at, at, ownership)
+    }
+    /// The live reader drains input to its watermark before admitting replies.
+    /// Wall-clock validation must not advance input timers past unread frames.
+    pub(crate) fn recognition_response_after_input(
+        &mut self,
+        proposal: Proposal,
+        input_at: Duration,
+        now: Duration,
+    ) -> io::Result<()> {
+        self.recognition_response_clocked(proposal, input_at, now, |_, _, _| (None, None))
+    }
+    fn recognition_response_clocked(
+        &mut self,
+        proposal: Proposal,
+        input_at: Duration,
+        at: Duration,
+        ownership: impl Fn(&Source, &Rule, u64) -> (Option<Ownership>, Option<u64>),
+    ) -> io::Result<()> {
+        if input_at > at || self.last_at.is_some_and(|last| input_at < last) {
             return Err(invalid("custom reply clock regressed"));
         }
-        self.advance(at)?;
+        self.advance(input_at)?;
         let id = self
             .custom
             .as_ref()

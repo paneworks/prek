@@ -78,7 +78,7 @@ fn authorize(runtime: &mut Runtime, at: Duration) {
                 fence: fence(),
                 sampled_at: at,
                 negotiated: BTreeSet::from([
-                    Capability::InputEvents,
+                    Capability::CustomRecognizers,
                     Capability::LuaEvents,
                     Capability::Context,
                     Capability::Observations,

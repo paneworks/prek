@@ -34,8 +34,7 @@ pub(super) fn validate(
         if config.rules.iter().any(|rule| matches!(&rule.trigger, crate::config::Trigger::Custom { recognizer, .. } if recognizer.name == binding.definition.name && recognizer != &binding.definition)) {
             return Err(error("recognizer binding differs from its native rule declaration"));
         }
-        if config.mode != crate::config::Mode::Observe
-            || !config.policy.allow_input_events
+        if !config.policy.allow_input_events
             || !binding.definition.selectors.iter().all(|selector| {
                 config.devices.contains_key(selector)
                     && config.policy.allowed_devices.contains(selector)
@@ -110,7 +109,7 @@ impl Runtime {
                 .policy
                 .allowed_seats
                 .contains(&ticket.input.source().seat)
-            && crate::input_events::permitted_subscription(
+            && crate::recognition::permitted_subscription(
                 &self.config,
                 &capabilities.negotiated,
                 view.context.as_deref(),

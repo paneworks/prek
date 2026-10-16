@@ -45,6 +45,9 @@ pub enum Capability {
     Observations,
     LuaEvents,
     InputEvents,
+    /// Private recognizer coordination; public broker negotiation stays closed
+    /// until authenticated helper readiness and cleanup are connected.
+    CustomRecognizers,
     LuaActions,
     RuntimeRules,
     HyprlandActions,

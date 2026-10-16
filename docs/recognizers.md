@@ -3,7 +3,9 @@
 `recognition::Gate` is the Rust ticket/response component for the planned Lua
 recognizer path. Internal host bindings connect approved source callbacks through
 the supervised Lua helper; opt-in native rule/routing coordinators create and
-arbitrate their tickets. The authenticated live broker/input-worker bridge and
+arbitrate their tickets. The private observation worker now transports tickets,
+readiness acknowledgements, native validation receipts and cancellation identities.
+The authenticated live broker/session bridge and
 source-level constructor remain required; custom recognizers are not yet
 available through `prek session`.
 
@@ -34,8 +36,8 @@ The ticket has `cause=timer`, a new Rust `requested_at` and response deadline,
 and retains the last physical frame's timestamp and sequence. Changes, contact
 births/releases and ended positions are cleared; retained contacts are marked
 non-fresh. This never extends a previous ticket. Repeated wake times, changed
-candidates and retired sources fail. Scheduling approved wakes and connecting
-actual input-worker retirement causes remain coordinator integration work.
+candidates and retired sources fail. The private observation worker schedules
+approved wakes and retires work on source changes, rule edits and readiness loss.
 
 `Gate::validate` consumes a known ticket and rechecks the current authoritative
 candidate, source/eligibility revision, deadline and ownership. A forwarded or
@@ -67,8 +69,8 @@ retire completed candidates, changed eligibility and lost sources. Existing
 production routing and public custom-recognizer negotiation remain disabled.
 
 The preparatory Rust embedding API, `lua::Definition::bind_recognizer`, binds an
-approved `input` subscription ID to a declaration. It requires observation mode,
-protected normalized-input permission and explicit permitted device selectors.
+approved `input` subscription ID to a declaration. It requires protected
+normalized-input permission and explicit permitted device selectors.
 Names and subscription IDs are unique, with at most 64 bindings. Bindings travel
 with the approved complete source snapshot; re-evaluation must reproduce its
 configuration and subscription metadata. This is a host API, not the finished
@@ -76,8 +78,9 @@ Lua declaration interface. No new Lua constructor is advertised.
 
 After instantiation, the bound subscription receives only ticketed callbacks;
 ordinary input dispatch skips it. `Runtime::recognize` requires fresh owning
-desktop context, matching fence/seat, negotiated normalized-input capabilities
-and the original unexpired ticket. It checks these before execution and after
+desktop context, matching fence/seat, the separate `custom_recognizers` capability
+alongside Lua events, observations and context, and the original unexpired ticket.
+It checks these before execution and after
 the callback. Unknown, expired or foreign context produces no proposal without
 entering Lua. Repeated/reordered delivery is rejected before changing closure
 state. Up to 64 delivered candidate identities are retained for cleanup.
@@ -111,6 +114,19 @@ mean no recognition. This private transport does not create authenticated public
 broker or worker admission. The caller must pass any returned proposal back to
 the owning Rust gate; even a validated result still requires real routing
 arbitration.
+
+The private worker starts custom coordinators inactive. A protected subscription
+must carry `custom_recognizers` and fresh owning desktop context before the worker
+acknowledges readiness. Broad `input_events` permission alone never activates it.
+Enabling reconciles held keys/contacts; revocation cancels native candidates and
+purges unsent tickets. Only declared selectors/input kinds enter each ticket.
+Queues and unread receipts remain bounded; congestion ends the affected stream.
+Replies wait until the reader has drained input to its timestamp watermark.
+Deadline/context checks use the current clock without advancing input timers past
+unread frames. A receipt reports native proposal validation, not an input claim.
+Public capability negotiation still refuses this capability until the broker and
+session-helper readiness/cleanup ledgers are connected; the sole routing worker
+also still needs its live custom callback bridge.
 
 The embedding revokes the Rust gate before calling `Session::cancel_recognition`.
 The parent removes matching unsent work and retained results and discards any

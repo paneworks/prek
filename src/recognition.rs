@@ -26,6 +26,35 @@ pub const MAX_DATA_BYTES: usize = 4096;
 pub const MAX_CANCELLATION_BYTES: usize = 2048;
 pub const MAX_REPLY: Duration = Duration::from_millis(250);
 
+#[cfg(target_os = "linux")]
+pub(crate) fn permitted_subscription(
+    config: &crate::config::Config,
+    capabilities: &BTreeSet<crate::protocol::Capability>,
+    context: Option<&crate::worker::ProvidedContext>,
+    seat: &str,
+    session: u64,
+    now: Duration,
+) -> bool {
+    use crate::protocol::Capability;
+    config.policy.allow_input_events
+        && config
+            .policy
+            .allowed_seats
+            .iter()
+            .any(|allowed| allowed == seat)
+        && [
+            Capability::CustomRecognizers,
+            Capability::LuaEvents,
+            Capability::Observations,
+            Capability::Context,
+        ]
+        .iter()
+        .all(|capability| capabilities.contains(capability))
+        && context.is_some_and(|context| {
+            crate::input_events::permitted_context(context, seat, session, now)
+        })
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InputKind {

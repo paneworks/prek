@@ -59,6 +59,18 @@ pub struct Subscriptions {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Report {
+    RecognizerReady {
+        subscription: Subscription,
+        ready: bool,
+    },
+    Recognition {
+        subscription: Subscription,
+        ticket: Box<crate::recognition::Ticket>,
+    },
+    RecognitionCancelled {
+        subscription: Subscription,
+        cancellation: crate::recognition::Cancellation,
+    },
     Ready {
         subscription: Subscription,
     },
@@ -89,6 +101,12 @@ pub enum Report {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Message {
+    RecognitionResult {
+        seat: String,
+        fence: Fence,
+        ticket: u64,
+        error: Option<String>,
+    },
     MorfReady {
         activation: crate::morf::admission::Activation,
     },
@@ -121,6 +139,9 @@ impl Report {
     pub fn subscription(&self) -> &Subscription {
         match self {
             Self::Ready { subscription }
+            | Self::RecognizerReady { subscription, .. }
+            | Self::Recognition { subscription, .. }
+            | Self::RecognitionCancelled { subscription, .. }
             | Self::Observation { subscription, .. }
             | Self::Input { subscription, .. }
             | Self::Ended { subscription, .. }
@@ -138,6 +159,57 @@ struct Observer {
     engine: Engine,
     input_enabled: bool,
     input_started: Duration,
+    recognizer_ready: Option<bool>,
+}
+
+impl Observer {
+    fn sync_recognition(&mut self, config: &Config, now: Duration) -> io::Result<Vec<Report>> {
+        let ready = crate::recognition::permitted_subscription(
+            config,
+            &self.subscription.capabilities,
+            self.subscription.context.as_deref(),
+            &self.subscription.seat,
+            self.subscription.fence.session,
+            now,
+        );
+        if self.recognizer_ready == Some(ready)
+            || self.recognizer_ready.is_none()
+                && !self
+                    .subscription
+                    .capabilities
+                    .contains(&crate::protocol::Capability::CustomRecognizers)
+        {
+            return Ok(Vec::new());
+        }
+        self.engine.recognition_ready(ready, now)?;
+        self.recognizer_ready = Some(ready);
+        Ok(vec![Report::RecognizerReady {
+            subscription: self.subscription.identity(),
+            ready,
+        }])
+    }
+    fn take_recognition_reports(&mut self, input_at: Option<Duration>) -> io::Result<Vec<Report>> {
+        let tickets = if let Some(at) = input_at.filter(|_| self.recognizer_ready == Some(true)) {
+            self.engine.recognition_requests(at)?
+        } else {
+            Vec::new()
+        };
+        let subscription = self.subscription.identity();
+        let mut reports: Vec<_> = self
+            .engine
+            .take_recognition_cancellations()
+            .into_iter()
+            .map(|cancellation| Report::RecognitionCancelled {
+                subscription: subscription.clone(),
+                cancellation,
+            })
+            .collect();
+        reports.extend(tickets.into_iter().map(|ticket| Report::Recognition {
+            subscription: subscription.clone(),
+            ticket: Box::new(ticket),
+        }));
+        Ok(reports)
+    }
 }
 
 fn permits_input(config: &Config, subscription: &Subscription, now: Duration) -> bool {
@@ -150,6 +222,17 @@ fn permits_input(config: &Config, subscription: &Subscription, now: Duration) ->
         now,
     )
 }
+// Custom declarations are validated by Config; they create native candidates
+// only in a fenced seat engine. Preflight still compiles every ordinary rule.
+fn preflight_profile(config: &Config) -> Config {
+    let mut profile = config.clone();
+    for rule in &mut profile.rules {
+        if matches!(rule.trigger, crate::config::Trigger::Custom { .. }) {
+            rule.enabled = false;
+        }
+    }
+    profile
+}
 struct Registry {
     config: Config,
     baseline: Engine,
@@ -161,6 +244,7 @@ struct Registry {
 }
 impl Registry {
     fn new(config: Config) -> io::Result<Self> {
+        Engine::new(preflight_profile(&config))?;
         let mut baseline = config.clone();
         for rule in &mut baseline.rules {
             rule.enabled = false;
@@ -290,6 +374,15 @@ impl Registry {
                 subscription.same_registration(report.subscription())
                     && (!matches!(report, Report::Input { .. })
                         || permits_input(&self.config, subscription, now))
+                    && (!matches!(report, Report::Recognition { .. })
+                        || crate::recognition::permitted_subscription(
+                            &self.config,
+                            &subscription.capabilities,
+                            subscription.context.as_deref(),
+                            &subscription.seat,
+                            subscription.fence.session,
+                            now,
+                        ))
             })
         });
         self.bytes = self.reports.iter().map(|(_, bytes)| bytes).sum();
@@ -321,12 +414,14 @@ impl Registry {
                     *observer.engine.authority_mut() = authority;
                 }
                 observer.subscription = subscription;
+                initial_inputs.extend(observer.sync_recognition(&self.config, now)?);
+                initial_inputs.extend(observer.take_recognition_reports(None)?);
                 continue;
             }
             let mut engine = self.baseline.fork_observer(
                 self.config.clone(),
                 &subscription.seat,
-                subscription.fence.session,
+                subscription.fence,
                 now,
             )?;
             if let Some(authority) = authorities.remove(&subscription.seat) {
@@ -350,6 +445,7 @@ impl Registry {
                     engine,
                     input_enabled,
                     input_started: now,
+                    recognizer_ready: None,
                 },
             );
             self.queue(
@@ -358,9 +454,23 @@ impl Registry {
                 },
                 now,
             )?;
+            if let Some(observer) = self.observers.get_mut(&subscription.seat) {
+                initial_inputs.extend(observer.sync_recognition(&self.config, now)?);
+                initial_inputs.extend(observer.take_recognition_reports(None)?);
+            }
         }
         for report in initial_inputs {
-            self.queue(report, now)?;
+            if self
+                .observers
+                .get(&report.subscription().seat)
+                .is_some_and(|observer| {
+                    observer
+                        .subscription
+                        .same_registration(report.subscription())
+                })
+            {
+                self.queue(report, now)?;
+            }
         }
         self.revision = update.revision;
         Ok(())
@@ -438,7 +548,12 @@ impl Registry {
         });
         let bytes = match encoded {
             Ok(bytes) => bytes.len(),
-            Err(_) if matches!(report, Report::Observation { .. } | Report::Input { .. }) => {
+            Err(_)
+                if matches!(
+                    report,
+                    Report::Observation { .. } | Report::Input { .. } | Report::Recognition { .. }
+                ) =>
+            {
                 return self.end(
                     report.subscription().clone(),
                     "worker observation exceeds packet limit",
@@ -447,6 +562,21 @@ impl Registry {
             }
             Err(error) => return Err(error),
         };
+        if let Report::RecognizerReady { subscription, .. } = &report {
+            self.reports.retain(|(old, _)| !matches!(old, Report::RecognizerReady { subscription: previous, .. } if previous.same_registration(subscription)));
+            self.bytes = self.reports.iter().map(|(_, bytes)| bytes).sum();
+        }
+        if let Report::RecognitionCancelled {
+            subscription,
+            cancellation,
+        } = &report
+        {
+            self.reports.retain(|(old, _)| !matches!(old,
+                Report::Recognition { subscription: previous, ticket }
+                if previous.same_registration(subscription) && ticket.candidate == cancellation.candidate
+                    && ticket.revision == cancellation.revision && ticket.id <= cancellation.through));
+            self.bytes = self.reports.iter().map(|(_, bytes)| bytes).sum();
+        }
         if let Report::Observation {
             subscription,
             event,
@@ -498,6 +628,7 @@ impl Registry {
             if source.is_some_and(|source| source.seat != observer.subscription.seat) {
                 continue;
             }
+            reports.extend(observer.sync_recognition(&self.config, now)?);
             let input_enabled = observer.input_enabled
                 && permits_input(&self.config, &observer.subscription, now)
                 && !matches!(&record,Record::Frame {frame} if frame.at<observer.input_started)
@@ -617,6 +748,11 @@ impl Registry {
                     source,
                 });
             }
+            let input_at = match record {
+                Record::Tick { at } => Some(at),
+                _ => None,
+            };
+            reports.extend(observer.take_recognition_reports(input_at)?);
             for event in observer.engine.take_events() {
                 reports.push(Report::Observation {
                     subscription: observer.subscription.identity(),
@@ -657,13 +793,22 @@ impl Registry {
         let revision = observer.engine.transact_rules(transaction, now)?;
         let subscription = observer.subscription.identity();
         let events = observer.engine.take_events();
+        let recognition = observer.take_recognition_reports(None)?;
         // Discard outcomes prepared by retired rules before publishing their
         // cancellation and the new revision. Other seats remain untouched.
         self.reports.retain(|(report, _)| {
             !report.subscription().same_registration(&subscription)
-                || !matches!(report, Report::Observation { .. } | Report::Dispatch { .. })
+                || !matches!(
+                    report,
+                    Report::Observation { .. }
+                        | Report::Dispatch { .. }
+                        | Report::Recognition { .. }
+                )
         });
         self.bytes = self.reports.iter().map(|(_, bytes)| *bytes).sum();
+        for report in recognition {
+            self.queue(report, now)?;
+        }
         for event in events {
             if matches!(event, Event::Cancelled { .. }) {
                 self.queue(
@@ -676,6 +821,45 @@ impl Registry {
             }
         }
         Ok(revision)
+    }
+    fn recognize(
+        &mut self,
+        seat: &str,
+        fence: Fence,
+        proposal: crate::recognition::Proposal,
+        input_at: Duration,
+        now: Duration,
+    ) -> io::Result<()> {
+        fence.validate()?;
+        if proposal.fence != fence || proposal.ticket == 0 {
+            return Err(protocol::invalid("foreign or invalid recognition proposal"));
+        }
+        let observer = self
+            .observers
+            .get_mut(seat)
+            .filter(|observer| observer.subscription.fence == fence && now < observer.expires)
+            .ok_or_else(|| {
+                protocol::invalid("recognizer requires the current seat registration")
+            })?;
+        let mut reports = observer.sync_recognition(&self.config, now)?;
+        let result = if observer.recognizer_ready == Some(true) {
+            observer
+                .engine
+                .recognition_response_after_input(proposal, input_at, now)
+        } else {
+            Err(protocol::invalid("recognizer helper is unavailable"))
+        };
+        reports.extend(observer.take_recognition_reports(Some(input_at))?);
+        reports.extend(observer.engine.take_events().into_iter().map(|event| {
+            Report::Observation {
+                subscription: observer.subscription.identity(),
+                event: Box::new(event),
+            }
+        }));
+        for report in reports {
+            self.queue(report, now)?;
+        }
+        result
     }
     fn deadline(&self) -> Option<Duration> {
         self.observers
@@ -704,7 +888,8 @@ impl Registry {
         }
         // Validate all new recognizers against retained device state before
         // cancelling a single old candidate or changing the baseline.
-        self.baseline.prepare_replacement(config.clone(), now)?;
+        self.baseline
+            .prepare_replacement(preflight_profile(&config), now)?;
         let mut baseline = config.clone();
         for rule in &mut baseline.rules {
             rule.enabled = false;
@@ -744,7 +929,7 @@ pub fn bootstrap(
                     return Err(protocol::invalid("invalid startup generation"));
                 }
                 let config = installation.config?;
-                Engine::new(config.clone())?;
+                Engine::new(preflight_profile(&config))?;
                 return Ok(config);
             }
         }
@@ -770,6 +955,13 @@ pub struct Stream {
     registry: Registry,
     assembly: Assembly,
     control: VecDeque<Message>,
+    recognitions: VecDeque<PendingRecognition>,
+}
+struct PendingRecognition {
+    seat: String,
+    fence: Fence,
+    proposal: crate::recognition::Proposal,
+    received_at: Duration,
 }
 impl Stream {
     pub fn new(config: Config, channel: Channel) -> io::Result<Self> {
@@ -781,10 +973,50 @@ impl Stream {
                 generation: 1,
                 error: None,
             }]),
+            recognitions: VecDeque::new(),
         })
     }
     pub fn push(&mut self, record: Record) -> io::Result<()> {
-        self.registry.push(record, crate::ipc::monotonic()?)
+        let tick = match record {
+            Record::Tick { at } => Some(at),
+            _ => None,
+        };
+        self.registry.push(record, crate::ipc::monotonic()?)?;
+        if let Some(at) = tick {
+            while self
+                .recognitions
+                .front()
+                .is_some_and(|pending| pending.received_at <= at)
+            {
+                let pending = self.recognitions.pop_front().unwrap();
+                let ticket = pending.proposal.ticket;
+                let result = self
+                    .registry
+                    .recognize(
+                        &pending.seat,
+                        pending.fence,
+                        pending.proposal,
+                        at,
+                        crate::ipc::monotonic()?,
+                    )
+                    .err()
+                    .map(|error| {
+                        error
+                            .to_string()
+                            .chars()
+                            .filter(|c| !c.is_control())
+                            .take(128)
+                            .collect()
+                    });
+                self.control.push_back(Message::RecognitionResult {
+                    seat: pending.seat,
+                    fence: pending.fence,
+                    ticket,
+                    error: result,
+                });
+            }
+        }
+        Ok(())
     }
     pub fn service(&mut self) -> io::Result<()> {
         let now = crate::ipc::monotonic()?;
@@ -794,13 +1026,38 @@ impl Stream {
                 break;
             };
             match packet.message {
+                Command::Recognition {
+                    seat,
+                    fence,
+                    proposal,
+                } => {
+                    if self.control.len() + self.recognitions.len() >= protocol::MAX_QUEUED_PACKETS
+                        || self.recognitions.len() >= crate::recognition::MAX_PENDING
+                    {
+                        return Err(protocol::invalid("recognizer receipts are not drained"));
+                    }
+                    fence.validate()?;
+                    if proposal.fence != fence || proposal.ticket == 0 || seat.len() > 256 {
+                        return Err(protocol::invalid("invalid private recognizer proposal"));
+                    }
+                    crate::recognition::validate_data(&proposal.data)?;
+                    self.recognitions.push_back(PendingRecognition {
+                        seat,
+                        fence,
+                        proposal,
+                        received_at: now,
+                    });
+                }
                 Command::Rules {
                     seat,
                     fence,
                     id,
                     transaction,
                 } => {
-                    if self.control.len() >= crate::protocol::MAX_QUEUED_PACKETS || id == 0 {
+                    if self.control.len() + self.recognitions.len()
+                        >= crate::protocol::MAX_QUEUED_PACKETS
+                        || id == 0
+                    {
                         return Err(protocol::invalid(
                             "invalid runtime rule request/response count",
                         ));
@@ -858,7 +1115,8 @@ impl Stream {
                 }
                 command => {
                     if let Some(installation) = self.assembly.accept(command, now)? {
-                        if self.control.len() >= crate::protocol::MAX_QUEUED_PACKETS
+                        if self.control.len() + self.recognitions.len()
+                            >= crate::protocol::MAX_QUEUED_PACKETS
                             || self
                                 .control
                                 .iter()
@@ -897,6 +1155,9 @@ impl Stream {
     }
     pub fn flush(&mut self) -> io::Result<()> {
         let now = crate::ipc::monotonic()?;
+        self.registry.expire(now)?;
+        self.registry.reports.retain(|(report, _)| !matches!(report, Report::Recognition { ticket, .. } if now >= ticket.deadline));
+        self.registry.bytes = self.registry.reports.iter().map(|(_, bytes)| bytes).sum();
         if let Some(message) = self.control.front() {
             if !self.channel.send(message, now)? {
                 return Ok(());
@@ -923,6 +1184,9 @@ impl Stream {
     pub fn deadline(&self) -> Option<Duration> {
         self.registry
             .deadline()
+            .into_iter()
+            .chain(self.recognitions.front().map(|pending| pending.received_at))
+            .min()
             .into_iter()
             .chain(self.assembly.deadline())
             .min()
@@ -955,6 +1219,7 @@ mod tests {
         protocol::Epoch,
         rules::Evidence,
     };
+    mod recognizers;
     fn ms(value: u64) -> Duration {
         Duration::from_millis(value)
     }

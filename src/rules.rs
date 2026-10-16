@@ -601,10 +601,11 @@ impl Engine {
         &self,
         config: Config,
         seat: &str,
-        session: u64,
+        fence: crate::protocol::Fence,
         at: Duration,
     ) -> io::Result<Self> {
-        let mut next = Self::new(config)?;
+        let mut next = Self::with_recognition(config, fence)?;
+        next.recognition_ready(false, at)?;
         next.push(Record::Header {
             version: crate::replay::FORMAT_VERSION,
         })?;
@@ -633,7 +634,7 @@ impl Engine {
             }
         }
         next.generation = self.generation;
-        next.authority.observation_generation(session);
+        next.authority.observation_generation(fence.session);
         next.last_at = Some(at);
         Ok(next)
     }
@@ -987,6 +988,7 @@ impl Engine {
             if generation == self.generation {
                 next.custom.as_mut().unwrap().approved = custom.approved.clone();
             }
+            next.recognition_ready(custom.ready(), at)?;
             next
         } else {
             Self::new(config)?

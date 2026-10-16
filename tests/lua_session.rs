@@ -112,7 +112,7 @@ fn authorize_recognizer(session: &mut Session) {
     session
         .update_capabilities(
             BTreeSet::from([
-                Capability::InputEvents,
+                Capability::CustomRecognizers,
                 Capability::LuaEvents,
                 Capability::Context,
                 Capability::Observations,
@@ -622,14 +622,56 @@ fn a_cleanup_proposal_retires_the_actual_helper_without_logs_or_effects() {
 }
 
 #[test]
-fn native_rule_engine_round_trips_a_stationary_hold_through_the_actual_luna_helper() {
+fn private_input_worker_round_trips_a_stationary_hold_through_the_actual_luna_helper() {
     use prek::{
         config::Trigger,
+        configuration::Command,
         input::{Device, EV_KEY, EV_SYN, Frame, RawEvent, SYN_REPORT, Source},
+        ipc::Channel,
+        protocol::Capability,
         recognition::{Cause, Retirement},
-        rules::{Engine, Event, Evidence, Stage},
+        rules::{Event, Evidence, Stage},
+        worker::{Message, Report, Stream, Subscription, Subscriptions},
     };
     use std::collections::{BTreeMap, BTreeSet};
+    fn messages(stream: &mut Stream, parent: &mut Channel) -> Vec<Message> {
+        let mut messages = Vec::new();
+        for _ in 0..4 {
+            stream.flush().unwrap();
+            while let Some(packet) = parent.receive::<Message>().unwrap() {
+                messages.push(packet.message);
+            }
+        }
+        messages
+    }
+    fn respond(
+        stream: &mut Stream,
+        parent: &mut Channel,
+        proposal: prek::recognition::Proposal,
+    ) -> Vec<Message> {
+        let id = proposal.ticket;
+        assert!(
+            parent
+                .send(
+                    &Command::Recognition {
+                        seat: "seat0".into(),
+                        fence: fence(1),
+                        proposal
+                    },
+                    monotonic().unwrap()
+                )
+                .unwrap()
+        );
+        stream.service().unwrap();
+        stream
+            .push(prek::replay::Record::Tick {
+                at: monotonic().unwrap(),
+            })
+            .unwrap();
+        let messages = messages(stream, parent);
+        assert!(messages.iter().any(|message| matches!(message, Message::RecognitionResult { ticket, fence: actual, error: None, .. } if *ticket == id && *actual == fence(1))));
+        messages
+    }
     let mut definition = Definition::compile(
         r#"
 local p=require('prek');local calls=0
@@ -673,18 +715,11 @@ return p.config.new{
     drain(&mut session).unwrap();
     authorize_recognizer(&mut session);
     let at = monotonic().unwrap();
-    let mut engine = Engine::with_recognition(config, fence(1)).unwrap();
+    let (mut parent, child) = Channel::pair().unwrap();
+    let mut stream = Stream::new(config, child).unwrap();
     // Explicit authority model; no broker, logind or compositor was verified.
     let provided = context_view(at, 0).context.unwrap();
-    engine
-        .authority_mut()
-        .bind(provided.binding.clone(), true, false)
-        .unwrap();
-    engine
-        .authority_mut()
-        .update(provided.snapshot.clone(), at)
-        .unwrap();
-    engine
+    stream
         .push(prek::replay::Record::Header { version: 1 })
         .unwrap();
     let source = Source {
@@ -692,7 +727,7 @@ return p.config.new{
         generation: u64::MAX,
         seat: "seat0".into(),
     };
-    engine
+    stream
         .push(prek::replay::Record::Device {
             device: Device {
                 source: source.clone(),
@@ -712,11 +747,44 @@ return p.config.new{
             contacts: vec![],
         })
         .unwrap();
-    engine
+    assert!(
+        parent
+            .send(
+                &Command::Subscriptions {
+                    update: Subscriptions {
+                        revision: 1,
+                        seats: vec![Subscription {
+                            seat: "seat0".into(),
+                            fence: fence(1),
+                            context: Some(provided),
+                            consumer: None,
+                            capabilities: BTreeSet::from([
+                                Capability::CustomRecognizers,
+                                Capability::LuaEvents,
+                                Capability::Context,
+                                Capability::Observations
+                            ]),
+                        }]
+                    }
+                },
+                monotonic().unwrap()
+            )
+            .unwrap()
+    );
+    stream.service().unwrap();
+    let initial = messages(&mut stream, &mut parent);
+    assert!(initial.iter().any(|message| matches!(
+        message,
+        Message::Outcome {
+            report: Report::RecognizerReady { ready: true, .. }
+        }
+    )));
+    let press_at = monotonic().unwrap();
+    stream
         .push(prek::replay::Record::Frame {
             frame: Frame {
                 source,
-                at,
+                at: press_at,
                 sequence: 1,
                 events: vec![
                     RawEvent {
@@ -733,40 +801,72 @@ return p.config.new{
             },
         })
         .unwrap();
-    let first = engine
-        .recognition_requests(monotonic().unwrap())
-        .unwrap()
-        .pop()
+    stream
+        .push(prek::replay::Record::Tick {
+            at: monotonic().unwrap(),
+        })
+        .unwrap();
+    let first = messages(&mut stream, &mut parent)
+        .into_iter()
+        .find_map(|message| match message {
+            Message::Outcome {
+                report: Report::Recognition { ticket, .. },
+            } => Some(*ticket),
+            _ => None,
+        })
         .unwrap();
     assert_eq!(first.cause, Cause::Frame);
     session.request_recognition(first).unwrap();
     drain(&mut session).unwrap();
-    engine
-        .recognition_response(
-            session.take_recognitions().pop().unwrap().1.unwrap(),
-            monotonic().unwrap(),
+    let mut replies = respond(
+        &mut stream,
+        &mut parent,
+        session.take_recognitions().pop().unwrap().1.unwrap(),
+    );
+    if !replies.iter().any(|message| {
+        matches!(
+            message,
+            Message::Outcome {
+                report: Report::Recognition { .. }
+            }
         )
-        .unwrap();
-    std::thread::sleep(Duration::from_millis(25));
-    let timer = engine
-        .recognition_requests(monotonic().unwrap())
-        .unwrap()
-        .pop()
+    }) {
+        std::thread::sleep(Duration::from_millis(25));
+        stream
+            .push(prek::replay::Record::Tick {
+                at: monotonic().unwrap(),
+            })
+            .unwrap();
+        replies.extend(messages(&mut stream, &mut parent));
+    }
+    let timer = replies
+        .into_iter()
+        .find_map(|message| match message {
+            Message::Outcome {
+                report: Report::Recognition { ticket, .. },
+            } => Some(*ticket),
+            _ => None,
+        })
         .unwrap();
     assert_eq!(timer.cause, Cause::Timer);
-    assert_eq!(timer.input.at(), at);
+    assert_eq!(timer.input.at(), press_at);
     session.request_recognition(timer).unwrap();
     drain(&mut session).unwrap();
-    engine
-        .recognition_response(
-            session.take_recognitions().pop().unwrap().1.unwrap(),
-            monotonic().unwrap(),
-        )
-        .unwrap();
-    assert!(
-        matches!(&engine.take_events()[..],[Event::Matched{stage:Stage::Discrete,ordinal:1,evidence:Evidence::Custom{data,..},..}] if data["calls"]==2)
+    let replies = respond(
+        &mut stream,
+        &mut parent,
+        session.take_recognitions().pop().unwrap().1.unwrap(),
     );
-    let cancellation = engine.take_recognition_cancellations().pop().unwrap();
+    assert!(replies.iter().any(|message| matches!(message, Message::Outcome { report: Report::Observation { event, .. } } if matches!(event.as_ref(), Event::Matched { stage: Stage::Discrete, ordinal: 1, evidence: Evidence::Custom { data, .. }, .. } if data["calls"] == 2))));
+    let cancellation = replies
+        .into_iter()
+        .find_map(|message| match message {
+            Message::Outcome {
+                report: Report::RecognitionCancelled { cancellation, .. },
+            } => Some(cancellation),
+            _ => None,
+        })
+        .unwrap();
     assert_eq!(cancellation.reason, Retirement::Completed);
     session.cancel_recognition(cancellation.clone()).unwrap();
     assert_eq!(drain(&mut session).unwrap()[0].message, "native-cleanup");

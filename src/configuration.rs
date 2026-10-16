@@ -15,6 +15,11 @@ pub const INSTALL_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
+    Recognition {
+        seat: String,
+        fence: crate::protocol::Fence,
+        proposal: crate::recognition::Proposal,
+    },
     Rules {
         seat: String,
         fence: crate::protocol::Fence,

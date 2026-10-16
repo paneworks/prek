@@ -102,6 +102,9 @@ impl Outbox {
                 Message::Configuration { .. } => false,
                 Message::RulesChanged {
                     seat: changed_seat, ..
+                }
+                | Message::RecognitionResult {
+                    seat: changed_seat, ..
                 } => changed_seat == seat,
                 Message::Released { .. } => false,
             };
