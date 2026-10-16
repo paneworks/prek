@@ -1194,6 +1194,48 @@ remain required. The installed `power.lua` declaration shows exact
 output selection, separate screen-on/off rules and a named handler that performs
 an effect only in the begin phase. Offline checking performs no effect.
 
+## Offline replay
+
+`replay.new(config = nil) -> Replay` creates a generation-local replay using
+the same Rust engines as `prek replay`. Omit the configuration for generic
+normalized/button/touch observations, or pass a complete validated configuration
+for configured rule outcomes. The configuration is copied; subsequent Lua edits
+do not change the replay. Both configuration evaluation and runtime callbacks or
+tasks can use this API without live context or effect capabilities.
+
+- `replay:push(record_json)` accepts one native recording JSON object, beginning
+  with `{"record":"header","version":1}`. Use the existing recording format for
+  device registration, frames, mapping, reconciliation, removal, ticks and final
+  expectations. JSON preserves full unsigned identities on input. Push has no
+  file access, live input injection, context setter or action dispatch.
+- `replay:finish(check = false) -> ReplayResult` returns `{mode,records,bytes,
+  checked,outcomes,json}` and releases the engine. `mode` is `observations` or
+  `rules`. `outcomes` copies the native observation/event schema, using canonical
+  decimal strings for opaque identities and unsigned integers above Lua's signed
+  range. `json` preserves the native CLI-compatible JSON, including exact unsigned
+  identity numbers. Edit returned tables freely; they have no live effect.
+- `finish(true)` requires a matching final `expected` or `expected_rules` record
+  for its engine. Missing or mismatched expectations raise an error. An unchecked
+  finish sets `checked=false` and never claims that an expectation test passed.
+- `replay:status()` copies `{mode,state,records,bytes,outcomes}`. States are
+  `open`, `finished`, `failed` and `closed`. `replay:close()` is idempotent and
+  discards the engine immediately. Push/finish after a terminal state fail.
+
+Each VM permits four open replays, each with at most 4,096 records, 32 KiB per
+record, 1 MiB total input, 16 distinct source device identities, 4,096 outcomes
+and 1 MiB encoded outcomes. Outcome accounting is conservative and includes
+per-push JSON delimiters. A configuration copy is preflighted to 65,536 expanded
+values, 64 nesting levels and 1 MiB including conservative value overhead, so
+cyclic/shared tables cannot cause unbounded native allocations. Every push and finish is still subject to the owning
+VM's fuel, wall-time and memory limits; split longer offline work across task
+wakes. The CLI remains the external file reader for larger recordings. A record,
+resource or expectation error retires that replay; an uncaught callback error
+also follows normal VM retirement. Finish, close, errors and VM replacement
+release owned replay state. No commands, Morf controls or power actions contained
+in replay outcomes are executed.
+
+See [offline_replay.lua](../examples/lua/offline_replay.lua) for both modes.
+
 ## Limits, libraries and errors
 
 The configuration VM includes Luna's core libraries and the `prek` module.

@@ -47,6 +47,39 @@ fn context_view(at: Duration, windows: usize) -> prek::context_transfer::View {
 }
 
 #[test]
+fn real_helper_runs_offline_replay_without_live_context_or_effect_capabilities() {
+    let definition = Definition::compile(
+        r#"
+local p=require('prek')
+p.events.on('ready',function()
+ assert(p.context.snapshot()==nil and p.capabilities.current()==nil)
+ local replay=p.replay.new()
+ replay:push('{"record":"header","version":1}')
+ replay:push('{"record":"tick","at":{"secs":0,"nanos":0}}')
+ local result=replay:finish()
+ assert(result.mode=='observations' and not result.checked and #result.outcomes==0)
+ assert(result.json=='[]' and replay:status().state=='finished')
+ local rules=p.replay.new(p.config.preset('minimal'))
+ rules:push('{"record":"header","version":1}')
+ assert(rules:finish().mode=='rules')
+ p.log.info('offline-replayed')
+end)
+return {version=1}
+"#,
+        "offline-replay-helper.lua",
+    )
+    .unwrap();
+    let mut session = Session::spawn(
+        Path::new(env!("CARGO_BIN_EXE_prek")),
+        fence(1),
+        "seat0",
+        definition,
+    )
+    .unwrap();
+    assert_eq!(drain(&mut session).unwrap()[0].message, "offline-replayed");
+}
+
+#[test]
 fn real_helper_reports_negotiated_capabilities_readiness_expiry_and_stop() {
     use prek::protocol::Capability;
     use std::collections::BTreeSet;

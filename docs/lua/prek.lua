@@ -718,6 +718,8 @@ local OutputsAPI = {}
 local RegionsAPI = {}
 ---@class prek.CoordinatesAPI
 local CoordinatesAPI = {}
+---@class prek.ReplayAPI
+local ReplayAPI = {}
 
 ---@class (exact) prek.Module
 ---@field api_version integer
@@ -741,6 +743,7 @@ local CoordinatesAPI = {}
 ---@field outputs prek.OutputsAPI
 ---@field regions prek.RegionsAPI
 ---@field coordinates prek.CoordinatesAPI
+---@field replay prek.ReplayAPI
 local prek = {
     api_version = 1, version = "0.1.0", api = {},
     config = ConfigAPI, rules = RulesAPI, layers = LayersAPI, modes = ModesAPI, triggers = TriggersAPI, actions = ActionsAPI,
@@ -749,7 +752,39 @@ local prek = {
     morf = MorfAPI,
     devices = DevicesAPI, seats = SeatsAPI,
     outputs = OutputsAPI, regions = RegionsAPI, coordinates = CoordinatesAPI,
+    replay = ReplayAPI,
 }
+
+---@class (exact) prek.ReplayStatus
+---@field mode 'observations'|'rules'
+---@field state 'open'|'finished'|'failed'|'closed'
+---@field records integer Successfully applied records.
+---@field bytes integer Successfully applied input bytes.
+---@field outcomes integer Retained outcome count before finish or close.
+---@class (exact) prek.ReplayResult
+---@field mode 'observations'|'rules'
+---@field records integer
+---@field bytes integer
+---@field checked boolean True only after matching native expectations.
+---@field json string Exact native CLI-compatible JSON; unsigned identities retain their original JSON numbers.
+---@field outcomes table[] Native observation/event schema; opaque identities are canonical decimal strings.
+---Offline only, in configuration evaluation or runtime callbacks/tasks. Copies and validates config.
+---@param config? prek.Config Omit for generic observations; supply for configured rule outcomes.
+---@return prek.Replay
+function ReplayAPI.new(config) error("Prek editor definition") end
+---@class prek.Replay
+local Replay = {}
+---Apply one native recording JSON object, at most 32 KiB. Any record/limit error retires this replay.
+---@param record_json string Recording format 1; first record must be its header.
+function Replay:push(record_json) error("Prek editor definition") end
+---Finish once. Check requires a final matching expected/expected_rules record; no live effects.
+---@param check? boolean Defaults to false.
+---@return prek.ReplayResult
+function Replay:finish(check) error("Prek editor definition") end
+---@return prek.ReplayStatus
+function Replay:status() error("Prek editor definition") end
+---Idempotent resource release; the handle then remains closed.
+function Replay:close() error("Prek editor definition") end
 
 ---Supply version=1 if absent; validate the final model in Rust. No effects or I/O.
 ---@param fields prek.Config

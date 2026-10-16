@@ -1,0 +1,298 @@
+use super::*;
+use crate::{
+    input::{Device, EV_KEY, EV_SYN, Frame, RawEvent, Source},
+    lua::{Definition, EventKind},
+};
+use std::collections::BTreeMap;
+
+fn records() -> Vec<Record> {
+    let source = Source {
+        device: u64::MAX,
+        generation: u64::MAX,
+        seat: "seat0".into(),
+    };
+    let device = Device {
+        source: source.clone(),
+        identity: "fixture".into(),
+        name: "fixture".into(),
+        path: "fixture".into(),
+        physical: "fixture".into(),
+        unique: String::new(),
+        vendor: 1,
+        product: 1,
+        properties: vec![],
+        capabilities: BTreeMap::from([(EV_KEY, vec![30])]),
+        axes: BTreeMap::new(),
+        virtual_device: false,
+    };
+    let mut records = vec![
+        Record::Header { version: 1 },
+        Record::Device {
+            device,
+            keys: Default::default(),
+            contacts: vec![],
+        },
+    ];
+    for (sequence, millis, value) in [(1, 0, 1), (2, 50, 0)] {
+        records.push(Record::Frame {
+            frame: Frame {
+                source: source.clone(),
+                at: Duration::from_millis(millis),
+                sequence,
+                events: vec![
+                    RawEvent {
+                        kind: EV_KEY,
+                        code: 30,
+                        value,
+                    },
+                    RawEvent {
+                        kind: EV_SYN,
+                        code: 0,
+                        value: 0,
+                    },
+                ],
+            },
+        });
+    }
+    records.push(Record::Tick {
+        at: Duration::from_millis(350),
+    });
+    records
+}
+
+fn script(records: &[Record], configured: bool, check: bool) -> String {
+    let mut script = String::from("local p=require('prek')\nlocal function run()\n");
+    if configured {
+        script.push_str("local c=p.config.preset('desktop');c.shapes={};c.rules[1].enabled=true;c.rules[1].trigger=p.triggers.button_taps{key='KEY_A',count=1};local r=p.replay.new(c)\n");
+    } else {
+        script.push_str("local r=p.replay.new()\n");
+    }
+    for record in records {
+        script.push_str(&format!(
+            "r:push([==[{}]==])\n",
+            serde_json::to_string(record).unwrap()
+        ));
+    }
+    script.push_str(&format!("local result=r:finish({check})\n"));
+    script.push_str("assert(r:status().state=='finished');assert(#result.outcomes>0);assert(type(result.json)=='string');assert(not pcall(function()r:push('{}')end));r:close();r:close();return result\nend\n");
+    script
+}
+
+#[test]
+fn lua_generic_replay_matches_cli_engine_and_keeps_unsigned_identities() {
+    let records = records();
+    let mut engine = crate::replay::Replay::default();
+    for record in &records {
+        engine.push(record.clone()).unwrap();
+    }
+    let expected = serde_json::to_string(engine.observations()).unwrap();
+    let mut script = script(&records, false, false);
+    script.push_str(&format!("local result=run();assert(result.mode=='observations');assert(result.json==[==[{expected}]==]);assert(result.outcomes[1].frame.raw.source.device=='18446744073709551615');assert(result.outcomes[1].frame.raw.source.generation=='18446744073709551615');return {{version=1}}"));
+    Definition::compile(&script, "replay.lua").unwrap();
+}
+
+#[test]
+fn generic_expectations_are_checked_and_mismatches_cannot_be_reused() {
+    let records = records();
+    let mut reference = crate::replay::Replay::default();
+    for record in &records {
+        reference.push(record.clone()).unwrap();
+    }
+    for matches in [true, false] {
+        let mut session = Session::new(None).unwrap();
+        for record in &records {
+            session
+                .push(&serde_json::to_string(record).unwrap())
+                .unwrap();
+        }
+        let expected = Record::Expected {
+            observations: if matches {
+                reference.observations().to_vec()
+            } else {
+                vec![]
+            },
+        };
+        session
+            .push(&serde_json::to_string(&expected).unwrap())
+            .unwrap();
+        assert_eq!(session.finish(true).is_ok(), matches);
+        assert_eq!(session.state, if matches { "finished" } else { "failed" });
+        assert!(session.engine.is_none());
+        assert!(session.finish(false).is_err());
+    }
+}
+
+#[test]
+fn replay_bounds_total_recording_and_source_history_and_rejects_stale_frames() {
+    let mut session = Session::new(None).unwrap();
+    session
+        .push("{\"record\":\"header\",\"version\":1}")
+        .unwrap();
+    let tick = "{\"record\":\"tick\",\"at\":{\"secs\":0,\"nanos\":0}}";
+    let padded = format!("{tick}{}", " ".repeat(MAX_RECORD_BYTES - tick.len()));
+    while session.push(&padded).is_ok() {}
+    assert_eq!(session.state, "failed");
+    assert!(session.bytes <= MAX_BYTES);
+
+    let mut session = Session::new(None).unwrap();
+    session
+        .push("{\"record\":\"header\",\"version\":1}")
+        .unwrap();
+    let Record::Device { device, .. } = &records()[1] else {
+        unreachable!()
+    };
+    for id in 1..=MAX_SOURCES as u64 {
+        let mut device = device.clone();
+        device.identity = format!("source-{id}");
+        device.source.device = id;
+        session
+            .push(
+                &serde_json::to_string(&Record::Device {
+                    device,
+                    keys: Default::default(),
+                    contacts: vec![],
+                })
+                .unwrap(),
+            )
+            .unwrap();
+    }
+    let mut extra = device.clone();
+    extra.source.device = MAX_SOURCES as u64 + 1;
+    assert!(
+        session
+            .push(
+                &serde_json::to_string(&Record::Device {
+                    device: extra,
+                    keys: Default::default(),
+                    contacts: vec![]
+                })
+                .unwrap()
+            )
+            .is_err()
+    );
+    assert!(session.engine.is_none());
+
+    let mut session = Session::new(None).unwrap();
+    let records = records();
+    for record in &records[..3] {
+        session
+            .push(&serde_json::to_string(record).unwrap())
+            .unwrap();
+    }
+    let mut stale = records[2].clone();
+    let Record::Frame { frame } = &mut stale else {
+        unreachable!()
+    };
+    frame.source.generation -= 1;
+    assert!(
+        session
+            .push(&serde_json::to_string(&stale).unwrap())
+            .is_err()
+    );
+    assert!(session.engine.is_none());
+}
+
+#[test]
+fn aliased_and_cyclic_configuration_cannot_expand_unbounded_native_state() {
+    Definition::compile(
+        r#"
+local p=require('prek')
+local c=p.config.preset('minimal')
+local aliases={}
+for i=1,17 do aliases={aliases,aliases}end
+c.rules=aliases
+local ok,err=pcall(p.replay.new,c)
+assert(not ok and tostring(err):find('value limit'))
+c.rules=c
+assert(not pcall(p.replay.new,c))
+for i=1,4 do local replay=p.replay.new();replay:close()end
+return {version=1}
+"#,
+        "bounded-replay-config.lua",
+    )
+    .unwrap();
+}
+
+#[test]
+fn lua_configured_replay_only_returns_outcomes_and_uses_exact_native_expectations() {
+    let records = records();
+    let mut config = Config::preset("desktop").unwrap();
+    config.shapes.clear();
+    config.rules[0].enabled = true;
+    config.rules[0].trigger = crate::config::Trigger::ButtonTaps {
+        key: crate::config::Key(30),
+        count: 1,
+    };
+    let mut engine = crate::rules::Engine::new(config).unwrap();
+    for record in &records {
+        engine.push(record.clone()).unwrap();
+    }
+    let events = engine.take_events();
+    assert_eq!(events.len(), 1);
+    let mut records = records;
+    records.push(Record::ExpectedRules {
+        events: events.clone(),
+    });
+    let mut script = script(&records, true, true);
+    script.push_str(&format!("local result=run();assert(result.mode=='rules' and result.checked);assert(result.json==[==[{}]==]);assert(result.outcomes[1].id=='1');assert(result.outcomes[1].source.device=='18446744073709551615');return {{version=1}}", serde_json::to_string(&events).unwrap()));
+    Definition::compile(&script, "configured-replay.lua").unwrap();
+}
+
+#[test]
+fn replay_can_run_inside_runtime_callbacks_and_releases_closed_capacity() {
+    let mut script = script(&records(), false, false);
+    script.push_str("p.events.on('ready',function()for i=1,6 do assert(run().mode=='observations')end;p.log.info('replayed')end);return {version=1}");
+    let mut runtime = Definition::compile(&script, "runtime-replay.lua")
+        .unwrap()
+        .instantiate()
+        .unwrap();
+    assert_eq!(
+        runtime
+            .dispatch(EventKind::Ready, &serde_json::json!({}))
+            .unwrap()[0]
+            .message,
+        "replayed"
+    );
+}
+
+#[test]
+fn replay_errors_close_the_session_without_becoming_successful_checks() {
+    for records in [vec![], vec![Record::Header { version: 1 }], records()] {
+        let mut session = Session::new(None).unwrap();
+        for record in records {
+            session
+                .push(&serde_json::to_string(&record).unwrap())
+                .unwrap();
+        }
+        assert!(session.finish(true).is_err());
+        assert_eq!(session.state, "failed");
+        assert!(session.engine.is_none());
+    }
+    for invalid in [
+        "{}",
+        "{\"record\":\"header\",\"version\":2}",
+        "{\"record\":\"header\",\"version\":1}\n{}",
+    ] {
+        let mut session = Session::new(None).unwrap();
+        assert!(session.push(invalid).is_err());
+        assert_eq!(session.state, "failed");
+        assert!(session.engine.is_none());
+    }
+}
+
+#[test]
+fn replay_limits_and_open_handle_capacity_are_enforced() {
+    let source = "local p=require('prek');local handles={};for i=1,4 do handles[i]=p.replay.new()end;assert(not pcall(p.replay.new));handles[1]:close();assert(p.replay.new());return {version=1}";
+    Definition::compile(source, "capacity.lua").unwrap();
+    let mut session = Session::new(None).unwrap();
+    assert!(session.push(&" ".repeat(MAX_RECORD_BYTES + 1)).is_err());
+    assert!(session.engine.is_none());
+    let mut session = Session::new(None).unwrap();
+    session.records = MAX_RECORDS;
+    assert!(
+        session
+            .push("{\"record\":\"header\",\"version\":1}")
+            .is_err()
+    );
+    assert!(session.engine.is_none());
+}

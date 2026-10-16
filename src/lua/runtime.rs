@@ -405,7 +405,10 @@ impl Runtime {
         Ok(())
     }
 }
-pub(super) fn bounded_json(value: &impl Serialize, maximum: usize) -> io::Result<Vec<u8>> {
+pub(super) fn bounded_json<T: Serialize + ?Sized>(
+    value: &T,
+    maximum: usize,
+) -> io::Result<Vec<u8>> {
     struct Buffer {
         bytes: Vec<u8>,
         maximum: usize,

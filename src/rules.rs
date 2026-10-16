@@ -608,6 +608,9 @@ impl Engine {
     pub fn take_events(&mut self) -> Vec<Event> {
         std::mem::take(&mut self.events)
     }
+    pub(crate) fn events(&self) -> &[Event] {
+        &self.events
+    }
     pub(crate) fn capture_input(&mut self, enabled: bool) {
         self.capture_input = enabled;
         self.captured_input = None;

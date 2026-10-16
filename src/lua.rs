@@ -22,6 +22,7 @@ mod hooks;
 mod modules;
 #[cfg(target_os = "linux")]
 mod morf;
+mod replay;
 mod rule_api;
 mod runtime;
 mod scheduler;
@@ -68,6 +69,11 @@ pub fn api() -> serde_json::Value {
         serde_json::json!({"name":"Task.cancel", "receiver":"Task", "signature":"task:cancel() -> nil", "description":"Cancel future resumes and release retained coroutine state at the next scheduler boundary."}),
         serde_json::json!({"name":"Task.status", "receiver":"Task", "signature":"task:status() -> TaskState", "description":"Inspect pending, running, sleeping, completed or cancelled state in the owning generation."}),
         serde_json::json!({"name":"actions.define", "signature":"actions.define(name, {requires = capabilities}, callback) -> Action", "description":"Register an approved generation-scoped named handler; resolve a bounded typed effect plan in the unprivileged session after a broker execution grant."}),
+        serde_json::json!({"name":"replay.new", "signature":"replay.new(config = nil) -> Replay", "phase":"configuration_and_runtime", "description":"Create an offline native observation replay, or a configured rule replay with a validated copied configuration; no device, desktop or action access."}),
+        serde_json::json!({"name":"Replay.push", "receiver":"Replay", "signature":"replay:push(record_json) -> nil", "description":"Apply one bounded native recording JSON object; malformed, stale or excessive input retires the replay."}),
+        serde_json::json!({"name":"Replay.finish", "receiver":"Replay", "signature":"replay:finish(check = false) -> ReplayResult", "description":"Finish once, optionally require exact native expectations, and return copied outcomes plus lossless CLI-compatible JSON; release replay resources."}),
+        serde_json::json!({"name":"Replay.status", "receiver":"Replay", "signature":"replay:status() -> ReplayStatus", "description":"Copy this generation-local replay's state, mode, record/byte counts and outcome count."}),
+        serde_json::json!({"name":"Replay.close", "receiver":"Replay", "signature":"replay:close() -> nil", "description":"Idempotently discard this offline replay and release its open-handle capacity."}),
     ];
     #[cfg(target_os = "linux")]
     for (name, signature, description) in [
@@ -376,6 +382,19 @@ pub fn api() -> serde_json::Value {
         "device_queries":{"catalog":"permitted metadata received through input reset notifications; no host inventory scan","maximum_sources":256,"maximum_bytes":4194304,"lookup":"exact Source device/generation/seat with canonical decimal strings","nil":"no received metadata, unknown source, missing mapping or unavailable/stale desktop context","empty_list":"all known sources removed while context remains usable","revision":"decimal string; metadata changes/removals only","map_keys":"numeric evdev type/axis keys in Lua","position":"validated device counts to normalized/mm/output-local/global coordinates; no action authority","seat":"current fresh desktop binding/fence only; no other-seat enumeration"},
         "runtime_api":"partial"});
     manifest["morf_adapter"] = morf_adapter;
+    manifest["offline_replay"] = serde_json::json!({
+        "phases":["configuration","runtime"],"effects":false,"io":false,
+        "modes":["observations","rules"],"input":"one native versioned recording JSON object per push",
+        "configuration":"validated copy; no live rule or policy change",
+        "expectations":"finish(true) requires matching final expected or expected_rules; unchecked replay never claims a passing test",
+        "identities":"outcome tables use canonical decimal strings for opaque identities and unsigned values above Lua's signed range; result.json preserves exact native CLI JSON",
+        "lifetime":"owning VM generation; close/finish/error releases engine; no external handles",
+        "maximum_open":replay::MAX_HANDLES,"maximum_records":replay::MAX_RECORDS,
+        "maximum_record_bytes":replay::MAX_RECORD_BYTES,"maximum_input_bytes":replay::MAX_BYTES,
+        "maximum_outcome_bytes":replay::MAX_BYTES,"maximum_sources":16,"maximum_outcomes":4096,
+        "maximum_configuration_values":replay::MAX_CONFIG_VALUES,
+        "failure":"malformed records, engine errors and resource/expectation failures retire that replay; ordinary uncaught callback errors retire the VM"
+    });
     manifest["morf_rendered_queries"] = serde_json::json!({
         "capability":"context","freshness_ms":250,"ipc_budget_ms":200,
         "maximum_regions":256,"maximum_reply_bytes":131072,
@@ -721,6 +740,7 @@ fn instantiate(
                 "regions",
                 "coordinates",
                 "morf",
+                "replay",
             ] {
                 module.set(ctx, namespace, Table::new(&ctx))?;
             }
@@ -779,6 +799,7 @@ fn instantiate(
             let module_loaders = Table::new(&ctx);
             ctx.globals().set(ctx, "__prek_modules", module_loaders)?;
             let actions: Table = module.get(ctx, "actions")?;
+            replay::register(&ctx, module.get(ctx, "replay")?)?;
             rule_api::register(&ctx, module.get(ctx, "rules")?, host.clone())?;
             let rules: Table = module.get(ctx, "rules")?;
             let hook_host = host.clone();
@@ -979,6 +1000,11 @@ mod tests {
     fn manifest_exports_resolve_to_real_configuration_functions() {
         let mut source = "local p=require('prek');\n".to_owned();
         for symbol in api()["symbols"].as_array().unwrap() {
+            if symbol["receiver"] == "Replay" {
+                let method = symbol["name"].as_str().unwrap().split('.').nth(1).unwrap();
+                source.push_str(&format!("local replay=p.replay.new();assert(type(replay.{method})=='function');replay:close();\n"));
+                continue;
+            }
             if symbol["receiver"] == "Subscription" {
                 source.push_str("local handle=p.events.on('ready',function()end); assert(type(handle.dispose)=='function'); handle:dispose();\n");
                 continue;

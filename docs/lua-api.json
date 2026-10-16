@@ -315,8 +315,17 @@
     "identity": "verified native output/endpoint epoch, UI generation and broker fence",
     "integers": "node identity, UI generation, revision and sampled_ns are canonical decimal strings",
     "ipc_budget_ms": 200,
-    "maximum_regions": 256,
-    "maximum_reply_bytes": 131072,
+    "keyboard_registry": {
+      "absence": "hidden applies only to the registered Morf node; does not set snapshot keyboard_known",
+      "capability": "keyboard_registry",
+      "known": "one declared keyboard under the primary root, with node and layout",
+      "scope": "registered_morf_primary",
+      "states": [
+        "unknown",
+        "hidden",
+        "visible"
+      ]
+    },
     "layout_projection": {
       "basis": "stock_layer_layout",
       "coordinates": "global logical layout boxes; not animated rendered positions",
@@ -324,18 +333,8 @@
       "missing_bounds": "viewport-clipped rows retain their native identities with null bounds",
       "optional": true
     },
-    "keyboard_registry": {
-      "capability": "keyboard_registry",
-      "scope": "registered_morf_primary",
-      "states": ["unknown", "hidden", "visible"],
-      "known": "one declared keyboard under the primary root, with node and layout",
-      "absence": "hidden applies only to the registered Morf node; does not set snapshot keyboard_known"
-    },
-    "surface_space": {
-      "capability": "layer_space",
-      "fields": ["namespace", "width", "height", "local_scale"],
-      "local_scale": "compositor logical units per native Morf layout unit"
-    },
+    "maximum_regions": 256,
+    "maximum_reply_bytes": 131072,
     "scopes": false,
     "semantic": {
       "absence": "does not establish hidden keyboard or complete coverage",
@@ -361,7 +360,43 @@
         "local_control"
       ]
     },
+    "surface_space": {
+      "capability": "layer_space",
+      "fields": [
+        "namespace",
+        "width",
+        "height",
+        "local_scale"
+      ],
+      "local_scale": "compositor logical units per native Morf layout unit"
+    },
     "unavailable": "nil without a fresh owning desktop; empty array when no fresh native frame is available"
+  },
+  "offline_replay": {
+    "configuration": "validated copy; no live rule or policy change",
+    "effects": false,
+    "expectations": "finish(true) requires matching final expected or expected_rules; unchecked replay never claims a passing test",
+    "failure": "malformed records, engine errors and resource/expectation failures retire that replay; ordinary uncaught callback errors retire the VM",
+    "identities": "outcome tables use canonical decimal strings for opaque identities and unsigned values above Lua's signed range; result.json preserves exact native CLI JSON",
+    "input": "one native versioned recording JSON object per push",
+    "io": false,
+    "lifetime": "owning VM generation; close/finish/error releases engine; no external handles",
+    "maximum_configuration_values": 65536,
+    "maximum_input_bytes": 1048576,
+    "maximum_open": 4,
+    "maximum_outcome_bytes": 1048576,
+    "maximum_outcomes": 4096,
+    "maximum_record_bytes": 32768,
+    "maximum_records": 4096,
+    "maximum_sources": 16,
+    "modes": [
+      "observations",
+      "rules"
+    ],
+    "phases": [
+      "configuration",
+      "runtime"
+    ]
   },
   "phase": "configuration_and_session_actions",
   "rule_hooks": {
@@ -600,6 +635,36 @@
       "description": "Register an approved generation-scoped named handler; resolve a bounded typed effect plan in the unprivileged session after a broker execution grant.",
       "name": "actions.define",
       "signature": "actions.define(name, {requires = capabilities}, callback) -> Action"
+    },
+    {
+      "description": "Create an offline native observation replay, or a configured rule replay with a validated copied configuration; no device, desktop or action access.",
+      "name": "replay.new",
+      "phase": "configuration_and_runtime",
+      "signature": "replay.new(config = nil) -> Replay"
+    },
+    {
+      "description": "Apply one bounded native recording JSON object; malformed, stale or excessive input retires the replay.",
+      "name": "Replay.push",
+      "receiver": "Replay",
+      "signature": "replay:push(record_json) -> nil"
+    },
+    {
+      "description": "Finish once, optionally require exact native expectations, and return copied outcomes plus lossless CLI-compatible JSON; release replay resources.",
+      "name": "Replay.finish",
+      "receiver": "Replay",
+      "signature": "replay:finish(check = false) -> ReplayResult"
+    },
+    {
+      "description": "Copy this generation-local replay's state, mode, record/byte counts and outcome count.",
+      "name": "Replay.status",
+      "receiver": "Replay",
+      "signature": "replay:status() -> ReplayStatus"
+    },
+    {
+      "description": "Idempotently discard this offline replay and release its open-handle capacity.",
+      "name": "Replay.close",
+      "receiver": "Replay",
+      "signature": "replay:close() -> nil"
     },
     {
       "description": "Copy fresh broker-verified native shell connection bindings for the owning desktop/output; no rendered regions, lock proof, recognizer ownership or action grant is inferred.",
