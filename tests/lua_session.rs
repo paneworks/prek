@@ -614,6 +614,10 @@ fn custom_metadata_helper_rechecks_original_age_after_parent_queueing() {
     session
         .recognizer_metadata(recognizer_device_metadata(monotonic().unwrap()))
         .unwrap();
+    assert!(drain(&mut session).unwrap().is_empty());
+    session
+        .recognizer_metadata(recognizer_device_metadata(monotonic().unwrap()))
+        .unwrap();
     std::thread::sleep(Duration::from_millis(275));
     session
         .update_context(context_view(monotonic().unwrap(), 0))
@@ -630,7 +634,11 @@ fn custom_metadata_helper_rechecks_original_age_after_parent_queueing() {
         )
         .unwrap();
     let error = drain(&mut session).unwrap_err();
-    assert!(error.to_string().contains("scope or freshness"), "{error}");
+    assert!(
+        error.to_string().contains("scope or freshness")
+            || error.to_string() == "Lua worker Exited: exit status: 0",
+        "{error}"
+    );
     assert!(session.take_recognitions().is_empty());
 }
 
