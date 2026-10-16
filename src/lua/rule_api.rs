@@ -9,6 +9,8 @@ use std::{
 };
 
 const MAX_BUILDERS: usize = 64;
+#[cfg(test)]
+mod inspection_tests;
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuleProposal {
@@ -81,6 +83,43 @@ fn phase(host: &runtime::Host) -> io::Result<()> {
     } else {
         Ok(())
     }
+}
+pub(super) fn register_inspection<'gc>(
+    ctx: &luna::Context<'gc>,
+    module: Table<'gc>,
+    host: Rc<RefCell<runtime::Host>>,
+) -> Result<(), luna::Error<'gc>> {
+    for namespace in ["config", "policy"] {
+        let host = host.clone();
+        let api: Table = module.get(*ctx, namespace)?;
+        api.set(
+            *ctx,
+            "current",
+            Callback::from_fn(ctx, move |ctx, _, mut stack| {
+                let host = host.borrow();
+                phase(&host)?;
+                let Some(config) = &host.rules.config else {
+                    stack.replace(ctx, Value::Nil);
+                    return Ok(CallbackReturn::Return);
+                };
+                let view = Table::new(&ctx);
+                view.set(
+                    ctx,
+                    "revision",
+                    ctx.intern(host.rules.revision.to_string().as_bytes()),
+                )?;
+                let value = if namespace == "config" {
+                    luna_util::serde::to_value(ctx, config).map_err(io::Error::other)?
+                } else {
+                    luna_util::serde::to_value(ctx, &config.policy).map_err(io::Error::other)?
+                };
+                view.set(ctx, namespace, value)?;
+                stack.replace(ctx, view);
+                Ok(CallbackReturn::Return)
+            }),
+        )?;
+    }
+    Ok(())
 }
 pub(super) fn register<'gc>(
     ctx: &luna::Context<'gc>,

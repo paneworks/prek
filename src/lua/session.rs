@@ -1,6 +1,6 @@
 //! A separately supervised, unprivileged event VM. The session parent keeps
 //! processing broker leases and generation changes while Lua executes.
-use super::{CapabilityView, Definition, EventKind, LogRecord, source_transfer};
+use super::{CapabilityView, Definition, EventKind, LogRecord, StatusView, source_transfer};
 use crate::{
     ipc::{Channel, monotonic},
     protocol::{self, Capability, Fence},
@@ -63,6 +63,7 @@ impl PendingEvents {
 enum Work {
     Capabilities {
         view: CapabilityView,
+        status: Option<StatusView>,
         id: u64,
     },
     RulesEnable {
@@ -167,6 +168,7 @@ pub struct Session {
     capabilities_pending: Option<(u64, Duration)>,
     capabilities_id: u64,
     capabilities_last: Option<CapabilityView>,
+    status_last: Option<StatusView>,
     context_source: Vec<u8>,
     context_offset: usize,
     context_next: Option<Vec<u8>>,
@@ -253,6 +255,7 @@ impl Session {
             capabilities_pending: None,
             capabilities_id: 0,
             capabilities_last: None,
+            status_last: None,
             context_source: Vec::new(),
             context_offset: 0,
             context_next: None,
@@ -359,6 +362,29 @@ impl Session {
         }
         self.capabilities_last = Some(view.clone());
         self.capabilities_next = Some(view);
+        Ok(())
+    }
+    /// Cache broker-stamped status for the bounded parent metadata channel.
+    /// It is delivered with capability updates without granting new flags.
+    pub fn update_status(&mut self, view: StatusView) -> io::Result<()> {
+        view.validate()?;
+        if self.stopping
+            || view.fence != self.fence
+            || view.sampled_at > monotonic()?
+            || self
+                .status_last
+                .as_ref()
+                .is_some_and(|old| old.sampled_at > view.sampled_at)
+        {
+            return Err(protocol::invalid("invalid or retired Lua status update"));
+        }
+        if self.status_last.as_ref() == Some(&view) {
+            return Ok(());
+        }
+        self.status_last = Some(view);
+        if let Some(capabilities) = &self.capabilities_last {
+            self.capabilities_next = Some(capabilities.clone());
+        }
         Ok(())
     }
     pub fn deadline(&self) -> io::Result<Duration> {
@@ -491,6 +517,7 @@ impl Session {
     pub fn stop(&mut self) -> io::Result<()> {
         self.stopping = true;
         self.capabilities_next = None;
+        self.status_last = None;
         self.rule_mutations = false;
         self.rules_ready = true;
         self.rules_handshake = None;
@@ -757,6 +784,7 @@ impl Session {
             if self.channel.send(
                 &Work::Capabilities {
                     view: view.clone(),
+                    status: self.status_last.clone(),
                     id,
                 },
                 now,
@@ -893,7 +921,7 @@ pub fn worker() -> io::Result<()> {
             && let Some(packet) = channel.receive::<Work>()?
         {
             match packet.message {
-                Work::Capabilities { view, id }
+                Work::Capabilities { view, status, id }
                     if fence == Some(view.fence)
                         && runtime.is_some()
                         && id == capabilities_id + 1 =>
@@ -905,7 +933,17 @@ pub fn worker() -> io::Result<()> {
                             .as_mut()
                             .unwrap()
                             .set_capabilities(view, monotonic()?)
-                        {
+                            .and_then(|()| {
+                                if let Some(status) = status {
+                                    runtime
+                                        .as_mut()
+                                        .unwrap()
+                                        .set_status(status, monotonic().map_err(super::error)?)
+                                } else {
+                                    runtime.as_mut().unwrap().clear_status();
+                                    Ok(())
+                                }
+                            }) {
                             Ok(()) => Message::Capabilities {
                                 fence: incoming,
                                 id,
@@ -1101,6 +1139,7 @@ pub fn worker() -> io::Result<()> {
                         rules_enabled = false;
                         runtime.as_mut().unwrap().disable_rule_transactions();
                         runtime.as_mut().unwrap().clear_capabilities();
+                        runtime.as_mut().unwrap().clear_status();
                         context_assembly = None;
                     }
                     runtime

@@ -29,6 +29,8 @@ mod scheduler;
 #[cfg(target_os = "linux")]
 pub mod session;
 pub mod source_transfer;
+#[cfg(target_os = "linux")]
+mod status;
 mod tasks;
 mod values;
 #[cfg(target_os = "linux")]
@@ -41,6 +43,8 @@ pub use modules::{Module, Sources};
 pub use rule_api::{RuleProposal, RuleReceipt};
 pub use runtime::{Definition, EventKind, LogRecord, MAX_SNAPSHOT_BYTES, Registration, Runtime};
 pub use scheduler::TimerRegistration;
+#[cfg(target_os = "linux")]
+pub use status::StatusView;
 pub use tasks::TaskRegistration;
 
 pub const API_VERSION: u32 = 1;
@@ -50,6 +54,8 @@ pub fn api() -> serde_json::Value {
     let mut symbols = vec![
         serde_json::json!({"name":"config.new", "signature":"config.new(table) -> Config", "description":"Apply the schema version default; validate the returned model."}),
         serde_json::json!({"name":"config.preset", "signature":"config.preset(name) -> Config", "description":"Return a mutable minimal, desktop or phone preset."}),
+        serde_json::json!({"name":"config.current", "signature":"config.current() -> ConfigurationView | nil", "phase":"runtime", "description":"Copy the owning VM's acknowledged validated configuration and exact rule revision; no source closures or live effect authority."}),
+        serde_json::json!({"name":"policy.current", "signature":"policy.current() -> PolicyView | nil", "phase":"runtime", "description":"Copy protected policy from the acknowledged configuration and its revision; negotiated execution grants remain separate."}),
         serde_json::json!({"name":"config.export", "signature":"config.export(config) -> string", "phase":"configuration", "description":"Validate and export a complete declarative model as bounded Lua source; performs no I/O and requires original source for named handlers."}),
         serde_json::json!({"name":"rules.define", "signature":"rules.define(table) -> Rule", "description":"Declare a rule; strict validation occurs at compilation."}),
         serde_json::json!({"name":"rules.on", "signature":"rules.on(id, phase, callback) -> Subscription", "phase":"configuration", "description":"Register a generation-scoped observational rule-phase callback for an existing configured rule; phases are discrete, begin, update, end and cancel; dispose with Subscription.dispose."}),
@@ -77,6 +83,11 @@ pub fn api() -> serde_json::Value {
     ];
     #[cfg(target_os = "linux")]
     for (name, signature, description) in [
+        (
+            "status.current",
+            "status.current() -> StatusView | nil",
+            "Copy fresh broker-stamped mode, reported context state/revision, queued reply count and errors for this session fence; no desktop or effect authority is inferred.",
+        ),
         (
             "morf.providers",
             "morf.providers() -> MorfProviderBinding[] | nil",
@@ -382,6 +393,19 @@ pub fn api() -> serde_json::Value {
         "device_queries":{"catalog":"permitted metadata received through input reset notifications; no host inventory scan","maximum_sources":256,"maximum_bytes":4194304,"lookup":"exact Source device/generation/seat with canonical decimal strings","nil":"no received metadata, unknown source, missing mapping or unavailable/stale desktop context","empty_list":"all known sources removed while context remains usable","revision":"decimal string; metadata changes/removals only","map_keys":"numeric evdev type/axis keys in Lua","position":"validated device counts to normalized/mm/output-local/global coordinates; no action authority","seat":"current fresh desktop binding/fence only; no other-seat enumeration"},
         "runtime_api":"partial"});
     manifest["morf_adapter"] = morf_adapter;
+    manifest["service_inspection"] = serde_json::json!({
+        "configuration":"acknowledged Rust model and canonical decimal-string rule revision; closures require original source",
+        "policy":"protected permissions in that model; not negotiated execution grants",
+        "phase":"runtime callback or task; independent of desktop context",
+        "configuration_unavailable":"nil when the acknowledged rule view has retired",
+        "status":{"freshness_ms":250,"refresh_ms":100,"timestamp":"original broker packet time; never renewed by parent/helper delivery",
+            "identity":"current broker/configuration/session fence; revision and fence words are canonical decimal strings",
+            "pending":"queued outgoing replies on the requesting agent connection; not global gestures or input ownership",
+            "state":"broker-reported state, not native lock completion or authentication",
+            "transport":"latest status accompanies bounded coalesced capability metadata without renewing either clock",
+            "unavailable":"nil before a broker report, after expiry, on a different fence or at stop"},
+        "authority":false
+    });
     manifest["offline_replay"] = serde_json::json!({
         "phases":["configuration","runtime"],"effects":false,"io":false,
         "modes":["observations","rules"],"input":"one native versioned recording JSON object per push",
@@ -741,6 +765,8 @@ fn instantiate(
                 "coordinates",
                 "morf",
                 "replay",
+                "status",
+                "policy",
             ] {
                 module.set(ctx, namespace, Table::new(&ctx))?;
             }
@@ -801,6 +827,7 @@ fn instantiate(
             let actions: Table = module.get(ctx, "actions")?;
             replay::register(&ctx, module.get(ctx, "replay")?)?;
             rule_api::register(&ctx, module.get(ctx, "rules")?, host.clone())?;
+            rule_api::register_inspection(&ctx, module, host.clone())?;
             let rules: Table = module.get(ctx, "rules")?;
             let hook_host = host.clone();
             rules.set(
@@ -841,6 +868,8 @@ fn instantiate(
             #[cfg(target_os = "linux")]
             {
                 let capabilities: Table = module.get(ctx, "capabilities")?;
+                let status: Table = module.get(ctx, "status")?;
+                status.set(ctx, "current", self::status::getter(&ctx, host.clone()))?;
                 for field in ["current", "has", "ready"] {
                     capabilities.set(ctx, field, self::capabilities::getter(&ctx, host.clone(), field))?;
                 }

@@ -1336,6 +1336,9 @@ fn run_session(
     let mut context_download: Option<prek::context_transfer::Assembly> = None;
     let mut context_view: Option<prek::context_transfer::View> = None;
     let mut next_context = started;
+    let mut status_view = None::<prek::lua::StatusView>;
+    let mut next_status = started;
+    let mut status_pending = false;
     loop {
         let now = monotonic()?;
         if signals.requested() || stop_at.is_some_and(|deadline| now >= deadline) {
@@ -1421,6 +1424,7 @@ fn run_session(
                     if !channel.send(&Request::Status { fence: accepted }, now)? {
                         return Err(io::ErrorKind::WouldBlock.into());
                     }
+                    status_pending = true;
                     if !inspect {
                         if json {
                             serde_json::to_writer(
@@ -1443,13 +1447,28 @@ fn run_session(
                     last_reload_error,
                     context_error,
                 } if Some(observed) == fence => {
-                    if json {
+                    let announce = status_view
+                        .as_ref()
+                        .is_none_or(|view| view.fence != observed);
+                    status_pending = false;
+                    next_status = now + Duration::from_millis(100);
+                    status_view = Some(prek::lua::StatusView {
+                        fence: observed,
+                        mode: broker_mode,
+                        state,
+                        revision,
+                        pending,
+                        last_reload_error: last_reload_error.clone(),
+                        context_error: context_error.clone(),
+                        sampled_at: packet.at,
+                    });
+                    if json && (inspect || announce) {
                         serde_json::to_writer(
                             &mut *output,
                             &serde_json::json!({"version": 1, "fence": observed, "mode": broker_mode, "state": state, "revision": revision, "pending": pending, "last_reload_error": last_reload_error, "context_error": context_error}),
                         )?;
                         writeln!(output)?;
-                    } else {
+                    } else if inspect || announce {
                         writeln!(
                             output,
                             "broker: {broker_mode:?}, context {state:?}, pending {pending}"
@@ -1557,6 +1576,7 @@ fn run_session(
                         executor.transition(next_fence)?;
                     }
                     fence = Some(next_fence);
+                    status_pending = false;
                     lua_rules_subscribed = false;
                     lua_waiting_definition = None;
                     lua_rule_request = None;
@@ -1663,6 +1683,7 @@ fn run_session(
                     if !channel.send(&Request::Status { fence: next_fence }, now)? {
                         return Err(io::ErrorKind::WouldBlock.into());
                     }
+                    status_pending = true;
                     next = now + Duration::from_millis(250);
                 }
                 Reply::Subscribed { fence: subscribed }
@@ -1953,6 +1974,12 @@ fn run_session(
                 .map_or_else(std::collections::BTreeSet::new, |executor| {
                     executor.ready_capabilities(capability_now)
                 });
+            if let Some(view) = status_view
+                .as_ref()
+                .filter(|view| Some(view.fence) == fence)
+            {
+                runtime.update_status(view.clone())?;
+            }
             runtime.update_capabilities(requested.clone(), ready)?;
             match runtime.step(monotonic()?) {
                 Ok(mut logs) => {
@@ -2051,6 +2078,20 @@ fn run_session(
                 return Err(io::ErrorKind::WouldBlock.into());
             }
         }
+        let status_active = lua
+            && (lua_runtime.is_some()
+                || lua_download.is_some()
+                || lua_waiting_definition.is_some());
+        if status_active
+            && !status_pending
+            && now >= next_status
+            && let Some(fence) = fence
+        {
+            if !channel.send(&Request::Status { fence }, now)? {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+            status_pending = true;
+        }
         if now.saturating_sub(last_reply) >= Duration::from_secs(1) {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -2078,6 +2119,11 @@ fn run_session(
         let until = context_download
             .as_ref()
             .map_or(until, |download| until.min(download.deadline()));
+        let until = if status_active && !status_pending && fence.is_some() {
+            until.min(next_status)
+        } else {
+            until
+        };
         let until = stop_at.map_or(until, |stop| until.min(stop));
         let until = lua_download
             .as_ref()

@@ -47,6 +47,88 @@ fn context_view(at: Duration, windows: usize) -> prek::context_transfer::View {
 }
 
 #[test]
+fn real_helper_receives_broker_stamped_status_with_independent_expiry_and_stop() {
+    use prek::{context::State, lua::StatusView, protocol::Mode};
+    use std::collections::BTreeSet;
+    let definition = Definition::compile(
+        r#"
+local p=require('prek')
+p.events.on('ready',function()
+ local status=p.status.current()
+ assert(status and status.revision=='18446744073709551615' and status.pending==63)
+ assert(status.fence.configuration=='1' and status.state=='unknown')
+ assert(status.context_error=='provider unavailable' and not p.capabilities.has('commands'))
+ local config=p.config.current();local policy=p.policy.current()
+ assert(config.revision=='1' and policy.revision=='1' and not policy.policy.allow_power_actions)
+ config.config.policy.allow_power_actions=true
+ assert(not p.policy.current().policy.allow_power_actions)
+ p.log.info('status')
+end)
+p.events.on('matched',function()
+ assert(p.status.current()==nil and p.capabilities.current()~=nil)
+ p.log.info('expired')
+end)
+p.events.on('stop',function()
+ assert(p.status.current()==nil and p.capabilities.current()==nil)
+ p.log.info('cleared')
+end)
+return {version=1}
+"#,
+        "status-helper.lua",
+    )
+    .unwrap();
+    let mut session = Session::spawn(
+        Path::new(env!("CARGO_BIN_EXE_prek")),
+        fence(1),
+        "seat0",
+        definition,
+    )
+    .unwrap();
+    for pending in 0..64 {
+        session
+            .update_status(StatusView {
+                fence: fence(1),
+                mode: Mode::Observe,
+                state: State::Unknown,
+                revision: u64::MAX,
+                pending,
+                last_reload_error: None,
+                context_error: Some("provider unavailable".into()),
+                sampled_at: monotonic().unwrap(),
+            })
+            .unwrap();
+    }
+    session
+        .update_capabilities(BTreeSet::new(), BTreeSet::new())
+        .unwrap();
+    assert_eq!(drain(&mut session).unwrap()[0].message, "status");
+    std::thread::sleep(Duration::from_millis(260));
+    session
+        .update_capabilities(BTreeSet::new(), BTreeSet::new())
+        .unwrap();
+    session
+        .notify(EventKind::Matched, serde_json::json!({}))
+        .unwrap();
+    assert_eq!(drain(&mut session).unwrap()[0].message, "expired");
+    session.stop().unwrap();
+    assert!(
+        session
+            .update_status(StatusView {
+                fence: fence(1),
+                mode: Mode::Observe,
+                state: State::Unknown,
+                revision: 0,
+                pending: 0,
+                last_reload_error: None,
+                context_error: None,
+                sampled_at: monotonic().unwrap()
+            })
+            .is_err()
+    );
+    assert_eq!(drain(&mut session).unwrap()[0].message, "cleared");
+}
+
+#[test]
 fn real_helper_runs_offline_replay_without_live_context_or_effect_capabilities() {
     let definition = Definition::compile(
         r#"

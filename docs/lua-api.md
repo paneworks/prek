@@ -1194,6 +1194,47 @@ remain required. The installed `power.lua` declaration shows exact
 output selection, separate screen-on/off rules and a named handler that performs
 an effect only in the begin phase. Offline checking performs no effect.
 
+## Service inspection
+
+These runtime callback/task queries return independent tables. They do not
+require desktop context, and editing a returned table changes no service state.
+
+`config.current() -> ConfigurationView | nil` returns `{revision,config}` using
+the owning VM's acknowledged Rust model. `revision` is an exact decimal string.
+The configuration contains the documented `Config` fields, including protected
+policy, selectors, timing, shapes, layers, modes and rules. Source closures and
+approved module code remain in their original source snapshot. A pending rule
+transaction leaves this view unchanged; a successful worker receipt updates it.
+A rejected receipt reporting an unknown revision retires the view and yields
+`nil` rather than presenting an unacknowledged model.
+
+`policy.current() -> PolicyView | nil` returns `{revision,policy}` from that same
+acknowledged model. Its allowlists and permission booleans constrain user code;
+they are distinct from current negotiated capabilities, executor readiness and
+one-use execution grants. Query `capabilities` for negotiated membership and
+readiness. No setter or permission expansion is exposed here.
+
+`status.current() -> StatusView | nil` copies `{fence,mode,state,revision,pending,
+last_reload_error?,context_error?,sampled_at}` from the authenticated broker
+connection. `mode` comes from its owning registration; `state` is the broker's
+reported context state, including `unknown`, without establishing native lock
+completion or authentication. `revision` is its context snapshot revision as a
+decimal string, or `"0"` when unavailable. `pending` counts outgoing replies
+queued for this requesting agent connection; it is not a global gesture count
+or input-ownership report. Error strings are bounded and optional.
+
+The parent requests status every 100 ms while loading/running Lua, with one
+outstanding request. It preserves the original broker packet time in
+`sampled_at={secs,nanos}` and relays the latest view through the existing bounded
+metadata channel. Parent/helper delivery and capability refresh cannot extend
+status freshness. Status likewise cannot refresh capability readiness. The
+getter rechecks the original 250 ms lifetime and current fence after copying.
+It returns `nil` before the first report, after expiry, on a mismatched fence
+or at stop; it can still report a fresh `unknown` state with a provider error.
+None of these views confers input, action or authentication authority.
+
+See [inspection.lua](../examples/lua/inspection.lua) for a runtime recipe.
+
 ## Offline replay
 
 `replay.new(config = nil) -> Replay` creates a generation-local replay using

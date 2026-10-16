@@ -720,6 +720,10 @@ local RegionsAPI = {}
 local CoordinatesAPI = {}
 ---@class prek.ReplayAPI
 local ReplayAPI = {}
+---@class prek.StatusAPI
+local StatusAPI = {}
+---@class prek.PolicyAPI
+local PolicyAPI = {}
 
 ---@class (exact) prek.Module
 ---@field api_version integer
@@ -744,6 +748,8 @@ local ReplayAPI = {}
 ---@field regions prek.RegionsAPI
 ---@field coordinates prek.CoordinatesAPI
 ---@field replay prek.ReplayAPI
+---@field status prek.StatusAPI
+---@field policy prek.PolicyAPI
 local prek = {
     api_version = 1, version = "0.1.0", api = {},
     config = ConfigAPI, rules = RulesAPI, layers = LayersAPI, modes = ModesAPI, triggers = TriggersAPI, actions = ActionsAPI,
@@ -753,7 +759,33 @@ local prek = {
     devices = DevicesAPI, seats = SeatsAPI,
     outputs = OutputsAPI, regions = RegionsAPI, coordinates = CoordinatesAPI,
     replay = ReplayAPI,
+    status = StatusAPI, policy = PolicyAPI,
 }
+
+---@class (exact) prek.ConfigurationView
+---@field revision prek.Identity Acknowledged rule revision in this VM generation.
+---@field config prek.Config Copied validated Rust model; closures require original source.
+---@class (exact) prek.PolicyView
+---@field revision prek.Identity Same acknowledged rule revision.
+---@field policy prek.Policy Protected configuration permissions, not execution grants.
+---@class (exact) prek.StatusView
+---@field fence prek.Fence
+---@field mode 'observe'|'route' Broker mode established by the owning registration.
+---@field state prek.State Broker report, not native lock completion or authentication proof.
+---@field revision prek.Identity Broker context snapshot revision; zero when unavailable.
+---@field pending integer Queued outgoing replies for this agent connection, not global gestures.
+---@field last_reload_error? string
+---@field context_error? string
+---@field sampled_at prek.MonotonicTime Original broker packet time, expires after 250ms.
+---Runtime callback/task only. Nil if the acknowledged configuration retired.
+---@return prek.ConfigurationView|nil
+function ConfigAPI.current() error("Prek editor definition") end
+---Runtime callback/task only. These permissions cannot grant live effects.
+---@return prek.PolicyView|nil
+function PolicyAPI.current() error("Prek editor definition") end
+---Fresh broker status for this fence, including unknown/inhibited states. No desktop context is required.
+---@return prek.StatusView|nil
+function StatusAPI.current() error("Prek editor definition") end
 
 ---@class (exact) prek.ReplayStatus
 ---@field mode 'observations'|'rules'

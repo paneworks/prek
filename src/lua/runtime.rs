@@ -213,6 +213,8 @@ pub(super) struct Host {
     #[cfg(target_os = "linux")]
     pub(super) capabilities: Option<super::CapabilityView>,
     #[cfg(target_os = "linux")]
+    pub(super) status: Option<super::StatusView>,
+    #[cfg(target_os = "linux")]
     pub(super) context: Option<crate::context_transfer::View>,
     #[cfg(target_os = "linux")]
     pub(super) context_clock: Option<Instant>,

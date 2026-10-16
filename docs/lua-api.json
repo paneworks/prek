@@ -524,6 +524,23 @@
     "uid": "unprivileged active session"
   },
   "schema_version": 1,
+  "service_inspection": {
+    "authority": false,
+    "configuration": "acknowledged Rust model and canonical decimal-string rule revision; closures require original source",
+    "configuration_unavailable": "nil when the acknowledged rule view has retired",
+    "phase": "runtime callback or task; independent of desktop context",
+    "policy": "protected permissions in that model; not negotiated execution grants",
+    "status": {
+      "freshness_ms": 250,
+      "identity": "current broker/configuration/session fence; revision and fence words are canonical decimal strings",
+      "pending": "queued outgoing replies on the requesting agent connection; not global gestures or input ownership",
+      "refresh_ms": 100,
+      "state": "broker-reported state, not native lock completion or authentication",
+      "timestamp": "original broker packet time; never renewed by parent/helper delivery",
+      "transport": "latest status accompanies bounded coalesced capability metadata without renewing either clock",
+      "unavailable": "nil before a broker report, after expiry, on a different fence or at stop"
+    }
+  },
   "symbols": [
     {
       "description": "Apply the schema version default; validate the returned model.",
@@ -534,6 +551,18 @@
       "description": "Return a mutable minimal, desktop or phone preset.",
       "name": "config.preset",
       "signature": "config.preset(name) -> Config"
+    },
+    {
+      "description": "Copy the owning VM's acknowledged validated configuration and exact rule revision; no source closures or live effect authority.",
+      "name": "config.current",
+      "phase": "runtime",
+      "signature": "config.current() -> ConfigurationView | nil"
+    },
+    {
+      "description": "Copy protected policy from the acknowledged configuration and its revision; negotiated execution grants remain separate.",
+      "name": "policy.current",
+      "phase": "runtime",
+      "signature": "policy.current() -> PolicyView | nil"
     },
     {
       "description": "Validate and export a complete declarative model as bounded Lua source; performs no I/O and requires original source for named handlers.",
@@ -665,6 +694,12 @@
       "name": "Replay.close",
       "receiver": "Replay",
       "signature": "replay:close() -> nil"
+    },
+    {
+      "description": "Copy fresh broker-stamped mode, reported context state/revision, queued reply count and errors for this session fence; no desktop or effect authority is inferred.",
+      "name": "status.current",
+      "phase": "runtime_callback",
+      "signature": "status.current() -> StatusView | nil"
     },
     {
       "description": "Copy fresh broker-verified native shell connection bindings for the owning desktop/output; no rendered regions, lock proof, recognizer ownership or action grant is inferred.",
