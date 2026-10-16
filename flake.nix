@@ -47,6 +47,10 @@
               rootProbe = nativeProbe;
             }}/bin/prek-cage-host-test "$@"
           '';
+          root-routing-test = import ./tests/root-routing.nix {
+            inherit pkgs;
+            package = self.packages.${system}.default;
+          };
           default = pkgs.rustPlatform.buildRustPackage {
             pname = "prek";
             version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
@@ -75,6 +79,15 @@
                 fi
               done
               test "$count" -eq 1
+              count=0
+              for candidate in target/*/release/deps/routing-* target/release/deps/routing-*; do
+                if [ -f "$candidate" ] && [ -x "$candidate" ] && \
+                  "$candidate" --list --ignored | ${pkgs.ripgrep}/bin/rg -Fx 'evdev_boundary::pregrab_backlog_and_postgrab_input_share_the_reader_queue: test'; then
+                  install -m 755 "$candidate" "$nativeTests/libexec/prek-routing-tests"
+                  count=$((count + 1))
+                fi
+              done
+              test "$count" -eq 1
               mkdir -p "$out/lib/udev/rules.d"
               substitute ${./udev/70-prek.rules} "$out/lib/udev/rules.d/70-prek.rules" \
                 --replace-fail '@prek@' "$out/bin/prek"
@@ -89,6 +102,7 @@
               cp ${./nix/module.nix} "$out/share/prek/nixos/module.nix"
               cp ${./docs/nixos.md} "$out/share/doc/prek/nixos.md"
               cp ${./docs/morf.md} "$out/share/doc/prek/morf.md"
+              cp ${./docs/root-routing.md} "$out/share/doc/prek/root-routing.md"
               for preset in minimal desktop phone; do
                 "$out/bin/prek" init --preset "$preset" \
                   --output "$out/share/prek/presets/$preset.lua"
@@ -121,6 +135,10 @@
           type = "app";
           program = "${self.packages.${system}.cage-root-test}/bin/prek-cage-root-test";
         };
+        root-routing-test = {
+          type = "app";
+          program = "${self.packages.${system}.root-routing-test}/bin/prek-root-routing-test";
+        };
       });
 
       checks = forSystems (system:
@@ -143,6 +161,15 @@
             cp ${./tests/support/morf-controls.py} receipts/morf-controls.py
             cp ${./tests/support/test_morf_controls.py} receipts/test_morf_controls.py
             python3 -m unittest discover -s receipts -p test_morf_controls.py -v > "$out" 2>&1
+          '';
+          root-routing-receipts = pkgs.runCommand "prek-root-routing-receipts-check" {
+            nativeBuildInputs = [ pkgs.python3 pkgs.bash ];
+          } ''
+            mkdir -p receipts/tests/support
+            cp ${./tests/support/root_routing.py} receipts/tests/support/root_routing.py
+            cp ${./tests/support/test_root_routing.py} receipts/tests/support/test_root_routing.py
+            cp ${./tests/run-root-routing.sh} receipts/tests/run-root-routing.sh
+            python3 -m unittest discover -s receipts/tests/support -p test_root_routing.py -v > "$out" 2>&1
           '';
           nixos-module = import ./tests/nixos-module.nix {
             inherit pkgs package;

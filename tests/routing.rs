@@ -5,6 +5,8 @@
 
 #![cfg(target_os = "linux")]
 
+#[path = "support/evdev_boundary.rs"]
+mod evdev_boundary;
 #[path = "support/kernel.rs"]
 mod kernel_fixture;
 #[path = "support/lifecycle.rs"]
