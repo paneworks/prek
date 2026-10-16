@@ -1,5 +1,6 @@
 """Receipt validation cannot turn a skipped or mismatched probe into acceptance."""
 import importlib.util
+import base64
 import json
 from pathlib import Path
 import unittest
@@ -7,6 +8,21 @@ import unittest
 spec = importlib.util.spec_from_file_location("morf_controls", Path(__file__).with_name("morf-controls.py"))
 controls = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(controls)
+
+
+class ScreencopyReceipt(unittest.TestCase):
+    def png(self):
+        return base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+
+    def test_complete_positive_png_dimensions(self):
+        self.assertEqual(controls.png_size(self.png()), (1, 1))
+
+    def test_missing_truncated_wrong_header_and_zero_size_are_rejected(self):
+        png = self.png()
+        for data in (b"", png[:32], png[:-1], b"bad" + png[3:],
+                     png[:12] + b"FAIL" + png[16:], png[:16] + b"\x00" * 4 + png[20:]):
+            with self.subTest(data=data), self.assertRaises(ValueError):
+                controls.png_size(data)
 
 
 class NativeReceipt(unittest.TestCase):

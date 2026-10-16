@@ -1,4 +1,4 @@
-{ pkgs, package, rootProbe ? null }:
+{ pkgs, package, rootProbe ? null, cage ? pkgs.cage, hyprland ? pkgs.hyprland, aquamarine ? null }:
 let
   receiver = import ./wayland-receiver.nix { inherit pkgs; };
   runtime = import ./cage-runtime.nix { inherit package; };
@@ -22,13 +22,20 @@ let
   };
 in
 pkgs.writeShellScriptBin "prek-cage-host-test" ''
+  export MORF_FONT_PATH="${pkgs.material-symbols}/share/fonts:${pkgs.inter}/share/fonts''${MORF_FONT_PATH:+:$MORF_FONT_PATH}"
+  ${pkgs.lib.optionalString (aquamarine != null) ''
+    export LD_LIBRARY_PATH="${aquamarine}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    export PREK_CAGE_AQUAMARINE=${aquamarine}
+    echo 'TEST-ONLY Aquamarine Wayland startup patch; not unmodified stock acceptance.' >&2
+  ''}
   exec ${pkgs.dbus}/bin/dbus-run-session --config-file=${./support/dbus-session.conf} -- \
     ${pkgs.bash}/bin/bash -c 'export PREK_TEST_SESSION_BUS="$DBUS_SESSION_BUS_ADDRESS"; exec "$@"' -- \
     ${pkgs.python3}/bin/python3 ${./cage-host.py} \
-    --cage ${pkgs.cage}/bin/cage \
-    --hyprland ${pkgs.hyprland}/bin/Hyprland \
+    --cage ${cage}/bin/cage \
+    --hyprland ${hyprland}/bin/Hyprland \
     --inner ${./cage-inner.py} --proxy ${./support/wlproxy.py} --morf-lock-check ${./support/morf-lock.py} \
     --morf-control-check ${./support/morf-controls.py} \
+    --screencopy ${pkgs.grim}/bin/grim \
     --receiver ${receiver}/bin/prek-wayland-receiver \
     --keyboard ${keyboard}/bin/prek-wayland-keyboard \
     ${pkgs.lib.optionalString (rootProbe != null) "--morf-root-probe ${rootProbe}"} \

@@ -16,6 +16,16 @@ def usable_outputs(monitors):
                                 for item in active)
 
 
+def aquamarine_libraries(maps, expected=None):
+    paths = [fields[5] for line in maps.splitlines()
+             if len(fields := line.split(maxsplit=5)) == 6]
+    libraries = sorted({path for path in paths if Path(path).name.startswith("libaquamarine.so")})
+    if expected and (not libraries or any(Path(path).parent != Path(expected) / "lib"
+                                         or path.endswith(" (deleted)") for path in libraries)):
+        raise RuntimeError("owned Hyprland did not load the declared test-only Aquamarine")
+    return dict(declared_test_override=expected, loaded_libraries=libraries)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hyprland", required=True)
@@ -81,9 +91,13 @@ def main():
             # As in Mold, the nested compositor gets an explicit output rather
             # than relying on Hyprland's unreported fallback monitor (-1).
             wait_for(lambda:usable_outputs(monitors()),hyprland)
+            maps = Path(f"/proc/{hyprland.pid}/maps").read_text()
+            (output / "hyprland-libraries.txt").write_text(maps)
+            libraries = aquamarine_libraries(maps, os.environ.get("PREK_CAGE_AQUAMARINE"))
             report = output / "nested.json"
             temporary = output / "nested.json.new"
-            temporary.write_text(json.dumps({"socket":str(nested), "hyprland_pid":hyprland.pid}))
+            temporary.write_text(json.dumps({"socket":str(nested), "hyprland_pid":hyprland.pid,
+                                             "aquamarine":libraries}))
             temporary.replace(report)
             receiver_env = dict(env, WAYLAND_DISPLAY=nested.name)
             receiver = subprocess.Popen([args.receiver, str(output / "receipts.jsonl")],

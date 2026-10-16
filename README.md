@@ -519,6 +519,11 @@ remain under `target/cage-host/run-*`. No host evdev devices are opened.
 `RENDER_NODE` selects the rendering device, defaulting to `/dev/dri/renderD128`.
 The compatibility proxy is adapted from Mold's sandbox at commit `36261df7`.
 
+On Ubuntu, an explicitly patched newer-compositor fixture is available as
+`cage-test-wayland-fix`; the default remains unchanged. See
+[the dependency distinction and owned-output screenshots](docs/ubuntu-compositors.md#explicit-nested-wayland-test-variant)
+before using its results as acceptance evidence.
+
 The same run now queries that owned Hyprland through Prek's verified IPC client,
 transfers complete geometry to its real supervised Luna helper, and routes
 synthetic A/B frames through the Lua-configured routing library. The app must

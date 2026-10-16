@@ -1,0 +1,29 @@
+--- a/src/backend/Wayland.cpp
++++ b/src/backend/Wayland.cpp
+@@ -182,6 +182,6 @@ bool Aquamarine::CWaylandBackend::createOutput(const std::string& szName) {
+     o->self = o;
+     if (backend->ready)
+         o->swapchain = CSwapchain::create(backend->primaryAllocator, self.lock());
+-    idleCallbacks.emplace_back([this, o]() { backend->events.newOutput.emit(SP<IOutput>(o)); });
++    wl_display_flush(waylandState.display);
+     return true;
+ }
+@@ -526,4 +526,17 @@ Aquamarine::CWaylandOutput::CWaylandOutput(const std::string& name_, Hyprutils::Memory::CWeakPointer<CWaylandBackend> backend_) : backend(backend_) {
+-    waylandState.xdgSurface->setConfigure([this](CCXdgSurface* r, uint32_t serial) {
++    waylandState.xdgSurface->setConfigure([this, announced = false](CCXdgSurface* r, uint32_t serial) mutable {
+         backend->backend->log(AQ_LOG_DEBUG, std::format("Output {}: configure surface with {}", name, serial));
+         r->sendAckConfigure(serial);
++        if (announced)
++            return;
++        announced = true;
++        backend->backend->addIdleEvent(makeShared<std::function<void()>>([weak = self]() {
++            const auto output = weak.lock();
++            if (!output)
++                return;
++            const auto owner = output->backend.lock();
++            if (!owner || std::ranges::find(owner->outputs, output) == owner->outputs.end())
++                return;
++            owner->backend->events.newOutput.emit(SP<IOutput>(output));
++            output->scheduleFrame(AQ_SCHEDULE_NEEDS_FRAME);
++        }));
+     });

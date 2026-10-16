@@ -10,6 +10,15 @@ import subprocess
 import time
 
 
+def verify_lock_acknowledgement(log, outputs):
+    if not outputs or any(item.get("disabled", False) or item.get("dpmsStatus") is not True
+                          or item.get("width", 0) <= 0 or item.get("height", 0) <= 0
+                          for item in outputs):
+        raise ValueError("lock acknowledgement requires active owned outputs")
+    if "Session got locked by " not in log or "Sending locked after a " in log:
+        raise ValueError("compositor did not acknowledge the owned lock without fallback")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("morf", "socket", "hyprctl", "instance", "output"):
@@ -50,6 +59,8 @@ ui.Rect{color="#203040",width=morf.surface.width,height=morf.surface.height}
 
     assert not locked()
     reports = []
+    compositor_logs = []
+    locked_outputs = None
     client = None
     endpoint = None
     with (output / "morf-lock.log").open("w") as log:
@@ -97,6 +108,15 @@ ui.Rect{color="#203040",width=morf.surface.width,height=morf.surface.height}
                     assert state["revision"] >= reports[-1]["state"]["revision"]
                 queried = time.monotonic()
                 actual_lock = locked()
+                if state["phase"] == "locked" and actual_lock and locked_outputs is None:
+                    reply = subprocess.run([args.hyprctl, "-j", "monitors"], env=env,
+                                           capture_output=True, text=True, check=True, timeout=2)
+                    locked_outputs = json.loads(reply.stdout)
+                if (not reports or state["phase"] != reports[-1]["state"]["phase"]
+                        or actual_lock != reports[-1]["compositor_locked"]):
+                    reply = subprocess.run([args.hyprctl, "rollinglog"], env=env,
+                                           capture_output=True, text=True, check=True, timeout=2)
+                    compositor_logs.append(reply.stdout)
                 reports.append({"state": state, "compositor_locked": actual_lock, "producer_pid": producer,
                                 "sampled_at": time.monotonic(), "query_ms": (time.monotonic() - queried) * 1000})
                 if state["phase"] == "unlock_dispatched" and not actual_lock:
@@ -112,10 +132,14 @@ ui.Rect{color="#203040",width=morf.surface.width,height=morf.surface.height}
                 time.sleep(.02)
             else:
                 raise RuntimeError(f"native Morf lock receipt timed out; see {output / 'morf-lock.log'}")
+            compositor_log = "\n".join(compositor_logs)
+            (output / "morf-lock-compositor.log").write_text(compositor_log)
+            verify_lock_acknowledgement(compositor_log, locked_outputs)
             (output / "morf-lock-receipts.json").write_text(json.dumps({
                 "status": "passed", "native_producer": True, "authentication_fixture": True,
                 "logind_registered": False, "root_release_tested": False,
                 "unprivileged_release_refused": True, "reports": reports,
+                "compositor_timeout_acknowledgement": False, "locked_outputs": locked_outputs,
             }) + "\n")
             print("PASS: native Morf provider reported actual owned compositor lock/unlock, retained its identity, refused unprivileged release and removed its endpoint.")
         finally:

@@ -1,5 +1,6 @@
 """Ordinary Morf controller IPC on the owned Cage compositor; no broker grant."""
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -9,6 +10,17 @@ import socket
 import struct
 import subprocess
 import time
+
+
+def png_size(data):
+    if (len(data) < 45 or data[:8] != b"\x89PNG\r\n\x1a\n"
+            or data[8:16] != b"\x00\x00\x00\rIHDR"
+            or data[-12:] != b"\x00\x00\x00\x00IEND\xaeB`\x82"):
+        raise ValueError("screencopy did not produce a complete PNG")
+    width, height = struct.unpack(">II", data[16:24])
+    if not width or not height:
+        raise ValueError("screencopy has no usable pixels")
+    return width, height
 
 
 def native_root_receipt(stdout, *, compositor_pid, producer_pid, output, cancel_supported=False):
@@ -41,6 +53,7 @@ def main():
         parser.add_argument(f"--{name}", required=True)
     parser.add_argument("--pid", required=True, type=int)
     parser.add_argument("--root-probe", type=Path)
+    parser.add_argument("--screencopy", type=Path)
     args = parser.parse_args()
     assert os.environ.get("PREK_CAGE_HOST") == "1"
     runtime = Path(os.environ["XDG_RUNTIME_DIR"])
@@ -75,6 +88,25 @@ def main():
     rpc_calls = 0
     timing_limit = 256
     producer = None
+    screen_captures = []
+
+    def capture(label):
+        if args.screencopy is None:
+            return
+        time.sleep(.6)
+        path = output / f"morf-{label}.png"
+        with (output / f"morf-{label}-screencopy.log").open("w") as log:
+            subprocess.run([str(args.screencopy), "-o", name, str(path)],
+                           env=dict(env, WAYLAND_DEBUG="client"),
+                           check=True, stdout=log, stderr=log, timeout=5)
+        assert path.stat().st_size <= 16 * 1024 * 1024, "screencopy exceeded its output bound"
+        data = path.read_bytes()
+        width, height = png_size(data)
+        assert (width, height) == (monitors[0]["width"], monitors[0]["height"])
+        screen_captures.append(dict(path=path.name, width=width, height=height,
+                                    sha256=hashlib.sha256(data).hexdigest(),
+                                    compositor_pid=args.pid, producer_pid=producer,
+                                    output=name, state=state()))
 
     def exchange(target, *values):
         nonlocal producer
@@ -351,6 +383,8 @@ def main():
                 assert value["launcher"] == (action in ("apps", "web"))
                 if action in ("apps", "web"):
                     assert value["menu"] == action
+                if action == "dashboard":
+                    capture("dashboard")
             # Apps/Web may focus an input and auto-show the existing keyboard.
             # Establish a hidden baseline through its real controller first.
             send(request("keyboard_hide"))
@@ -359,10 +393,12 @@ def main():
             send(request("keyboard_show"))
             assert state()["keyboard"] and state()["keyboard_layout"] == "full"
             rendered_frame(True, "full")
+            capture("keyboard-full")
             toggle = request("keyboard_toggle_layout")
             send(toggle)
             assert state()["keyboard_layout"] == "dev"
             rendered_frame(True, "dev")
+            capture("keyboard-dev")
             send(toggle, "duplicate")
             assert state()["keyboard_layout"] == "dev"
             send(request("keyboard_hide"))
@@ -427,6 +463,9 @@ def main():
                 native_layer_space_tested=bool(layout_observations),
                 native_layer_layout_observations=layout_observations,
                 native_rendered_context_broker_tested=False,
+                actual_compositor_screencopy_tested=bool(screen_captures),
+                screen_captures=screen_captures,
+                morf_font_path=env.get("MORF_FONT_PATH"),
                 native_rendered_observations=rendered_observations,
                 native_handoff_state=handoff, native_handoff_operations_refused=True,
                 native_reload_generation_verified=True,

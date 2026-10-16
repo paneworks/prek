@@ -37,6 +37,8 @@ def main():
                         default=Path(__file__).parent / "support/morf-lock.py")
     parser.add_argument("--morf-shell", type=Path,
                         help="Caelestia shell init.lua for ordinary typed Morf controller checks")
+    parser.add_argument("--screencopy", type=Path,
+                        help="grim executable for captures from the private owned output")
     parser.add_argument("--morf-control-check", type=Path,
                         default=Path(__file__).parent / "support/morf-controls.py")
     parser.add_argument("--morf-root-probe", type=Path,
@@ -159,6 +161,17 @@ def main():
             assert received[-1]["modifiers"] == {
                 "depressed": 0, "latched": 0, "locked": 0, "group": 0}
             assert any(row["modifiers"]["depressed"] for row in received)
+            if args.screencopy:
+                capture_env = dict(control_env, WAYLAND_DISPLAY=socket.name, WAYLAND_DEBUG="client")
+                monitors = subprocess.run([hyprctl, "-j", "monitors"], env=control_env,
+                                          check=True, capture_output=True, text=True, timeout=3)
+                active = [item for item in json.loads(monitors.stdout) if not item.get("disabled", False)]
+                assert len(active) == 1
+                with (output / "receiver-screencopy.log").open("w") as capture_log:
+                    subprocess.run([str(args.screencopy), "-o", active[0]["name"],
+                                    str(output / "receiver-baseline.png")],
+                                   env=capture_env, stdout=capture_log, stderr=capture_log,
+                                   check=True, timeout=5)
             if args.prek_fixture:
                 if not args.prek_app:
                     parser.error("--prek-fixture requires --prek-app")
@@ -309,6 +322,7 @@ def main():
                         "--pid", str(report["hyprland_pid"]),
                         "--socket", str(socket), "--hyprctl", hyprctl,
                         "--instance", instances[0], "--output", str(output)]
+                        + (["--screencopy", str(args.screencopy)] if args.screencopy else [])
                         + (["--root-probe", str(args.morf_root_probe)] if args.morf_root_probe else []),
                         env=env, check=True, timeout=90)
             session_name = "visible nested Hyprland" if args.visible else "local Cage/nested Hyprland"

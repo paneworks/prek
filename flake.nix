@@ -2,10 +2,11 @@
   description = "Prek: low-level Linux input tools";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs?rev=4c1018dae018162ec878d42fec712642d214fdfa";
+  inputs.compositor-nixpkgs.url = "github:NixOS/nixpkgs/55bfb4d7437bd4e09ab7cba58a43bd68eb310044";
   inputs.rust-overlay.url = "github:oxalica/rust-overlay/dbc715a4b7c0ace63b9769a032d1dd34cd89e5bd";
   inputs.rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
 
-  outputs = { self, nixpkgs, rust-overlay }:
+  outputs = { self, nixpkgs, compositor-nixpkgs, rust-overlay }:
     let
       forSystems = nixpkgs.lib.genAttrs [ "x86_64-linux" "aarch64-linux" ];
     in
@@ -19,6 +20,7 @@
       packages = forSystems (system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
+          compositorPkgs = compositor-nixpkgs.legacyPackages.${system};
           nativeProbe = pkgs.writeShellScript "prek-native-root-probe" ''
             test "$#" -eq 8 || { echo 'native probe needs its eight owned-session bindings' >&2; exit 2; }
             exec ${pkgs.coreutils}/bin/env -i \
@@ -33,6 +35,15 @@
           cage-touch-test = import ./tests/cage-touch.nix { inherit pkgs; };
           cage-test = import ./tests/cage-host.nix {
             inherit pkgs;
+            package = self.packages.${system}.default;
+          };
+          aquamarine-wayland-test = import ./tests/aquamarine-wayland.nix {
+            pkgs = compositorPkgs;
+          };
+          cage-test-wayland-fix = import ./tests/cage-host.nix {
+            inherit pkgs;
+            inherit (compositorPkgs) cage hyprland;
+            aquamarine = self.packages.${system}.aquamarine-wayland-test;
             package = self.packages.${system}.default;
           };
           cage-root-test = pkgs.writeShellScriptBin "prek-cage-root-test" ''
@@ -132,6 +143,10 @@
           type = "app";
           program = "${self.packages.${system}.cage-test}/bin/prek-cage-host-test";
         };
+        cage-test-wayland-fix = {
+          type = "app";
+          program = "${self.packages.${system}.cage-test-wayland-fix}/bin/prek-cage-host-test";
+        };
         cage-root-test = {
           type = "app";
           program = "${self.packages.${system}.cage-root-test}/bin/prek-cage-root-test";
@@ -169,7 +184,9 @@
             mkdir receipts
             cp ${./tests/support/morf-controls.py} receipts/morf-controls.py
             cp ${./tests/support/test_morf_controls.py} receipts/test_morf_controls.py
-            python3 -m unittest discover -s receipts -p test_morf_controls.py -v > "$out" 2>&1
+            cp ${./tests/support/morf-lock.py} receipts/morf-lock.py
+            cp ${./tests/support/test_morf_lock.py} receipts/test_morf_lock.py
+            python3 -m unittest discover -s receipts -p 'test_morf*.py' -v > "$out" 2>&1
           '';
           root-routing-receipts = pkgs.runCommand "prek-root-routing-receipts-check" {
             nativeBuildInputs = [ pkgs.python3 pkgs.bash ];
