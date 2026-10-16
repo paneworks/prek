@@ -55,6 +55,11 @@ scene name `id`, an opaque decimal-string `node` identity, a surface-local
 `bounds={x,y,width,height}` and `interactive`. Names can repeat, such as a label
 in each launcher row; the native node identities keep every result distinct.
 Node identities are meaningful only within the endpoint epoch and UI generation.
+An optional `semantic={role,layout?}` annotates the actual node: `keyboard`,
+`secure_overlay`, `clock_background`, `content_bottom`, `physical_bottom`,
+`top_left`, `top_right`, `side_left`, `side_right` or `local_control`. A keyboard
+role requires its existing layout name; other roles cannot set a layout.
+Annotations accept no coordinates or authentication/ownership fields.
 Bounds include ancestor transforms and clipping and exclude hidden, transparent,
 masked and exiting subtrees. They are bounding boxes, including for curved or
 rotated items. `interactive` describes an enabled native input target itself;
@@ -74,6 +79,17 @@ These inspection bounds do not populate gesture scopes or keyboard state. They
 do not prove compositor presentation, authentication, keyboard absence, surface
 stacking or the contents of auxiliary layers. Complete semantic regions and
 production ownership/cutover remain required before Morf action negotiation.
+
+Output snapshots explicitly distinguish keyboard knowledge. `keyboard_known=false`
+means unknown, even when `keyboard=nil`. Keyboard visibility conditions and
+spatial eligibility on an awake output then fail with `KeyboardUnavailable`.
+A known state with no keyboard geometry establishes hidden; a known state with
+geometry establishes visible. Knowledge loss invalidates frozen output targets.
+Explicit global rules can remain independent of keyboard context, and an explicit
+screen-off rule can use its supplied region without inferring a visible keyboard.
+Stock compositor metadata reports unknown. Native annotations remain inspection
+data until a complete, verified output mapping/coverage provider supplies knowledge;
+missing keyboard annotations cannot establish hidden.
 
 ## Editor definitions
 
@@ -681,7 +697,7 @@ window; use a new query before making a decision.
 | --- | --- |
 | `Snapshot` | `generation`, `revision`, `captured_at`, `state`, `outputs`, `windows`, `regions`, `secure_overlay`. `generation` matches the session fence. |
 | `Binding` | `seat`, `session`, `uid`, `compositor_pid`, `compositor_start`, `kind` (`user` or `greeter`). Identity comes from broker process/logind verification. |
-| `OutputState` | `geometry`, `geometry_generation`, `active_workspace` (integer or `nil`), `screen` (`on` or `off`), `keyboard` (`Keyboard` or `nil`). |
+| `OutputState` | `geometry`, `geometry_generation`, `active_workspace` (integer or `nil`), `screen` (`on` or `off`), `keyboard_known` (boolean), `keyboard` (`Keyboard` or `nil`). `keyboard_known=false` means unknown; only a known state with `keyboard=nil` establishes hidden. |
 | `Output` | `name`, `pixel_width`, `pixel_height`, `scale`, `origin`, `transform`. Pixel dimensions and scale define logical dimensions; origins use logical desktop coordinates. |
 | `Window` | `id`, `output`, `workspace`, `rect`, `content`, `mapped`, `visible`, `focused`, `z_order` (integer or `nil`). Mapped and visible are distinct; absent stacking order conveys no order. |
 | `Region` | `id`, `scope` (or `nil` for a local widget/overlay), `output`, `rect`, `interactive`. |

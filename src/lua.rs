@@ -386,6 +386,22 @@ pub fn api() -> serde_json::Value {
         "authority":"inspection only; no input-mask, keyboard-absence, authentication, stacking or presentation proof",
         "scopes":false
     });
+    manifest["morf_rendered_queries"]["semantic"] = serde_json::json!({
+        "capability":"semantic_regions","property":"input_context","fields":["role","layout"],
+        "roles":["keyboard","secure_overlay","clock_background","content_bottom","physical_bottom","top_left","top_right","side_left","side_right","local_control"],
+        "layout":"required for keyboard only; 1 to 128 bytes without control characters",
+        "coordinates":"native frame bounds only; caller coordinates rejected",
+        "absence":"does not establish hidden keyboard or complete coverage",
+        "ownership":false
+    });
+    manifest["keyboard_context"] = serde_json::json!({
+        "knowledge":"OutputState.keyboard_known; false means unknown even without geometry",
+        "visible":"known with keyboard geometry","hidden":"known without keyboard geometry",
+        "unknown":"KeyboardUnavailable for visibility conditions and awake spatial scopes",
+        "independent":"explicit global rules and explicit screen-off scopes need not infer keyboard state",
+        "loss":"invalidates the frozen output target","stock_compositor":"unknown",
+        "native_annotations":"inspection only until complete verified mapping and coverage"
+    });
     manifest
 }
 const MEMORY: usize = 32 * 1024 * 1024;

@@ -290,6 +290,7 @@
 ---@field active_workspace? integer
 ---@field screen prek.Screen
 ---@field keyboard? prek.Keyboard
+---@field keyboard_known boolean Whether visibility was explicitly established by a bound provider; false means unknown, not hidden.
 ---@class (exact) prek.Window
 ---@field id string
 ---@field output string
@@ -653,10 +654,14 @@ local MorfAPI = {}
 ---@return prek.MorfProviderBinding[]|nil
 function MorfAPI.providers() error("Prek editor definition") end
 ---@class (exact) prek.MorfNamedBounds
+---@field semantic? prek.MorfSemanticRegion Declared meaning of this native node; no screen mapping or input authority.
 ---@field node prek.Identity Opaque generational node identity, scoped by the native endpoint epoch and UI generation.
 ---@field id string Scene node name; repeated names are preserved as separate native nodes.
 ---@field bounds {x:number,y:number,width:number,height:number} Surface-local logical bounding box, clipped to ancestor and surface bounds.
 ---@field interactive boolean Whether this node is an enabled native input target; does not describe its exact hit shape or surface input mask.
+---@class (exact) prek.MorfSemanticRegion
+---@field role 'keyboard'|'secure_overlay'|'clock_background'|'content_bottom'|'physical_bottom'|'top_left'|'top_right'|'side_left'|'side_right'|'local_control'
+---@field layout? string Required only for the keyboard role; the existing full/dev/phone/pattern layout name.
 ---@class (exact) prek.MorfPrimaryFrame
 ---@field width integer Surface-local logical width.
 ---@field height integer Surface-local logical height.

@@ -83,8 +83,11 @@ p.events.on('ready',function()
   assert(c.coverage=='primary_surface_named_bounds' and c.frame.width==1000)
   assert(c.frame.regions[1].id=='drawer-keyboard' and c.frame.regions[1].bounds.x==10.25)
   assert(c.frame.regions[1].node=='18446744073709551615')
+  assert(c.frame.regions[1].semantic.role=='keyboard' and c.frame.regions[1].semantic.layout=='dev')
   c.frame.regions[1].id='forged'
+  c.frame.regions[1].semantic.layout='forged'
   assert(p.morf.regions()[1].context.frame.regions[1].id=='drawer-keyboard')
+  assert(p.morf.regions()[1].context.frame.regions[1].semantic.layout=='dev')
   p.log.info('frame')
 end)
 return {version=1}
@@ -120,6 +123,16 @@ return {version=1}
                 output: "fixture-output".into(),
                 context: crate::morf::rendered::tests::sample(at),
             });
+        current.morf_rendered[0]
+            .context
+            .frame
+            .as_mut()
+            .unwrap()
+            .regions[0]
+            .semantic = Some(crate::morf::rendered::Semantic {
+            role: crate::morf::rendered::SemanticRole::Keyboard,
+            layout: Some("dev".into()),
+        });
         runtime.set_context(current.clone(), at).unwrap();
         assert_eq!(
             runtime

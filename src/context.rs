@@ -94,6 +94,10 @@ pub struct OutputState {
     /// Required for workspace/viewport actions; never guess from current focus.
     pub active_workspace: Option<i64>,
     pub screen: Screen,
+    /// True only when a bound provider explicitly establishes keyboard
+    /// visibility. Missing geometry alone cannot establish a hidden keyboard.
+    #[serde(default)]
+    pub keyboard_known: bool,
     pub keyboard: Option<Keyboard>,
 }
 impl OutputState {
@@ -211,6 +215,7 @@ impl Snapshot {
                 || output.geometry.pixel_height <= 0.0
                 || output.geometry.name.is_empty()
                 || output.geometry.name.len() > 256
+                || !output.keyboard_known && output.keyboard.is_some()
                 || output.keyboard.as_ref().is_some_and(|keyboard| {
                     !keyboard.rect.valid()
                         || !output.rect().contains_rect(keyboard.rect)
@@ -279,6 +284,7 @@ pub enum Rejection {
     MixedTargets,
     InteractiveReservation,
     KeyboardVisible,
+    KeyboardUnavailable,
     ScreenState,
     SourceChanged,
 }
@@ -726,6 +732,13 @@ impl Authority {
             if rule.screen.is_some_and(|screen| screen != output.screen) {
                 return Err(Rejection::ScreenState);
             }
+            if !output.keyboard_known
+                && (rule.keyboard_visible.is_some()
+                    || rule.scope != Scope::Everywhere
+                        && !(output.screen == Screen::Off && rule.screen == Some(Screen::Off)))
+            {
+                return Err(Rejection::KeyboardUnavailable);
+            }
             if rule
                 .keyboard_visible
                 .is_some_and(|visible| visible != output.keyboard.is_some())
@@ -1016,6 +1029,72 @@ mod tests {
         input::Axis,
     };
     #[test]
+    fn unknown_keyboard_is_neither_hidden_nor_eligible_spatial_context() {
+        let mut authority = authority();
+        let source = source();
+        let map = mapping();
+        let mut unknown = snapshot(authority.generation(), 2, 0);
+        unknown.outputs[0].keyboard = None;
+        unknown.outputs[0].keyboard_known = false;
+        authority.update(unknown.clone(), ms(0)).unwrap();
+        for name in ["G01", "G05", "G06", "G08_up"] {
+            error(
+                authority.start(&rule(name), input(&source, &map, 0), &[point(200, 200)]),
+                Rejection::KeyboardUnavailable,
+            );
+        }
+        let mut selected = rule("G08_up");
+        selected.action = Action::Event {
+            name: "keyboard-context".into(),
+        };
+        selected.scope = Scope::Everywhere;
+        selected.keyboard_visible = Some(false);
+        error(
+            authority.start(&selected, input(&source, &map, 0), &[]),
+            Rejection::KeyboardUnavailable,
+        );
+        selected.keyboard_visible = Some(true);
+        error(
+            authority.start(&selected, input(&source, &map, 0), &[]),
+            Rejection::KeyboardUnavailable,
+        );
+        // Explicit global rules can remain independent of keyboard knowledge.
+        selected.keyboard_visible = None;
+        authority
+            .start(&selected, input(&source, &map, 0), &[])
+            .unwrap();
+        let mut hidden = unknown;
+        hidden.revision = 3;
+        hidden.outputs[0].keyboard_known = true;
+        authority.update(hidden.clone(), ms(0)).unwrap();
+        selected.keyboard_visible = Some(false);
+        let permit = authority
+            .start(&selected, input(&source, &map, 0), &[])
+            .unwrap();
+        hidden.revision = 4;
+        hidden.outputs[0].keyboard_known = false;
+        authority.update(hidden, ms(0)).unwrap();
+        assert_eq!(
+            authority.validate(&permit, input(&source, &map, 0)),
+            Err(Rejection::OutputChanged)
+        );
+    }
+    #[test]
+    fn geometry_cannot_appear_under_unknown_keyboard_knowledge() {
+        let mut value = snapshot(1, 1, 0);
+        value.outputs[0].keyboard_known = false;
+        assert_eq!(value.validate(), Err(Rejection::InvalidGeometry));
+        value.outputs[0].keyboard = None;
+        value.validate().unwrap();
+        let mut encoded = serde_json::to_value(&value).unwrap();
+        encoded["outputs"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("keyboard_known");
+        let legacy: Snapshot = serde_json::from_value(encoded).unwrap();
+        assert!(!legacy.outputs[0].keyboard_known);
+    }
+    #[test]
     fn explicit_output_freezes_keyboard_targets_without_inventing_a_mapping() {
         let mut authority = authority();
         let mut candidate = Config::preset("desktop").unwrap().rules.remove(0);
@@ -1134,6 +1213,7 @@ mod tests {
                 geometry_generation: 1,
                 active_workspace: Some(1),
                 screen: Screen::On,
+                keyboard_known: true,
                 keyboard: Some(Keyboard {
                     rect: rect(0.0, 800.0, 500.0, 200.0),
                     layout: "normal".into(),

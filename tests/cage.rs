@@ -369,6 +369,7 @@ fn context(routing: &mut Routing, geometry: &Output, revision: u64) {
                     geometry_generation: 2,
                     active_workspace: Some(1),
                     screen: Screen::On,
+                    keyboard_known: true,
                     keyboard: None,
                 }],
                 windows: vec![],

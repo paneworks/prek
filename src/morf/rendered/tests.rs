@@ -16,6 +16,7 @@ pub(crate) fn sample(at: Duration) -> Context {
                 node: u64::MAX,
                 id: "drawer-keyboard".into(),
                 interactive: false,
+                semantic: None,
                 bounds: Bounds {
                     x: 10.25,
                     y: 600.0,
@@ -25,6 +26,40 @@ pub(crate) fn sample(at: Duration) -> Context {
             }],
         }),
     }
+}
+#[test]
+fn semantic_roles_cannot_supply_unverified_bounds_or_keyboard_absence() {
+    let at = Duration::from_secs(1);
+    let mut context = sample(at);
+    context.frame.as_mut().unwrap().regions[0].semantic = Some(Semantic {
+        role: SemanticRole::Keyboard,
+        layout: Some("dev".into()),
+    });
+    context.validate(&state(), at, None).unwrap();
+    let original = serde_json::to_value(&context).unwrap();
+    for bad in [
+        serde_json::json!({"role":"keyboard"}),
+        serde_json::json!({"role":"keyboard","layout":""}),
+        serde_json::json!({"role":"top_left","layout":"dev"}),
+        serde_json::json!({"role":"keyboard_hidden"}),
+        serde_json::json!({"role":"keyboard","layout":"dev","x":10}),
+    ] {
+        let mut value = original.clone();
+        value["frame"]["regions"][0]["semantic"] = bad;
+        assert!(
+            serde_json::from_value::<Context>(value)
+                .and_then(|context| context
+                    .validate(&state(), at, None)
+                    .map(|_| context)
+                    .map_err(serde_json::Error::io))
+                .is_err()
+        );
+    }
+    context.frame.as_mut().unwrap().regions[0].semantic = Some(Semantic {
+        role: SemanticRole::TopLeft,
+        layout: None,
+    });
+    context.validate(&state(), at, None).unwrap();
 }
 fn state() -> ShellState {
     ShellState {

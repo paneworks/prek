@@ -46,6 +46,18 @@ covered. The broker does not convert these observations into gesture scopes,
 keyboard absence or authentication. Those semantic and ownership integrations
 remain required. See the exact shape in [the Lua reference](lua-api.md).
 
+When `semantic_regions=true`, named bounds can also contain a typed `semantic`
+annotation. Morf configs attach `input_context={role,layout?}` to the actual scene
+node; they never submit coordinates. Caelestia labels its keyboard panel with the
+current layout, authentication/session drawers as secure overlays, ordinary
+drawers as local controls and persistent top/bottom/side geometry as shell roles.
+The semantic Items take no input and remain laid out while native recognizers
+are inhibited. Annotations describe visible primary-frame nodes only. Absence
+does not prove a hidden keyboard, and these fields cannot fabricate unlock or
+input ownership. Prek's output snapshots now retain `keyboard_known=false` for
+missing keyboard context; awake spatial/visibility-dependent rules then pass
+through with `KeyboardUnavailable` rather than treating missing data as hidden.
+
 The optional owned local test is:
 
 ```sh

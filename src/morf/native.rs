@@ -53,6 +53,8 @@ pub struct Capabilities {
     cancel_gesture: bool,
     #[serde(default)]
     rendered_context: bool,
+    #[serde(default)]
+    semantic_regions: bool,
 }
 impl Capabilities {
     pub fn epoch(&self) -> &str {
@@ -78,6 +80,9 @@ impl Capabilities {
     }
     pub fn has_rendered_context(&self) -> bool {
         self.rendered_context
+    }
+    pub fn has_semantic_regions(&self) -> bool {
+        self.semantic_regions
     }
     fn validate(&self, state: &ShellState, previous: Option<u64>) -> io::Result<()> {
         if self.version != 1

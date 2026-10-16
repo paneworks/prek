@@ -40,6 +40,47 @@ pub struct Region {
     /// Whether this node itself is an enabled native input target. Bounds
     /// still do not express its exact hit shape or the surface's input mask.
     pub interactive: bool,
+    /// Declarative meaning attached to this actual native frame node. This
+    /// supplies no screen mapping, exact hit shape or input ownership.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic: Option<Semantic>,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticRole {
+    Keyboard,
+    SecureOverlay,
+    ClockBackground,
+    ContentBottom,
+    PhysicalBottom,
+    TopLeft,
+    TopRight,
+    SideLeft,
+    SideRight,
+    LocalControl,
+}
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Semantic {
+    pub role: SemanticRole,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<String>,
+}
+impl Semantic {
+    fn validate(&self) -> io::Result<()> {
+        if match &self.layout {
+            Some(layout) => {
+                self.role != SemanticRole::Keyboard
+                    || layout.is_empty()
+                    || layout.len() > 128
+                    || layout.chars().any(char::is_control)
+            }
+            None => self.role == SemanticRole::Keyboard,
+        } {
+            return Err(invalid("invalid native semantic region"));
+        }
+        Ok(())
+    }
 }
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -121,6 +162,9 @@ impl Context {
             }
             let mut nodes = BTreeSet::new();
             for region in &frame.regions {
+                if let Some(semantic) = &region.semantic {
+                    semantic.validate()?;
+                }
                 let b = region.bounds;
                 if region.id.is_empty()
                     || region.id.len() > 128
@@ -171,6 +215,13 @@ impl Client<ShellState> {
                 MAX_BYTES,
             )?;
             let context: Context = serde_json::from_slice(&bytes)?;
+            if !capabilities.has_semantic_regions()
+                && context.frame.as_ref().is_some_and(|frame| {
+                    frame.regions.iter().any(|region| region.semantic.is_some())
+                })
+            {
+                return Err(invalid("native semantic regions were not negotiated"));
+            }
             let state = self.sample_until(logind, compositor, until)?;
             context.validate(&state, crate::ipc::monotonic()?, self.rendered.as_ref())?;
             if context.ui_generation != capabilities.ui_generation() {

@@ -205,14 +205,14 @@ def main():
             assert (capabilities["queue"], capabilities["receipts"], capabilities["lease_ms"],
                     capabilities["grant_ms"]) == (8, 64, 1000, 250)
             rendered_observations = []
-            def rendered_frame(keyboard=None):
+            def rendered_frame(keyboard=None, layout=None):
                 if not capabilities.get("rendered_context", False):
                     return None
                 until = time.monotonic() + 5
                 while True:
                     value = native_rpc(dict(version=1, op="rendered-context"), 128 * 1024)
                     with (output / "morf-rendered-observations.jsonl").open("a") as log:
-                        log.write(json.dumps(dict(expected_keyboard=keyboard, report=value)) + "\n")
+                        log.write(json.dumps(dict(expected_keyboard=keyboard, expected_layout=layout, report=value)) + "\n")
                     assert set(value) == {"version", "epoch", "ui_generation", "revision", "sampled_ns", "coverage", "frame"}
                     assert value["version"] == 1 and value["epoch"] == initial_native["epoch"]
                     assert value["ui_generation"] == capabilities["ui_generation"]
@@ -225,16 +225,37 @@ def main():
                         assert len(frame["regions"]) <= 256
                         ids = set()
                         nodes = set()
+                        semantics = []
                         for region in frame["regions"]:
                             assert isinstance(region["node"], str) and str(int(region["node"])) == region["node"]
                             assert 0 < int(region["node"]) <= 2**64 - 1 and region["node"] not in nodes
                             nodes.add(region["node"])
                             ids.add(region["id"])
+                            if "semantic" in region:
+                                semantic = region["semantic"]
+                                assert set(semantic) <= {"role", "layout"}
+                                assert semantic["role"] in {"keyboard", "secure_overlay", "clock_background", "content_bottom", "physical_bottom", "top_left", "top_right", "side_left", "side_right", "local_control"}
+                                assert ("layout" in semantic) == (semantic["role"] == "keyboard")
+                                semantics.append((region, semantic))
                             bounds = region["bounds"]
                             assert all(math.isfinite(number) for number in bounds.values())
                             assert 0 <= bounds["x"] < bounds["x"] + bounds["width"] <= frame["width"] + 1e-6
                             assert 0 <= bounds["y"] < bounds["y"] + bounds["height"] <= frame["height"] + 1e-6
+                        keyboard_regions = [s for r, s in semantics if s["role"] == "keyboard"]
+                        if capabilities.get("semantic_regions", False):
+                            roles = {s["role"] for r, s in semantics}
+                            if not roles >= {"content_bottom", "physical_bottom", "top_left", "top_right", "side_left", "side_right"}:
+                                assert time.monotonic() < until, f"native semantic geometry did not converge: {roles}"
+                                time.sleep(.025)
+                                continue
+                            assert all(not r["interactive"] for r, s in semantics if s["role"] in {"content_bottom", "physical_bottom", "top_left", "top_right", "side_left", "side_right"})
+                            if layout is not None and (len(keyboard_regions) != 1 or keyboard_regions[0]["layout"] != layout):
+                                assert time.monotonic() < until, "native keyboard layout annotation did not converge"
+                                time.sleep(.025)
+                                continue
                         if keyboard is None or ("drawer-keyboard" in ids) == keyboard:
+                            if capabilities.get("semantic_regions", False):
+                                assert bool(keyboard_regions) == ("drawer-keyboard" in ids)
                             rendered_observations.append(value)
                             return value
                     assert time.monotonic() < until, "native submitted-frame geometry did not converge"
@@ -304,10 +325,11 @@ def main():
             rendered_frame(False)
             send(request("keyboard_show"))
             assert state()["keyboard"] and state()["keyboard_layout"] == "full"
-            rendered_frame(True)
+            rendered_frame(True, "full")
             toggle = request("keyboard_toggle_layout")
             send(toggle)
             assert state()["keyboard_layout"] == "dev"
+            rendered_frame(True, "dev")
             send(toggle, "duplicate")
             assert state()["keyboard_layout"] == "dev"
             send(request("keyboard_hide"))
@@ -367,6 +389,7 @@ def main():
                 native_root_receipt=root_receipt,
                 native_control_capabilities=capabilities,
                 native_rendered_context_tested=bool(rendered_observations),
+                native_semantic_regions_tested=bool(rendered_observations) and capabilities.get("semantic_regions", False),
                 native_rendered_context_broker_tested=False,
                 native_rendered_observations=rendered_observations,
                 native_handoff_state=handoff, native_handoff_operations_refused=True,

@@ -372,6 +372,7 @@ pub(crate) mod tests {
                         geometry_generation: 2,
                         active_workspace: Some(3),
                         screen: Screen::On,
+                        keyboard_known: true,
                         keyboard: Some(Keyboard {
                             rect,
                             layout: "us".into(),

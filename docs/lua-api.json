@@ -242,6 +242,16 @@
     "sources": "explicit policy.allowed_devices selectors on the owning seat; virtual devices excluded",
     "system_permission": "policy.allow_input_events"
   },
+  "keyboard_context": {
+    "hidden": "known without keyboard geometry",
+    "independent": "explicit global rules and explicit screen-off scopes need not infer keyboard state",
+    "knowledge": "OutputState.keyboard_known; false means unknown even without geometry",
+    "loss": "invalidates the frozen output target",
+    "native_annotations": "inspection only until complete verified mapping and coverage",
+    "stock_compositor": "unknown",
+    "unknown": "KeyboardUnavailable for visibility conditions and awake spatial scopes",
+    "visible": "known with keyboard geometry"
+  },
   "limits": {
     "instructions": 1000000,
     "memory_bytes": 33554432,
@@ -308,6 +318,30 @@
     "maximum_regions": 256,
     "maximum_reply_bytes": 131072,
     "scopes": false,
+    "semantic": {
+      "absence": "does not establish hidden keyboard or complete coverage",
+      "capability": "semantic_regions",
+      "coordinates": "native frame bounds only; caller coordinates rejected",
+      "fields": [
+        "role",
+        "layout"
+      ],
+      "layout": "required for keyboard only; 1 to 128 bytes without control characters",
+      "ownership": false,
+      "property": "input_context",
+      "roles": [
+        "keyboard",
+        "secure_overlay",
+        "clock_background",
+        "content_bottom",
+        "physical_bottom",
+        "top_left",
+        "top_right",
+        "side_left",
+        "side_right",
+        "local_control"
+      ]
+    },
     "unavailable": "nil without a fresh owning desktop; empty array when no fresh native frame is available"
   },
   "phase": "configuration_and_session_actions",

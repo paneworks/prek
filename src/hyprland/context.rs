@@ -267,6 +267,7 @@ fn parse(
             } else {
                 Screen::Off
             },
+            keyboard_known: false,
             keyboard: None,
         });
     }
@@ -458,6 +459,8 @@ mod tests {
         assert_eq!(result.regions.len(), 1);
         assert!(result.regions[0].interactive);
         assert_eq!(result.regions[0].scope, None);
+        assert!(!result.outputs[0].keyboard_known);
+        assert!(result.outputs[0].keyboard.is_none());
         let mut outside = layers;
         outside["panel"]["levels"]["2"][0]["x"] = json!(0);
         assert!(snapshot(&json!([monitor()]), &json!([]), &outside, &json!({})).is_err());
