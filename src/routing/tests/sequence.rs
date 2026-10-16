@@ -1,5 +1,6 @@
 //! Native routing models with synthetic device descriptions; no kernel I/O.
 use super::*;
+mod chains;
 use crate::config::{Key, Millis, Scope};
 
 fn hold(key: u16) -> Trigger {
@@ -51,7 +52,15 @@ fn snapshot(at: u64, second: bool) -> Snapshot {
     }
 }
 fn setup_with_target(first: Trigger, targeted: bool) -> (Routing, Device, Device) {
+    setup_profile(vec![first, hold(48)], targeted, Delivery::Reserve)
+}
+fn setup_profile(
+    steps: Vec<Trigger>,
+    targeted: bool,
+    delivery: Delivery,
+) -> (Routing, Device, Device) {
     let mut config = config();
+    config.timing.tap_gap = Millis(20);
     let selector = config.devices.get_mut("touch").unwrap();
     selector.identity = None;
     selector.keys = vec![Key(30), Key(48)];
@@ -63,10 +72,10 @@ fn setup_with_target(first: Trigger, targeted: bool) -> (Routing, Device, Device
         Context::Console
     }];
     rule.scope = Scope::Everywhere;
-    rule.delivery = Delivery::Reserve;
+    rule.delivery = delivery;
     rule.trigger = Trigger::Sequence {
         timeout: Millis(1000),
-        steps: vec![first, hold(48)],
+        steps,
     };
     if targeted {
         rule.output = Some("test".into());
@@ -96,7 +105,7 @@ fn setup_with_target(first: Trigger, targeted: bool) -> (Routing, Device, Device
     let mut first = device();
     first.axes.clear();
     first.properties.clear();
-    first.capabilities = BTreeMap::from([(EV_SYN, vec![SYN_REPORT]), (EV_KEY, vec![30, 48])]);
+    first.capabilities = BTreeMap::from([(EV_SYN, vec![SYN_REPORT]), (EV_KEY, vec![30, 46, 48])]);
     let mut second = first.clone();
     second.source.device += 1;
     second.identity.push_str("-second");

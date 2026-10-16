@@ -363,9 +363,10 @@ integration, full worker/helper integration and
 offline custom replay are still required. These fixtures do not constitute that
 API, privileged, device or rendered acceptance.
 The [native raw-group chain API](routing-chains.md) provides bounded multi-group
-buffer/reserve, FIFO fallback and opaque ownership proofs in the Rust transport
-model. Composed rules do not yet admit these chains through `routing::Routing`;
-native parent/leaf scope binding and the actual worker path still need integration.
+buffer/reserve, FIFO fallback and opaque ownership proofs. Built-in native
+sequences use these through `routing::Routing`, with actual per-source step
+admission and immutable dispatch receipts. Custom leaf-to-parent ownership and
+the full composed worker/source path still need integration.
 `oslo make test-composition-helper` exercises a private native hold-to-custom-to-
 custom-to-native-motion plan with source-bound callbacks in the actual supervised executable;
 it is not public source admission or consuming-route acceptance.

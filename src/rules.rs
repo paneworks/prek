@@ -135,6 +135,7 @@ struct Candidate {
     continued_from: Option<u64>,
     contacts: BTreeSet<crate::input::ContactId>,
     sources: BTreeSet<Source>,
+    source_inputs: BTreeMap<Source, u64>,
     peak_contacts: usize,
     peak_at: Duration,
 }
@@ -185,6 +186,9 @@ impl RouteIntent {
     }
     pub fn sources(&self) -> &BTreeSet<Source> {
         &self.candidate.sources
+    }
+    pub(crate) fn admits_input(&self, source: &Source, watermark: u64) -> bool {
+        self.candidate.source_inputs.get(source) == Some(&watermark)
     }
 }
 pub(crate) struct RouteOutcome {
@@ -529,6 +533,22 @@ impl Engine {
     pub(crate) fn input_at(&self) -> Duration {
         self.last_at.unwrap_or_default()
     }
+    pub(crate) fn input_watermark(&self) -> u64 {
+        self.input_watermark
+    }
+    pub(crate) fn cancel_sequence(&mut self, id: u64, at: Duration, reason: &str) {
+        for sequence in &mut self.sequences {
+            let seat = sequence
+                .pending
+                .iter()
+                .find_map(|(seat, pending)| (pending.id == id).then(|| seat.clone()));
+            if let Some(seat) = seat {
+                sequence.cancel(&seat, at, reason, &mut self.events);
+                sequence.reset.insert(seat);
+            }
+        }
+        self.custom_sync(at, crate::recognition::Retirement::Cancelled);
+    }
     pub(crate) fn enable_routing(&mut self) {
         self.routing = true;
         for worker in &mut self.workers {
@@ -561,6 +581,7 @@ impl Engine {
                 let mut candidate = pending.first.clone();
                 candidate.id = pending.id;
                 candidate.sources = pending.sources.clone();
+                candidate.source_inputs = pending.source_inputs.clone();
                 RouteIntent {
                     rule: sequence.rule.clone(),
                     candidate,
@@ -1265,15 +1286,6 @@ impl Engine {
                         candidate.peak_at = at;
                     }
                 }
-                if matches!(worker.rule.trigger, Trigger::Chord { .. }) {
-                    for candidate in worker
-                        .candidates
-                        .values_mut()
-                        .filter(|candidate| candidate.source.seat == source.seat)
-                    {
-                        candidate.sources.insert(source.clone());
-                    }
-                }
             }
             match &worker.rule.trigger {
                 Trigger::Custom { .. } => {
@@ -1336,6 +1348,13 @@ impl Engine {
                                     &mut self.next_id,
                                     &mut self.events,
                                 );
+                            }
+                            if key_state == KeyState::Press
+                                && let Some(candidate) = worker.candidates.get_mut(source)
+                            {
+                                candidate
+                                    .source_inputs
+                                    .insert(source.clone(), state.input_watermark);
                             }
                             let signals = match &mut worker.recognizer {
                                 Recognizer::Key => vec![Signal::Edge {
@@ -1421,6 +1440,18 @@ impl Engine {
                                 );
                                 if let Some(c) = worker.candidates.get_mut(source) {
                                     c.expires = Some(at.saturating_add(timeout));
+                                }
+                            }
+                            if key_state == KeyState::Press {
+                                for candidate in worker
+                                    .candidates
+                                    .values_mut()
+                                    .filter(|candidate| candidate.source.seat == source.seat)
+                                {
+                                    candidate.sources.insert(source.clone());
+                                    candidate
+                                        .source_inputs
+                                        .insert(source.clone(), state.input_watermark);
                                 }
                             }
                             let Recognizer::Keys(keys) = &mut worker.recognizer else {
@@ -1558,6 +1589,11 @@ impl Engine {
                         }
                     }
                     if let Some(candidate) = worker.candidates.get_mut(source) {
+                        if new_group {
+                            candidate
+                                .source_inputs
+                                .insert(source.clone(), state.input_watermark);
+                        }
                         candidate.expires = None;
                     }
                     let Recognizer::Touch(touches) = &mut worker.recognizer else {
@@ -1704,6 +1740,7 @@ struct PendingSequence {
     finished: Duration,
     evidence: Vec<Evidence>,
     sources: BTreeSet<Source>,
+    source_inputs: BTreeMap<Source, u64>,
     groups: BTreeMap<usize, Duration>,
     progress: bool,
     previous: Option<Candidate>,
@@ -1907,6 +1944,7 @@ impl Sequence {
                 ordinal: 0,
                 finished: candidate.started,
                 sources: candidate.sources.clone(),
+                source_inputs: candidate.source_inputs.clone(),
                 first: candidate,
                 step: 0,
                 evidence: Vec::new(),
@@ -2035,6 +2073,12 @@ impl Sequence {
                     continue;
                 }
                 pending.sources.extend(candidate.sources.iter().cloned());
+                pending.source_inputs.extend(
+                    candidate
+                        .source_inputs
+                        .iter()
+                        .map(|(source, input)| (source.clone(), *input)),
+                );
                 for (index, _) in self
                     .groups
                     .iter()
@@ -2171,6 +2215,9 @@ impl Sequence {
                 continue;
             }
             pending.sources.extend(trace.candidate.sources.clone());
+            pending
+                .source_inputs
+                .extend(trace.candidate.source_inputs.clone());
             if final_step {
                 pending.ordinal = pending
                     .ordinal
@@ -2210,8 +2257,14 @@ impl Sequence {
                     let mut candidate = pending.first.clone();
                     candidate.id = pending.id;
                     candidate.sources = pending.sources.clone();
+                    candidate.source_inputs = pending.source_inputs.clone();
                     self.outcomes.push(RouteOutcome {
-                        expires: trace.expires,
+                        expires: pending
+                            .groups
+                            .iter()
+                            .map(|(index, started)| *started + self.groups[*index].timeout)
+                            .chain(trace.expires)
+                            .min(),
                         event: events.last().unwrap().clone(),
                         intent: RouteIntent {
                             rule: self.rule.clone(),
@@ -2496,6 +2549,9 @@ impl Sequence {
                 pending.sources.insert(source.clone());
             }
         }
+        pending
+            .source_inputs
+            .extend(candidate.source_inputs.clone());
         for (index, _) in self
             .groups
             .iter()
@@ -2922,6 +2978,7 @@ fn start_candidate(
                     continued_from: None,
                     contacts: state.contacts.iter().map(|contact| contact.id).collect(),
                     sources: BTreeSet::from([source.clone()]),
+                    source_inputs: BTreeMap::from([(source.clone(), state.input_watermark)]),
                     peak_contacts: state.contacts.len(),
                     peak_at: at,
                 },

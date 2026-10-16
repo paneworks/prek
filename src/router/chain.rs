@@ -147,6 +147,17 @@ impl Router {
         }
         Some(group.ownership)
     }
+    /// Return the original pending chain decision without advancing clocks.
+    pub fn chain_deadline(&self, token: &ChainToken) -> Option<Duration> {
+        if self.chain_ownership(token, self.last_at) != Some(Ownership::Pending) {
+            return None;
+        }
+        let group = self.group.as_ref()?;
+        match group.candidate?.policy {
+            Policy::Buffer { decision, .. } => group.first.checked_add(decision),
+            _ => None,
+        }
+    }
     /// Seal all claimed segments through the latest native token.
     pub fn seal_chain(&self, token: &ChainToken, at: Duration) -> Result<ClaimedChain, Fault> {
         self.continuation(token)?;

@@ -1,8 +1,9 @@
 # Native raw-group chains
 
 The Rust `router::Router` transport model can retain several physical groups
-under one consuming decision. This is not yet connected to composed rule
-admission in `routing::Routing`, the sole input worker or Lua. Public custom
+under one consuming decision. `routing::Routing` uses it for consuming built-in
+native sequences. Custom leaf-to-parent proposal ownership, composed callbacks
+and their full worker/source integration remain unfinished. Public custom
 sequence validation and production routing remain gated.
 
 The embedding must verify the active rule step, source incarnation, protected
@@ -19,6 +20,7 @@ deserialized from a callback or IPC request.
 | `ChainAdmission::Held(token)` | The new segment is pending or claimed under that original lease. Inspect `chain_ownership` to distinguish the states. |
 | `ChainAdmission::Forwarded` | The frame was processed on the ordinary path; the buffer decision elapsed. It must not be submitted again. |
 | `chain_ownership(token, at)` | Read-only native ownership of an admitted segment. Invalid, retired, backdated or expired scopes return `None`. This does not advance input or delivery clocks. |
+| `chain_deadline(token)` | Original pending buffer deadline, never the later segment's join deadline or an older queued delivery. Claimed/invalid leases have no pending decision. |
 | `claim` / `claim_finished` | Claim every pending segment in the logical lease, not only the latest press. Only a physically neutral interaction may use `claim_finished`. |
 | `cancel` | Pending chains fall back once through the scheduled FIFO. Claimed chains drain their remaining physical releases without replaying consumed input. |
 | `seal_chain(latest, at)` | Create a `ClaimedChain` receipt only after the entire lease is claimed. An older predecessor cannot seal later segments. The receipt records source, authorization, candidate and a compact segment range. |
@@ -69,3 +71,20 @@ keyboard/touch chains, exact-once fallback, claim/drain, original deadlines,
 latest join clocks, native token/receipt lifetime, latent axes and resource
 limits. These are component checks, not kernel capture, rendered delivery,
 composed callback admission or physical takeover acceptance.
+
+## Configured native sequences
+
+Native candidate/sequence scopes retain per-source admission watermarks. Only a
+fresh group admitted by the current step can extend its parent chain. Required
+chord presses join a source; unrelated frames do not. If any required prefix
+was already ordinary, the parent is retired rather than claiming a later suffix.
+All required sources must have matching live tokens before the all-source claim.
+The coordinator bounds aggregate native source bindings to 4096.
+
+Final matches waiting for a later group's join window retain their original
+parent/decision expiry in the bounded deferred queue. Queued native effects
+hold a shared immutable claim receipt, so completing a prefix or forwarding a
+later ordinary group cannot retarget the result. Dispatch validates source and
+authorization lifetime, the original frozen target/context/config and expiry.
+An expired queued begin cancels the series and drains held state; updates cannot
+be dispatched as a new series. These paths do not admit custom composition.

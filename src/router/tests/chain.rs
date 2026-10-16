@@ -263,6 +263,8 @@ fn claiming_a_later_chain_preserves_an_older_queued_application_release() {
             .unwrap(),
     );
     router.push(up(6, 75, 0), None, ms(75)).unwrap();
+    assert_eq!(router.next_deadline(), Some(ms(80)));
+    assert_eq!(router.chain_deadline(&token), Some(ms(350)));
     router.claim_finished(2, 1, ms(80)).unwrap();
     let receipt = router.seal_chain(&token, ms(80)).unwrap();
     assert_eq!(receipt.segments(), 2);
