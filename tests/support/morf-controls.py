@@ -1,6 +1,7 @@
 """Ordinary Morf controller IPC on the owned Cage compositor; no broker grant."""
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import signal
@@ -181,7 +182,7 @@ def main():
             layers = stock("layers")
             assert "caelestia-drawers" in json.dumps(layers)
             native_path, initial_native = native_state()
-            def native_rpc(message):
+            def native_rpc(message, maximum=4096):
                 with socket.socket(socket.AF_UNIX) as client:
                     client.settimeout(1)
                     client.connect(str(native_path))
@@ -192,7 +193,7 @@ def main():
                         if not part:
                             assert not raw, "partial native response"
                             return None
-                        assert len(raw) + len(part) <= 4096
+                        assert len(raw) + len(part) <= maximum
                         raw += part
                     return json.loads(raw)
 
@@ -203,6 +204,42 @@ def main():
             assert capabilities["ui_generation"] == "1"
             assert (capabilities["queue"], capabilities["receipts"], capabilities["lease_ms"],
                     capabilities["grant_ms"]) == (8, 64, 1000, 250)
+            rendered_observations = []
+            def rendered_frame(keyboard=None):
+                if not capabilities.get("rendered_context", False):
+                    return None
+                until = time.monotonic() + 5
+                while True:
+                    value = native_rpc(dict(version=1, op="rendered-context"), 128 * 1024)
+                    with (output / "morf-rendered-observations.jsonl").open("a") as log:
+                        log.write(json.dumps(dict(expected_keyboard=keyboard, report=value)) + "\n")
+                    assert set(value) == {"version", "epoch", "ui_generation", "revision", "sampled_ns", "coverage", "frame"}
+                    assert value["version"] == 1 and value["epoch"] == initial_native["epoch"]
+                    assert value["ui_generation"] == capabilities["ui_generation"]
+                    assert value["coverage"] == "primary_surface_named_bounds"
+                    frame = value["frame"]
+                    if frame is not None:
+                        assert 0 <= time.monotonic_ns() - int(value["sampled_ns"]) < 250_000_000
+                        assert int(value["revision"]) > 0
+                        assert frame["width"] > 0 and frame["height"] > 0 and frame["scale_120"] > 0
+                        assert len(frame["regions"]) <= 256
+                        ids = set()
+                        nodes = set()
+                        for region in frame["regions"]:
+                            assert isinstance(region["node"], str) and str(int(region["node"])) == region["node"]
+                            assert 0 < int(region["node"]) <= 2**64 - 1 and region["node"] not in nodes
+                            nodes.add(region["node"])
+                            ids.add(region["id"])
+                            bounds = region["bounds"]
+                            assert all(math.isfinite(number) for number in bounds.values())
+                            assert 0 <= bounds["x"] < bounds["x"] + bounds["width"] <= frame["width"] + 1e-6
+                            assert 0 <= bounds["y"] < bounds["y"] + bounds["height"] <= frame["height"] + 1e-6
+                        if keyboard is None or ("drawer-keyboard" in ids) == keyboard:
+                            rendered_observations.append(value)
+                            return value
+                    assert time.monotonic() < until, "native submitted-frame geometry did not converge"
+                    time.sleep(.025)
+            rendered_frame()
             assert os.geteuid() != 0, "this fixture exercises real unprivileged refusal"
             handoff = native_rpc(dict(version=1, op="handoff-state"))
             until = time.monotonic() + 3
@@ -231,6 +268,7 @@ def main():
             handoff = reloaded
             capabilities = native_rpc(dict(version=1, op="control-capabilities"))
             assert capabilities["ui_generation"] == "2"
+            rendered_frame()
             assert handoff["handoff"]["phase"] == "native" and handoff["handoff"]["global_enabled"] is True
             for operation in ("lease", "submit", "revoke", "cancel-gesture", "handoff-quiesce", "handoff-activate", "handoff-release"):
                 message = dict(version=1, op=operation, epoch=initial_native["epoch"],
@@ -259,8 +297,14 @@ def main():
                 assert value["launcher"] == (action in ("apps", "web"))
                 if action in ("apps", "web"):
                     assert value["menu"] == action
+            # Apps/Web may focus an input and auto-show the existing keyboard.
+            # Establish a hidden baseline through its real controller first.
+            send(request("keyboard_hide"))
+            assert not state()["keyboard"]
+            rendered_frame(False)
             send(request("keyboard_show"))
             assert state()["keyboard"] and state()["keyboard_layout"] == "full"
+            rendered_frame(True)
             toggle = request("keyboard_toggle_layout")
             send(toggle)
             assert state()["keyboard_layout"] == "dev"
@@ -268,6 +312,7 @@ def main():
             assert state()["keyboard_layout"] == "dev"
             send(request("keyboard_hide"))
             assert not state()["keyboard"]
+            rendered_frame(False)
             pan = request("workspace_preview", "begin")
             send(pan)
             assert state()["workspace_preview"]
@@ -321,6 +366,9 @@ def main():
                 native_ui_handoff_tested=root_receipt is not None,
                 native_root_receipt=root_receipt,
                 native_control_capabilities=capabilities,
+                native_rendered_context_tested=bool(rendered_observations),
+                native_rendered_context_broker_tested=False,
+                native_rendered_observations=rendered_observations,
                 native_handoff_state=handoff, native_handoff_operations_refused=True,
                 native_reload_generation_verified=True,
                 native_shell_binding=final_native, native_endpoint_removed=True,

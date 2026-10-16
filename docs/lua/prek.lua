@@ -652,6 +652,31 @@ local MorfAPI = {}
 ---Nil for stale, missing or inhibited context. No geometry, handoff, lock proof or effect grant.
 ---@return prek.MorfProviderBinding[]|nil
 function MorfAPI.providers() error("Prek editor definition") end
+---@class (exact) prek.MorfNamedBounds
+---@field node prek.Identity Opaque generational node identity, scoped by the native endpoint epoch and UI generation.
+---@field id string Scene node name; repeated names are preserved as separate native nodes.
+---@field bounds {x:number,y:number,width:number,height:number} Surface-local logical bounding box, clipped to ancestor and surface bounds.
+---@field interactive boolean Whether this node is an enabled native input target; does not describe its exact hit shape or surface input mask.
+---@class (exact) prek.MorfPrimaryFrame
+---@field width integer Surface-local logical width.
+---@field height integer Surface-local logical height.
+---@field scale_120 integer Actual surface scale in units of 1/120.
+---@field regions prek.MorfNamedBounds[] At most 256 named scene bounds from a submitted GPU frame.
+---@class (exact) prek.MorfFrameContext
+---@field version integer Currently 1.
+---@field epoch string Native connection identity.
+---@field ui_generation prek.Identity Lua VM generation.
+---@field revision prek.Identity Named frame geometry revision.
+---@field sampled_ns prek.Identity CLOCK_MONOTONIC observation, expires after 250ms.
+---@field coverage 'primary_surface_named_bounds'
+---@field frame prek.MorfPrimaryFrame
+---@class (exact) prek.MorfRenderedContext
+---@field output string Verified native output binding.
+---@field context prek.MorfFrameContext
+---@field fence prek.Fence
+---Fresh submitted-frame inspection only. Bounds do not grant input scopes, prove keyboard absence, authenticate a surface, or acknowledge compositor presentation.
+---@return prek.MorfRenderedContext[]|nil
+function MorfAPI.regions() error("Prek editor definition") end
 ---@class prek.ContextAPI
 local ContextAPI = {}
 ---@class prek.DevicesAPI

@@ -29,6 +29,23 @@ the global-recognizer handoff still require implementation. The read-only
 the other Morf runtime operations remain pending. Root/logind and
 physical authentication acceptance remain unverified by local model fixtures.
 
+Native shell endpoints also provide read-only `rendered-context` when
+`control-capabilities.rendered_context` is true. It exposes the primary GPU
+frame's named scene bounding boxes, surface size/scale, endpoint epoch, UI
+generation, revision and original monotonic observation time. Prek verifies and
+transfers fresh observations to `prek.morf.regions()`; old providers return no
+report. The report is bounded to 256 names/128 KiB, excludes hidden/transparent,
+masked and exiting subtrees, and follows native transforms and clipping.
+Repeated names are preserved under separate opaque native node identities,
+scoped by the endpoint epoch and UI generation. A skipped or layout-only frame cannot
+supply evidence, and reading the endpoint cannot extend its freshness.
+
+This is submitted-frame inspection. Rounded/rotated shapes are represented by
+bounding boxes; auxiliary surfaces and compositor stacking/presentation are not
+covered. The broker does not convert these observations into gesture scopes,
+keyboard absence or authentication. Those semantic and ownership integrations
+remain required. See the exact shape in [the Lua reference](lua-api.md).
+
 The optional owned local test is:
 
 ```sh

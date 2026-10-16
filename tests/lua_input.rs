@@ -135,6 +135,7 @@ return p.config.new{policy={allow_input_events=true,allowed_devices={'keyboard'}
     session
         .update_context(prek::context_transfer::View {
             morf: Vec::new(),
+            morf_rendered: Vec::new(),
             fence,
             sampled_at: now,
             state: State::Desktop,

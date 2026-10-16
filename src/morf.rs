@@ -6,6 +6,7 @@ pub mod dispatch;
 pub mod handoff;
 pub mod native;
 pub mod ownership;
+pub mod rendered;
 mod shell;
 pub use shell::{Phase as ShellPhase, State as ShellState};
 pub type ShellClient = Client<ShellState>;
@@ -125,6 +126,7 @@ pub struct Client<S: NativeState = State> {
     registration: Registration,
     last: Option<S>,
     control_generation: Option<u64>,
+    rendered: Option<rendered::Context>,
 }
 impl<S: NativeState> Client<S> {
     pub(crate) fn last_state(&self) -> Option<&S> {
@@ -242,6 +244,7 @@ impl<S: NativeState> Client<S> {
                 registration,
                 last: None,
                 control_generation: None,
+                rendered: None,
             };
             match client.sample_until(logind, compositor, until) {
                 Ok(_) => {}
@@ -334,6 +337,15 @@ impl Transport {
         let _ = self.stream.shutdown(std::net::Shutdown::Both);
     }
     fn exchange(&mut self, bytes: &[u8], until: Instant, sent: &mut bool) -> io::Result<Vec<u8>> {
+        self.exchange_limit(bytes, until, sent, MAX_REPLY)
+    }
+    fn exchange_limit(
+        &mut self,
+        bytes: &[u8],
+        until: Instant,
+        sent: &mut bool,
+        maximum: usize,
+    ) -> io::Result<Vec<u8>> {
         if self.failed {
             return Err(denied("native provider connection has been retired"));
         }
@@ -349,7 +361,7 @@ impl Transport {
                     Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
                     Ok(_) if byte[0] == b'\n' => break,
                     Ok(_) => {
-                        if bytes.len() >= MAX_REPLY {
+                        if bytes.len() >= maximum {
                             return Err(invalid("native provider reply exceeds limit"));
                         }
                         bytes.push(byte[0]);

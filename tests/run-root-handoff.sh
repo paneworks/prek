@@ -49,6 +49,9 @@ morf_default="$morf_repo/target/async-wallpaper-verified/morf"
 if [[ -x "$morf_repo/target/native-cancel-verified/morf" ]]; then
   morf_default="$morf_repo/target/native-cancel-verified/morf"
 fi
+if [[ -x "$morf_repo/target/rendered-context-verified/morf" ]]; then
+  morf_default="$morf_repo/target/rendered-context-verified/morf"
+fi
 morf_binary=${PREK_MORF_BINARY:-"$morf_default"}
 morf_shell=${PREK_MORF_SHELL:-"$morf_repo/examples/shells/caelestia/shell/init.lua"}
 if [[ ! -x "$morf_binary" || ! -f "$morf_shell" ]]; then

@@ -166,6 +166,7 @@ struct Bound {
     native: Option<crate::morf::Client>,
     native_shells: Vec<crate::morf::ShellClient>,
     shell_states: Vec<crate::morf::ShellState>,
+    shell_rendered: Vec<crate::morf::rendered::OutputContext>,
     shell_discovered: Duration,
     actions: ActionLedger,
     available_actions: BTreeSet<Capability>,
@@ -185,6 +186,7 @@ fn refresh_native_shells(bound: &mut Bound, policy: &Policy, logind: &Logind, no
     }) else {
         bound.native_shells.clear();
         bound.shell_states.clear();
+        bound.shell_rendered.clear();
         bound.shell_discovered = Duration::ZERO;
         return;
     };
@@ -233,15 +235,29 @@ fn refresh_native_shells(bound: &mut Bound, policy: &Policy, logind: &Logind, no
                 visible.push(state);
             }
         }
-        Ok(visible)
+        let mut rendered = Vec::new();
+        for client in &mut bound.native_shells {
+            let Some(state) = client.last_state().filter(|state| visible.contains(state)) else {
+                continue;
+            };
+            let output = state.output.clone();
+            if let Some(context) = client.rendered_context_until(logind, &bound.client, until)? {
+                rendered.push(crate::morf::rendered::OutputContext { output, context });
+            }
+        }
+        Ok((visible, rendered))
     })();
     match result {
-        Ok(states) => bound.shell_states = states,
+        Ok((states, rendered)) => {
+            bound.shell_states = states;
+            bound.shell_rendered = rendered;
+        }
         Err(_) => {
             // Optional shell identity loss never fabricates a region, action
             // grant or unlock, and does not inhibit unrelated generic rules.
             bound.native_shells.clear();
             bound.shell_states.clear();
+            bound.shell_rendered.clear();
         }
     }
 }
@@ -1688,6 +1704,7 @@ impl Broker {
                         native: None,
                         native_shells: Vec::new(),
                         shell_states: Vec::new(),
+                        shell_rendered: Vec::new(),
                         shell_discovered: Duration::ZERO,
                         context_export: None,
                         rules: rule_control::Rules::new(self.rule_baseline.clone()),
@@ -1792,6 +1809,21 @@ impl Broker {
                                     sampled_at: now,
                                     state: bound.context.state(now),
                                     context,
+                                    morf_rendered: if bound.context.fresh(now)
+                                        && bound.context.state(now) == State::Desktop
+                                    {
+                                        bound
+                                            .shell_rendered
+                                            .iter()
+                                            .filter(|rendered| {
+                                                rendered.context.frame.is_none()
+                                                    || rendered.context.fresh(now)
+                                            })
+                                            .cloned()
+                                            .collect()
+                                    } else {
+                                        Vec::new()
+                                    },
                                     morf: if bound.context.fresh(now)
                                         && bound.context.state(now) == State::Desktop
                                     {

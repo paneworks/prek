@@ -5,6 +5,7 @@ use std::{cell::RefCell, rc::Rc};
 pub(super) fn getter<'gc>(
     ctx: &luna::Context<'gc>,
     host: Rc<RefCell<runtime::Host>>,
+    field: &'static str,
 ) -> Callback<'gc> {
     Callback::from_fn(ctx, move |ctx, _, mut stack| {
         let host = host.borrow();
@@ -16,6 +17,29 @@ pub(super) fn getter<'gc>(
         let mut value = Value::Nil;
         if let Some(view) = context::desktop(&host) {
             let providers = Table::new(&ctx);
+            if field == "regions" {
+                let now = host.now.unwrap()
+                    + host
+                        .context_clock
+                        .map_or(Duration::ZERO, |clock| clock.elapsed());
+                let reports = Table::new(&ctx);
+                for report in view
+                    .morf_rendered
+                    .iter()
+                    .filter(|report| report.context.fresh(now))
+                {
+                    let json = serde_json::to_value(report).map_err(io::Error::other)?;
+                    let Value::Table(table) =
+                        luna_util::serde::to_value(ctx, &json).map_err(io::Error::other)?
+                    else {
+                        unreachable!()
+                    };
+                    table.set(ctx, "fence", values::context_fence(ctx, &view.fence)?)?;
+                    reports.set(ctx, reports.length(&ctx) + 1, table)?;
+                }
+                stack.replace(ctx, Value::Table(reports));
+                return Ok(CallbackReturn::Return);
+            }
             for (index, provider) in view.morf.iter().enumerate() {
                 let mut json = serde_json::to_value(provider).map_err(io::Error::other)?;
                 json["compositor_start"] =
@@ -45,6 +69,85 @@ mod tests {
         lua::{Definition, EventKind},
         morf::{ShellPhase, ShellState},
     };
+    #[test]
+    fn native_frame_queries_are_copies_and_expire_independently_of_desktop_refresh() {
+        let definition = Definition::compile(
+            r#"
+local p=require('prek')
+p.events.on('ready',function()
+  local reports=p.morf.regions()
+  if reports==nil then p.log.info('unavailable');return end
+  if #reports==0 then p.log.info('empty');return end
+  local c=reports[1].context
+  assert(reports[1].output=='fixture-output' and c.ui_generation=='2' and c.revision=='7')
+  assert(c.coverage=='primary_surface_named_bounds' and c.frame.width==1000)
+  assert(c.frame.regions[1].id=='drawer-keyboard' and c.frame.regions[1].bounds.x==10.25)
+  assert(c.frame.regions[1].node=='18446744073709551615')
+  c.frame.regions[1].id='forged'
+  assert(p.morf.regions()[1].context.frame.regions[1].id=='drawer-keyboard')
+  p.log.info('frame')
+end)
+return {version=1}
+"#,
+            "native-frame.lua",
+        )
+        .unwrap();
+        let mut runtime = definition.instantiate().unwrap();
+        assert_eq!(
+            runtime
+                .dispatch(EventKind::Ready, &serde_json::json!({}))
+                .unwrap()[0]
+                .message,
+            "unavailable"
+        );
+        let at = Duration::from_secs(1);
+        let mut current = view(at);
+        let binding = &current.context.as_ref().unwrap().binding;
+        current.morf.push(ShellState {
+            version: 1,
+            role: "shell".into(),
+            epoch: "a".repeat(32),
+            revision: 2,
+            phase: ShellPhase::Configured,
+            compositor_pid: binding.compositor_pid,
+            compositor_start: binding.compositor_start,
+            compositor_uid: binding.uid,
+            output: "fixture-output".into(),
+        });
+        current
+            .morf_rendered
+            .push(crate::morf::rendered::OutputContext {
+                output: "fixture-output".into(),
+                context: crate::morf::rendered::tests::sample(at),
+            });
+        runtime.set_context(current.clone(), at).unwrap();
+        assert_eq!(
+            runtime
+                .dispatch(EventKind::Ready, &serde_json::json!({}))
+                .unwrap()[0]
+                .message,
+            "frame"
+        );
+        let later = at + Duration::from_millis(240);
+        current.sampled_at = later;
+        current.context.as_mut().unwrap().snapshot.captured_at = later;
+        runtime.set_context(current, later).unwrap();
+        runtime.set_clock(at + Duration::from_millis(250)).unwrap();
+        assert_eq!(
+            runtime
+                .dispatch(EventKind::Ready, &serde_json::json!({}))
+                .unwrap()[0]
+                .message,
+            "empty"
+        );
+        assert!(
+            Definition::compile(
+                "local p=require('prek');p.morf.regions();return {version=1}",
+                "frame.lua"
+            )
+            .is_err()
+        );
+    }
     #[test]
     fn native_morf_views_are_fresh_fenced_lossless_and_cannot_modify_host_state() {
         let definition = Definition::compile(

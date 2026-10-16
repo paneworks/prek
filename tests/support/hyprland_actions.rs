@@ -141,6 +141,7 @@ impl Fixture {
         };
         let view = View {
             morf: Vec::new(),
+            morf_rendered: Vec::new(),
             fence,
             sampled_at: snapshot.captured_at,
             state: snapshot.state,

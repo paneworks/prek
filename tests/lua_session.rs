@@ -409,6 +409,10 @@ p.events.on('context_changed',function()
   assert(provider.phase=='configured' and provider.output=='fixture-output')
   assert(provider.compositor_start=='18446744073709551615')
   assert(provider.fence.session==p.context.fence().session)
+  local reports=p.morf.regions()
+  assert(#reports==1 and reports[1].output==provider.output)
+  assert(reports[1].context.frame.regions[1].id=='drawer-keyboard')
+  assert(reports[1].context.ui_generation=='2')
   p.log.info('native-binding',{epoch=provider.epoch,birth=provider.compositor_start})
 end)
 return {version=1}
@@ -438,12 +442,29 @@ return {version=1}
         compositor_uid: binding.uid,
         output: "fixture-output".into(),
     });
+    // This helper test transfers an explicit native-context model; actual
+    // native GPU observations are exercised separately in the owned Cage run.
+    view.morf_rendered
+        .push(prek::morf::rendered::OutputContext {
+            output: "fixture-output".into(),
+            context: serde_json::from_value(serde_json::json!({
+                "version":1,"epoch":"a".repeat(32),"ui_generation":"2","revision":"7",
+                "sampled_ns":view.sampled_at.as_nanos().to_string(),
+                "coverage":"primary_surface_named_bounds",
+                "frame":{"width":1000,"height":800,"scale_120":120,"regions":[{
+                "node":"18446744073709551615","id":"drawer-keyboard","interactive":false,
+                    "bounds":{"x":10.0,"y":600.0,"width":980.0,"height":200.0}
+                }]}
+            }))
+            .unwrap(),
+        });
     session.update_context(view.clone()).unwrap();
     assert_eq!(
         drain(&mut session).unwrap()[0].fields,
         serde_json::json!({"epoch":"a".repeat(32),"birth":u64::MAX.to_string()})
     );
     view.morf.clear();
+    view.morf_rendered.clear();
     view.sampled_at = monotonic().unwrap();
     view.context.as_mut().unwrap().snapshot.captured_at = view.sampled_at;
     session.update_context(view.clone()).unwrap();

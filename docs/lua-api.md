@@ -45,6 +45,36 @@ generic rules. Authentication input and inactive/unrelated sessions cannot use
 this query. See [morf_providers.lua](../examples/lua/morf_providers.lua) for a
 runnable observation recipe.
 
+`morf.regions() -> MorfRenderedContext[] | nil` copies fresh native named bounds
+from the shell's primary GPU frame. Each item contains `output`, `fence` and
+`context={version,epoch,ui_generation,revision,sampled_ns,coverage,frame}`.
+Generation, revision and monotonic nanoseconds are exact decimal strings.
+`coverage` is `primary_surface_named_bounds`; `frame` contains logical surface
+`width`, `height`, `scale_120` and up to 256 `regions`. Each region supplies its
+scene name `id`, an opaque decimal-string `node` identity, a surface-local
+`bounds={x,y,width,height}` and `interactive`. Names can repeat, such as a label
+in each launcher row; the native node identities keep every result distinct.
+Node identities are meaningful only within the endpoint epoch and UI generation.
+Bounds include ancestor transforms and clipping and exclude hidden, transparent,
+masked and exiting subtrees. They are bounding boxes, including for curved or
+rotated items. `interactive` describes an enabled native input target itself;
+it does not describe the exact hit shape or the compositor input mask.
+
+The native host records a successful GPU submission, then refreshes unchanged
+geometry only while the current scene, surface size/scale and Lua generation
+still match it. A query cannot refresh itself. Busy, skipped, layout-only, stale
+or replaced frames supply no regions. Invalid or excessive named regions make
+the report unavailable rather than truncating it. Duplicate native node identities
+are rejected. The broker verifies the
+native binding around each read within the shared 200 ms deadline. Lua gets
+independent tables, `nil` without fresh desktop context and an empty array when
+no fresh report is available. Unavailable reports are never proof of absence.
+
+These inspection bounds do not populate gesture scopes or keyboard state. They
+do not prove compositor presentation, authentication, keyboard absence, surface
+stacking or the contents of auxiliary layers. Complete semantic regions and
+production ownership/cutover remain required before Morf action negotiation.
+
 ## Editor definitions
 
 `prek api --lua` prints the same `prek.lua` installed at `share/prek/lua/prek.lua`.

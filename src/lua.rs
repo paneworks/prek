@@ -77,6 +77,11 @@ pub fn api() -> serde_json::Value {
             "Copy fresh broker-verified native shell connection bindings for the owning desktop/output; no rendered regions, lock proof, recognizer ownership or action grant is inferred.",
         ),
         (
+            "morf.regions",
+            "morf.regions() -> MorfRenderedContext[] | nil",
+            "Copy fresh native primary-frame named bounds in surface-local coordinates with output, endpoint/UI generation and fence; inspection only, without input-mask, keyboard-absence, authentication or compositor-presentation authority.",
+        ),
+        (
             "capabilities.current",
             "capabilities.current() -> CapabilityView | nil",
             "Copy fresh broker-negotiated flags and parent executor readiness for this session fence; neither grants effects.",
@@ -371,6 +376,16 @@ pub fn api() -> serde_json::Value {
         "device_queries":{"catalog":"permitted metadata received through input reset notifications; no host inventory scan","maximum_sources":256,"maximum_bytes":4194304,"lookup":"exact Source device/generation/seat with canonical decimal strings","nil":"no received metadata, unknown source, missing mapping or unavailable/stale desktop context","empty_list":"all known sources removed while context remains usable","revision":"decimal string; metadata changes/removals only","map_keys":"numeric evdev type/axis keys in Lua","position":"validated device counts to normalized/mm/output-local/global coordinates; no action authority","seat":"current fresh desktop binding/fence only; no other-seat enumeration"},
         "runtime_api":"partial"});
     manifest["morf_adapter"] = morf_adapter;
+    manifest["morf_rendered_queries"] = serde_json::json!({
+        "capability":"context","freshness_ms":250,"ipc_budget_ms":200,
+        "maximum_regions":256,"maximum_reply_bytes":131072,
+        "coverage":"primary_surface_named_bounds","coordinates":"surface-local logical bounding boxes",
+        "identity":"verified native output/endpoint epoch, UI generation and broker fence",
+        "integers":"node identity, UI generation, revision and sampled_ns are canonical decimal strings",
+        "unavailable":"nil without a fresh owning desktop; empty array when no fresh native frame is available",
+        "authority":"inspection only; no input-mask, keyboard-absence, authentication, stacking or presentation proof",
+        "scopes":false
+    });
     manifest
 }
 const MEMORY: usize = 32 * 1024 * 1024;
@@ -777,7 +792,9 @@ fn instantiate(
                 }
                 geometry::register(&ctx, module, host.clone())?;
                 let morf: Table = module.get(ctx, "morf")?;
-                morf.set(ctx, "providers", self::morf::getter(&ctx, host.clone()))?;
+                for field in ["providers", "regions"] {
+                    morf.set(ctx, field, self::morf::getter(&ctx, host.clone(), field))?;
+                }
                 let context: Table = module.get(ctx, "context")?;
                 for field in ["snapshot", "binding", "state", "fence", "error"] {
                     context.set(ctx, field, self::context::getter(&ctx, host.clone(), field))?;

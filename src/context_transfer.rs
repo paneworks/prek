@@ -24,6 +24,10 @@ pub struct View {
     /// or controller authority are inferred from these role states.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub morf: Vec<crate::morf::ShellState>,
+    /// Native primary-frame bounds remain inspection data. They do not add
+    /// scoped regions, keyboard absence or authentication to the snapshot.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub morf_rendered: Vec<crate::morf::rendered::OutputContext>,
 }
 impl View {
     pub fn validate(&self) -> io::Result<()> {
@@ -58,6 +62,21 @@ impl View {
                     "Morf binding differs from owning desktop/output",
                 ));
             }
+        }
+        let mut rendered_outputs = std::collections::BTreeSet::new();
+        if self.morf_rendered.len() > self.morf.len() {
+            return Err(protocol::invalid("too many native rendered contexts"));
+        }
+        for rendered in &self.morf_rendered {
+            let state = self
+                .morf
+                .iter()
+                .find(|state| state.output == rendered.output)
+                .ok_or_else(|| protocol::invalid("rendered context lacks native output binding"))?;
+            if !rendered_outputs.insert(&rendered.output) {
+                return Err(protocol::invalid("duplicate rendered output context"));
+            }
+            rendered.context.validate(state, self.sampled_at, None)?;
         }
         if self
             .error
@@ -226,6 +245,45 @@ impl Assembly {
 pub(crate) mod tests {
     use super::*;
     #[test]
+    fn rendered_native_bounds_require_the_same_live_output_and_do_not_create_scopes() {
+        let at = Duration::from_secs(1);
+        let mut current = view(at);
+        let binding = &current.context.as_ref().unwrap().binding;
+        current.morf.push(crate::morf::ShellState {
+            version: 1,
+            role: "shell".into(),
+            epoch: "a".repeat(32),
+            revision: 2,
+            phase: crate::morf::ShellPhase::Configured,
+            compositor_pid: binding.compositor_pid,
+            compositor_start: binding.compositor_start,
+            compositor_uid: binding.uid,
+            output: "fixture-output".into(),
+        });
+        current
+            .morf_rendered
+            .push(crate::morf::rendered::OutputContext {
+                output: "fixture-output".into(),
+                context: crate::morf::rendered::tests::sample(at),
+            });
+        let snapshot = current.context.as_ref().unwrap().snapshot.clone();
+        let decoded: View = serde_json::from_slice(&current.encode().unwrap()).unwrap();
+        assert_eq!(decoded, current);
+        assert_eq!(decoded.context.unwrap().snapshot, snapshot);
+        for case in 0..6 {
+            let mut changed = current.clone();
+            match case {
+                0 => changed.morf_rendered[0].output = "other".into(),
+                1 => changed.morf_rendered[0].context.epoch = "b".repeat(32),
+                2 => changed.morf.clear(),
+                3 => changed.morf_rendered.push(changed.morf_rendered[0].clone()),
+                4 => changed.morf_rendered[0].context.sampled_ns += 1,
+                _ => changed.sampled_at += Duration::from_millis(250),
+            }
+            assert!(changed.validate().is_err(), "case {case}");
+        }
+    }
+    #[test]
     fn native_morf_metadata_cannot_cross_compositor_output_or_secure_context() {
         let mut original = view(Duration::from_secs(1));
         let binding = &original.context.as_ref().unwrap().binding;
@@ -275,6 +333,7 @@ pub(crate) mod tests {
         };
         View {
             morf: Vec::new(),
+            morf_rendered: Vec::new(),
             fence: fence(),
             sampled_at: at,
             state: State::Desktop,
@@ -344,6 +403,7 @@ pub(crate) mod tests {
     fn context_transfer_preserves_full_metadata_and_rejects_stale_or_reordered_chunks() {
         let view = View {
             morf: Vec::new(),
+            morf_rendered: Vec::new(),
             fence: fence(),
             sampled_at: Duration::ZERO,
             state: State::Unknown,

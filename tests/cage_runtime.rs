@@ -114,6 +114,7 @@ fn context(
     session
         .update_context(View {
             morf: Vec::new(),
+            morf_rendered: Vec::new(),
             fence,
             sampled_at: now,
             state: snapshot.state,
@@ -738,6 +739,7 @@ return p.config.new{mode='route',policy={allowed_devices={'keyboard'},allow_hypr
     settle(&mut session, &mut ignored);
     let view = |snapshot: Snapshot| View {
         morf: Vec::new(),
+        morf_rendered: Vec::new(),
         fence,
         sampled_at: snapshot.captured_at,
         state: snapshot.state,
@@ -1037,6 +1039,7 @@ devices={keyboard={keys={'KEY_A','KEY_B'}}},rules={
     );
     let view = |snapshot: Snapshot| View {
         morf: Vec::new(),
+        morf_rendered: Vec::new(),
         fence,
         sampled_at: snapshot.captured_at,
         state: snapshot.state,

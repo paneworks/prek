@@ -296,6 +296,20 @@
     "role": "shell",
     "unavailable": "nil without a fresh owning desktop; empty array when no native provider is currently verified"
   },
+  "morf_rendered_queries": {
+    "authority": "inspection only; no input-mask, keyboard-absence, authentication, stacking or presentation proof",
+    "capability": "context",
+    "coordinates": "surface-local logical bounding boxes",
+    "coverage": "primary_surface_named_bounds",
+    "freshness_ms": 250,
+    "identity": "verified native output/endpoint epoch, UI generation and broker fence",
+    "integers": "node identity, UI generation, revision and sampled_ns are canonical decimal strings",
+    "ipc_budget_ms": 200,
+    "maximum_regions": 256,
+    "maximum_reply_bytes": 131072,
+    "scopes": false,
+    "unavailable": "nil without a fresh owning desktop; empty array when no fresh native frame is available"
+  },
   "phase": "configuration_and_session_actions",
   "rule_hooks": {
     "budget": "shared event subscription, fuel, time and log limits",
@@ -539,6 +553,12 @@
       "name": "morf.providers",
       "phase": "runtime_callback",
       "signature": "morf.providers() -> MorfProviderBinding[] | nil"
+    },
+    {
+      "description": "Copy fresh native primary-frame named bounds in surface-local coordinates with output, endpoint/UI generation and fence; inspection only, without input-mask, keyboard-absence, authentication or compositor-presentation authority.",
+      "name": "morf.regions",
+      "phase": "runtime_callback",
+      "signature": "morf.regions() -> MorfRenderedContext[] | nil"
     },
     {
       "description": "Copy fresh broker-negotiated flags and parent executor readiness for this session fence; neither grants effects.",

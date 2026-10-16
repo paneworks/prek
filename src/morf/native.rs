@@ -51,6 +51,8 @@ pub struct Capabilities {
     recognizer_ownership: bool,
     #[serde(default)]
     cancel_gesture: bool,
+    #[serde(default)]
+    rendered_context: bool,
 }
 impl Capabilities {
     pub fn epoch(&self) -> &str {
@@ -73,6 +75,9 @@ impl Capabilities {
     }
     pub fn can_cancel_gestures(&self) -> bool {
         self.cancel_gesture
+    }
+    pub fn has_rendered_context(&self) -> bool {
+        self.rendered_context
     }
     fn validate(&self, state: &ShellState, previous: Option<u64>) -> io::Result<()> {
         if self.version != 1
@@ -405,7 +410,14 @@ impl Client<ShellState> {
         logind: &Logind,
         compositor: &hyprland::Client,
     ) -> io::Result<Capabilities> {
-        let until = Instant::now() + RPC_TIME;
+        self.control_capabilities_until(logind, compositor, Instant::now() + RPC_TIME)
+    }
+    pub(crate) fn control_capabilities_until(
+        &mut self,
+        logind: &Logind,
+        compositor: &hyprland::Client,
+        until: Instant,
+    ) -> io::Result<Capabilities> {
         let result = (|| {
             let state = self.sample_until(logind, compositor, until)?;
             let bytes = self.transport.exchange(
