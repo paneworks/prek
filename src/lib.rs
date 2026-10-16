@@ -40,6 +40,7 @@ pub mod lua_compiler;
 pub mod morf;
 pub mod paths;
 pub mod protocol;
+pub mod recognition;
 pub mod replay;
 #[cfg(target_os = "linux")]
 pub mod route_worker;
