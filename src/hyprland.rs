@@ -358,10 +358,12 @@ impl Client {
         until: Instant,
         sent: &mut bool,
     ) -> io::Result<Vec<u8>> {
+        crate::process_clock::monotonic()?;
         let mut stream = connect(&self.socket_path(), until)?;
         self.verify(&stream)?;
         let mut pending = request.as_bytes();
         while !pending.is_empty() {
+            crate::process_clock::monotonic()?;
             if Instant::now() >= until {
                 return Err(io::ErrorKind::TimedOut.into());
             }
@@ -381,6 +383,7 @@ impl Client {
         let mut bytes = Vec::new();
         let mut buffer = [0u8; 8192];
         loop {
+            crate::process_clock::monotonic()?;
             if Instant::now() >= until {
                 return Err(io::ErrorKind::TimedOut.into());
             }

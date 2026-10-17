@@ -353,6 +353,7 @@ impl Transport {
             return Err(denied("native provider connection has been retired"));
         }
         let result = (|| {
+            crate::process_clock::monotonic()?;
             self.write_tracked(bytes, until, sent)?;
             let mut bytes = Vec::new();
             let mut byte = [0u8; 1];
@@ -376,6 +377,7 @@ impl Transport {
                     Err(error) => return Err(error),
                 }
             }
+            crate::process_clock::monotonic()?;
             Ok(bytes)
         })();
         if result.is_err() {
@@ -396,6 +398,7 @@ impl Transport {
     fn write_tracked(&mut self, bytes: &[u8], until: Instant, sent: &mut bool) -> io::Result<()> {
         let mut pending = bytes;
         while !pending.is_empty() {
+            crate::process_clock::monotonic()?;
             if Instant::now() >= until {
                 return Err(io::ErrorKind::TimedOut.into());
             }

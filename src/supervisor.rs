@@ -8,7 +8,6 @@
 use nix::{
     libc,
     poll::{PollFd, PollFlags, PollTimeout, poll},
-    time::{ClockId, clock_gettime},
 };
 use std::{
     fs, io,
@@ -99,8 +98,7 @@ fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 fn now() -> io::Result<Duration> {
-    let time = clock_gettime(ClockId::CLOCK_MONOTONIC).map_err(io::Error::from)?;
-    Ok(Duration::new(time.tv_sec() as u64, time.tv_nsec() as u32))
+    crate::process_clock::monotonic()
 }
 
 fn start_ticks(pid: u32) -> io::Result<u64> {

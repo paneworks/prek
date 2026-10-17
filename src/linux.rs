@@ -8,7 +8,6 @@ use evdev::{InputEvent, KeyCode, raw_stream::RawDevice};
 use nix::{
     libc,
     poll::{PollFd, PollFlags, PollTimeout, poll},
-    time::{ClockId, clock_gettime},
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -386,6 +385,7 @@ impl Cursors for Vec<Reader> {
 }
 impl Reader {
     fn new(path: &Path, generation: u64) -> io::Result<(Self, Record)> {
+        monotonic()?;
         let raw = open(path)?;
         let clock = libc::CLOCK_MONOTONIC;
         // SAFETY: the owned descriptor and initialized c_int pointer match
@@ -671,6 +671,7 @@ fn observe_loop(
     sink: &mut impl InputSink,
     mut health: Option<&mut crate::supervisor::Heartbeat>,
 ) -> io::Result<()> {
+    monotonic()?;
     if let Some(health) = health.as_mut() {
         health.progress()?;
     }
@@ -706,7 +707,9 @@ fn observe_loop(
             path.display(),
             reader.device.name
         );
+        monotonic()?;
         sink.push(record)?;
+        monotonic()?;
         sink.push(Record::Absolute {
             source: reader.device.source.clone(),
             state: absolute_state(&reader.raw, &reader.device)?,
@@ -731,6 +734,7 @@ fn observe_loop(
     let mut policy_generation = 0;
     let mut input_at = Duration::ZERO;
     loop {
+        monotonic()?;
         sink.service()?;
         if sink.finished() {
             return Ok(());
@@ -758,6 +762,7 @@ fn observe_loop(
             policy_generation = generation;
             scan_at = monotonic()? + Duration::from_millis(250);
         }
+        monotonic()?;
         sink.flush()?;
         let mut reopen = Vec::new();
         let buffered = buffered_sources(&pending.frames);
@@ -766,6 +771,7 @@ fn observe_loop(
             let mut buffer =
                 ReaderBuffer::inspect(&reader.device.source, &reader.cursor.assembler, &buffered);
             buffer.incomplete |= reader.cursor.cut_pending();
+            monotonic()?;
             match sink.reader(&mut reader.raw, &reader.device, buffer, health.as_deref())? {
                 ReaderDisposition::Keep => {}
                 ReaderDisposition::Reopen => reopen.push(index),
@@ -860,12 +866,15 @@ fn observe_loop(
             release_reader(readers.remove(index), &source, sink)?;
         }
         if ingress::dispatch(&mut pending, readers, sink, watermark, &mut input_at)? {
+            monotonic()?;
             sink.flush()?;
             return Ok(());
         }
         let tick = Record::Tick { at: watermark };
+        monotonic()?;
         sink.push(tick)?;
         input_at = watermark;
+        monotonic()?;
         sink.flush()?;
         if readers.is_empty() && sink.device_policy().is_none() {
             return Err(io::Error::other("no observed device remains available"));
@@ -999,8 +1008,10 @@ fn refresh_readers(
         {
             continue;
         }
+        monotonic()?;
         sink.push(record)?;
         generations.insert(reader.device.source.device, generation);
+        monotonic()?;
         sink.push(Record::Absolute {
             source: reader.device.source.clone(),
             state: absolute_state(&reader.raw, &reader.device)?,
@@ -1015,8 +1026,7 @@ fn refresh_readers(
 }
 
 pub fn monotonic() -> io::Result<Duration> {
-    let now = clock_gettime(ClockId::CLOCK_MONOTONIC).map_err(io::Error::from)?;
-    Ok(Duration::new(now.tv_sec() as u64, now.tv_nsec() as u32))
+    crate::process_clock::monotonic()
 }
 
 fn poll_timeout(duration: Duration) -> PollTimeout {

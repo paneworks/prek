@@ -232,6 +232,7 @@ fn announce(
         .ok_or_else(|| invalid("input source has no original reader"))?;
     cursor.live()?;
     if let Some(through) = cursor.ready() {
+        crate::process_clock::monotonic()?;
         if let Err(error) = sink.reader_cutover(source, through, at) {
             cursor.failed = true;
             return Err(error);
@@ -249,6 +250,7 @@ pub(super) fn dispatch(
     delivered_at: &mut Duration,
 ) -> io::Result<bool> {
     for frame in pending.ready(watermark) {
+        crate::process_clock::monotonic()?;
         if frame.at < *delivered_at {
             if let Some(cursor) = cursors.cursor(&frame.source) {
                 cursor.retire();

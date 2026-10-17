@@ -39,6 +39,8 @@ pub mod lua_compiler;
 #[cfg(target_os = "linux")]
 pub mod morf;
 pub mod paths;
+#[cfg(target_os = "linux")]
+mod process_clock;
 pub mod protocol;
 pub mod recognition;
 pub mod replay;

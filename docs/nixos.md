@@ -126,6 +126,8 @@ directly so module ownership and no-symlink checks retain their normal meaning.
 Changing the configuration restarts the service onto the new checked tree.
 For configuration or executable replacement, restart the session agent as well;
 the broker authenticates the exact agent executable.
+Confirmed suspend-clock discontinuities retire live process authority; see
+[the clock epoch and recovery limits](suspend-epoch.md).
 
 ## Start the owning session agent
 

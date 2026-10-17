@@ -4,7 +4,6 @@
 
 use crate::protocol::{self, MAX_PACKET, Packet};
 use nix::libc;
-use nix::time::{ClockId, clock_gettime};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
@@ -28,8 +27,7 @@ pub struct Credentials {
     pub gid: u32,
 }
 pub fn monotonic() -> io::Result<Duration> {
-    let time = clock_gettime(ClockId::CLOCK_MONOTONIC).map_err(io::Error::from)?;
-    Ok(Duration::new(time.tv_sec() as u64, time.tv_nsec() as u32))
+    crate::process_clock::monotonic()
 }
 fn credentials(fd: &impl AsFd) -> io::Result<Credentials> {
     let mut value: libc::ucred = unsafe { std::mem::zeroed() };
@@ -319,6 +317,7 @@ impl Channel {
         self.peer.pid = pid;
     }
     pub fn send<T: Serialize>(&mut self, message: &T, at: Duration) -> io::Result<bool> {
+        monotonic()?;
         if self.failed {
             return Err(protocol::invalid("IPC channel has failed"));
         }
@@ -361,6 +360,7 @@ impl Channel {
         Ok(true)
     }
     pub fn receive<T: for<'de> Deserialize<'de>>(&mut self) -> io::Result<Option<Packet<T>>> {
+        monotonic()?;
         if self.failed {
             return Err(protocol::invalid("IPC channel has failed"));
         }
