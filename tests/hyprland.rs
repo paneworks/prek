@@ -5,6 +5,8 @@ use prek::hyprland::Client;
 mod layouts;
 #[path = "support/power_tests.rs"]
 mod power;
+#[path = "support/hyprland_reorder.rs"]
+mod reorder;
 #[path = "support/hyprland_actions.rs"]
 mod window_actions;
 use std::{
@@ -62,8 +64,9 @@ impl Server {
                     stream
                         .set_read_timeout(Some(Duration::from_secs(1)))
                         .unwrap();
-                    let mut bytes = [0; 4096];
+                    let mut bytes = [0; 16384];
                     let length = stream.read(&mut bytes).unwrap_or(0);
+                    assert!(length < bytes.len());
                     if length == 0 {
                         continue;
                     }

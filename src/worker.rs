@@ -39,6 +39,29 @@ pub struct ProvidedContext {
     pub layouts: Option<crate::hyprland::layouts::Snapshot>,
 }
 impl ProvidedContext {
+    /// Describe the native graph of an existing trusted window target.
+    pub fn reorder_scope(&self, window: &str) -> Option<crate::protocol::ReorderScope> {
+        self.validate_layouts().ok()?;
+        crate::hyprland::reorder::scope(&self.snapshot, self.layouts.as_ref()?, window)
+    }
+    pub(crate) fn hyprland_target_available(
+        &self,
+        action: &crate::config::Action,
+        scope: crate::config::Scope,
+        window: Option<&str>,
+        output: Option<&str>,
+        workspace: Option<i64>,
+    ) -> bool {
+        crate::hyprland::reorder::available(
+            &self.snapshot,
+            self.layouts.as_ref(),
+            action,
+            scope,
+            window,
+            output,
+            workspace,
+        )
+    }
     pub(crate) fn validate_layouts(&self) -> io::Result<()> {
         if let Some(layouts) = &self.layouts {
             if self.binding.kind != crate::context::SessionKind::User
@@ -115,6 +138,8 @@ pub enum Report {
     Dispatch {
         subscription: Subscription,
         event: Box<Event>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reorder_scope: Option<crate::protocol::ReorderScope>,
     },
     SourceInvalidated {
         subscription: Subscription,
@@ -473,7 +498,7 @@ impl Registry {
                         .is_none_or(|old| old.snapshot.revision < context.snapshot.revision)
                 }) {
                     authority
-                        .update(context.snapshot.clone(), now)
+                        .update_native(context.snapshot.clone(), context.layouts.clone(), now)
                         .map_err(io::Error::other)?;
                 } else {
                     authority.tick(now);

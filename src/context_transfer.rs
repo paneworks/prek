@@ -301,6 +301,7 @@ pub(crate) mod tests {
         context.layouts = Some(Layouts {
             generation: context.snapshot.generation,
             revision: context.snapshot.revision,
+            continuity: 1,
             captured_at: context.snapshot.captured_at,
             workspaces: vec![Workspace {
                 id: 3,

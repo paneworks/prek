@@ -59,6 +59,7 @@
           '';
         in {
           native-root-probe = nativeProbe;
+          cage-test-receiver = import ./tests/wayland-receiver.nix { inherit pkgs; };
           cage-touch-test = import ./tests/cage-touch.nix { inherit pkgs; package = self.packages.${system}.default; };
           cage-test = import ./tests/cage-host.nix {
             inherit pkgs;
@@ -173,6 +174,7 @@
               cp ${./docs/routing-replay.md} "$out/share/doc/prek/routing-replay.md"
               cp ${./docs/evdev-boundary.md} "$out/share/doc/prek/evdev-boundary.md"
               cp ${./docs/feedback.md} "$out/share/doc/prek/feedback.md"
+              cp ${./docs/hyprland-reorder.md} "$out/share/doc/prek/hyprland-reorder.md"
               for preset in minimal desktop phone; do
                 "$out/bin/prek" init --preset "$preset" \
                   --output "$out/share/prek/presets/$preset.lua"

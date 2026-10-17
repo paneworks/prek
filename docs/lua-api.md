@@ -1149,6 +1149,9 @@ approved registry; callable pointers are never serialized into configuration.
 
 `prek session --hyprland` opts into protected-policy `close`,
 `move_left_and_follow` and `move_right_and_follow` actions on a routing broker.
+The native 0.56.2 Lua provider additionally supports experimental `reorder_up`
+and `reorder_down` with a complete frozen vertical scrolling-layout graph;
+see [the selection and execution contract](hyprland-reorder.md).
 Use `--lua --hyprland` for approved named handlers returning
 `actions.hyprland {action=...}`. `--commands` and `--power` are independent
 permissions and are required only for their effect families. The protected
@@ -1200,7 +1203,7 @@ from the starting window, rather than from later focus. Moves currently require
 a single-output desktop; cross-output workspace-rule topology remains pending.
 Numeric destinations must fit stock Hyprland's positive 32-bit workspace parser
 (`1..2147483647`); moving left from 1 or right from 2147483647 is unavailable.
-Reorder and scrolling-layout actions remain unavailable. Legacy Hyprlang address
+Continuous scrolling-layout actions remain unavailable. Legacy Hyprlang address
 dispatchers cannot enforce the same atomic window guards: they retain a
 read/dispatch race despite the pre-dispatch checks. Goal boxes do not establish
 rendered visibility, and these guards do not prove atomic lock/overlay state or

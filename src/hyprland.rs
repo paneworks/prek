@@ -25,6 +25,7 @@ mod context;
 pub(crate) mod dispatch;
 pub mod layers;
 pub mod layouts;
+pub(crate) mod reorder;
 pub mod scrolling;
 pub use context::ContextSampler;
 

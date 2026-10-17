@@ -35,6 +35,8 @@ struct Pending {
     power_target: Option<crate::context::OutputState>,
     window_target: Option<hyprland::Target>,
     morf_target: Option<morf::Target>,
+    reorder_scope: Option<protocol::ReorderScope>,
+    reorder_granted: bool,
 }
 
 struct Running {
@@ -162,9 +164,20 @@ impl Executor {
         })
     }
     pub fn offer(&mut self, fence: Fence, event: Box<Event>, now: Duration) -> io::Result<()> {
+        self.offer_scoped(fence, event, None, now)
+    }
+    /// Offer a match with its original native claim proof; absent proofs disable reorder.
+    pub fn offer_scoped(
+        &mut self,
+        fence: Fence,
+        event: Box<Event>,
+        reorder_scope: Option<protocol::ReorderScope>,
+        now: Duration,
+    ) -> io::Result<()> {
         Reply::Dispatch {
             fence,
             event: event.clone(),
+            reorder_scope: reorder_scope.clone(),
         }
         .validate()?;
         let Event::Matched {
@@ -211,27 +224,33 @@ impl Executor {
             } else {
                 None
             };
-        let window_target =
-            if protocol::action_capabilities(action).contains(&Capability::HyprlandActions) {
-                let adapter = self
-                    .hyprland
-                    .as_ref()
-                    .ok_or_else(|| protocol::invalid("Hyprland adapter unavailable"))?;
-                let Event::Matched {
-                    window: Some(window),
-                    output: Some(output),
-                    workspace: Some(workspace),
-                    ..
-                } = event.as_ref()
-                else {
-                    return Err(protocol::invalid(
-                        "Hyprland action requires a frozen window, output and workspace",
-                    ));
-                };
-                Some(adapter.target(window, output, *workspace, now)?)
-            } else {
-                None
+        let window_target = if protocol::action_capabilities(action)
+            .contains(&Capability::HyprlandActions)
+        {
+            let adapter = self
+                .hyprland
+                .as_ref()
+                .ok_or_else(|| protocol::invalid("Hyprland adapter unavailable"))?;
+            let Event::Matched {
+                window: Some(window),
+                output: Some(output),
+                workspace: Some(workspace),
+                ..
+            } = event.as_ref()
+            else {
+                return Err(protocol::invalid(
+                    "Hyprland action requires a frozen window, output and workspace",
+                ));
             };
+            let target = adapter.target(window, output, *workspace, now)?;
+            if matches!(action,Action::Hyprland{action:action @ (crate::config::WindowAction::ReorderUp|crate::config::WindowAction::ReorderDown)} if target.reorder(*action).is_none())
+            {
+                return Err(protocol::invalid("reorder has no frozen eligible neighbor"));
+            }
+            Some(target)
+        } else {
+            None
+        };
         let morf_target =
             if protocol::action_capabilities(action).contains(&Capability::MorfActions) {
                 let Event::Matched {
@@ -259,8 +278,26 @@ impl Executor {
             ));
         }
         let (id, ordinal) = (*id, *ordinal);
-        self.queue(Request::Authorize { fence, id, ordinal })?;
         self.seen.insert(id, ordinal);
+        let reorder_scope = reorder_scope.filter(|scope| match event.as_ref() {
+            Event::Matched {
+                window: Some(window),
+                ..
+            } => {
+                self.hyprland
+                    .as_ref()
+                    .and_then(|adapter| adapter.reorder_scope(window, now))
+                    .as_ref()
+                    == Some(scope)
+            }
+            _ => false,
+        });
+        if matches!(event.as_ref(),Event::Matched{action,..} if crate::routing::native::required(action))
+            && reorder_scope.is_none()
+        {
+            return self.complete(id, ordinal, Completion::Unavailable);
+        }
+        self.queue(Request::Authorize { fence, id, ordinal })?;
         self.pending.insert(
             (id, ordinal),
             Pending {
@@ -271,6 +308,8 @@ impl Executor {
                 power_target,
                 window_target,
                 morf_target,
+                reorder_scope,
+                reorder_granted: false,
             },
         );
         Ok(())
@@ -312,10 +351,31 @@ impl Executor {
         view: crate::context_transfer::View,
     ) -> io::Result<()> {
         self.reported_available = None;
-        self.hyprland
+        let result = self
+            .hyprland
             .as_mut()
             .ok_or_else(|| protocol::invalid("Hyprland adapter unavailable"))?
-            .update_context(view)
+            .update_context(view);
+        let now = monotonic()?;
+        for pending in self.pending.values_mut() {
+            if let Some(scope) = pending.reorder_scope.as_ref() {
+                let current = match pending.event.as_ref() {
+                    Event::Matched {
+                        window: Some(window),
+                        ..
+                    } if result.is_ok() => self
+                        .hyprland
+                        .as_ref()
+                        .and_then(|adapter| adapter.reorder_scope(window, now)),
+                    _ => None,
+                };
+                if current.as_ref() != Some(scope) {
+                    pending.reorder_scope = None;
+                    pending.reorder_granted = false;
+                }
+            }
+        }
+        result
     }
     /// Explicit host opt-in. Public broker negotiation remains separate.
     pub fn set_power_adapter(&mut self, adapter: PowerAdapter) -> io::Result<()> {
@@ -420,6 +480,18 @@ impl Executor {
         expires: Duration,
         now: Duration,
     ) -> io::Result<()> {
+        self.grant_scoped(fence, id, ordinal, expires, None, now)
+    }
+    /// Grant one offer with the same native proof and a bounded execution deadline.
+    pub fn grant_scoped(
+        &mut self,
+        fence: Fence,
+        id: u64,
+        ordinal: u64,
+        expires: Duration,
+        reorder_scope: Option<protocol::ReorderScope>,
+        now: Duration,
+    ) -> io::Result<()> {
         if id == 0 || ordinal == 0 {
             return Err(protocol::invalid("invalid action grant identity"));
         }
@@ -445,6 +517,22 @@ impl Executor {
             return Ok(());
         }
         pending.expires = Some(expires);
+        let current = match pending.event.as_ref() {
+            Event::Matched {
+                window: Some(window),
+                ..
+            } => self
+                .hyprland
+                .as_ref()
+                .and_then(|adapter| adapter.reorder_scope(window, now)),
+            _ => None,
+        };
+        pending.reorder_granted = reorder_scope.is_some()
+            && reorder_scope == pending.reorder_scope
+            && current == reorder_scope;
+        if !pending.reorder_granted {
+            pending.reorder_scope = None;
+        }
         Ok(())
     }
     /// Call after draining current broker messages, so a queued generation
@@ -666,6 +754,7 @@ impl Executor {
                     && (self.power.is_none() || pending.power_target.is_none())
                 || actions.iter().any(|action| matches!(action, Action::Hyprland { .. }))
                     && (self.hyprland.is_none() || pending.window_target.is_none())
+                || actions.iter().any(crate::routing::native::required) && !pending.reorder_granted
                 || native > 0 && (self.morf.is_none() || pending.morf_target.is_none())
                 || actions.iter().any(|action| matches!(action,Action::Morf {action}
                     if crate::morf::controls::Request::from_event(self.fence,&pending.event,*action).is_err()))

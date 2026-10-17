@@ -816,7 +816,11 @@ impl WindowAction {
     pub fn supported_session(self) -> bool {
         matches!(
             self,
-            Self::Close | Self::MoveLeftAndFollow | Self::MoveRightAndFollow
+            Self::Close
+                | Self::MoveLeftAndFollow
+                | Self::MoveRightAndFollow
+                | Self::ReorderUp
+                | Self::ReorderDown
         )
     }
     pub fn workspace_destination(self, from: i64) -> Option<i64> {

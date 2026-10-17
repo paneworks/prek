@@ -10,6 +10,13 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, io, time::Duration};
 
 pub const VERSION: u32 = 1;
+
+/// Native source/workspace/output proof correlated with a trusted dispatch and grant.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReorderScope {
+    pub fingerprint: [u8; 32],
+}
 pub const MAX_PACKET: usize = 64 * 1024;
 pub const MAX_QUEUED_PACKETS: usize = 128;
 pub const MAX_QUEUED_BYTES: usize = 512 * 1024;
@@ -81,6 +88,8 @@ pub fn supported_session_action(action: &crate::config::Action) -> bool {
                 action: crate::config::WindowAction::Close
                     | crate::config::WindowAction::MoveLeftAndFollow
                     | crate::config::WindowAction::MoveRightAndFollow
+                    | crate::config::WindowAction::ReorderUp
+                    | crate::config::WindowAction::ReorderDown
             }
             | crate::config::Action::Power {
                 action: crate::config::PowerAction::Wake | crate::config::PowerAction::Blank
@@ -397,6 +406,8 @@ pub enum Reply {
     Dispatch {
         fence: Fence,
         event: Box<Event>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reorder_scope: Option<ReorderScope>,
     },
     /// Short-lived permission for an already offered action. The consumer
     /// must still check its current fence and this deadline before execution.
@@ -405,6 +416,8 @@ pub enum Reply {
         id: u64,
         ordinal: u64,
         expires: Duration,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reorder_scope: Option<ReorderScope>,
     },
     /// Invalidate one offered effect before execution, without retiring
     /// unrelated gestures or this session's Lua VM.
@@ -456,6 +469,17 @@ impl Reply {
         }
     }
     pub fn validate(&self) -> io::Result<()> {
+        if let Self::Dispatch {
+            event,
+            reorder_scope: Some(_),
+            ..
+        } = self
+            && !matches!(event.as_ref(),Event::Matched{action,window:Some(_),..} if action.requires_hyprland())
+        {
+            return Err(invalid(
+                "native reorder scope has no matching window action",
+            ));
+        }
         if let Some(fence) = self.fence() {
             fence.validate()?;
         }
@@ -564,7 +588,7 @@ impl Reply {
             Self::ActionCancelled { id, ordinal, .. } if *id == 0 || *ordinal == 0 => {
                 return Err(invalid("invalid cancelled action identity"));
             }
-            Self::Observation { fence, event } | Self::Dispatch { fence, event } => {
+            Self::Observation { fence, event } | Self::Dispatch { fence, event, .. } => {
                 if let Event::Matched {
                     version,
                     config_generation,

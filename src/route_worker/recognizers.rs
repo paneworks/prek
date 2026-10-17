@@ -416,10 +416,69 @@ impl Stream {
         }
         Ok(())
     }
-    pub(super) fn prune_reports(&mut self, now: Duration) {
+    pub(super) fn prune_reports(&mut self, now: Duration) -> io::Result<()> {
         let config = &self.config;
         let seats = &self.seats;
         let grabbed = &self.grabbed;
+        let mut scopes = BTreeMap::new();
+        for (message, bytes) in &mut self.messages.messages {
+            let Message::Outcome {
+                report:
+                    Report::Dispatch {
+                        subscription,
+                        event,
+                        reorder_scope,
+                    },
+            } = message
+            else {
+                continue;
+            };
+            if reorder_scope.is_none() {
+                continue;
+            }
+            let current = if let crate::rules::Event::Matched {
+                window: Some(window),
+                ..
+            } = event.as_ref()
+            {
+                scopes
+                    .entry((
+                        subscription.seat.clone(),
+                        subscription.fence.broker.0,
+                        subscription.fence.configuration,
+                        subscription.fence.session,
+                        window.clone(),
+                    ))
+                    .or_insert_with(|| {
+                        seats
+                            .get(&subscription.seat)
+                            .filter(|seat| {
+                                seat.subscription.same_registration(subscription)
+                                    && now < seat.expires
+                                    && seat
+                                        .subscription
+                                        .capabilities
+                                        .contains(&Capability::HyprlandActions)
+                            })
+                            .and_then(|seat| seat.routing.authority().reorder_scope(window, now))
+                    })
+                    .as_ref()
+            } else {
+                None
+            };
+            if reorder_scope.as_ref() != current {
+                *reorder_scope = None;
+                let size = protocol::encode(&protocol::Packet {
+                    version: 1,
+                    sequence: u64::MAX,
+                    at: Duration::MAX,
+                    message: &*message,
+                })?
+                .len();
+                self.messages.bytes = self.messages.bytes - *bytes + size;
+                *bytes = size;
+            }
+        }
         self.messages.retain(|message| {
             let Message::Outcome { report } = message else {
                 return true;
@@ -433,6 +492,12 @@ impl Stream {
                 return false;
             };
             match report {
+                Report::Dispatch {
+                    event,
+                    reorder_scope,
+                    ..
+                } => !matches!(event.as_ref(),crate::rules::Event::Matched {action,..}
+                        if crate::routing::native::required(action) && reorder_scope.is_none()),
                 Report::RecognizerMetadata { metadata, .. } => {
                     permits_recognition(config, &seat.subscription, now) && metadata.fresh(now)
                 }
@@ -454,5 +519,6 @@ impl Stream {
                 _ => true,
             }
         });
+        Ok(())
     }
 }

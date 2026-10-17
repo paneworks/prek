@@ -395,21 +395,50 @@ make.recipe{ name = "test-cage-lua-wayland-fix", desc = "typed window/power effe
                cage_test("cage-test-wayland-fix", { "--hyprland-config", "lua", "--layers", "--input", "--power", "--windows" })
              end }
 
+make.recipe{ name="build-cage-receiver",desc="immutable instrumented receiver without rebuilding Rust",
+             run=function()
+               assert(oslo.run{"nix","--option","eval-cache","false","--extra-experimental-features","nix-command flakes","--max-jobs","1","--cores","2","build","--no-write-lock-file","--out-link",project_root().."/target/reorder-rendering/receiver",".#cage-test-receiver"}.ok,"receiver build failed")
+             end }
+make.recipe{ name="test-cage-runtime-dev",desc="current Cargo controller with an explicit immutable owned test runner",
+             params={{"--runner",desc="absolute pinned test-only Cage runner"},{"--receiver",desc="absolute current instrumented receiver"}},
+             run=function(a)
+               for _,name in ipairs{"runner","receiver"} do assert(type(a[name])=="string" and a[name]:sub(1,1)=="/","supply absolute --"..name) end
+               local built=oslo.run{"bash","-c",[[set -euo pipefail
+app=$(cargo build --locked --bin prek --message-format=json | jq -ers '[.[]|select(.reason=="compiler-artifact" and .target.name=="prek" and (.profile.test|not) and .executable!=null)|.executable]|unique|if length==1 then .[0] else error("expected one application") end')
+fixture=$(cargo test --locked --test cage_runtime --no-run --message-format=json | jq -ers '[.[]|select(.reason=="compiler-artifact" and .target.name=="cage_runtime" and .profile.test and .executable!=null)|.executable]|unique|if length==1 then .[0] else error("expected one controller") end')
+printf '%s\n%s\n' "$app" "$fixture"]],capture=true}
+               if not built.ok then io.stderr:write(built.err or "") end
+               assert(built.ok,"current application/controller build failed")
+               local app,fixture=(built.out or ""):match("^%s*([^\r\n]+)\r?\n([^\r\n]+)%s*$")
+               assert(app and fixture,"missing Cargo artifacts")
+               assert(oslo.run{a.runner,"--hyprland-config","lua","--modes","--input","--power","--windows","--receiver",a.receiver,"--prek-fixture",fixture,"--prek-app",app}.ok,"owned current-source Cage fixture failed")
+             end }
+
 make.recipe{ name = "test-cage-startup", desc = "unprivileged nested output and library-provenance checks",
              run = function()
                sh.python3("-m", "unittest", "discover", "-s", "tests/support", "-p", "test_cage_startup.py", "-v")
              end }
+
+make.recipe{ name="test-cage-rendering",desc="bounded real capture pixel decoder and marker checks",
+             run=function() sh.cargo("test","--locked","--test","cage_runtime","rendering::tests") end }
 
 make.recipe{ name = "test-hyprland", desc = "bound Hyprland queries, window and power adapter models",
              run = function()
                sh.cargo("test", "--locked", "--lib", "hyprland::dispatch::tests")
                sh.cargo("test", "--locked", "--lib", "hyprland::scrolling::tests")
                sh.cargo("test", "--locked", "--lib", "hyprland::layouts::tests")
+               sh.cargo("test", "--locked", "--lib", "hyprland::reorder::tests")
+               sh.cargo("test", "--locked", "--lib", "routing::tests::native_claims::")
+               sh.cargo("test", "--locked", "--lib", "service::tests::native_reorder::")
+               sh.cargo("test", "--locked", "--lib", "route_worker::tests::recognizers::native_reorder::")
                sh.cargo("test", "--locked", "--test", "hyprland")
              end }
 
 make.recipe{ name = "check", desc = "type-check every target",
              run = function() sh.cargo("check", "--locked", "--all-targets") end }
+
+make.recipe{ name="update-lock",desc="resolve workspace lockfile while retaining locked external packages",
+             run=function() sh.cargo("update","--workspace") end }
 
 make.recipe{ name = "api-json", desc = "refresh the shipped Lua API manifest",
              run = function()

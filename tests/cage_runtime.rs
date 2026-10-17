@@ -1,6 +1,8 @@
 //! Local GUI acceptance: actual compositor queries and Luna helper callbacks,
 //! with synthetic source/readiness authority explicitly confined to this test.
 #![cfg(target_os = "linux")]
+#[path = "cage_runtime/rendering.rs"]
+mod rendering;
 use prek::{
     context::{Binding, SessionKind, Snapshot},
     context_transfer::View,
@@ -701,6 +703,7 @@ fn window_acceptance(
         let child = OwnedReceiver(
             std::process::Command::new(std::env::var_os("PREK_CAGE_RECEIVER").unwrap())
                 .arg(output.join(format!("{name}.jsonl")))
+                .env("PREK_TEST_RECEIVER_LABEL", name)
                 .env("WAYLAND_DISPLAY", socket)
                 .env_remove("WAYLAND_SOCKET")
                 .stdin(std::process::Stdio::null())
@@ -1208,6 +1211,9 @@ return {version=1}
             );
             std::thread::sleep(Duration::from_millis(5));
         };
+        if layout == "scrolling" {
+            reorder_acceptance(checking, binding, fence, app, instance, output, direction);
+        }
         receipts.push(snapshot);
     }
     let columns = |snapshot: &prek::hyprland::layouts::Snapshot| {
@@ -1228,6 +1234,264 @@ return {version=1}
             "status":"passed","workspace":id,"snapshots":receipts
         }))
         .unwrap(),
+    )
+    .unwrap();
+}
+
+fn reorder_acceptance(
+    checking: &Client,
+    binding: &Binding,
+    fence: Fence,
+    app: &Path,
+    instance: &str,
+    output: &Path,
+    direction: &str,
+) {
+    use prek::{
+        actions::Executor,
+        protocol::{Completion, Mode, Request},
+        rules::{Event, Evidence, Stage},
+    };
+    let mut sampler = ContextSampler::default();
+    let sample = |sampler: &mut ContextSampler| {
+        let until = monotonic().unwrap() + Duration::from_secs(3);
+        loop {
+            let (snapshot, layouts) = sampler
+                .sample_with_layouts(checking, 1, SessionKind::User)
+                .unwrap();
+            if let Some(layouts) = layouts {
+                return (snapshot, layouts);
+            }
+            assert!(
+                monotonic().unwrap() < until,
+                "owned reorder graph unavailable"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    let (_, initial) = sample(&mut sampler);
+    let workspace = initial
+        .workspaces
+        .iter()
+        .find(|ws| ws.active && !ws.special)
+        .unwrap();
+    assert_eq!(workspace.columns.len(), 3);
+    let source = workspace.columns[1].members[0].clone();
+    let guard = workspace.columns[if direction == "down" { 2 } else { 0 }].members[0].clone();
+    focus_owned_window(&guard, instance);
+    let source_lua = r#"
+local p=require('prek')
+local handler=p.actions.define('reorder',{requires={'hyprland_actions'}},function(payload)
+ assert(payload.event.stage=='begin' and p.capabilities.ready('hyprland_actions'))
+ return p.actions.hyprland{action=payload.event.rule}
+end)
+return p.config.new{mode='route',policy={allowed_devices={'keyboard'},allow_hyprland_actions=true},devices={keyboard={keys={'KEY_A','KEY_B'}}},rules={
+ p.rules.define{id='reorder_up',devices={'keyboard'},trigger=p.triggers.key{key='KEY_A'},action=handler},
+ p.rules.define{id='reorder_down',devices={'keyboard'},trigger=p.triggers.key{key='KEY_B'},action=handler},
+}}
+"#;
+    let definition = Definition::compile(source_lua, "owned-native-reorder.lua").unwrap();
+    let config = definition.validate().unwrap();
+    let mut helper = Session::spawn(app, fence, "seat0", definition).unwrap();
+    let capabilities = BTreeSet::from([
+        Capability::Context,
+        Capability::Observations,
+        Capability::LuaEvents,
+        Capability::LuaActions,
+        Capability::HyprlandActions,
+    ]);
+    helper
+        .update_capabilities(capabilities.clone(), BTreeSet::new())
+        .unwrap();
+    let mut logs = fs::File::create(output.join(format!("reorder-{direction}.jsonl"))).unwrap();
+    settle(&mut helper, &mut logs);
+    let view = |snapshot: Snapshot, layouts: prek::hyprland::layouts::Snapshot| View {
+        fence,
+        sampled_at: snapshot.captured_at,
+        state: snapshot.state,
+        context: Some(Box::new(ProvidedContext {
+            binding: binding.clone(),
+            snapshot,
+            layouts: Some(layouts),
+        })),
+        error: None,
+        morf: vec![],
+        morf_rendered: vec![],
+    };
+    let (first, native) = sample(&mut sampler);
+    let mut executor =
+        Executor::new(fence, "seat0".into(), Mode::Route, capabilities.clone()).unwrap();
+    let runtime = std::path::PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap());
+    executor
+        .sync_hyprland_context(&runtime, instance, view(first, native))
+        .unwrap();
+    executor.lua_ready(true);
+    let (mut channel, mut broker) = Channel::pair().unwrap();
+    let mut receipts = Vec::new();
+    for index in 0..2 {
+        let (snapshot, native) = sample(&mut sampler);
+        let window = snapshot
+            .windows
+            .iter()
+            .find(|window| window.id == source)
+            .unwrap()
+            .clone();
+        let before = native
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == window.workspace)
+            .unwrap()
+            .columns
+            .clone();
+        let current = view(snapshot, native);
+        let reorder_scope = current
+            .context
+            .as_ref()
+            .unwrap()
+            .reorder_scope(&source)
+            .unwrap();
+        executor.update_hyprland_context(current.clone()).unwrap();
+        helper
+            .update_capabilities(
+                capabilities.clone(),
+                executor.ready_capabilities(monotonic().unwrap()),
+            )
+            .unwrap();
+        helper.update_context(current).unwrap();
+        settle(&mut helper, &mut logs);
+        let id = index as u64 + 1;
+        let event = Box::new(Event::Matched {
+            version: 1,
+            rule: config.rules[index].id.clone(),
+            id,
+            ordinal: 1,
+            source: Source {
+                device: 701,
+                generation: 1,
+                seat: "seat0".into(),
+            },
+            at: monotonic().unwrap(),
+            config_generation: 1,
+            session_generation: 1,
+            stage: Stage::Begin,
+            action: config.rules[index].action.clone(),
+            evidence: Evidence::Key { down: true },
+            window: Some(source.clone()),
+            output: Some(window.output.clone()),
+            workspace: Some(window.workspace),
+        });
+        executor
+            .offer_scoped(
+                fence,
+                event,
+                Some(reorder_scope.clone()),
+                monotonic().unwrap(),
+            )
+            .unwrap();
+        executor.flush(&mut channel).unwrap();
+        let mut authorized = false;
+        while let Some(packet) = broker.receive::<Request>().unwrap() {
+            if matches!(packet.message,Request::Authorize{id:incoming,ordinal:1,..} if incoming==id)
+            {
+                authorized = true;
+            }
+        }
+        assert!(authorized, "reorder requires its own explicit model grant");
+        let now = monotonic().unwrap();
+        executor
+            .grant_scoped(
+                fence,
+                id,
+                1,
+                now + Duration::from_millis(250),
+                Some(reorder_scope.clone()),
+                now,
+            )
+            .unwrap();
+        let until = now + Duration::from_secs(3);
+        let completion = loop {
+            executor
+                .execute_ready_with_lua(monotonic().unwrap(), Some(&mut helper))
+                .unwrap();
+            for log in helper.step(monotonic().unwrap()).unwrap() {
+                serde_json::to_writer(&mut logs, &log).unwrap();
+                writeln!(&mut logs).unwrap();
+            }
+            for (id, ordinal, result) in helper.take_actions() {
+                executor
+                    .resolve_action(id, ordinal, result, monotonic().unwrap())
+                    .unwrap();
+            }
+            executor.flush(&mut channel).unwrap();
+            let mut completed = None;
+            while let Some(packet) = broker.receive::<Request>().unwrap() {
+                if let Request::Complete {
+                    id: incoming,
+                    ordinal: 1,
+                    result,
+                    ..
+                } = packet.message
+                {
+                    assert_eq!(incoming, id);
+                    completed = Some(result);
+                }
+            }
+            if let Some(result) = completed {
+                break result;
+            }
+            assert!(
+                monotonic().unwrap() < until,
+                "reorder plan did not complete"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let (after, native) = sample(&mut sampler);
+        fs::write(output.join(format!("reorder-{direction}-{index}-debug.json")),serde_json::to_vec(&serde_json::json!({"completion":completion,"source":source,"before":before,"after":native})).unwrap()).unwrap();
+        assert_eq!(
+            completion,
+            Completion::Applied,
+            "native {direction} reorder"
+        );
+        let ws = native
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == window.workspace)
+            .unwrap();
+        let mut expected = before.clone();
+        let position = expected
+            .iter()
+            .position(|column| column.members.contains(&source))
+            .unwrap();
+        let neighbor = if (index == 0) == (direction == "down") {
+            position - 1
+        } else {
+            position + 1
+        };
+        let temporary = expected[position].members.clone();
+        expected[position].members = expected[neighbor].members.clone();
+        expected[neighbor].members = temporary;
+        assert_eq!(ws.columns, expected);
+        assert!(
+            after
+                .windows
+                .iter()
+                .any(|window| window.id == guard && window.mapped)
+        );
+        assert!(ws.windows.iter().any(|window| window.id == source));
+        let capture = rendering::capture(
+            &after,
+            window.workspace,
+            instance,
+            output,
+            &format!("reorder-{direction}-{index}"),
+        );
+        receipts.push(serde_json::json!({"completion":completion,"action":config.rules[index].id,"source":source,"guard":guard,"workspace":window.workspace,"columns_before":before,"columns_after":ws.columns,"capture":capture,"model_grant":true,"physical_takeover_tested":false}));
+    }
+    helper.stop().unwrap();
+    settle(&mut helper, &mut logs);
+    fs::write(
+        output.join(format!("reorder-{direction}-receipts.json")),
+        serde_json::to_vec(&receipts).unwrap(),
     )
     .unwrap();
 }

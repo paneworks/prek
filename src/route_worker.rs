@@ -361,7 +361,7 @@ impl Stream {
                 self.collect(&scope.seat, now, None)?;
             }
         }
-        self.prune_reports(now);
+        self.prune_reports(now)?;
         Ok(())
     }
     fn expire_subscriptions(&mut self, now: Duration) -> io::Result<()> {
@@ -489,7 +489,7 @@ impl Stream {
                     .is_none_or(|old| old.snapshot.revision < context.snapshot.revision)
                 {
                     authority
-                        .update(context.snapshot.clone(), now)
+                        .update_native(context.snapshot.clone(), context.layouts.clone(), now)
                         .map_err(io::Error::other)?;
                 } else {
                     authority.tick(now);
@@ -504,7 +504,7 @@ impl Stream {
                     .adopt(context.binding.clone(), subscription.fence.session)
                     .map_err(io::Error::other)?;
                 authority
-                    .update(context.snapshot.clone(), now)
+                    .update_native(context.snapshot.clone(), context.layouts.clone(), now)
                     .map_err(io::Error::other)?;
                 prepared.insert(subscription.seat.clone(), authority);
             }
@@ -557,6 +557,7 @@ impl Stream {
             self.sync_seat(&name, now)?;
             self.collect(&name, now, None)?;
         }
+        self.prune_reports(now)?;
         self.revision = update.revision;
         Ok(())
     }
@@ -575,7 +576,7 @@ impl Stream {
         };
         let cancellations = seat.routing.take_recognition_cancellations();
         let diagnostics = seat.routing.take_events();
-        let dispatches = seat.routing.take_dispatches(now);
+        let dispatches = seat.routing.take_scoped_dispatches(now);
         let recoveries = seat.routing.take_recoveries();
         for recovery in recoveries {
             let source = recovery.source.clone();
@@ -611,11 +612,12 @@ impl Stream {
                 },
             })?;
         }
-        for event in dispatches {
+        for dispatch in dispatches {
             self.queue(Message::Outcome {
                 report: Report::Dispatch {
                     subscription: subscription.clone(),
-                    event: Box::new(event),
+                    event: Box::new(dispatch.event),
+                    reorder_scope: dispatch.reorder_scope,
                 },
             })?;
         }
@@ -974,14 +976,14 @@ impl InputSink for Stream {
                 }
             }
         }
-        self.prune_reports(now);
+        self.prune_reports(now)?;
         Ok(())
     }
     fn flush(&mut self) -> io::Result<()> {
         let now = monotonic()?;
         self.expire_subscriptions(now)?;
         self.expire_admissions(now)?;
-        self.prune_reports(now);
+        self.prune_reports(now)?;
         for (source, output) in &mut self.outputs {
             if let Some(feedback) = &mut output.feedback {
                 feedback.service(

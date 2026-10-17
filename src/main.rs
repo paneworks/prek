@@ -1902,11 +1902,14 @@ fn run_session(
                 Reply::Dispatch {
                     fence: offered,
                     event,
+                    reorder_scope,
                 } if effects && Some(offered) == fence => {
-                    executor
-                        .as_mut()
-                        .unwrap()
-                        .offer(offered, event, monotonic()?)?;
+                    executor.as_mut().unwrap().offer_scoped(
+                        offered,
+                        event,
+                        reorder_scope,
+                        monotonic()?,
+                    )?;
                 }
                 Reply::LuaSource {
                     fence: incoming,
@@ -1988,12 +1991,14 @@ fn run_session(
                     id,
                     ordinal,
                     expires,
+                    reorder_scope,
                 } if effects && Some(granted) == fence => {
-                    executor.as_mut().unwrap().grant(
+                    executor.as_mut().unwrap().grant_scoped(
                         granted,
                         id,
                         ordinal,
                         expires,
+                        reorder_scope,
                         monotonic()?,
                     )?;
                 }

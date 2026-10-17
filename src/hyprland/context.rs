@@ -20,8 +20,17 @@ pub struct ContextSampler {
     outputs: BTreeMap<String, (Output, u64)>,
     active_outputs: BTreeSet<String>,
     inhibited: bool,
+    native: Option<NativeContinuity>,
+}
+struct NativeContinuity {
+    signature: [u8; 32],
+    incarnation: u64,
+    captured_at: Duration,
 }
 impl ContextSampler {
+    pub(crate) fn retire_native(&mut self) {
+        self.native = None;
+    }
     /// Collect ordinary geometry and optional matching native layouts under one budget.
     pub fn sample_with_layouts(
         &mut self,
@@ -29,7 +38,16 @@ impl ContextSampler {
         generation: u64,
         kind: SessionKind,
     ) -> io::Result<(Snapshot, Option<super::layouts::Snapshot>)> {
-        let until = Instant::now() + REQUEST_TIME;
+        self.sample_with_layouts_until(client, generation, kind, Instant::now() + REQUEST_TIME)
+    }
+    pub(crate) fn sample_with_layouts_until(
+        &mut self,
+        client: &Client,
+        generation: u64,
+        kind: SessionKind,
+        until: Instant,
+    ) -> io::Result<(Snapshot, Option<super::layouts::Snapshot>)> {
+        let previous = self.native.take();
         let snapshot = self.sample_until(client, generation, kind, until)?;
         if kind != SessionKind::User || snapshot.state != State::Desktop || snapshot.secure_overlay
         {
@@ -41,17 +59,33 @@ impl ContextSampler {
             Err(error) if self.inhibited => return Err(error),
             Err(_) => return Ok((snapshot, None)),
         };
-        let layouts = super::layouts::Snapshot {
+        let mut layouts = super::layouts::Snapshot {
             generation: snapshot.generation,
             revision: snapshot.revision,
+            continuity: 0,
             captured_at: snapshot.captured_at,
             workspaces,
         };
-        let layouts = layouts
-            .validate_context(&snapshot)
-            .is_ok()
-            .then_some(layouts);
-        Ok((snapshot, layouts))
+        if layouts.validate_context(&snapshot).is_err() {
+            return Ok((snapshot, None));
+        }
+        let signature = super::reorder::continuity_signature(&snapshot, &layouts)
+            .ok_or_else(|| invalid("native continuity exceeds canonical context bound"))?;
+        layouts.continuity = previous
+            .filter(|old| {
+                old.signature == signature
+                    && snapshot
+                        .captured_at
+                        .checked_sub(old.captured_at)
+                        .is_some_and(|age| age < crate::context::SNAPSHOT_MAX_AGE)
+            })
+            .map_or(snapshot.revision, |old| old.incarnation);
+        self.native = Some(NativeContinuity {
+            signature,
+            incarnation: layouts.continuity,
+            captured_at: snapshot.captured_at,
+        });
+        Ok((snapshot, Some(layouts)))
     }
     /// Fixed native Lua layout query with lock inhibition and one shared budget.
     /// This metadata does not establish rendered regions or routing authority.
@@ -60,6 +94,7 @@ impl ContextSampler {
         client: &Client,
         generation: u64,
     ) -> io::Result<super::layouts::Snapshot> {
+        self.native = None;
         if generation == 0 {
             return Err(invalid("native layouts require a session generation"));
         }
@@ -74,6 +109,7 @@ impl ContextSampler {
         Ok(super::layouts::Snapshot {
             generation,
             revision,
+            continuity: 0,
             captured_at,
             workspaces,
         })
@@ -109,6 +145,7 @@ impl ContextSampler {
         generation: u64,
         kind: SessionKind,
     ) -> io::Result<Snapshot> {
+        self.native = None;
         self.sample_until(client, generation, kind, Instant::now() + REQUEST_TIME)
     }
     pub(crate) fn sample_until(

@@ -412,6 +412,8 @@ struct Offered {
     delivered: bool,
     cancelled: bool,
     required: BTreeSet<Capability>,
+    reorder_scope: Option<protocol::ReorderScope>,
+    reorder_required: bool,
 }
 impl Offered {
     fn morf_request(
@@ -511,11 +513,22 @@ impl Offered {
     }
 }
 impl ActionLedger {
+    #[cfg(test)]
     fn offer(
         &mut self,
         fence: Fence,
         event: &crate::rules::Event,
         snapshot: &crate::context::Snapshot,
+        now: Duration,
+    ) -> io::Result<()> {
+        self.offer_scoped(fence, event, snapshot, None, now)
+    }
+    fn offer_scoped(
+        &mut self,
+        fence: Fence,
+        event: &crate::rules::Event,
+        snapshot: &crate::context::Snapshot,
+        reorder_scope: Option<protocol::ReorderScope>,
         now: Duration,
     ) -> io::Result<()> {
         let crate::rules::Event::Matched {
@@ -543,6 +556,8 @@ impl ActionLedger {
         self.pending.insert(
             (*id, *ordinal),
             Offered {
+                reorder_scope,
+                reorder_required:matches!(event,crate::rules::Event::Matched{action,..} if crate::routing::native::required(action)),
                 source: source.clone(),
                 snapshot: snapshot.clone(),
                 output: output.clone(),
@@ -591,7 +606,10 @@ impl ActionLedger {
             .pending
             .get_mut(&(id, ordinal))
             .ok_or_else(|| protocol::invalid("action authorization has no broker offer"))?;
-        if offer.granted || !offer.target_valid(snapshot, now) {
+        if offer.granted
+            || !offer.target_valid(snapshot, now)
+            || offer.reorder_required && offer.reorder_scope.is_none()
+        {
             return Err(protocol::invalid(
                 "action target or execution authority expired",
             ));
@@ -600,6 +618,40 @@ impl ActionLedger {
         offer.grant_until =
             Some((now + SNAPSHOT_MAX_AGE).min(snapshot.captured_at + SNAPSHOT_MAX_AGE));
         Ok(())
+    }
+    fn retire_native(
+        &mut self,
+        context: Option<&ProvidedContext>,
+    ) -> Vec<(crate::input::Source, u64)> {
+        let mut cancelled = Vec::new();
+        for ((id, _), offer) in &mut self.pending {
+            if let Some(scope) = &offer.reorder_scope {
+                let current = context.and_then(|context| {
+                    offer
+                        .window
+                        .as_deref()
+                        .and_then(|window| context.reorder_scope(window))
+                });
+                if current.as_ref() != Some(scope) {
+                    offer.reorder_scope = None;
+                }
+            }
+            if offer.reorder_required && offer.reorder_scope.is_none() && !offer.cancelled {
+                cancelled.push((offer.source.clone(), *id));
+            }
+        }
+        cancelled
+    }
+    fn authorize_native(
+        &mut self,
+        id: u64,
+        ordinal: u64,
+        context: &ProvidedContext,
+        now: Duration,
+    ) -> io::Result<Option<protocol::ReorderScope>> {
+        let _ = self.retire_native(Some(context));
+        self.authorize(id, ordinal, &context.snapshot, now)?;
+        Ok(self.pending[&(id, ordinal)].reorder_scope.clone())
     }
     fn complete(&mut self, id: u64, ordinal: u64) -> io::Result<()> {
         if self.pending.get(&(id, ordinal)).is_none_or(|offer| {
@@ -684,6 +736,7 @@ impl Connection {
         Ok(())
     }
     fn flush(&mut self, now: Duration) -> io::Result<()> {
+        self.refresh_native_actions(now)?;
         if let Some(reply) = self.outgoing.front()
             && self.channel.send(reply, now)?
         {
@@ -713,6 +766,49 @@ impl Connection {
                 offer.morf_result_sent = true;
             }
             self.bytes -= reply_size(&reply)?;
+        }
+        Ok(())
+    }
+    fn refresh_native_actions(&mut self, now: Duration) -> io::Result<()> {
+        let Some(bound) = self.bound.as_mut() else {
+            return Ok(());
+        };
+        let context = bound
+            .context
+            .fresh(now)
+            .then_some(bound.context.value.as_deref())
+            .flatten();
+        let cancelled = bound.actions.retire_native(context);
+        for reply in &mut self.outgoing {
+            let identity = match reply {
+                Reply::Dispatch { event, .. } => match event.as_ref() {
+                    crate::rules::Event::Matched { id, ordinal, .. } => Some((*id, *ordinal)),
+                    _ => None,
+                },
+                Reply::Execute { id, ordinal, .. } => Some((*id, *ordinal)),
+                _ => None,
+            };
+            if identity.is_some_and(|identity| {
+                bound
+                    .actions
+                    .pending
+                    .get(&identity)
+                    .is_none_or(|offer| offer.reorder_scope.is_none())
+            }) {
+                match reply {
+                    Reply::Dispatch { reorder_scope, .. }
+                    | Reply::Execute { reorder_scope, .. } => *reorder_scope = None,
+                    _ => {}
+                }
+            }
+        }
+        self.bytes = self
+            .outgoing
+            .iter()
+            .map(reply_size)
+            .sum::<io::Result<usize>>()?;
+        for (source, id) in cancelled {
+            self.cancel_actions(&source, Some(id))?;
         }
         Ok(())
     }
@@ -1356,7 +1452,11 @@ impl Broker {
                 }
                 Reply::Observation { fence, event }
             }
-            Report::Dispatch { event, .. } if bound.observing => {
+            Report::Dispatch {
+                event,
+                reorder_scope,
+                ..
+            } if bound.observing => {
                 if bound.rules.busy() {
                     self.connections.insert(index, connection);
                     return Ok(());
@@ -1416,7 +1516,7 @@ impl Broker {
                     || !protocol::supported_session_action(action)
                     || action.requires_hyprland()
                         && (!config.policy.allow_hyprland_actions
-                            || !context.snapshot.hyprland_target_available(
+                            || !context.hyprland_target_available(
                                 action,
                                 configured.scope,
                                 window.as_deref(),
@@ -1462,15 +1562,35 @@ impl Broker {
                         "action is unavailable for this session/context",
                     ));
                 }
+                let reorder_scope = reorder_scope.filter(|scope| {
+                    window
+                        .as_deref()
+                        .and_then(|window| context.reorder_scope(window))
+                        .as_ref()
+                        == Some(scope)
+                });
+                if crate::routing::native::required(action) && reorder_scope.is_none() {
+                    self.connections.insert(index, connection);
+                    return Ok(());
+                }
                 Reply::Dispatch {
                     fence,
                     event: event.clone(),
+                    reorder_scope: reorder_scope.clone(),
                 }
                 .validate()?;
-                bound
-                    .actions
-                    .offer(bound.fence, &event, &context.snapshot, now)?;
-                Reply::Dispatch { fence, event }
+                bound.actions.offer_scoped(
+                    bound.fence,
+                    &event,
+                    &context.snapshot,
+                    reorder_scope.clone(),
+                    now,
+                )?;
+                Reply::Dispatch {
+                    fence,
+                    event,
+                    reorder_scope,
+                }
             }
             Report::Ended { reason, .. } => {
                 let _ = connection
@@ -1991,6 +2111,9 @@ impl Broker {
                                 bound.actions.pending.get(&(id, ordinal)).ok_or_else(|| {
                                     protocol::invalid("action grant lacks an offer")
                                 })?;
+                            if offer.cancelled {
+                                return connection.flush(now);
+                            }
                             if !offer.capabilities_available(
                                 &bound.capabilities,
                                 &bound.available_actions,
@@ -2004,9 +2127,8 @@ impl Broker {
                                 connection.push(Reply::ActionCancelled { fence, id, ordinal })?;
                                 return connection.flush(monotonic()?);
                             }
-                            bound
-                                .actions
-                                .authorize(id, ordinal, &context.snapshot, now)?;
+                            let reorder_scope =
+                                bound.actions.authorize_native(id, ordinal, context, now)?;
                             let expires = (now + SNAPSHOT_MAX_AGE)
                                 .min(context.snapshot.captured_at + SNAPSHOT_MAX_AGE);
                             connection.push(Reply::Execute {
@@ -2014,6 +2136,7 @@ impl Broker {
                                 id,
                                 ordinal,
                                 expires,
+                                reorder_scope,
                             })?;
                         }
                         Request::Complete {
@@ -2050,6 +2173,14 @@ impl Broker {
                                 return Err(protocol::invalid(
                                     "action availability exceeds negotiated capabilities",
                                 ));
+                            }
+                            if bound
+                                .available_actions
+                                .contains(&Capability::HyprlandActions)
+                                && !capabilities.contains(&Capability::HyprlandActions)
+                            {
+                                bound.context.sampler.retire_native();
+                                bound.context.checked = Duration::ZERO;
                             }
                             bound.available_actions = capabilities;
                         }
@@ -2365,10 +2496,11 @@ impl Broker {
             bound.context.usable = false;
             bound.context.error = Some("compositor snapshot exceeded freshness budget".into());
         }
-        if old_state != bound.context.state
+        let transition = old_state != bound.context.state
             || old_usable != bound.context.usable
-            || old_usable && !was_fresh
-        {
+            || old_usable && !was_fresh;
+        connection.refresh_native_actions(checked)?;
+        if transition {
             self.advance_session(connection, checked)?;
         }
         Ok(())
@@ -2393,6 +2525,7 @@ impl AsFd for Broker {
 
 #[cfg(test)]
 mod tests {
+    mod native_reorder;
     use super::*;
     use crate::{
         config::{Action, Direction},

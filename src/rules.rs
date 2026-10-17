@@ -151,6 +151,13 @@ pub(crate) struct RecognitionOwnership {
     pub deadline: Option<Duration>,
 }
 impl RouteIntent {
+    pub(crate) fn window_id(&self) -> Option<&str> {
+        self.candidate
+            .permit
+            .as_ref()?
+            .window()
+            .map(|window| window.id.as_str())
+    }
     pub fn hyprland_target_available(&self, authority: &Authority, at: Duration) -> bool {
         let Some(permit) = self.candidate.permit.as_ref() else {
             return false;
@@ -158,15 +165,14 @@ impl RouteIntent {
         let (Some(window), Some(output)) = (permit.window(), permit.desktop_output()) else {
             return false;
         };
-        authority.fresh(at).is_ok_and(|snapshot| {
-            snapshot.hyprland_target_available(
-                &self.rule.action,
-                self.rule.scope,
-                Some(&window.id),
-                Some(&output.geometry.name),
-                Some(window.workspace),
-            )
-        })
+        authority.hyprland_target_available(
+            &self.rule.action,
+            self.rule.scope,
+            Some(&window.id),
+            Some(&output.geometry.name),
+            Some(window.workspace),
+            at,
+        )
     }
     pub fn power_target_available(&self) -> bool {
         self.candidate

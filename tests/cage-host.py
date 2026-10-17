@@ -218,6 +218,8 @@ def main():
                 fixture_env["PREK_CAGE_CONFIG_PROVIDER"] = args.hyprland_config
                 fixture_env["PREK_CAGE_RECEIVER"] = args.receiver
                 fixture_env["PREK_CAGE_HYPRCTL"] = str(Path(args.hyprland).parent / "hyprctl")
+                if args.screencopy:
+                    fixture_env["PREK_CAGE_SCREENCOPY"] = str(args.screencopy)
                 instances = [path.parent.name for path in (runtime / "hypr").glob("*/.socket2.sock")]
                 if len(instances) != 1:
                     raise RuntimeError("expected one owned compositor instance")

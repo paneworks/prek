@@ -14,6 +14,8 @@ const MAX_WINDOWS: usize = 512;
 pub struct Snapshot {
     pub generation: u64,
     pub revision: u64,
+    #[serde(default)]
+    pub continuity: u64,
     pub captured_at: Duration,
     pub workspaces: Vec<Workspace>,
 }
@@ -25,6 +27,7 @@ impl Snapshot {
             || self.generation != context.generation
             || self.revision == 0
             || self.revision != context.revision
+            || self.continuity > self.revision
             || self.captured_at != context.captured_at
             || context.state != crate::context::State::Desktop
             || context.secure_overlay

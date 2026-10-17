@@ -24,6 +24,7 @@ use std::{
 };
 mod chain;
 mod custom;
+pub(crate) mod native;
 
 const MAX_DISPATCHES: usize = 128;
 struct Route {
@@ -45,9 +46,16 @@ struct Dispatch {
     outcome: RouteOutcome,
     configuration: u64,
     chain: Option<Arc<Vec<ClaimedChain>>>,
+    reorder_scope: Option<crate::protocol::ReorderScope>,
+}
+
+pub struct ScopedDispatch {
+    pub event: Event,
+    pub reorder_scope: Option<crate::protocol::ReorderScope>,
 }
 
 pub struct Routing {
+    native_claims: BTreeMap<u64, native::Claim>,
     chains: BTreeMap<u64, BTreeMap<Source, ChainToken>>,
     custom_groups: BTreeMap<u64, (Source, u64, u64)>,
     custom_chains: BTreeMap<u64, custom::BoundCustom>,
@@ -157,6 +165,7 @@ impl Routing {
         engine.push(Record::Header { version: 1 })?;
         engine.enable_routing();
         Ok(Self {
+            native_claims: BTreeMap::new(),
             chains: BTreeMap::new(),
             custom_groups: BTreeMap::new(),
             custom_chains: BTreeMap::new(),
@@ -193,10 +202,14 @@ impl Routing {
         self.capability_generation = generation;
         self.capabilities = capabilities;
         self.capability_expires = at + crate::context::PROVIDER_LEASE;
+        self.retire_native(at);
     }
     pub(crate) fn restrict_actions(&mut self, capabilities: &BTreeSet<Capability>) {
         self.capabilities
             .retain(|capability| capabilities.contains(capability));
+        if !self.capabilities.contains(&Capability::HyprlandActions) {
+            self.clear_native();
+        }
     }
     pub fn attach(
         &mut self,
@@ -291,6 +304,7 @@ impl Routing {
     }
     fn available(&self, intent: &RouteIntent, at: Duration) -> bool {
         self.capability_generation == self.authority_generation
+            && (!native::required(&intent.rule.action) || self.native_scope(intent).is_some())
             && (!intent.rule.action.requires_hyprland()
                 || self.engine.config().policy.allow_hyprland_actions
                     && intent.hyprland_target_available(self.engine.authority(), at))
@@ -438,6 +452,7 @@ impl Routing {
         let mut active = self.engine.route_intents();
         let mut intents = active.clone();
         intents.extend(outcomes.iter().map(|outcome| outcome.intent.clone()));
+        self.capture_native(intents.iter().chain(claims.iter()), now);
         if let (Some(source), Some(frame)) = (source, frame) {
             let mut choices: Vec<_> = intents
                 .into_iter()
@@ -636,10 +651,12 @@ impl Routing {
                 if let Some(won) = self.won.get_mut(&id) {
                     won.emitted = true;
                 }
+                let reorder_scope = self.native_scope(&outcome.intent);
                 self.dispatches.push_back(Dispatch {
                     outcome,
                     configuration: self.engine.generation(),
                     chain,
+                    reorder_scope,
                 });
             } else if matches!(
                 outcome.intent.rule.trigger,
@@ -979,6 +996,14 @@ impl Routing {
             .map(|route| route.router.delivery_offset())
     }
     pub fn take_dispatches(&mut self, at: Duration) -> Vec<Event> {
+        self.take_scoped_dispatches(at)
+            .into_iter()
+            .map(|dispatch| dispatch.event)
+            .collect()
+    }
+    /// Dequeue fresh matches with their preclaim native proofs after permanent retirement.
+    pub fn take_scoped_dispatches(&mut self, at: Duration) -> Vec<ScopedDispatch> {
+        self.retire_native(at);
         let mut result = Vec::new();
         let mut rejected = BTreeSet::new();
         while let Some(dispatch) = self.dispatches.pop_front() {
@@ -986,6 +1011,8 @@ impl Routing {
             if !rejected.contains(&id)
                 && dispatch.configuration == self.engine.generation()
                 && self.available(&dispatch.outcome.intent, at)
+                && (!native::required(&dispatch.outcome.intent.rule.action)
+                    || dispatch.reorder_scope.is_some())
                 && dispatch.outcome.expires.is_none_or(|expiry| at < expiry)
                 && dispatch.chain.as_ref().map_or(
                     dispatch.outcome.intent.rule.delivery == Delivery::Observe
@@ -996,7 +1023,10 @@ impl Routing {
                     |chain| self.chain_receipt_valid(chain),
                 )
             {
-                result.push(dispatch.outcome.event);
+                result.push(ScopedDispatch {
+                    event: dispatch.outcome.event,
+                    reorder_scope: dispatch.reorder_scope,
+                });
             } else if matches!(
                 dispatch.outcome.intent.rule.trigger,
                 Trigger::Sequence { .. }
@@ -1118,6 +1148,7 @@ impl Routing {
         // Includes the transport-specific timing checks before any retirement.
         Self::build(config, self.engine.recognition_fence())?;
         let revision = self.engine.transact_rules(transaction, at)?;
+        self.native_claims.clear();
         let sources: Vec<_> = self.routes.keys().cloned().collect();
         for source in sources {
             self.recover(&source);
@@ -1132,6 +1163,7 @@ impl Routing {
         // old model and every transport's pending/claimed ownership.
         Self::build(config.clone(), self.engine.recognition_fence())?;
         self.engine.reload(config, at)?;
+        self.native_claims.clear();
         let sources: Vec<_> = self.routes.keys().cloned().collect();
         for source in sources {
             self.recover(&source);
@@ -1146,6 +1178,7 @@ impl Routing {
         self.routes.contains_key(source)
     }
     pub fn recover(&mut self, source: &Source) {
+        self.remove_native(source);
         let ids: Vec<_> = self
             .chains
             .iter()
@@ -1212,6 +1245,8 @@ impl Routing {
 #[cfg(test)]
 mod tests {
     mod custom;
+    #[cfg(target_os = "linux")]
+    mod native_claims;
     mod sequence;
     use super::*;
     use crate::config::Action;
@@ -1783,6 +1818,9 @@ mod tests {
             "right-bound",
             "multi-output",
             "unsupported",
+            "reorder",
+            "reorder-bound",
+            "reorder-context-loss",
             "locked",
             "overlay",
             "screen",
@@ -1807,7 +1845,9 @@ mod tests {
                     action: match case {
                         "move" | "multi-output" | "right-bound" => WindowAction::MoveRightAndFollow,
                         "left-bound" => WindowAction::MoveLeftAndFollow,
-                        "unsupported" => WindowAction::ReorderUp,
+                        "unsupported" | "reorder" | "reorder-bound" | "reorder-context-loss" => {
+                            WindowAction::ReorderUp
+                        }
                         _ => WindowAction::Close,
                     },
                 }
@@ -1885,7 +1925,81 @@ mod tests {
                 other.active_workspace = Some(77);
                 snapshot.outputs.push(other);
             }
-            routing.authority_mut().update(snapshot, ms(0)).unwrap();
+            if case.starts_with("reorder") {
+                let template = snapshot.windows[0].clone();
+                snapshot.windows[0].rect.origin.y =
+                    if case == "reorder-bound" { 50. } else { 200. };
+                snapshot.windows[0].rect.size.y = 100.;
+                snapshot.windows[0].content = snapshot.windows[0].rect;
+                for (id, y) in [
+                    ("0x2:2", if case == "reorder-bound" { 200. } else { 50. }),
+                    ("0x3:3", 350.),
+                ] {
+                    let mut window = template.clone();
+                    window.id = id.into();
+                    window.rect.origin.y = y;
+                    window.rect.size.y = 100.;
+                    window.content = window.rect;
+                    window.focused = false;
+                    snapshot.windows.push(window);
+                }
+                snapshot
+                    .windows
+                    .sort_by(|a, b| a.rect.origin.y.total_cmp(&b.rect.origin.y));
+                let layouts = crate::hyprland::layouts::Snapshot {
+                    generation: snapshot.generation,
+                    revision: snapshot.revision,
+                    continuity: 1,
+                    captured_at: snapshot.captured_at,
+                    workspaces: vec![crate::hyprland::layouts::Workspace {
+                        id: workspace,
+                        output: Some("test".into()),
+                        monitor: Some(0),
+                        active: true,
+                        special: false,
+                        layout: "scrolling".into(),
+                        columns: snapshot
+                            .windows
+                            .iter()
+                            .enumerate()
+                            .map(|(index, w)| crate::hyprland::layouts::Column {
+                                index,
+                                width: 0.5,
+                                members: vec![w.id.clone()],
+                            })
+                            .collect(),
+                        windows: snapshot
+                            .windows
+                            .iter()
+                            .enumerate()
+                            .map(|(index, w)| crate::hyprland::layouts::Window {
+                                id: w.id.clone(),
+                                rect: [
+                                    w.rect.origin.x,
+                                    w.rect.origin.y,
+                                    w.rect.size.x,
+                                    w.rect.size.y,
+                                ],
+                                hidden: false,
+                                floating: false,
+                                grouped: false,
+                                fullscreen: 0,
+                                column: Some(crate::hyprland::layouts::Position { index, row: 0 }),
+                            })
+                            .collect(),
+                    }],
+                };
+                routing
+                    .authority_mut()
+                    .update_native(snapshot.clone(), Some(layouts), ms(0))
+                    .unwrap();
+                if case == "reorder-context-loss" {
+                    snapshot.revision += 1;
+                    routing.authority_mut().update(snapshot, ms(0)).unwrap();
+                }
+            } else {
+                routing.authority_mut().update(snapshot, ms(0)).unwrap();
+            }
             routing
                 .attach(device.clone(), &ready(&device), None, ms(0))
                 .unwrap();
@@ -1922,7 +2036,10 @@ mod tests {
                 .unwrap();
             let forwarded = drain(&mut routing, 0);
             let dispatches = routing.take_dispatches(ms(0));
-            if matches!(case, "allowed" | "stock" | "move" | "lua" | "close-multi") {
+            if matches!(
+                case,
+                "allowed" | "stock" | "move" | "lua" | "close-multi" | "reorder"
+            ) {
                 assert!(forwarded.is_empty(), "{case}: input was not claimed");
                 assert_eq!(dispatches.len(), 1, "{case}");
                 assert!(

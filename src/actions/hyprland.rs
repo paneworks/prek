@@ -18,6 +18,17 @@ use std::{
 pub(super) struct Target {
     window: Window,
     output: OutputState,
+    reorder_up: Option<crate::hyprland::reorder::Plan>,
+    reorder_down: Option<crate::hyprland::reorder::Plan>,
+}
+impl Target {
+    pub(super) fn reorder(&self, action: WindowAction) -> Option<&crate::hyprland::reorder::Plan> {
+        match action {
+            WindowAction::ReorderUp => self.reorder_up.as_ref(),
+            WindowAction::ReorderDown => self.reorder_down.as_ref(),
+            _ => None,
+        }
+    }
 }
 
 pub(super) fn supported(action: WindowAction) -> bool {
@@ -77,6 +88,14 @@ impl HyprlandAdapter {
     pub(super) fn ready(&self, now: Duration) -> bool {
         self.current(now).is_ok()
     }
+    pub(super) fn reorder_scope(
+        &self,
+        window: &str,
+        now: Duration,
+    ) -> Option<crate::protocol::ReorderScope> {
+        self.current(now).ok()?;
+        self.view.context.as_ref()?.reorder_scope(window)
+    }
     fn current(&self, now: Duration) -> io::Result<&Snapshot> {
         let provided = self
             .view
@@ -130,7 +149,32 @@ impl HyprlandAdapter {
         Ok(Target {
             window: window.clone(),
             output: output.clone(),
+            reorder_up: self.reorder_plan(id, WindowAction::ReorderUp),
+            reorder_down: self.reorder_plan(id, WindowAction::ReorderDown),
         })
+    }
+    fn reorder_plan(
+        &self,
+        id: &str,
+        action: WindowAction,
+    ) -> Option<crate::hyprland::reorder::Plan> {
+        if self.dialect != crate::hyprland::dispatch::Dialect::Lua
+            || (
+                self.client.version().major,
+                self.client.version().minor,
+                self.client.version().patch,
+            ) != (0, 56, 2)
+        {
+            return None;
+        }
+        let context = self.view.context.as_ref()?;
+        crate::hyprland::reorder::Plan::freeze(
+            &context.snapshot,
+            context.layouts.as_ref()?,
+            id,
+            action,
+        )
+        .ok()
     }
     pub(super) fn execute(
         &mut self,
@@ -160,6 +204,10 @@ impl HyprlandAdapter {
             if current.output != target.output || !same_window(&current.window, &target.window) {
                 return Ok(Completion::Unavailable);
             }
+            let until = Instant::now() + remaining.min(Duration::from_millis(200));
+            if matches!(action, WindowAction::ReorderUp | WindowAction::ReorderDown) {
+                return self.execute_reorder(action, target, expires, until, &mut sent);
+            }
             let destination = action.workspace_destination(target.window.workspace);
             if action != WindowAction::Close && destination.is_none() {
                 return Ok(Completion::Unavailable);
@@ -170,7 +218,6 @@ impl HyprlandAdapter {
             if destination.is_some() && self.current(now)?.outputs.len() != 1 {
                 return Ok(Completion::Unavailable);
             }
-            let until = Instant::now() + remaining.min(Duration::from_millis(200));
             let snapshot = self.sampler.sample_until(
                 &self.client,
                 self.view.fence.session,
@@ -249,6 +296,70 @@ impl HyprlandAdapter {
             Completion::Unavailable
         })
     }
+    fn execute_reorder(
+        &mut self,
+        action: WindowAction,
+        target: &Target,
+        expires: Duration,
+        until: Instant,
+        sent: &mut bool,
+    ) -> io::Result<Completion> {
+        let Some(plan) = target.reorder(action) else {
+            return Ok(Completion::Unavailable);
+        };
+        let provided = self.view.context.as_ref().unwrap();
+        if !provided
+            .layouts
+            .as_ref()
+            .is_some_and(|layouts| plan.matches(&provided.snapshot, layouts))
+        {
+            return Ok(Completion::Unavailable);
+        }
+        let (snapshot, layouts) = self.sampler.sample_with_layouts_until(
+            &self.client,
+            self.view.fence.session,
+            SessionKind::User,
+            until,
+        )?;
+        if !layouts
+            .as_ref()
+            .is_some_and(|layouts| plan.matches(&snapshot, layouts))
+            || self.client.dispatch_dialect_until(until)? != crate::hyprland::dispatch::Dialect::Lua
+        {
+            return Ok(Completion::Unavailable);
+        }
+        if monotonic()? >= expires || Instant::now() >= until {
+            return Ok(Completion::Cancelled);
+        }
+        let request = self.dialect.reorder(plan)?;
+        let reply = self.client.exchange_effect(&request, until, sent)?;
+        if reply != b"ok" && reply != b"ok\n" {
+            return Ok(Completion::Uncertain);
+        }
+        loop {
+            let (snapshot, layouts) = self.sampler.sample_with_layouts_until(
+                &self.client,
+                self.view.fence.session,
+                SessionKind::User,
+                until,
+            )?;
+            if monotonic()? >= expires {
+                return Ok(Completion::Uncertain);
+            }
+            if layouts
+                .as_ref()
+                .is_some_and(|layouts| plan.confirmed(&snapshot, layouts))
+            {
+                return Ok(Completion::Applied);
+            }
+            if Instant::now() >= until {
+                return Ok(Completion::Uncertain);
+            }
+            std::thread::sleep(
+                Duration::from_millis(1).min(until.saturating_duration_since(Instant::now())),
+            );
+        }
+    }
 }
 fn same_window(current: &Window, target: &Window) -> bool {
     current.id == target.id
@@ -288,12 +399,8 @@ mod tests {
             address("0xffffffffffffffff:ffffffffffffffff").unwrap(),
             "0xffffffffffffffff"
         );
-        for action in [
-            WindowAction::ReorderUp,
-            WindowAction::ReorderDown,
-            WindowAction::ScrollStack,
-        ] {
-            assert!(!supported(action));
-        }
+        assert!(!supported(WindowAction::ScrollStack));
+        assert!(supported(WindowAction::ReorderUp));
+        assert!(supported(WindowAction::ReorderDown));
     }
 }

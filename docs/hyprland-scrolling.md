@@ -102,6 +102,8 @@ only a complete validated body can activate or renew them. Original capture
 times remain unchanged. Graph delivery is **not** preclaim proof: camera bounds,
 rendered scope and native action authority remain required integration gates
 before any layout-dependent ownership is enabled.
+The experimental G08 reorder path additionally requires the sampled native
+continuity and immutable claim/grant proof described in [its contract](hyprland-reorder.md).
 
 `oslo make test-hyprland` also runs closed-query Luna/JSON and socket models.
 `oslo make test-cage-lua-wayland-fix` exercises the actual read-only query on

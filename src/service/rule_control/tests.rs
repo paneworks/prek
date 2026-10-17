@@ -342,14 +342,14 @@ fn public_hyprland_registration_requires_protected_route_policy_declared_effects
         )
         .is_err()
     );
-    for action in [
-        WindowAction::ReorderUp,
-        WindowAction::ReorderDown,
-        WindowAction::ScrollStack,
-    ] {
+    for action in [WindowAction::ReorderUp, WindowAction::ReorderDown] {
         config.rules[0].action = Action::Hyprland { action };
-        assert!(accepted(Some(&config), false, &caps).is_err());
+        assert!(accepted(Some(&config), false, &caps).is_ok());
     }
+    config.rules[0].action = Action::Hyprland {
+        action: WindowAction::ScrollStack,
+    };
+    assert!(accepted(Some(&config), false, &caps).is_err());
     config.rules[0].action = Action::Lua {
         handler: "window".into(),
         requires: BTreeSet::from([EffectKind::HyprlandActions]),
@@ -917,6 +917,8 @@ fn rule_retirement_removes_unsent_offers_and_cancels_delivered_work() {
         secure_overlay: false,
     };
     let offer = |delivered| Offered {
+        reorder_scope: None,
+        reorder_required: false,
         source: source.clone(),
         snapshot: snapshot.clone(),
         output: None,
@@ -956,6 +958,7 @@ fn rule_retirement_removes_unsent_offers_and_cancels_delivered_work() {
         Reply::Dispatch {
             fence,
             event: Box::new(event.clone()),
+            reorder_scope: None,
         },
         Reply::Observation {
             fence,

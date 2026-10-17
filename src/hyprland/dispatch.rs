@@ -10,6 +10,10 @@ pub(crate) enum Dialect {
     Hyprlang,
     Lua,
 }
+enum WindowEffect<'a> {
+    Standard(Option<i64>),
+    Reorder(&'a super::reorder::Plan),
+}
 
 impl Dialect {
     pub(super) fn parse(provider: &serde_json::Value) -> io::Result<Self> {
@@ -28,6 +32,21 @@ impl Dialect {
         output: &OutputState,
         destination: Option<i64>,
     ) -> io::Result<String> {
+        self.window_effect(window, output, WindowEffect::Standard(destination))
+    }
+    pub(crate) fn reorder(self, plan: &super::reorder::Plan) -> io::Result<String> {
+        self.window_effect(&plan.source, &plan.output, WindowEffect::Reorder(plan))
+    }
+    fn window_effect(
+        self,
+        window: &Window,
+        output: &OutputState,
+        effect: WindowEffect<'_>,
+    ) -> io::Result<String> {
+        let destination = match &effect {
+            WindowEffect::Standard(destination) => *destination,
+            WindowEffect::Reorder(_) => None,
+        };
         let address = hyprland_window_address(&window.id)
             .ok_or_else(|| io::Error::other("invalid frozen window lifetime"))?;
         let geometry = &output.geometry;
@@ -57,6 +76,10 @@ impl Dialect {
             return Err(io::Error::other("invalid absolute workspace"));
         }
         match self {
+            Self::Hyprlang if matches!(effect, WindowEffect::Reorder(_)) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "reorder requires the native Lua provider",
+            )),
             Self::Hyprlang => Ok(if let Some(destination) = destination {
                 format!("/dispatch movetoworkspace {destination},address:{address}")
             } else {
@@ -64,7 +87,13 @@ impl Dialect {
             }),
             Self::Lua => {
                 let stable = window.id.split_once(':').unwrap().1;
-                let effect = if let Some(destination) = destination {
+                let guard = match &effect {
+                    WindowEffect::Reorder(plan) => plan.native_guard(),
+                    _ => String::new(),
+                };
+                let effect = if matches!(effect, WindowEffect::Reorder(_)) {
+                    "hl.dsp.window.swap({window=w,target=v})".into()
+                } else if let Some(destination) = destination {
                     format!(
                         "hl.dsp.window.move({{window=w,workspace=\"{destination}\",follow=true}})"
                     )
@@ -101,7 +130,7 @@ impl Dialect {
                     assert(m.x=={ox:?} and m.y=={oy:?} and m.width=={ow:?} and m.height=={oh:?} and \
                     m.scale=={scale:?} and m.transform=={transform},\"Prek output geometry changed\"); \
                     local p,s=w.at,w.size; assert(p.x=={x:?} and p.y=={y:?} and s.x=={width:?} and s.y=={height:?},\"Prek window geometry changed\"); \
-                    return {effect} end)()"
+                    {guard} return {effect} end)()"
                 ))
             }
         }

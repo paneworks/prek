@@ -165,6 +165,31 @@ impl Snapshot {
         {
             return false;
         }
+        if !self.hyprland_window_target_available(scope, window, output, workspace) {
+            return false;
+        }
+        let window = self
+            .windows
+            .iter()
+            .find(|candidate| Some(candidate.id.as_str()) == window)
+            .unwrap();
+        match action {
+            Action::Hyprland { action } if *action != crate::config::WindowAction::Close => {
+                self.outputs.len() == 1 && action.workspace_destination(window.workspace).is_some()
+            }
+            _ => true,
+        }
+    }
+    pub(crate) fn hyprland_window_target_available(
+        &self,
+        scope: Scope,
+        window: Option<&str>,
+        output: Option<&str>,
+        workspace: Option<i64>,
+    ) -> bool {
+        if self.state != State::Desktop || self.secure_overlay {
+            return false;
+        }
         let Some(window) = self
             .windows
             .iter()
@@ -191,12 +216,7 @@ impl Snapshot {
         if output.screen != Screen::On || output.active_workspace != Some(window.workspace) {
             return false;
         }
-        match action {
-            Action::Hyprland { action } if *action != crate::config::WindowAction::Close => {
-                self.outputs.len() == 1 && action.workspace_destination(window.workspace).is_some()
-            }
-            _ => true,
-        }
+        true
     }
     pub fn validate(&self) -> Result<(), Rejection> {
         if self.outputs.len() > 256 || self.windows.len() > 4096 || self.regions.len() > 4096 {
@@ -365,6 +385,8 @@ pub struct Authority {
     console: Option<String>,
     barrier: LockBarrier,
     snapshot: Option<Snapshot>,
+    #[cfg(target_os = "linux")]
+    native_layouts: Option<Box<crate::hyprland::layouts::Snapshot>>,
     acknowledged_at: Option<Duration>,
     lease: Option<Duration>,
     revision: u64,
@@ -384,6 +406,8 @@ impl Default for Authority {
             console: None,
             barrier: LockBarrier::Open,
             snapshot: None,
+            #[cfg(target_os = "linux")]
+            native_layouts: None,
             acknowledged_at: None,
             lease: None,
             revision: 0,
@@ -455,6 +479,10 @@ impl Authority {
             .checked_add(1)
             .expect("session generation exhausted");
         self.snapshot = None;
+        #[cfg(target_os = "linux")]
+        {
+            self.native_layouts = None;
+        }
         self.acknowledged_at = None;
         self.lease = None;
         self.revision = 0;
@@ -577,7 +605,76 @@ impl Authority {
         self.lease = Some(acknowledged_at.saturating_add(PROVIDER_LEASE));
         self.acknowledged_at = Some(acknowledged_at);
         self.snapshot = Some(snapshot);
+        #[cfg(target_os = "linux")]
+        {
+            self.native_layouts = None;
+        }
         Ok(())
+    }
+    /// Install one trusted desktop sample and its matching native graph together.
+    #[cfg(target_os = "linux")]
+    pub fn update_native(
+        &mut self,
+        snapshot: Snapshot,
+        layouts: Option<crate::hyprland::layouts::Snapshot>,
+        at: Duration,
+    ) -> Result<(), Rejection> {
+        if let Some(layouts) = &layouts {
+            layouts
+                .validate_context(&snapshot)
+                .map_err(|_| Rejection::InvalidGeometry)?;
+        }
+        self.update(snapshot, at)?;
+        self.native_layouts = layouts.map(Box::new);
+        Ok(())
+    }
+    pub(crate) fn hyprland_target_available(
+        &self,
+        action: &Action,
+        scope: Scope,
+        window: Option<&str>,
+        output: Option<&str>,
+        workspace: Option<i64>,
+        at: Duration,
+    ) -> bool {
+        let Ok(snapshot) = self.fresh(at) else {
+            return false;
+        };
+        #[cfg(target_os = "linux")]
+        {
+            crate::hyprland::reorder::available(
+                snapshot,
+                self.native_layouts.as_deref(),
+                action,
+                scope,
+                window,
+                output,
+                workspace,
+            )
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            snapshot.hyprland_target_available(action, scope, window, output, workspace)
+        }
+    }
+    pub(crate) fn reorder_scope(
+        &self,
+        window: &str,
+        at: Duration,
+    ) -> Option<crate::protocol::ReorderScope> {
+        #[cfg(target_os = "linux")]
+        {
+            crate::hyprland::reorder::scope(
+                self.fresh(at).ok()?,
+                self.native_layouts.as_deref()?,
+                window,
+            )
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (window, at);
+            None
+        }
     }
     pub fn heartbeat(&mut self, generation: u64, at: Duration) -> Result<(), Rejection> {
         self.tick(at);

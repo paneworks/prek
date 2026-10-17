@@ -579,7 +579,10 @@ and output-geometry guards, not arbitrary dispatch strings. These guards run
 inside the native factory; legacy address dispatch retains a read/dispatch race.
 Unknown or changed providers refuse without syntax fallback.
 Workspace moves require a single output and protected `session --hyprland` opt-in.
-Production takeover, reorder and scrolling-layout effects remain pending.
+Production takeover and continuous scrolling-layout effects remain pending.
+[Native app reordering](docs/hyprland-reorder.md) requires a complete frozen
+vertical scrolling-layout graph on the exact 0.56.2 Lua provider; it does not
+grant rendered app-content or physical input ownership.
 [Continuous viewport planning](docs/hyprland-scrolling.md) documents the bounded
 numerical G11 planner and the native authority/rendering gates still required;
 it does not enable scrolling actions.

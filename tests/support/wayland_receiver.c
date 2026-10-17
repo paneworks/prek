@@ -18,6 +18,7 @@
 #include <wayland-client.h>
 #include <xkbcommon/xkbcommon.h>
 #include "xdg-shell-client-protocol.h"
+#include "presentation-time-client-protocol.h"
 
 #define CONTACTS 32
 #define KEYS 768
@@ -33,6 +34,7 @@ struct app {
     struct wl_touch *touch;
     struct wl_pointer *pointer;
     struct wl_callback *frame_callback;
+    struct wp_presentation *presentation;
     struct xkb_context *xkb;
     struct xkb_keymap *keymap;
     struct xkb_state *key_state;
@@ -40,13 +42,17 @@ struct app {
     bool running, configured, dirty, touch_pending, keys[KEYS];
     uint32_t depressed, latched, locked, group;
     unsigned buffers;
+    unsigned presentations;
+    uint32_t presentation_clock;
     int width, height;
     uint64_t sequence, frames, drawn_sequence;
     double pointer_x, pointer_y;
     char text[1024];
+    char label[64];
     struct contact contacts[CONTACTS];
 };
 struct drawing { struct app *app; void *pixels; size_t bytes; struct wl_buffer *buffer; };
+struct feedback { struct app *app; uint64_t sequence; int width,height; };
 static void draw(struct app *app);
 static uint64_t clock_ns(void) {
     struct timespec now;
@@ -69,6 +75,7 @@ static void receipt(struct app *app,const char *event,const char *detail) {
     if (detail && *detail) fprintf(app->log,",%s",detail);
     fprintf(app->log,",\"width\":%d,\"height\":%d,\"frames\":%" PRIu64 ",\"text\":",app->width,app->height,app->frames);
     quoted(app->log,app->text);
+    fputs(",\"label\":",app->log);quoted(app->log,app->label);
     fprintf(app->log,",\"modifiers\":{\"depressed\":%u,\"latched\":%u,\"locked\":%u,\"group\":%u},\"keys\":[",
             app->depressed,app->latched,app->locked,app->group);
     bool comma=false;
@@ -80,7 +87,7 @@ static void receipt(struct app *app,const char *event,const char *detail) {
     }
     fprintf(app->log,"]}\n");
     if (fflush(app->log)) abort();
-    if (strcmp(event,"rendered")) {app->dirty=true;draw(app);}
+    if (strcmp(event,"rendered") && strcmp(event,"presented") && strcmp(event,"presentation_discarded")) {app->dirty=true;draw(app);}
 }
 static void presented(void *data,struct wl_callback *callback,uint32_t time) {
     struct app *app=data;
@@ -89,6 +96,22 @@ static void presented(void *data,struct wl_callback *callback,uint32_t time) {
     receipt(app,"rendered",detail);draw(app);
 }
 static const struct wl_callback_listener presentation_listener={.done=presented};
+static void synchronized(void *data,struct wp_presentation_feedback *feedback,struct wl_output *output) {}
+static void feedback_presented(void *data,struct wp_presentation_feedback *feedback,uint32_t hi,uint32_t lo,uint32_t ns,uint32_t refresh,uint32_t seq_hi,uint32_t seq_lo,uint32_t flags) {
+    struct feedback *pending=data;struct app *app=pending->app;if(ns>=1000000000)abort();
+    char detail[320];snprintf(detail,sizeof(detail),"\"drawn_sequence\":%" PRIu64 ",\"buffer_width\":%d,\"buffer_height\":%d,\"presentation_clock\":%u,\"presentation_sec\":%" PRIu64 ",\"presentation_nsec\":%u,\"presentation_flags\":%u",pending->sequence,pending->width,pending->height,app->presentation_clock,((uint64_t)hi<<32)|lo,ns,flags);
+    receipt(app,"presented",detail);wp_presentation_feedback_destroy(feedback);free(pending);app->presentations--;draw(app);
+}
+static void feedback_discarded(void *data,struct wp_presentation_feedback *feedback) {
+    struct feedback *pending=data;struct app *app=pending->app;
+    char detail[80];snprintf(detail,sizeof(detail),"\"drawn_sequence\":%" PRIu64,pending->sequence);
+    receipt(app,"presentation_discarded",detail);wp_presentation_feedback_destroy(feedback);free(pending);app->presentations--;draw(app);
+}
+static const struct wp_presentation_feedback_listener feedback_listener={.sync_output=synchronized,.presented=feedback_presented,.discarded=feedback_discarded};
+static void presentation_clock(void *data,struct wp_presentation *presentation,uint32_t clock) {
+    struct app *app=data;app->presentation_clock=clock;
+}
+static const struct wp_presentation_listener clock_listener={.clock_id=presentation_clock};
 static void released(void *data,struct wl_buffer *buffer) {
     struct drawing *drawing=data;
     struct app *app=drawing->app;
@@ -120,8 +143,11 @@ static void draw(struct app *app) {
     cairo_surface_t *surface=cairo_image_surface_create_for_data(pixels,CAIRO_FORMAT_ARGB32,app->width,app->height,app->width*4);
     cairo_t *cr=cairo_create(surface);
     cairo_set_source_rgb(cr,.07,.10,.15);cairo_paint(cr);
+    bool target=!strcmp(app->label,"hyprland-target"),guard=!strcmp(app->label,"hyprland-guard");
+    cairo_set_source_rgb(cr,target?1:0,guard?1:0,(!target && !guard)?1:0);
+    cairo_rectangle(cr,8,8,8,8);cairo_fill(cr);
     cairo_set_source_rgb(cr,.85,.94,1);cairo_select_font_face(cr,"monospace",CAIRO_FONT_SLANT_NORMAL,CAIRO_FONT_WEIGHT_NORMAL);cairo_set_font_size(cr,18);
-    label(cr,30,"Prek Wayland input receiver");
+    label(cr,30,app->label);
     char line[1100];snprintf(line,sizeof(line),"receipts: %" PRIu64 "  touch frames: %" PRIu64,app->sequence,app->frames);label(cr,60,line);
     snprintf(line,sizeof(line),"modifiers: %u / %u / %u  group: %u",app->depressed,app->latched,app->locked,app->group);label(cr,90,line);
     snprintf(line,sizeof(line),"text: %s",app->text);label(cr,120,line);
@@ -137,6 +163,13 @@ static void draw(struct app *app) {
     cairo_set_source_rgb(cr,.95,.7,.2);cairo_rectangle(cr,app->pointer_x-4,app->pointer_y-4,8,8);cairo_fill(cr);
     cairo_destroy(cr);cairo_surface_destroy(surface);
     app->drawn_sequence=app->sequence;
+    if(app->presentation) {
+        if(app->presentations>=16)abort();
+        struct feedback *pending=calloc(1,sizeof(*pending));if(!pending)abort();
+        *pending=(struct feedback){app,app->drawn_sequence,app->width,app->height};
+        struct wp_presentation_feedback *feedback=wp_presentation_feedback(app->presentation,app->surface);
+        wp_presentation_feedback_add_listener(feedback,&feedback_listener,pending);app->presentations++;
+    }
     app->frame_callback=wl_surface_frame(app->surface);
     wl_callback_add_listener(app->frame_callback,&presentation_listener,app);
     wl_surface_attach(app->surface,buffer,0,0);wl_surface_damage_buffer(app->surface,0,0,app->width,app->height);wl_surface_commit(app->surface);
@@ -231,6 +264,7 @@ static void global(void *data,struct wl_registry *registry,uint32_t name,const c
     struct app *app=data;
     if(!strcmp(interface,"wl_compositor"))app->compositor=wl_registry_bind(registry,name,&wl_compositor_interface,version<4?version:4);
     else if(!strcmp(interface,"wl_shm"))app->shm=wl_registry_bind(registry,name,&wl_shm_interface,1);
+    else if(!strcmp(interface,"wp_presentation")){app->presentation=wl_registry_bind(registry,name,&wp_presentation_interface,1);wp_presentation_add_listener(app->presentation,&clock_listener,app);}
     else if(!strcmp(interface,"xdg_wm_base")){app->wm=wl_registry_bind(registry,name,&xdg_wm_base_interface,1);xdg_wm_base_add_listener(app->wm,&wm_listener,app);}
     else if(!strcmp(interface,"wl_seat")){app->seat=wl_registry_bind(registry,name,&wl_seat_interface,version<5?version:5);wl_seat_add_listener(app->seat,&seat_listener,app);}
 }
@@ -246,12 +280,16 @@ int main(int argc,char **argv) {
     if(argc!=2 || !((vm && !strcmp(vm,"1")) || (host && !strcmp(host,"1")))){fprintf(stderr,"use an explicitly owned Cage test session and supply a receipt path\n");return 2;}
     int fd=open(argv[1],O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);if(fd<0){perror("receipt file");return 1;}
     struct app app={.running=true,.width=600,.height=800};app.log=fdopen(fd,"w");if(!app.log)abort();
+    const char *label=getenv("PREK_TEST_RECEIVER_LABEL");if(!label)label="Prek Wayland input receiver";
+    if(!*label || strlen(label)>=sizeof(app.label))abort();
+    for(const unsigned char *p=(const unsigned char *)label;*p;p++)if(*p<32 || *p>126)abort();
+    snprintf(app.label,sizeof(app.label),"%s",label);
     app.xkb=xkb_context_new(XKB_CONTEXT_NO_FLAGS);app.display=wl_display_connect(NULL);if(!app.xkb || !app.display)abort();
     struct wl_registry *registry=wl_display_get_registry(app.display);wl_registry_add_listener(registry,&registry_listener,&app);if(wl_display_roundtrip(app.display)<0)abort();
     if(!app.compositor || !app.shm || !app.wm || !app.seat)abort();
     app.surface=wl_compositor_create_surface(app.compositor);
     struct xdg_surface *surface=xdg_wm_base_get_xdg_surface(app.wm,app.surface);xdg_surface_add_listener(surface,&surface_listener,&app);
-    struct xdg_toplevel *toplevel=xdg_surface_get_toplevel(surface);xdg_toplevel_add_listener(toplevel,&toplevel_listener,&app);xdg_toplevel_set_title(toplevel,"Prek input receiver");xdg_toplevel_set_app_id(toplevel,"prek-cage-receiver");
+    struct xdg_toplevel *toplevel=xdg_surface_get_toplevel(surface);xdg_toplevel_add_listener(toplevel,&toplevel_listener,&app);xdg_toplevel_set_title(toplevel,app.label);xdg_toplevel_set_app_id(toplevel,"prek-cage-receiver");
     wl_surface_commit(app.surface);
     while(app.running && wl_display_dispatch(app.display)>=0){}
     app.configured=false;receipt(&app,"closed",NULL);wl_display_disconnect(app.display);fclose(app.log);return 0;
