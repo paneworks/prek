@@ -52,6 +52,7 @@ let
   };
   fromFile = evaluate { configFile = ../examples/lua/modular/config.lua; };
   sessionDisabled = evaluate { session.enable = false; };
+  reconnectDisabled = evaluate { session.reconnect = false; };
   wrapped = pkgs.runCommand "prek-fixture-compositor" { } ''
     mkdir -p "$out/bin"
     ln -s ${pkgs.coreutils}/bin/true "$out/bin/.Hyprland-wrapped"
@@ -63,7 +64,7 @@ let
     compositorExecutable = lib.mkForce null;
   };
   defaultCompositor = evaluate { compositorExecutable = lib.mkForce null; };
-  cases = { inherit minimal inline fromFile sessionDisabled wrappedConfig defaultCompositor; };
+  cases = { inherit minimal inline fromFile sessionDisabled reconnectDisabled wrappedConfig defaultCompositor; };
   snapshot = cfg: {
     unit = cfg.systemd.services.prek.serviceConfig;
     configuration = toString cfg.services.prek.configurationPackage;

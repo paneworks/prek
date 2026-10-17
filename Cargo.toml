@@ -20,6 +20,10 @@ harness = false
 name = "recovery"
 harness = false
 
+[[test]]
+name = "session_launcher"
+harness = false
+
 [dependencies]
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }

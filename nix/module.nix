@@ -65,6 +65,7 @@ let
     "--morf-executable" (toString cfg.morfExecutable)
   ];
   sessionArgs = [ (lib.getExe cfg.package) "session" "--socket" "/run/${cfg.runtimeDirectory}/control.sock" ]
+    ++ lib.optional cfg.session.reconnect "--reconnect"
     ++ lib.optional cfg.session.observations "--observations"
     ++ lib.optional cfg.session.context "--context"
     ++ lib.optional cfg.session.lua "--lua"
@@ -133,6 +134,11 @@ in {
       description = "Root-owned directory under /run for the authenticated broker socket.";
     };
     session = {
+      reconnect = mkOption {
+        type = types.bool;
+        default = true;
+        description = "Keep an authority-free launcher in the owning login session and re-execute retired agents with bounded reconnects. Policy rejection and orderly stop are terminal.";
+      };
       enable = mkEnableOption "the prek-session launcher, to run as a child of the compositor login session" // { default = true; };
       observations = mkOption { type = types.bool; default = true; description = "Request own-seat configured semantic outcomes."; };
       context = mkOption { type = types.bool; default = true; description = "Request broker-verified compositor context."; };

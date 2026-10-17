@@ -549,9 +549,90 @@ fn session_help_documents_explicit_desktop_opt_ins_without_enabling_routing() {
     assert!(help.contains("--power") && help.contains("protected-policy DPMS"));
     assert!(help.contains("--hyprland") && help.contains("protected-policy targeted Hyprland"));
     assert!(help.contains("--recognizers") && help.contains("native validated"));
+    assert!(help.contains("--reconnect") && !help.contains("--reconnect-child"));
+    let bounded = run(&["session", "--reconnect", "--duration", "1"]);
+    assert!(!bounded.status.success());
+    assert!(String::from_utf8_lossy(&bounded.stderr).contains("cannot be used with"));
+    let unbound = run(&["session", "--reconnect-child"]);
+    assert!(!unbound.status.success());
+    assert!(String::from_utf8_lossy(&unbound.stderr).contains("launcher pipe"));
     let denied = run(&["session", "--recognizers"]);
     assert!(!denied.status.success());
     assert!(String::from_utf8_lossy(&denied.stderr).contains("--lua"));
+}
+
+#[test]
+fn reconnecting_cli_reexecutes_only_against_its_missing_owned_endpoint_and_stops() {
+    let directory = Directory::new();
+    let log = directory.0.join("session-stderr");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_prek"));
+    command
+        .args([
+            "session",
+            "--reconnect",
+            "--instance",
+            "owned-missing-instance",
+            "--socket",
+        ])
+        .arg(directory.0.join("missing socket"))
+        .args([
+            "--json",
+            "--lua",
+            "--input",
+            "--recognizers",
+            "--rule-mutations",
+            "--observations",
+            "--context",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(fs::File::create(&log).unwrap());
+    if unsafe { nix::libc::geteuid() } == 0 {
+        assert!(!command.status().unwrap().success());
+        assert!(
+            fs::read_to_string(log)
+                .unwrap()
+                .contains("unprivileged user")
+        );
+        return;
+    }
+    let mut child = command.spawn().unwrap();
+    let until = std::time::Instant::now() + Duration::from_secs(4);
+    loop {
+        if fs::read_to_string(&log)
+            .unwrap()
+            .matches("reconnecting with fresh process authority")
+            .count()
+            >= 2
+        {
+            break;
+        }
+        if child.try_wait().unwrap().is_some() || std::time::Instant::now() >= until {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "owned CLI reconnect failed: {}",
+                fs::read_to_string(&log).unwrap()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        unsafe { nix::libc::kill(child.id() as i32, nix::libc::SIGTERM) },
+        0
+    );
+    let until = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success());
+            break;
+        }
+        if std::time::Instant::now() >= until {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("owned CLI ignored termination");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[test]

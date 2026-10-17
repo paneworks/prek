@@ -38,6 +38,8 @@ def main():
                if key not in ("HYPRLAND_INSTANCE_SIGNATURE", "WAYLAND_DISPLAY", "DISPLAY")}
         help_text = subprocess.check_output([launcher, "--help"], env=env, timeout=10, text=True)
         assert "--rule-mutations" in help_text and "--hyprland" in help_text
+        assert "--reconnect" in help_text
+        assert ("--reconnect" in launcher.read_text()) == (name != "reconnectDisabled")
         assert unit["KillMode"] == "control-group" and unit["TimeoutStopSec"] == 5
         assert unit["DeviceAllow"] == ["char-input r"]
         assert unit["NoNewPrivileges"] and unit["ProtectHome"] == "read-only"

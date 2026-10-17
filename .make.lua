@@ -196,6 +196,12 @@ make.recipe{ name = "test-handoff-boundary", desc = "bounded evdev fanout-prefix
 make.recipe{ name = "test-suspend-epoch", desc = "suspend-sensitive process clocks and native IO/reaping gates",
              run = function() sh.cargo("test", "--locked", "--lib", "process_clock::tests::") end }
 
+make.recipe{ name = "test-session-reconnect", desc = "same-login native agent re-execution, bounds and termination",
+             run = function()
+               sh.cargo("test", "--locked", "--lib", "session_launcher::tests::")
+               sh.cargo("test", "--locked", "--test", "session_launcher")
+             end }
+
 make.recipe{ name = "test-routed-replay", desc = "offline downstream ownership, writes and recovery",
              run = function()
                sh.cargo("test", "--locked", "--lib", "replay::routed::")

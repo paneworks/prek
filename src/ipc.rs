@@ -29,6 +29,38 @@ pub struct Credentials {
 pub fn monotonic() -> io::Result<Duration> {
     crate::process_clock::monotonic()
 }
+
+#[derive(Debug)]
+struct TransportLoss(io::Error);
+impl std::fmt::Display for TransportLoss {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+impl std::error::Error for TransportLoss {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+fn transport(error: io::Error) -> io::Error {
+    if matches!(
+        error.kind(),
+        io::ErrorKind::UnexpectedEof
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::BrokenPipe
+    ) {
+        io::Error::new(error.kind(), TransportLoss(error))
+    } else {
+        error
+    }
+}
+/// Identify transport loss reported by this authenticated packet channel.
+pub fn is_transport_loss(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|error| error.is::<TransportLoss>())
+}
 fn credentials(fd: &impl AsFd) -> io::Result<Credentials> {
     let mut value: libc::ucred = unsafe { std::mem::zeroed() };
     let mut length = size_of::<libc::ucred>() as libc::socklen_t;
@@ -350,7 +382,7 @@ impl Channel {
                 return Ok(false);
             }
             self.failed = true;
-            return Err(error);
+            return Err(transport(error));
         }
         if written as usize != bytes.len() {
             self.failed = true;
@@ -368,7 +400,7 @@ impl Channel {
         if result.is_err() {
             self.failed = true;
         }
-        result
+        result.map_err(transport)
     }
     fn read_packet<T: for<'de> Deserialize<'de>>(&mut self) -> io::Result<Option<Packet<T>>> {
         let mut bytes = vec![0u8; MAX_PACKET];

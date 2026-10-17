@@ -239,6 +239,10 @@ fn isolated_process_epoch_invalidation_fences_io_and_reaps_owned_children() {
         command
     };
     match std::env::var(MODE).as_deref() {
+        Ok("launcher-worker") => {
+            assert!(crate::ipc::monotonic().is_ok());
+            return;
+        }
         Ok("worker") => {
             std::thread::sleep(Duration::from_secs(20));
             return;
@@ -307,4 +311,6 @@ fn isolated_process_epoch_invalidation_fences_io_and_reaps_owned_children() {
     assert!(crate::supervisor::Supervisor::spawn(child("worker")).is_err());
     drop(worker);
     assert!(identity.confirmed_dead().unwrap());
+    crate::session_launcher::run(|| child("launcher-worker")).unwrap();
+    assert!(crate::ipc::monotonic().is_err());
 }

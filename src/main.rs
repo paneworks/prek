@@ -82,6 +82,11 @@ enum Command {
     },
     /// Register from this compositor's login session and maintain a private lease.
     Session {
+        /// Re-execute a retired agent inside this same login session.
+        #[arg(long, conflicts_with_all = ["duration", "reconnect_child"])]
+        reconnect: bool,
+        #[arg(long, hide = true)]
+        reconnect_child: bool,
         #[arg(long, default_value = "/run/prek/control.sock")]
         socket: PathBuf,
         /// Defaults to HYPRLAND_INSTANCE_SIGNATURE; the broker verifies it.
@@ -261,6 +266,10 @@ fn main() -> ExitCode {
         Err(error) if error.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("prek: {error}");
+            #[cfg(target_os = "linux")]
+            if let Some(code) = prek::session_launcher::exit_code(&error) {
+                return ExitCode::from(code);
+            }
             ExitCode::FAILURE
         }
     }
@@ -420,6 +429,8 @@ fn run(command: Command) -> io::Result<()> {
             )
         }
         Command::Session {
+            reconnect,
+            reconnect_child,
             socket,
             instance,
             json,
@@ -434,10 +445,8 @@ fn run(command: Command) -> io::Result<()> {
             rule_mutations,
             input,
             recognizers,
-        } => run_session(
-            &socket,
-            instance,
-            SessionOptions {
+        } => {
+            let options = SessionOptions {
                 json,
                 duration,
                 inspect: false,
@@ -451,9 +460,30 @@ fn run(command: Command) -> io::Result<()> {
                 rule_mutations,
                 input,
                 recognizers,
-            },
-            &mut output,
-        ),
+            };
+            if reconnect {
+                if unsafe { nix::libc::geteuid() } == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "session launcher must run as the compositor's unprivileged user",
+                    ));
+                }
+                let executable = std::env::current_exe()?;
+                let instance = session_instance(instance)?;
+                return prek::session_launcher::run(|| {
+                    options.command(&executable, &socket, &instance)
+                });
+            }
+            let mut ready = reconnect_child
+                .then(prek::session_launcher::Ready::connect)
+                .transpose()?;
+            let result = run_session(&socket, instance, options, &mut output, ready.as_mut());
+            if reconnect_child {
+                result.map_err(prek::session_launcher::classify)
+            } else {
+                result
+            }
+        }
         Command::Status {
             socket,
             instance,
@@ -467,6 +497,7 @@ fn run(command: Command) -> io::Result<()> {
                 ..Default::default()
             },
             &mut output,
+            None,
         ),
         Command::Reload { socket, json } => reload_broker(&socket, json, &mut output),
         Command::UdevImport { marker } => prek::kernel::import_metadata(&marker, &mut output),
@@ -1256,6 +1287,106 @@ struct SessionOptions {
 }
 
 #[cfg(target_os = "linux")]
+impl SessionOptions {
+    fn command(
+        &self,
+        executable: &std::path::Path,
+        socket: &std::path::Path,
+        instance: &str,
+    ) -> std::process::Command {
+        let mut command = std::process::Command::new(executable);
+        command
+            .arg("session")
+            .arg("--reconnect-child")
+            .arg("--socket")
+            .arg(socket)
+            .arg("--instance")
+            .arg(instance)
+            .stdin(std::process::Stdio::null());
+        for (enabled, flag) in [
+            (self.json, "--json"),
+            (self.observations, "--observations"),
+            (self.context, "--context"),
+            (self.commands, "--commands"),
+            (self.power, "--power"),
+            (self.hyprland, "--hyprland"),
+            (self.morf, "--morf"),
+            (self.lua, "--lua"),
+            (self.rule_mutations, "--rule-mutations"),
+            (self.input, "--input"),
+            (self.recognizers, "--recognizers"),
+        ] {
+            if enabled {
+                command.arg(flag);
+            }
+        }
+        command
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn session_instance(instance: Option<String>) -> io::Result<String> {
+    instance
+        .or_else(|| std::env::var("HYPRLAND_INSTANCE_SIGNATURE").ok())
+        .ok_or_else(|| {
+            io::Error::other(
+                "select the live compositor with --instance or HYPRLAND_INSTANCE_SIGNATURE",
+            )
+        })
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod session_launcher_tests {
+    use super::*;
+    #[test]
+    fn reconstructed_session_flags_and_paths_are_exact_argv_not_shell_text() {
+        let options = SessionOptions {
+            json: true,
+            observations: true,
+            context: true,
+            commands: true,
+            power: true,
+            hyprland: true,
+            morf: true,
+            lua: true,
+            rule_mutations: true,
+            input: true,
+            recognizers: true,
+            ..Default::default()
+        };
+        let executable = std::path::Path::new("/owned path/prek");
+        let command = options.command(
+            executable,
+            std::path::Path::new("/owned path/control.sock"),
+            "original-instance",
+        );
+        assert_eq!(command.get_program(), executable);
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [
+                "session",
+                "--reconnect-child",
+                "--socket",
+                "/owned path/control.sock",
+                "--instance",
+                "original-instance",
+                "--json",
+                "--observations",
+                "--context",
+                "--commands",
+                "--power",
+                "--hyprland",
+                "--morf",
+                "--lua",
+                "--rule-mutations",
+                "--input",
+                "--recognizers"
+            ]
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn spawn_lua_session(
     executable: &std::path::Path,
     fence: prek::protocol::Fence,
@@ -1284,6 +1415,7 @@ fn run_session(
     instance: Option<String>,
     options: SessionOptions,
     output: &mut impl Write,
+    mut ready: Option<&mut prek::session_launcher::Ready>,
 ) -> io::Result<()> {
     let SessionOptions {
         json,
@@ -1317,13 +1449,7 @@ fn run_session(
             "session agent must run as the compositor's unprivileged user",
         ));
     }
-    let instance = instance
-        .or_else(|| std::env::var("HYPRLAND_INSTANCE_SIGNATURE").ok())
-        .ok_or_else(|| {
-            io::Error::other(
-                "select the live compositor with --instance or HYPRLAND_INSTANCE_SIGNATURE",
-            )
-        })?;
+    let instance = session_instance(instance)?;
     let mut requested = std::collections::BTreeSet::new();
     let observations = observations || lua;
     if observations {
@@ -1365,7 +1491,18 @@ fn run_session(
         capabilities: requested.clone(),
     };
     registration.validate()?;
-    let mut channel = Channel::connect(socket)?;
+    let mut channel = Channel::connect(socket).map_err(|error| {
+        if ready.is_some()
+            && matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+            )
+        {
+            prek::session_launcher::retry(error)
+        } else {
+            error
+        }
+    })?;
     if channel.peer().uid != 0 {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -1466,6 +1603,9 @@ fn run_session(
                         )?);
                     }
                     fence = Some(accepted);
+                    if let Some(ready) = ready.as_mut() {
+                        ready.accepted()?;
+                    }
                     lua_seat = seat.clone();
                     if lua {
                         lua_download =
@@ -2228,10 +2368,15 @@ fn run_session(
             status_pending = true;
         }
         if now.saturating_sub(last_reply) >= Duration::from_secs(1) {
-            return Err(io::Error::new(
+            let error = io::Error::new(
                 io::ErrorKind::TimedOut,
                 "broker registration/lease acknowledgement timed out",
-            ));
+            );
+            return Err(if ready.is_some() {
+                prek::session_launcher::retry(error)
+            } else {
+                error
+            });
         }
         if now >= next
             && let Some(fence) = fence

@@ -139,8 +139,9 @@ exec-once = /run/current-system/sw/bin/prek-session
 ```
 
 For a Lua-configured compositor, use its equivalent existing startup hook.
-The launcher directly execs the installed session agent with observation,
-verified context and Lua enabled. It inherits `XDG_RUNTIME_DIR` and
+The launcher starts `prek session --reconnect` with observation,
+verified context and Lua enabled. An authority-free guardian re-executes retired
+agents in that same login session; every replacement registers afresh. It inherits `XDG_RUNTIME_DIR` and
 `HYPRLAND_INSTANCE_SIGNATURE` from that session. It does not create a systemd
 user service: the shared user manager does not prove owning logind membership,
 and its agents are deliberately rejected. A compositor run without an active
@@ -157,6 +158,13 @@ source policy. `session.enable=false` omits the launcher from the system profile
 while retaining the broker, useful when an existing session hook starts the
 selected `prek` executable directly. `session.package` exposes the generated
 launcher to other upstream modules.
+`session.reconnect=false` restores one-shot foreground behavior. Reconnection
+does not retry policy rejection, malformed protocol, orderly exit or an external
+agent signal/crash. Broker transport loss and a confirmed retired clock epoch
+are retryable, with a five-second startup deadline, 500 ms retry delay, at most
+16 launches in 60 seconds and a 60-second unregistered-outage budget. SIGINT or
+SIGTERM stops the guardian and reaps its child; abrupt guardian death kills that
+child. No old Lua VM, pending action, fence or source generation is reused.
 
 The `prek.service` root broker starts at `multi-user.target`, after logind and
 udev. Its supervised worker alone opens allowlisted input devices. The unit
@@ -181,9 +189,11 @@ sudo systemctl stop prek.service
 sudo systemctl start prek.service
 ```
 
-Stopping the broker retires its worker and registration; a session agent should
-then be restarted from the compositor's own startup hook. Do not launch a second
-agent while the first remains registered. Observation does not consume input,
+Stopping the broker retires its worker and registration. The reconnecting
+launcher waits within its bounded recovery budget; stopping only the broker is
+not an agent-stop command. Stop the owning `prek-session` process as well when
+shutting down the integration. One-shot agents must be restarted from the
+compositor's own startup hook. Do not launch a second agent while the first remains registered. Observation does not consume input,
 so stopping it preserves ordinary application delivery. Physical routing,
 failure-neutralization and rollback acceptance remain separate implementation
 and hardware gates.
