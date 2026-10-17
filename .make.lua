@@ -432,6 +432,14 @@ make.recipe{ name="test-key-worker",desc="scoped key scheduling, repeats and raw
                sh.cargo("test","--locked","--lib","routing::keys::tests")
              end }
 
+make.recipe{ name="test-native-key-worker",desc="managed generated-output slots, publication replies and native worker policy; no devices",
+             run=function()
+               sh.cargo("test","--locked","--lib","route_worker::keys::tests")
+               sh.cargo("test","--locked","--lib","service::transport_offer::tests")
+               sh.cargo("test","--locked","--lib","route_worker::tests::recognizers::keys")
+               sh.cargo("test","--locked","--lib","linux::owned_service_tests")
+             end }
+
 make.recipe{ name="test-generated-keyboard",desc="generated keyboard role, publication and readiness models; no devices",
              run=function()
                sh.cargo("test","--locked","--lib","keys::native::tests")

@@ -96,6 +96,14 @@ impl KeyWork {
 }
 
 impl Routing {
+    pub(crate) fn key_output_available(&mut self, available: bool) {
+        if available && !self.capabilities.contains(&Capability::SyntheticInput) {
+            self.advance_key_epoch();
+            self.capabilities.insert(Capability::SyntheticInput);
+        } else if !available {
+            self.revoke_key_work();
+        }
+    }
     pub(crate) fn revoke_key_work(&mut self) {
         let mut capabilities = self.capabilities.clone();
         capabilities.remove(&Capability::SyntheticInput);

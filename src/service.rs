@@ -19,6 +19,7 @@ mod morf_handoff;
 mod recognizers;
 mod rule_control;
 mod source;
+mod transport_offer;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs, io,
@@ -1580,8 +1581,17 @@ impl Broker {
         now: Duration,
     ) -> io::Result<Option<crate::configuration::Command>> {
         descriptor.validate().map_err(protocol::invalid)?;
-        let owners = self.morf_requirements(subscription.fence, &subscription.seat);
-        let lease = self.morf_lease(subscription.fence, &subscription.seat, now);
+        let generated = descriptor.is_generated_keyboard();
+        let owners = if generated {
+            Vec::new()
+        } else {
+            self.morf_requirements(subscription.fence, &subscription.seat)
+        };
+        let lease = if generated {
+            None
+        } else {
+            self.morf_lease(subscription.fence, &subscription.seat, now)
+        };
         let Some(bound) = self
             .connections
             .iter_mut()
@@ -1605,26 +1615,26 @@ impl Broker {
             return Ok(None);
         };
         bound.registration.check(&self.logind, &bound.client)?;
-        if let Some(ledger) = self.input_releases.as_mut() {
-            ledger.prepared(bound.fence, descriptor.source.clone())?;
-        }
-        bound.transport_started = true;
-        Ok(Some(crate::configuration::Command::Transport {
-            fence: bound.fence,
-            source: descriptor.source.clone(),
-            evidence,
-            admission: (!owners.is_empty()).then_some(crate::morf::admission::Admission {
-                owners,
-                expires: lease.map(|until| {
-                    until
-                        .min(bound.context.checked + crate::context::SNAPSHOT_MAX_AGE)
-                        .min(
-                            bound.context.value.as_ref().unwrap().snapshot.captured_at
-                                + crate::context::SNAPSHOT_MAX_AGE,
-                        )
-                }),
+        let admission = (!owners.is_empty()).then_some(crate::morf::admission::Admission {
+            owners,
+            expires: lease.map(|until| {
+                until
+                    .min(bound.context.checked + crate::context::SNAPSHOT_MAX_AGE)
+                    .min(
+                        bound.context.value.as_ref().unwrap().snapshot.captured_at
+                            + crate::context::SNAPSHOT_MAX_AGE,
+                    )
             }),
-        }))
+        });
+        let reply = transport_offer::reply(
+            descriptor,
+            bound.fence,
+            evidence,
+            admission,
+            self.input_releases.as_mut(),
+            &mut bound.transport_started,
+        )?;
+        Ok(Some(reply))
     }
     pub fn deadline(&self) -> Option<Duration> {
         self.connections

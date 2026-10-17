@@ -46,6 +46,7 @@ pub enum Command {
     Transport {
         fence: crate::protocol::Fence,
         source: crate::input::Source,
+        marker: String,
         evidence: crate::transport::ConsumerEvidence,
         #[serde(default)]
         admission: Option<crate::morf::admission::Admission>,

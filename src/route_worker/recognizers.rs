@@ -345,6 +345,9 @@ impl Stream {
                 now,
                 matches!(record, Record::Tick { .. }).then_some(at),
             )?;
+            if owned && let Record::Frame { frame } = record {
+                self.repeat_keys(&name, frame, now)?;
+            }
         }
         Ok(())
     }

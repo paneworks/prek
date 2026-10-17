@@ -27,6 +27,8 @@ use std::{
     time::Duration,
 };
 
+mod key_control;
+mod keys;
 mod recognizers;
 
 struct Seat {
@@ -39,6 +41,7 @@ struct Seat {
     input_started: Duration,
     metadata_enabled: bool,
     metadata_started: Duration,
+    keys: Option<keys::Slot>,
 }
 struct Output {
     fence: Fence,
@@ -102,6 +105,9 @@ pub struct Stream {
     messages: Outbox,
     pending: VecDeque<Pending>,
     pending_bytes: usize,
+    closing_keys: Vec<keys::Slot>,
+    key_generation: u64,
+    key_failure: Option<io::Error>,
 }
 struct Pending {
     seat: String,
@@ -308,6 +314,9 @@ impl Stream {
             messages,
             pending: VecDeque::new(),
             pending_bytes: 0,
+            closing_keys: Vec::new(),
+            key_generation: 0,
+            key_failure: None,
         })
     }
     fn queue(&mut self, message: Message) -> io::Result<()> {
@@ -333,6 +342,11 @@ impl Stream {
     }
     fn teardown(&mut self, seat: &str, now: Duration) {
         if let Some(mut owner) = self.seats.remove(seat) {
+            if let Some(keys) = owner.keys.take()
+                && let Err(error) = self.close_keys(keys, now)
+            {
+                self.key_failure.get_or_insert(error);
+            }
             let sources: Vec<_> = self
                 .outputs
                 .keys()
@@ -572,16 +586,18 @@ impl Stream {
                         input_started: now,
                         metadata_enabled: false,
                         metadata_started: now,
+                        keys: None,
                     },
                 );
             }
             let seat = self.seats.get_mut(&subscription.seat).unwrap();
             *seat.routing.authority_mut() = prepared.remove(&subscription.seat).unwrap();
-            seat.routing.actions_available(
-                subscription.fence.session,
-                subscription.capabilities.clone(),
-                now,
-            );
+            let mut capabilities = subscription.capabilities.clone();
+            if !seat.keys.as_ref().is_some_and(|keys| keys.available(now)) {
+                capabilities.remove(&protocol::Capability::SyntheticInput);
+            }
+            seat.routing
+                .actions_available(subscription.fence.session, capabilities, now);
             seat.subscription = subscription;
             seat.expires = now + protocol::MAX_PACKET_AGE;
             let name = seat.subscription.seat.clone();
@@ -611,6 +627,9 @@ impl Stream {
         let recoveries = seat.routing.take_recoveries();
         for recovery in recoveries {
             let source = recovery.source.clone();
+            if let Some(keys) = self.seats.get_mut(name).and_then(|seat| seat.keys.as_mut()) {
+                keys.retire_source(&source, now)?;
+            }
             self.retire(recovery, now);
             self.queue(Message::Outcome {
                 report: Report::SourceInvalidated {
@@ -636,6 +655,11 @@ impl Stream {
             })?;
         }
         for event in diagnostics {
+            if matches!(event, crate::rules::Event::Cancelled { .. })
+                && let Some(keys) = self.seats.get_mut(name).and_then(|seat| seat.keys.as_mut())
+            {
+                keys.cancel(&event, now)?;
+            }
             self.queue(Message::Outcome {
                 report: Report::Observation {
                     subscription: subscription.clone(),
@@ -644,6 +668,24 @@ impl Stream {
             })?;
         }
         for dispatch in dispatches {
+            if matches!(
+                &dispatch.event,
+                crate::rules::Event::Matched {
+                    action: crate::config::Action::Keys { .. }
+                        | crate::config::Action::Remap { .. },
+                    ..
+                }
+            ) {
+                let work = dispatch
+                    .into_key_work()
+                    .map_err(|_| invalid("native key dispatch lost its original scope"))?;
+                self.seats
+                    .get_mut(name)
+                    .and_then(|seat| seat.keys.as_mut())
+                    .ok_or_else(|| invalid("native key dispatch has no generated output"))?
+                    .enqueue(work, now)?;
+                continue;
+            }
             self.queue(Message::Outcome {
                 report: Report::Dispatch {
                     subscription: subscription.clone(),
@@ -656,6 +698,10 @@ impl Stream {
     }
 }
 impl InputSink for Stream {
+    fn service_owned(&mut self, health: Option<&Heartbeat>) -> io::Result<()> {
+        self.service()?;
+        self.service_keys(health)
+    }
     fn reader_released(&mut self, source: &Source) -> io::Result<()> {
         if self.outputs.contains_key(source) {
             return Err(invalid("original closed before virtual retirement"));
@@ -892,11 +938,27 @@ impl InputSink for Stream {
                 Command::Transport {
                     fence,
                     source,
+                    marker,
                     evidence,
                     admission,
                 } => {
+                    if let Some(keys) = self
+                        .seats
+                        .get_mut(&source.seat)
+                        .and_then(|seat| seat.keys.as_mut())
+                        && keys.matches(fence, &source, &marker)
+                    {
+                        if admission.is_some() {
+                            return Err(invalid(
+                                "generated keyboard received physical Morf admission",
+                            ));
+                        }
+                        keys.observe(fence, &source, &marker, &evidence, monotonic()?)?;
+                        continue;
+                    }
                     if let Some(output) = self.outputs.get_mut(&source)
                         && output.fence == fence
+                        && output.virtual_device.descriptor().marker == marker
                     {
                         output
                             .admission
@@ -949,6 +1011,7 @@ impl InputSink for Stream {
     }
     fn flush(&mut self) -> io::Result<()> {
         let now = monotonic()?;
+        self.refresh_keys(now)?;
         self.expire_subscriptions(now)?;
         self.expire_admissions(now)?;
         self.prune_reports(now)?;
@@ -975,6 +1038,13 @@ impl InputSink for Stream {
             if output.in_flight.is_none()
                 && let Some(scheduled) = seat.routing.due_after_input(&source, now)?
             {
+                if seat
+                    .keys
+                    .as_ref()
+                    .is_some_and(|keys| keys.blocks_raw(&source, scheduled.frame.sequence))
+                {
+                    continue;
+                }
                 output.sequence = scheduled.frame.sequence;
                 let frame = if let Some(feedback) = &mut output.feedback {
                     feedback.prepare_forward(&scheduled.frame)?
@@ -1009,6 +1079,12 @@ impl InputSink for Stream {
                 ])
             })
             .chain(self.assembly.deadline())
+            .chain(
+                self.seats
+                    .values()
+                    .filter_map(|seat| seat.keys.as_ref().and_then(keys::Slot::deadline)),
+            )
+            .chain(self.closing_keys.iter().filter_map(keys::Slot::deadline))
             .chain(self.subscriptions.deadline())
             .chain(self.pending.front().map(|pending| pending.received_at))
             .chain(
@@ -1058,6 +1134,16 @@ impl InputSink for Stream {
                 sources.push(PollFd::new(feedback.as_fd(), PollFlags::POLLOUT));
             }
         }
+        for keys in self
+            .seats
+            .values()
+            .filter_map(|seat| seat.keys.as_ref())
+            .chain(self.closing_keys.iter())
+        {
+            if let Some(fd) = keys.poll_fd() {
+                sources.push(PollFd::new(fd, PollFlags::POLLOUT));
+            }
+        }
         sources
     }
     fn device_policy(&self) -> Option<(&Config, u64)> {
@@ -1070,6 +1156,7 @@ impl InputSink for Stream {
             self.teardown(&name, now);
         }
         self.outputs.clear();
+        self.shutdown_keys();
     }
 }
 impl Drop for Stream {

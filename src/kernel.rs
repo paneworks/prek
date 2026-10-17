@@ -788,6 +788,40 @@ pub struct Virtual {
 }
 
 impl Virtual {
+    #[cfg(test)]
+    pub(crate) fn ordinary_file_fixture(publication: Publication, file: File) -> io::Result<Self> {
+        let metadata = file.metadata()?;
+        // SAFETY: geteuid takes no arguments and reads process credentials.
+        let uid = unsafe { libc::geteuid() };
+        if !metadata.is_file()
+            || metadata.nlink() != 1
+            || metadata.mode() & 0o077 != 0
+            || metadata.uid() != uid
+            || !publication.descriptor.is_isolated()
+        {
+            return Err(invalid(
+                "fixture requires a private owned regular file and isolated publication",
+            ));
+        }
+        publication.verify()?;
+        Ok(Self {
+            file,
+            publication,
+            pending: None,
+            stopped: false,
+            created: false,
+            sequence: None,
+        })
+    }
+    #[cfg(test)]
+    pub(crate) fn is_ordinary_file_fixture(&self) -> bool {
+        !self.created
+            && self.publication.descriptor.is_isolated()
+            && self
+                .file
+                .metadata()
+                .is_ok_and(|metadata| metadata.is_file())
+    }
     pub fn create(publication: Publication) -> io::Result<Self> {
         supported_backend(&publication.descriptor)?;
         // Registry metadata must still exist before the device add event.

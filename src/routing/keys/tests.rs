@@ -78,6 +78,18 @@ fn epoch_exhaustion_permanently_seals_only_the_key_lane() {
 }
 
 #[test]
+fn output_availability_never_renews_the_original_capability_lease() {
+    let mut routing = routing(vec![rule("shift", Action::Remap { key: Key(42) })]);
+    let work = push(&mut routing, 1, 1, 10, 1).pop().unwrap();
+    let expires = routing.capability_expires;
+    routing.key_output_available(false);
+    routing.key_output_available(true);
+    assert_eq!(routing.capability_expires, expires);
+    assert!(!work.available(&routing, ms(20)));
+    assert!(!routing.key_lane(fence(), expires));
+}
+
+#[test]
 fn expiry_followed_by_regrant_does_not_resurrect_old_work() {
     let mut routing = routing(vec![rule("shift", Action::Remap { key: Key(42) })]);
     let work = push(&mut routing, 1, 1, 10, 1).pop().unwrap();

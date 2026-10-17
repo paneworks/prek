@@ -5,9 +5,9 @@ per-seat keyboard sink. Ordinary input retains its per-device counterpart; do
 not feed raw passthrough ownership into this driver's counts.
 
 This is a library execution component, **not an authorization or readiness
-gate**. Configured `keys`/`remap` actions are not yet wired through the production
-broker/worker. `SyntheticInput` remains ungrantable and native takeover remains
-closed. The native `kernel::Virtual` sink adapter is compiled; device-free tests
+gate**. Configured `keys`/`remap` actions have private broker/worker binding,
+but live execution remains unaccepted. `SyntheticInput` remains ungrantable and
+native takeover remains closed. The native `kernel::Virtual` sink adapter is compiled; device-free tests
 exercise the driver and native byte-prefix accounting. Its kernel execution is
 not verified. The real Cage tests use owned protocol keyboards, not kernel devices.
 
@@ -39,9 +39,10 @@ waiting; an error discards the
 unwritten device/publication. Activation is one-shot. `deadline()` supplies the
 worker's bounded readiness wakeup deadline, not a forwarding-loop implementation.
 
-The caller still enforces one active generated keyboard per seat and the complete
-current authority fence. Production broker/worker action binding, delegated input,
-poll integration and native execution acceptance remain unfinished.
+The sole worker now manages one pending/active generated slot per seat, with
+separate bounded retiring output, heartbeat-bearing service and write polling.
+Actual broker authentication, kernel/consumer execution and complete reentry
+acceptance remain unproved; delegated input remains unfinished.
 `./tests/run-root-routing.sh` includes a user-launched isolated generated-keyboard
 test with persistent logs; see [root testing](root-routing.md). The agent does not
 run it. `oslo make test-generated-keyboard` executes only device-free models.
@@ -74,8 +75,8 @@ the complete current execution fence and source binding before submitting work.
 ## Route-scoped scheduler
 
 `keys::worker::Seat<S>` schedules configured key work on one output incarnation.
-It is a library actor, **not yet connected to the production native worker or
-broker**. Creating it does not grant `SyntheticInput`, prove native readiness,
+It is a library actor used by the private native worker binding, **not an
+accepted public native execution path**. Creating it does not grant `SyntheticInput`, prove native readiness,
 or permit a physical grab. The caller supplies an idle output and its exact
 coordinator `Fence`; rejected construction returns the original output.
 
@@ -147,6 +148,48 @@ requires an explicitly supplied, already built immutable compositor runner. It
 builds and selects the current Cargo test executable, prints its SHA-256, and
 runs both configuration dialects without rebuilding the unrelated release
 application. This is development-binary evidence, not packaged-release evidence.
+
+## Private native worker binding
+
+The supervised input loop calls `InputSink::service_owned(health)` even with no
+physical readers. The routing worker can prepare one generated keyboard for an
+authorized seat only with its live supervisor heartbeat. Subscription permission
+is distinct from execution availability: `SyntheticInput` is masked in Routing
+until that seat's prepared output activates with fresh consumer evidence.
+Availability changes never extend the original capability lease.
+
+Private transport replies carry the exact publication marker, source and fence.
+Numeric source values do not distinguish physical and generated roles. Generated
+offers do not enroll physical original-release evidence, close its enrollment
+window, or receive Morf recognizer admission. The broker still checks the actual
+agent registration before and after obtaining its device evidence.
+
+Consumer identity, marker, name, class, seat, settings and timestamp remain
+checked after activation. A fresh sample cannot revive an expired active lease.
+Consumer loss seals the output, cancels unwritten tails and requires worker
+recovery, not an inventory-only resume. Cancellation and source-recovery reports
+are applied before new work. New reader incarnations remain necessary after
+raw-route replacement; a retained physical source generation is not reusable.
+
+The slot supplies preparation/offer/consumer/write/drain deadlines and pending
+write fds. Scope teardown retains retiring output until release-only draining
+finishes or its 250 ms deadline fails. Shutdown attempts bounded cleanup before
+original reader release. Neither local write completion nor descriptor removal
+is a consumer-neutral acknowledgement. There is no automatic in-place resume of
+a retired native slot in its old coordinator.
+
+This binding does not complete native acceptance. The stock consumer boundary
+still refuses takeover, public `SyntheticInput` negotiation stays disabled, and
+the shared per-key/input-position projector remains missing. Mixed press/release
+and repeat frames are explicitly refused rather than silently reordered.
+Provider-owned repeat, neutral reentry and the complete Lua input-effect APIs
+also remain open.
+
+`oslo make test-native-key-worker` runs slot models, actual sole-worker dispatch
+through the native ABI writer on isolated private **regular files**, broker
+ledger/publication tests and the owned service-hook test. Its fixture rejects
+nonregular files and never creates a uinput device. It does not prove kernel
+injection, authenticated broker registration or physical consumer behavior.
 
 ## Operations
 

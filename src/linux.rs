@@ -24,6 +24,8 @@ use std::{
 mod discovery;
 #[cfg(test)]
 mod inventory_tests;
+#[cfg(test)]
+mod owned_service_tests;
 pub(crate) use discovery::Publication as DevicePublication;
 pub mod feedback;
 pub mod handoff;
@@ -530,6 +532,9 @@ pub trait InputSink {
     fn service(&mut self) -> io::Result<()> {
         Ok(())
     }
+    fn service_owned(&mut self, _health: Option<&crate::supervisor::Heartbeat>) -> io::Result<()> {
+        self.service()
+    }
     fn poll_sources(&self) -> Vec<PollFd<'_>> {
         Vec::new()
     }
@@ -780,7 +785,7 @@ fn observe_loop(
     let mut input_at = Duration::ZERO;
     loop {
         monotonic()?;
-        sink.service()?;
+        sink.service_owned(health.as_deref())?;
         if sink.finished() {
             return Ok(());
         }

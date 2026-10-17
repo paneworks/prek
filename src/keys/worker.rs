@@ -245,6 +245,26 @@ impl<S: Sink> Seat<S> {
         }
     }
 
+    /// List live remap instances for one physical source key.
+    pub(crate) fn repeat_handles(&self, source: &Source, code: u16) -> Vec<Remap> {
+        self.bindings
+            .iter()
+            .filter(|(_, binding)| {
+                !binding.ended
+                    && !binding.cancelled
+                    && binding
+                        .work
+                        .remap_key()
+                        .is_some_and(|key| key.source == *source && key.code == code)
+            })
+            .map(|(gesture, _)| Remap {
+                sink: self.output.source().clone(),
+                fence: self.fence,
+                gesture: gesture.clone(),
+            })
+            .collect()
+    }
+
     /// Forward one owned source repeat to each distinct output code once.
     pub fn repeat(
         &mut self,

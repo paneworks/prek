@@ -1,6 +1,7 @@
 //! Private-channel fixtures model native readiness without opening device nodes.
 mod actual;
 mod composed;
+mod keys;
 mod native_reorder;
 mod subscriptions;
 use super::*;

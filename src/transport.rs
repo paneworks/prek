@@ -508,6 +508,28 @@ pub struct ConsumerEvidence {
     pub settings: BTreeMap<String, String>,
     pub at: Duration,
 }
+impl ConsumerEvidence {
+    pub(crate) fn valid_for(
+        &self,
+        descriptor: &Descriptor,
+        consumer: &Consumer,
+        at: Duration,
+    ) -> bool {
+        at >= self.at
+            && at - self.at <= FRESHNESS
+            && &self.consumer == consumer
+            && self.marker == descriptor.marker
+            && self.name == descriptor.name
+            && self.class == descriptor.class
+            && self.seat == descriptor.source.seat
+            && self.settings == descriptor.consumer_settings
+    }
+    pub(crate) fn deadline(&self) -> Duration {
+        self.at
+            .saturating_add(FRESHNESS)
+            .saturating_add(Duration::from_nanos(1))
+    }
+}
 
 #[derive(Debug)]
 pub struct Readiness {
@@ -613,15 +635,7 @@ impl Readiness {
         at: Duration,
     ) -> Result<(), &'static str> {
         self.advance(at)?;
-        if observed.at > at
-            || at - observed.at > FRESHNESS
-            || observed.consumer != self.consumer
-            || observed.marker != self.descriptor.marker
-            || observed.name != self.descriptor.name
-            || observed.class != self.descriptor.class
-            || observed.seat != self.descriptor.source.seat
-            || observed.settings != self.descriptor.consumer_settings
-        {
+        if !observed.valid_for(&self.descriptor, &self.consumer, at) {
             self.failed = true;
             return Err("consumer acknowledgement is stale or mismatched");
         }
@@ -798,6 +812,7 @@ pub(crate) mod tests {
             admission: None,
             fence,
             source: spec.source.clone(),
+            marker: spec.marker.clone(),
             evidence: expected.clone(),
         };
         let encoded = serde_json::to_vec(&command).unwrap();

@@ -1,0 +1,475 @@
+use super::*;
+use crate::keys::output::Sink;
+use std::{fs::OpenOptions, os::unix::fs::OpenOptionsExt};
+
+#[test]
+fn generated_incarnations_have_distinct_consumer_names() {
+    let mut fixture = Fixture::new(profile(), super::owner());
+    let one = Descriptor::generated_keyboard(
+        fixture.stream.next_key_source("seat0").unwrap(),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let two = Descriptor::generated_keyboard(
+        fixture.stream.next_key_source("seat1").unwrap(),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    assert_ne!(one.name, two.name);
+    fixture.stream.key_generation = u64::MAX;
+    assert!(fixture.stream.next_key_source("seat0").is_err());
+}
+
+#[test]
+fn a_fatal_generated_cleanup_error_stays_latched() {
+    let mut fixture = Fixture::new(profile(), super::owner());
+    fixture.stream.key_failure = Some(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "modeled cleanup failure",
+    ));
+    for _ in 0..2 {
+        assert_eq!(
+            fixture
+                .stream
+                .refresh_keys(monotonic().unwrap())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
+    }
+}
+
+#[test]
+fn the_native_adapter_fixture_rejects_a_socket_instead_of_a_regular_file() {
+    let fixture = Fixture::new(profile(), super::owner());
+    let descriptor = Descriptor::generated_keyboard(
+        Source {
+            device: 0,
+            generation: 1,
+            seat: "seat0".into(),
+        },
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let publication = fixture
+        .stream
+        .registry
+        .prepare_generated_isolated(descriptor)
+        .unwrap();
+    let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+    let file = std::fs::File::from(std::os::fd::OwnedFd::from(socket));
+    assert!(Virtual::ordinary_file_fixture(publication, file).is_err());
+    assert_eq!(fs::read_dir(&fixture.directory).unwrap().count(), 0);
+}
+
+fn profile() -> Config {
+    let mut config = super::profile();
+    let rule = &mut config.rules[0];
+    rule.id = "shift".into();
+    rule.trigger = Trigger::Key {
+        key: crate::config::Key(30),
+    };
+    rule.action = Action::Remap {
+        key: crate::config::Key(42),
+    };
+    config
+}
+fn owner() -> Subscription {
+    let mut owner = super::owner();
+    owner.capabilities.insert(Capability::SyntheticInput);
+    owner
+}
+fn slot(fixture: &Fixture) -> (crate::route_worker::keys::Slot, Descriptor, PathBuf) {
+    let descriptor = Descriptor::generated_keyboard(
+        Source {
+            device: 0,
+            generation: 1,
+            seat: "seat0".into(),
+        },
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let publication = fixture
+        .stream
+        .registry
+        .prepare_generated_isolated(descriptor)
+        .unwrap();
+    let path = fixture.directory.join("generated-bytes");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .unwrap();
+    let device = Virtual::ordinary_file_fixture(publication, file).unwrap();
+    let descriptor = device.descriptor().clone();
+    assert!(Sink::supports_key(&device, 42));
+    (
+        crate::route_worker::keys::Slot::ordinary_file_fixture(
+            fixture.owner.fence,
+            fixture.owner.consumer.clone().unwrap(),
+            device,
+            monotonic().unwrap(),
+        )
+        .unwrap(),
+        descriptor,
+        path,
+    )
+}
+fn ack(fixture: &mut Fixture) {
+    let routing = &mut fixture.stream.seats.get_mut("seat0").unwrap().routing;
+    while let Some(scheduled) = routing.due(&device().source, monotonic().unwrap()).unwrap() {
+        let ticket = scheduled.ticket;
+        routing
+            .delivered(&device().source, ticket, monotonic().unwrap())
+            .unwrap();
+    }
+}
+fn events(path: &std::path::Path) -> Vec<(u16, i32)> {
+    let bytes = fs::read(path).unwrap();
+    assert_eq!(
+        bytes.len() % std::mem::size_of::<nix::libc::input_event>(),
+        0
+    );
+    bytes
+        .chunks_exact(std::mem::size_of::<nix::libc::input_event>())
+        .filter_map(|bytes| {
+            let kind = u16::from_ne_bytes(
+                bytes[std::mem::offset_of!(nix::libc::input_event, type_)..][..2]
+                    .try_into()
+                    .unwrap(),
+            );
+            let code = u16::from_ne_bytes(
+                bytes[std::mem::offset_of!(nix::libc::input_event, code)..][..2]
+                    .try_into()
+                    .unwrap(),
+            );
+            let value = i32::from_ne_bytes(
+                bytes[std::mem::offset_of!(nix::libc::input_event, value)..][..4]
+                    .try_into()
+                    .unwrap(),
+            );
+            (kind == EV_KEY).then_some((code, value))
+        })
+        .collect()
+}
+
+#[test]
+fn subscription_permission_is_not_execution_availability_without_a_ready_output() {
+    let mut fixture = Fixture::new(profile(), owner());
+    let seat = &fixture.stream.seats["seat0"];
+    assert!(
+        seat.subscription
+            .capabilities
+            .contains(&Capability::SyntheticInput)
+    );
+    assert!(
+        !seat
+            .routing
+            .key_lane(fixture.owner.fence, monotonic().unwrap())
+    );
+    assert!(seat.keys.is_none());
+    assert!(fixture.stream.service_owned(None).is_err());
+    assert_eq!(fs::read_dir(&fixture.directory).unwrap().count(), 0);
+}
+
+#[test]
+fn sole_worker_collect_executes_original_key_work_through_the_native_adapter_on_a_private_file() {
+    let mut fixture = Fixture::new(profile(), owner());
+    let (slot, _descriptor, path) = slot(&fixture);
+    fixture.stream.seats.get_mut("seat0").unwrap().keys = Some(slot);
+    fixture.stream.refresh_keys(monotonic().unwrap()).unwrap();
+    fixture.key(1, true);
+    ack(&mut fixture);
+    for _ in 0..3 {
+        fixture.stream.flush().unwrap();
+    }
+    assert_eq!(events(&path), [(42, 1)]);
+    fixture.key(2, false);
+    ack(&mut fixture);
+    for _ in 0..3 {
+        fixture.stream.flush().unwrap();
+    }
+    assert_eq!(events(&path), [(42, 1), (42, 0)]);
+    assert!(!fixture.drain().iter().any(|message| matches!(message,Message::Outcome { report: Report::Dispatch { event,.. } } if matches!(&**event,crate::rules::Event::Matched { action: Action::Remap { .. },.. }))));
+}
+
+#[test]
+fn private_publication_reply_is_demultiplexed_without_physical_source_aliases() {
+    let mut fixture = Fixture::new(profile(), owner());
+    let (slot, descriptor, _path) = slot(&fixture);
+    fixture.stream.seats.get_mut("seat0").unwrap().keys = Some(slot);
+    let evidence = ConsumerEvidence {
+        consumer: fixture.owner.consumer.clone().unwrap(),
+        marker: descriptor.marker.clone(),
+        name: descriptor.name.clone(),
+        class: descriptor.class,
+        seat: "seat0".into(),
+        settings: BTreeMap::new(),
+        at: monotonic().unwrap(),
+    };
+    let source = descriptor.source.clone();
+    assert!(
+        fixture
+            .parent
+            .send(
+                &Command::Transport {
+                    fence: fixture.owner.fence,
+                    source: source.clone(),
+                    marker: "old-publication".into(),
+                    evidence: evidence.clone(),
+                    admission: Some(crate::morf::admission::Admission {
+                        owners: vec![],
+                        expires: None
+                    })
+                },
+                monotonic().unwrap()
+            )
+            .unwrap()
+    );
+    fixture.stream.service().unwrap();
+    assert!(
+        fixture.stream.seats["seat0"]
+            .keys
+            .as_ref()
+            .unwrap()
+            .available(monotonic().unwrap())
+    );
+    assert!(
+        fixture
+            .parent
+            .send(
+                &Command::Transport {
+                    fence: fixture.owner.fence,
+                    source,
+                    marker: descriptor.marker,
+                    evidence,
+                    admission: Some(crate::morf::admission::Admission {
+                        owners: vec![],
+                        expires: None
+                    })
+                },
+                monotonic().unwrap()
+            )
+            .unwrap()
+    );
+    assert!(fixture.stream.service().is_err());
+}
+
+#[test]
+fn a_late_generated_reply_cannot_mutate_a_physical_output_with_equal_source_numbers() {
+    let mut fixture = Fixture::new(profile(), super::owner());
+    let mut original = crate::transport::tests::touch();
+    original.identity = "test:role-alias".into();
+    original.name = "Prek test role alias".into();
+    original.physical = "fixture/role-alias".into();
+    original.path.clear();
+    original.source = Source {
+        device: 0,
+        generation: 1,
+        seat: "seat0".into(),
+    };
+    let descriptor = Descriptor::mirror(
+        &original,
+        KernelIdentity {
+            bus: 3,
+            vendor: 1,
+            product: 2,
+            version: 1,
+        },
+        None,
+        &BTreeMap::new(),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let publication = fixture
+        .stream
+        .registry
+        .prepare_isolated(descriptor)
+        .unwrap();
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(fixture.directory.join("physical-bytes"))
+        .unwrap();
+    let virtual_device = Virtual::ordinary_file_fixture(publication, file).unwrap();
+    let physical = virtual_device.descriptor().clone();
+    let source = physical.source.clone();
+    let worker =
+        serde_json::from_value(serde_json::json!({"pid":std::process::id(),"birth":1,"epoch":1}))
+            .unwrap();
+    let now = monotonic().unwrap();
+    fixture.stream.outputs.insert(
+        source.clone(),
+        Output {
+            fence: fixture.owner.fence,
+            admission: crate::morf::admission::Gate::new(
+                worker,
+                fixture.owner.fence,
+                source.clone(),
+            ),
+            virtual_device,
+            state_probe: None,
+            feedback: None,
+            readiness: None,
+            consumer: None,
+            offered: now,
+            started: now,
+            in_flight: None,
+            sequence: 0,
+        },
+    );
+    let generated = Descriptor::generated_keyboard(source.clone(), BTreeMap::new())
+        .unwrap()
+        .for_isolated()
+        .unwrap()
+        .bind_publication(Epoch([7, 8]))
+        .unwrap();
+    for descriptor in [&generated, &physical] {
+        let evidence = ConsumerEvidence {
+            consumer: fixture.owner.consumer.clone().unwrap(),
+            marker: descriptor.marker.clone(),
+            name: descriptor.name.clone(),
+            class: descriptor.class,
+            seat: "seat0".into(),
+            settings: BTreeMap::new(),
+            at: monotonic().unwrap(),
+        };
+        assert!(
+            fixture
+                .parent
+                .send(
+                    &Command::Transport {
+                        fence: fixture.owner.fence,
+                        source: source.clone(),
+                        marker: descriptor.marker.clone(),
+                        evidence,
+                        admission: None
+                    },
+                    monotonic().unwrap()
+                )
+                .unwrap()
+        );
+        fixture.stream.service().unwrap();
+        assert_eq!(
+            fixture.stream.outputs[&source].consumer.is_some(),
+            !descriptor.is_generated_keyboard()
+        );
+    }
+}
+
+#[test]
+fn teardown_drains_generated_releases_before_dropping_its_publication() {
+    let mut fixture = Fixture::new(profile(), owner());
+    let (slot, descriptor, path) = slot(&fixture);
+    fixture.stream.seats.get_mut("seat0").unwrap().keys = Some(slot);
+    fixture.stream.refresh_keys(monotonic().unwrap()).unwrap();
+    fixture.key(1, true);
+    ack(&mut fixture);
+    for _ in 0..3 {
+        fixture.stream.flush().unwrap();
+    }
+    fixture.stream.teardown("seat0", monotonic().unwrap());
+    assert!(fixture.stream.seats.is_empty());
+    assert_eq!(fixture.stream.closing_keys.len(), 1);
+    fixture.stream.refresh_keys(monotonic().unwrap()).unwrap();
+    assert!(fixture.stream.closing_keys.is_empty());
+    assert_eq!(events(&path), [(42, 1), (42, 0)]);
+    assert!(
+        fs::read_dir(&fixture.directory)
+            .unwrap()
+            .all(|entry| entry.unwrap().file_name() == "generated-bytes")
+    );
+    assert!(descriptor.is_generated_keyboard());
+}
+
+#[test]
+fn runtime_route_replacement_accepts_the_fresh_reader_incarnation() {
+    let mut fixture = Fixture::new(profile(), owner());
+    let (slot, _descriptor, path) = slot(&fixture);
+    fixture.stream.seats.get_mut("seat0").unwrap().keys = Some(slot);
+    fixture.stream.refresh_keys(monotonic().unwrap()).unwrap();
+    fixture.key(1, true);
+    ack(&mut fixture);
+    for _ in 0..3 {
+        fixture.stream.flush().unwrap();
+    }
+    for enabled in [false, true] {
+        let routing = &mut fixture.stream.seats.get_mut("seat0").unwrap().routing;
+        routing
+            .transact_rules(
+                &Transaction {
+                    revision: routing.rule_revision(),
+                    changes: vec![Change::Enabled {
+                        id: "shift".into(),
+                        enabled,
+                    }],
+                },
+                monotonic().unwrap(),
+            )
+            .unwrap();
+        fixture
+            .stream
+            .collect("seat0", monotonic().unwrap(), None)
+            .unwrap();
+        for _ in 0..3 {
+            fixture.stream.flush().unwrap();
+        }
+    }
+    fixture.key(2, false);
+    let old = device();
+    fixture
+        .stream
+        .push(Record::Remove {
+            source: old.source.clone(),
+            at: monotonic().unwrap(),
+        })
+        .unwrap();
+    let mut fresh = old;
+    fresh.source.generation += 1;
+    fixture
+        .stream
+        .push(Record::Device {
+            device: fresh.clone(),
+            keys: BTreeSet::new(),
+            contacts: vec![],
+        })
+        .unwrap();
+    fixture.attach_device(&fresh);
+    fixture
+        .stream
+        .push(Record::Frame {
+            frame: Frame {
+                source: fresh.source.clone(),
+                sequence: 1,
+                at: monotonic().unwrap(),
+                events: vec![
+                    RawEvent {
+                        kind: EV_KEY,
+                        code: 30,
+                        value: 1,
+                    },
+                    RawEvent {
+                        kind: EV_SYN,
+                        code: SYN_REPORT,
+                        value: 0,
+                    },
+                ],
+            },
+        })
+        .unwrap();
+    let routing = &mut fixture.stream.seats.get_mut("seat0").unwrap().routing;
+    while let Some(scheduled) = routing.due(&fresh.source, monotonic().unwrap()).unwrap() {
+        let ticket = scheduled.ticket;
+        routing
+            .delivered(&fresh.source, ticket, monotonic().unwrap())
+            .unwrap();
+    }
+    for _ in 0..3 {
+        fixture.stream.flush().unwrap();
+    }
+    assert_eq!(events(&path), [(42, 1), (42, 0), (42, 1)]);
+}
