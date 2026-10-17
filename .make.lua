@@ -317,6 +317,15 @@ make.recipe{ name = "test-root-session", desc = "unprivileged remote-handoff tra
                sh.shellcheck("tests/run-root-handoff.sh")
              end }
 
+make.recipe{
+  name = "test-feedback",
+  desc = "bounded LED relay and independent source-writer models; no device access",
+  run = function()
+    sh.cargo("test", "--locked", "--lib", "linux::feedback::tests", "--", "--test-threads=1")
+    sh.cargo("test", "--locked", "--lib", "linux::reader_buffer_tests::writable_reopen_does_not_share_the_reader_cursor_or_read_access", "--", "--exact")
+  end,
+}
+
 make.recipe{ name = "test-root-routing", desc = "unprivileged kernel-runner receipts and cleanup tests",
              run = function()
                sh.python3("-m", "unittest", "discover", "-s", "tests/support", "-p", "test_root_routing.py", "-v")

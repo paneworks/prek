@@ -22,6 +22,7 @@ use std::{
     time::Duration,
 };
 
+pub mod feedback;
 pub mod handoff;
 mod ingress;
 #[cfg(test)]
@@ -41,16 +42,20 @@ fn open(path: &Path) -> io::Result<RawDevice> {
 }
 
 fn reopen_readonly(fd: BorrowedFd<'_>) -> io::Result<File> {
+    reopen(fd, false)
+}
+fn reopen(fd: BorrowedFd<'_>, writable: bool) -> io::Result<File> {
     let original = nix::sys::stat::fstat(fd)?;
     let file = OpenOptions::new()
-        .read(true)
+        .read(!writable)
+        .write(writable)
         .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
         .open(format!("/proc/self/fd/{}", fd.as_raw_fd()))?;
     let reopened = file.metadata()?;
     if (original.st_dev, original.st_ino, original.st_rdev)
         != (reopened.dev(), reopened.ino(), reopened.rdev())
     {
-        return Err(io::Error::other("state probe reopened a different device"));
+        return Err(io::Error::other("reopened a different device"));
     }
     Ok(file)
 }
@@ -1070,6 +1075,28 @@ fn print_observation(
 #[cfg(test)]
 mod reader_buffer_tests {
     use super::*;
+
+    #[test]
+    fn writable_reopen_does_not_share_the_reader_cursor_or_read_access() {
+        use std::io::{Read, Seek, SeekFrom};
+        let fd = nix::sys::memfd::memfd_create(
+            c"prek-feedback-writer",
+            nix::sys::memfd::MFdFlags::MFD_CLOEXEC,
+        )
+        .unwrap();
+        let mut reader = File::from(fd);
+        reader.write_all(b"queued").unwrap();
+        reader.seek(SeekFrom::Start(2)).unwrap();
+        let mut writer = reopen(reader.as_fd(), true).unwrap();
+        writer.write_all(b"q").unwrap();
+        assert_eq!(reader.stream_position().unwrap(), 2);
+        assert!(writer.read(&mut [0u8; 1]).is_err());
+        let flags = nix::fcntl::fcntl(writer.as_fd(), nix::fcntl::FcntlArg::F_GETFL).unwrap();
+        assert_eq!(flags & libc::O_ACCMODE, libc::O_WRONLY);
+        assert_ne!(flags & libc::O_NONBLOCK, 0);
+        let flags = nix::fcntl::fcntl(writer.as_fd(), nix::fcntl::FcntlArg::F_GETFD).unwrap();
+        assert_ne!(flags & libc::FD_CLOEXEC, 0);
+    }
 
     #[test]
     fn reopened_probe_has_an_independent_file_description() {

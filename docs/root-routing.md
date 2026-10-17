@@ -29,6 +29,8 @@ key/switch capability. No test writes a key while its node is ungrabbed. No
 physical input nodes are opened.
 
 Fourteen routing gates cover keyboard/mouse/touchpad forwarding, keyboard LED feedback,
+including the actual bounded source-write bridge, intact partial hardware frames,
+queued key releases and recovery after a wrapped uinput feedback ring,
 configured touch consumption/fallback and cadence, reader error/panic teardown,
 four evdev boundary experiments and sole-reader prefix/cutover/tail ordering.
 Desktop context in configured routing tests

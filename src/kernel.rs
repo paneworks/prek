@@ -570,13 +570,19 @@ pub enum Flush {
 }
 
 #[derive(Debug)]
-struct Batch {
+pub(crate) struct Batch {
     bytes: Vec<u8>,
     written: usize,
 }
 
 impl Batch {
-    fn flush(&mut self, writer: &mut impl Write) -> io::Result<Flush> {
+    pub(crate) fn events(events: &[RawEvent]) -> io::Result<Self> {
+        Ok(Self {
+            bytes: encode_events(events)?,
+            written: 0,
+        })
+    }
+    pub(crate) fn flush(&mut self, writer: &mut impl Write) -> io::Result<Flush> {
         // Bound syscall work per loop iteration, including repeated EINTR.
         for _ in 0..16 {
             if self.written == self.bytes.len() {
@@ -586,7 +592,7 @@ impl Batch {
                 Ok(0) => {
                     return Err(io::Error::new(
                         io::ErrorKind::WriteZero,
-                        "uinput write made no progress",
+                        "event write made no progress",
                     ));
                 }
                 Ok(length)
@@ -951,10 +957,7 @@ impl Virtual {
                 "frame source/sequence/boundaries/capabilities do not match output",
             ));
         }
-        self.pending = Some(Batch {
-            bytes: encode_events(&frame.events)?,
-            written: 0,
-        });
+        self.pending = Some(Batch::events(&frame.events)?);
         self.sequence = Some(frame.sequence);
         Ok(())
     }

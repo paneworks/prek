@@ -351,10 +351,12 @@ fn t48_isolated_touchpad_preserves_slots_tool_flags_and_button_clicks() {
 #[test]
 #[ignore = "requires authorized isolated uinput environment and packaged pre-add udev rule"]
 fn t55_isolated_keyboard_led_feedback_reaches_source_without_echo() {
+    use prek::linux::feedback::LedFeedback;
+    use std::os::fd::AsFd;
     let registry = authorized();
     let keyboard = || {
         let mut device = fixture(false);
-        device.capabilities.insert(17, vec![0]);
+        device.capabilities.insert(17, vec![0, 1]);
         device
     };
     let original = keyboard();
@@ -365,44 +367,206 @@ fn t55_isolated_keyboard_led_feedback_reaches_source_without_echo() {
         Virtual::create(registry.prepare_isolated(descriptor(&device)).unwrap()).unwrap();
     let mut input = Receiver::open(&source, &original.source);
     let mut target = Receiver::open(&output, &device.source);
-    for value in [1, 0] {
+    let baseline = [InputEvent::new(17, 0, 0), InputEvent::new(17, 1, 0)];
+    input.raw.send_events(&baseline).unwrap();
+    target.raw.send_events(&baseline).unwrap();
+    source.feedback().unwrap();
+    output.feedback().unwrap();
+    let mut bridge = LedFeedback::new(&input.raw, output.descriptor()).unwrap();
+    target
+        .raw
+        .send_events(&[InputEvent::new(17, 0, 1)])
+        .unwrap();
+    bridge.service(&mut output, false, now()).unwrap();
+    assert!(bridge.ready(now()));
+    assert!(
+        !input
+            .raw
+            .get_led_state()
+            .unwrap()
+            .contains(evdev::LedCode(0))
+    );
+    assert!(source.feedback().unwrap().is_empty());
+
+    let write_partial = |source: &Virtual, events: &[RawEvent]| {
+        let bytes = prek::kernel::encode_events(events).unwrap();
+        assert_eq!(
+            nix::unistd::write(source.as_fd(), &bytes).unwrap(),
+            bytes.len()
+        );
+    };
+    write_partial(
+        &source,
+        &[RawEvent {
+            kind: EV_KEY,
+            code: 30,
+            value: 1,
+        }],
+    );
+    bridge.service(&mut output, true, now()).unwrap();
+    assert!(
+        input.next(Duration::from_millis(20)).is_none(),
+        "feedback fabricated a hardware SYN_REPORT"
+    );
+    assert_eq!(
+        source.feedback().unwrap(),
+        [RawEvent {
+            kind: 17,
+            code: 0,
+            value: 1
+        }]
+    );
+    assert!(output.feedback().unwrap().is_empty());
+    write_partial(
+        &source,
+        &[RawEvent {
+            kind: EV_SYN,
+            code: 0,
+            value: 0,
+        }],
+    );
+    let press = input.next(Duration::from_secs(1)).unwrap();
+    assert_eq!(
+        press
+            .events
+            .iter()
+            .filter(|event| event.kind == EV_KEY)
+            .copied()
+            .collect::<Vec<_>>(),
+        [RawEvent {
+            kind: EV_KEY,
+            code: 30,
+            value: 1
+        }]
+    );
+
+    send(&mut source, 1, &[(EV_KEY, 30, 0)]);
+    target
+        .raw
+        .send_events(&[InputEvent::new(17, 0, 0)])
+        .unwrap();
+    bridge.service(&mut output, true, now()).unwrap();
+    let release = input.next(Duration::from_secs(1)).unwrap();
+    assert_eq!(
+        release
+            .events
+            .iter()
+            .filter(|event| event.kind == EV_KEY)
+            .copied()
+            .collect::<Vec<_>>(),
+        [RawEvent {
+            kind: EV_KEY,
+            code: 30,
+            value: 0
+        }]
+    );
+    assert_eq!(
+        source.feedback().unwrap(),
+        [RawEvent {
+            kind: 17,
+            code: 0,
+            value: 0
+        }]
+    );
+    assert!(output.feedback().unwrap().is_empty());
+    assert!(!bridge.pending());
+
+    for index in 0..15 {
         target
             .raw
-            .send_events(&[InputEvent::new(17, 0, value)])
+            .send_events(&[InputEvent::new(17, 0, 1 - index % 2)])
             .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(1);
-        let feedback = loop {
-            let events = output.feedback().unwrap();
-            if !events.is_empty() {
-                break events;
-            }
-            assert!(Instant::now() < deadline);
-            thread::sleep(Duration::from_millis(1));
-        };
-        assert_eq!(
-            feedback,
-            [RawEvent {
+    }
+    target
+        .raw
+        .send_events(&[InputEvent::new(17, 1, 1)])
+        .unwrap();
+    assert!(
+        output.feedback().unwrap().is_empty(),
+        "expected the Linux uinput producer ring to wrap"
+    );
+    thread::sleep(Duration::from_millis(260));
+    bridge.service(&mut output, true, now()).unwrap();
+    assert_eq!(
+        source.feedback().unwrap(),
+        [
+            RawEvent {
                 kind: 17,
                 code: 0,
-                value
-            }]
-        );
-        let events: Vec<_> = feedback
+                value: 1
+            },
+            RawEvent {
+                kind: 17,
+                code: 1,
+                value: 1
+            }
+        ]
+    );
+    let leds = input.raw.get_led_state().unwrap();
+    assert!(leds.contains(evdev::LedCode(0)) && leds.contains(evdev::LedCode(1)));
+    assert!(!bridge.pending());
+    assert!(output.feedback().unwrap().is_empty());
+
+    input.raw.send_events(&[InputEvent::new(17, 0, 0)]).unwrap();
+    assert_eq!(
+        source.feedback().unwrap(),
+        [RawEvent {
+            kind: 17,
+            code: 0,
+            value: 0
+        }]
+    );
+    write_partial(
+        &source,
+        &[RawEvent {
+            kind: EV_SYN,
+            code: 0,
+            value: 0,
+        }],
+    );
+    let mut echoed = input.next(Duration::from_secs(1)).unwrap();
+    assert!(
+        echoed
+            .events
             .iter()
-            .map(|event| InputEvent::new(event.kind, event.code, event.value))
-            .collect();
-        input.raw.send_events(&events).unwrap();
-        assert_eq!(
-            input
-                .raw
-                .get_led_state()
-                .unwrap()
-                .contains(evdev::LedCode(0)),
-            value == 1
-        );
-        assert_eq!(source.feedback().unwrap(), feedback);
-        assert!(output.feedback().unwrap().is_empty());
-    }
+            .any(|event| event.kind == 17 && event.code == 0 && event.value == 0)
+    );
+    echoed.source = device.source.clone();
+    let echoed = bridge.prepare_forward(&echoed).unwrap();
+    assert!(echoed.events.iter().all(|event| event.kind != 17));
+    output.enqueue(&echoed).unwrap();
+    assert_eq!(output.flush().unwrap(), prek::kernel::Flush::Complete);
+    assert!(output.feedback().unwrap().is_empty());
+    assert!(
+        target
+            .raw
+            .get_led_state()
+            .unwrap()
+            .contains(evdev::LedCode(0)),
+        "source echo overwrote virtual consumer LED intent"
+    );
+    thread::sleep(Duration::from_millis(260));
+    bridge.service(&mut output, true, now()).unwrap();
+    assert_eq!(
+        source.feedback().unwrap(),
+        [RawEvent {
+            kind: 17,
+            code: 0,
+            value: 1
+        }]
+    );
+
+    let wrong = keyboard();
+    let mut replacement =
+        Virtual::create(registry.prepare_isolated(descriptor(&wrong)).unwrap()).unwrap();
+    assert!(bridge.service(&mut replacement, true, now()).is_err());
+    assert!(!bridge.ready(now()));
+    assert!(bridge.service(&mut output, true, now()).is_err());
+    drop(input.raw);
+    let mut probe = evdev::raw_stream::RawDevice::open(&source.event_nodes().unwrap()[0]).unwrap();
+    probe.grab().unwrap();
+    probe.ungrab().unwrap();
+    drop(bridge);
 }
 
 #[test]

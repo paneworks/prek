@@ -46,6 +46,7 @@ struct Output {
     admission: crate::morf::admission::Gate,
     virtual_device: Virtual,
     state_probe: Option<linux::StateProbe>,
+    feedback: Option<linux::feedback::LedFeedback>,
     readiness: Option<Readiness>,
     consumer: Option<crate::transport::ConsumerEvidence>,
     offered: Duration,
@@ -566,12 +567,11 @@ impl InputSink for Stream {
                 BTreeMap::new(),
             )
             .map_err(invalid)?;
-            if descriptor.feedback_required() {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "routing requires a verified physical feedback bridge",
-                ));
-            }
+            let feedback = descriptor
+                .capabilities
+                .contains_key(&17)
+                .then(|| linux::feedback::LedFeedback::new(raw, &descriptor))
+                .transpose()?;
             let state_probe = linux::StateProbe::new(raw)?;
             let output = Virtual::create(
                 self.registry
@@ -598,6 +598,7 @@ impl InputSink for Stream {
                     ),
                     virtual_device: output,
                     state_probe: Some(state_probe),
+                    feedback,
                     readiness: Some(readiness),
                     consumer: None,
                     offered: Duration::ZERO,
@@ -624,6 +625,14 @@ impl InputSink for Stream {
             output.admission.cancel_pending();
             return Ok(ReaderDisposition::Keep);
         }
+        if output
+            .feedback
+            .as_ref()
+            .is_some_and(|feedback| !feedback.ready(now))
+        {
+            output.admission.cancel_pending();
+            return Ok(ReaderDisposition::Keep);
+        }
         // Complete frames awaiting the watermark and partial assembler state
         // belong to observation. Let the sole loop deliver them before grab.
         if !buffer.is_drained() {
@@ -644,6 +653,8 @@ impl InputSink for Stream {
         gate.metadata(output.virtual_device.descriptor(), now)
             .map_err(invalid)?;
         gate.consumer(evidence, now).map_err(invalid)?;
+        gate.feedback(output.feedback.is_some(), now)
+            .map_err(invalid)?;
         gate.neutral(true, now).map_err(invalid)?;
         let ready = output
             .readiness
@@ -847,6 +858,15 @@ impl InputSink for Stream {
         let now = monotonic()?;
         self.expire_admissions(now)?;
         self.prune_reports(now);
+        for (source, output) in &mut self.outputs {
+            if let Some(feedback) = &mut output.feedback {
+                feedback.service(
+                    &mut output.virtual_device,
+                    self.grabbed.contains(source),
+                    now,
+                )?;
+            }
+        }
         let sources: Vec<_> = self
             .outputs
             .keys()
@@ -862,7 +882,12 @@ impl InputSink for Stream {
                 && let Some(scheduled) = seat.routing.due_after_input(&source, now)?
             {
                 output.sequence = scheduled.frame.sequence;
-                output.virtual_device.enqueue(&scheduled.frame)?;
+                let frame = if let Some(feedback) = &mut output.feedback {
+                    feedback.prepare_forward(&scheduled.frame)?
+                } else {
+                    std::borrow::Cow::Borrowed(&scheduled.frame)
+                };
+                output.virtual_device.enqueue(&frame)?;
                 output.in_flight = Some(scheduled.ticket);
             }
             if output.in_flight.is_some() && output.virtual_device.flush()? == Flush::Complete {
@@ -902,6 +927,11 @@ impl InputSink for Stream {
                     .values()
                     .filter_map(|output| output.admission.deadline()),
             )
+            .chain(
+                self.outputs.values().filter_map(|output| {
+                    output.feedback.as_ref().map(|feedback| feedback.deadline())
+                }),
+            )
             .min()
     }
     fn poll_sources(&self) -> Vec<PollFd<'_>> {
@@ -914,11 +944,25 @@ impl InputSink for Stream {
                     PollFlags::POLLOUT
                 },
         )];
-        sources.extend(self.outputs.values().filter_map(|output| {
-            output
-                .in_flight
-                .map(|_| PollFd::new(output.virtual_device.as_fd(), PollFlags::POLLOUT))
-        }));
+        for output in self.outputs.values() {
+            let mut flags = PollFlags::empty();
+            if output.in_flight.is_some() {
+                flags |= PollFlags::POLLOUT;
+            }
+            if output.feedback.is_some() {
+                flags |= PollFlags::POLLIN;
+            }
+            if !flags.is_empty() {
+                sources.push(PollFd::new(output.virtual_device.as_fd(), flags));
+            }
+            if let Some(feedback) = output
+                .feedback
+                .as_ref()
+                .filter(|feedback| feedback.pending())
+            {
+                sources.push(PollFd::new(feedback.as_fd(), PollFlags::POLLOUT));
+            }
+        }
         sources
     }
     fn device_policy(&self) -> Option<(&Config, u64)> {

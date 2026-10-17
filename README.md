@@ -21,8 +21,10 @@ Preflight models capability/axis preservation, consumer mapping and acknowledgem
 feedback requirements and neutral handoff. The router models reserve/buffer/observe
 ownership, scheduled fallback, slot reuse, delivery acknowledgements and neutral
 recovery. The Linux backend now publishes pre-add metadata, creates per-source
-uinput devices and writes bounded complete frames. It also reads declared LED
-feedback. Real consumer readiness, the reverse-feedback bridge, policy arbitration
+uinput devices and writes bounded complete frames. The private worker has a
+[bounded, descriptor-bound LED feedback bridge](docs/feedback.md), with independent
+queries and source writes; its synthetic kernel challenge still needs a user-run
+receipt. Real consumer readiness, policy arbitration
 and supervised input takeover are still pending. Devices with repeat support or
 nonzero axis fuzz are refused until transparent forwarding is verified for those
 capabilities.
