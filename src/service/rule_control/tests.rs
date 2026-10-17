@@ -4,6 +4,179 @@ use crate::{
     rule_transactions::{Change, Transaction},
 };
 
+fn composed_profile() -> Config {
+    use crate::{
+        config::{Context, Millis, Scope, Trigger},
+        recognition::{Definition, InputKind},
+    };
+    let mut config = Config::preset("desktop").unwrap();
+    config.policy.allow_input_events = true;
+    config.policy.allow_runtime_rules = true;
+    config.policy.allowed_devices = config.devices.keys().cloned().collect();
+    let steps: Vec<_> = ["first", "last"]
+        .into_iter()
+        .map(|name| Trigger::Custom {
+            recognizer: Definition {
+                name: name.into(),
+                selectors: BTreeSet::from(["keyboard".into()]),
+                inputs: BTreeSet::from([InputKind::Key]),
+                reply_within: Millis(100),
+                continuous: false,
+            },
+            timeout: Millis(1000),
+            wake: None,
+        })
+        .collect();
+    config.recognizers = steps
+        .iter()
+        .flat_map(Trigger::recognizers)
+        .cloned()
+        .collect();
+    config.rules.truncate(1);
+    let rule = &mut config.rules[0];
+    rule.enabled = true;
+    rule.scope = Scope::Everywhere;
+    rule.contexts = vec![Context::Desktop];
+    rule.action = Action::Event {
+        name: "native-chain".into(),
+    };
+    rule.trigger = Trigger::Sequence {
+        steps,
+        timeout: Millis(1000),
+    };
+    config
+        .validate_for(crate::config::Validation::Coordinated)
+        .unwrap();
+    config
+}
+
+#[test]
+fn composed_native_broker_edits_retain_source_admission_after_remove_and_restore() {
+    for retained_registry in [true, false] {
+        let mut config = composed_profile();
+        if !retained_registry {
+            config.recognizers.clear();
+        }
+        let rule = config.rules[0].clone();
+        let mut rules = Rules::new(Some(Arc::new(config)));
+        let caps = BTreeSet::from([Capability::Observations]);
+        for (index, change) in [
+            Change::Enabled {
+                id: rule.id.clone(),
+                enabled: false,
+            },
+            Change::Remove {
+                id: rule.id.clone(),
+            },
+            Change::Replace {
+                rule: Box::new(rule.clone()),
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = index as u64 + 1;
+            rules
+                .prepare(
+                    RuleProposal {
+                        id,
+                        transaction: Transaction {
+                            revision: id,
+                            changes: vec![change],
+                        },
+                    },
+                    &caps,
+                    &[],
+                    Duration::ZERO,
+                )
+                .unwrap();
+            rules.pending.as_mut().unwrap().sent = true;
+            rules
+                .receipt(
+                    &RuleReceipt {
+                        id,
+                        revision: id + 1,
+                        error: None,
+                    },
+                    Duration::ZERO,
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            rules.current().unwrap().rules.as_slice(),
+            std::slice::from_ref(&rule)
+        );
+        let mut changed = rule;
+        let crate::config::Trigger::Sequence { steps, .. } = &mut changed.trigger else {
+            unreachable!()
+        };
+        let crate::config::Trigger::Custom { recognizer, .. } = &mut steps[1] else {
+            unreachable!()
+        };
+        recognizer.reply_within.0 += 1;
+        let error = rules
+            .prepare(
+                RuleProposal {
+                    id: 4,
+                    transaction: Transaction {
+                        revision: 4,
+                        changes: vec![Change::Replace {
+                            rule: Box::new(changed),
+                        }],
+                    },
+                },
+                &caps,
+                &[],
+                Duration::ZERO,
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains(if retained_registry {
+                "consistent and bounded"
+            } else {
+                "unapproved custom recognizer declarations"
+            }),
+            "{error}"
+        );
+        assert_eq!(rules.revision(), 4);
+        assert!(!rules.busy());
+    }
+}
+
+#[test]
+fn a_public_flat_broker_baseline_cannot_upgrade_itself_to_composed_admission() {
+    let mut config = composed_profile();
+    let chain = config.rules[0].clone();
+    let crate::config::Trigger::Sequence { steps, .. } = &chain.trigger else {
+        unreachable!()
+    };
+    config.rules[0].trigger = steps[0].clone();
+    config.validate().unwrap();
+    let mut rules = Rules::new(Some(Arc::new(config)));
+    let error = rules
+        .prepare(
+            RuleProposal {
+                id: 1,
+                transaction: Transaction {
+                    revision: 1,
+                    changes: vec![Change::Replace {
+                        rule: Box::new(chain),
+                    }],
+                },
+            },
+            &BTreeSet::from([Capability::Observations]),
+            &[],
+            Duration::ZERO,
+        )
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("coordinated step lifetimes"),
+        "{error}"
+    );
+    assert_eq!(rules.revision(), 1);
+    assert!(!rules.busy());
+}
+
 #[test]
 fn broker_rule_edits_use_retained_source_definitions_not_client_declarations() {
     use crate::{

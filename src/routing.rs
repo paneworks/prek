@@ -128,7 +128,7 @@ impl Routing {
     pub fn with_recognition(config: Config, fence: crate::protocol::Fence) -> io::Result<Self> {
         Self::build(config, Some(fence))
     }
-    fn build(config: Config, fence: Option<crate::protocol::Fence>) -> io::Result<Self> {
+    pub(crate) fn validate_profile(config: &Config) -> io::Result<()> {
         if config.mode != crate::config::Mode::Route {
             return Err(io::Error::other(
                 "configured routing requires explicit route mode",
@@ -144,6 +144,10 @@ impl Routing {
                 "buffered routing requires join_window < decision_window",
             ));
         }
+        Ok(())
+    }
+    fn build(config: Config, fence: Option<crate::protocol::Fence>) -> io::Result<Self> {
+        Self::validate_profile(&config)?;
         let mut engine = if let Some(fence) = fence {
             Engine::with_recognition(config, fence)?
         } else {
@@ -1085,9 +1089,7 @@ impl Routing {
         transaction: &crate::rule_transactions::Transaction,
         at: Duration,
     ) -> io::Result<u64> {
-        let config = transaction
-            .prepare(self.engine.config(), self.engine.rule_revision())
-            .map_err(io::Error::other)?;
+        let config = self.engine.prepare_rules(transaction)?;
         // Includes the transport-specific timing checks before any retirement.
         Self::build(config, self.engine.recognition_fence())?;
         let revision = self.engine.transact_rules(transaction, at)?;

@@ -236,6 +236,13 @@
               --ignored --test-threads=1 > "$out" 2>&1 || { cat "$out"; exit 1; }
             ${pkgs.gnugrep}/bin/grep -F 'test result: ok. 1 passed; 0 failed;' "$out" || { cat "$out"; exit 1; }
           '';
+          native-composed-worker-helper = pkgs.runCommand "prek-native-composed-worker-helper-check" {} ''
+            PREK_TEST_LUA_BINARY=${package}/bin/prek \
+              ${package.nativeTests}/libexec/prek-native-tests \
+              --exact route_worker::tests::recognizers::composed::helper::supervised_composed_plans_survive_real_private_configuration_reconstruction \
+              --ignored --test-threads=1 > "$out" 2>&1 || { cat "$out"; exit 1; }
+            ${pkgs.gnugrep}/bin/grep -F 'test result: ok. 1 passed; 0 failed;' "$out" || { cat "$out"; exit 1; }
+          '';
           root-handoff-launcher = pkgs.runCommand "prek-root-handoff-launcher-check" {
             nativeBuildInputs = [ pkgs.bash pkgs.shellcheck ];
           } ''

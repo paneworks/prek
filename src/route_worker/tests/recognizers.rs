@@ -1,5 +1,6 @@
 //! Private-channel fixtures model native readiness without opening device nodes.
 mod actual;
+mod composed;
 use super::*;
 use crate::{
     config::{Action, Delivery, Millis, Scope, Selector, Trigger},
@@ -157,10 +158,12 @@ impl Fixture {
         fixture
     }
     fn attach(&mut self) {
-        let device = device();
+        self.attach_device(&device());
+    }
+    fn attach_device(&mut self, device: &Device) {
         let now = monotonic().unwrap();
         let descriptor = Descriptor::mirror(
-            &device,
+            device,
             KernelIdentity {
                 bus: 3,
                 vendor: 1,

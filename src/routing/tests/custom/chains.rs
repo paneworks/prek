@@ -24,9 +24,10 @@ fn fixture(steps: Vec<Trigger>, delivery: Delivery, touch: bool) -> (Routing, De
     config.timing.decision_window = Millis(300);
     config.devices.get_mut("touch").unwrap().identity = None;
     config.devices.get_mut("touch").unwrap().keys = vec![Key(if touch { 0x14a } else { 30 })];
-    config.recognizers = steps
-        .iter()
-        .flat_map(Trigger::recognizers)
+    config.recognizers = config.rules[0]
+        .trigger
+        .recognizers()
+        .chain(steps.iter().flat_map(Trigger::recognizers))
         .cloned()
         .collect();
     let mut rule: Rule = config.rules[0].clone();
@@ -43,9 +44,8 @@ fn fixture(steps: Vec<Trigger>, delivery: Delivery, touch: bool) -> (Routing, De
     public.rules = vec![rule.clone()];
     let error = public.validate().unwrap_err().to_string();
     assert!(error.contains("custom recognizers in sequences"), "{error}");
-    config.rules[0].enabled = false;
+    config.rules = vec![rule];
     let mut routing = Routing::with_recognition(config, fence()).unwrap();
-    routing.engine.add_routing_sequence_fixture(rule);
     context(&mut routing, 0);
     if touch && delivery == Delivery::Reserve {
         let mut snapshot = routing.authority_mut().fresh(ms(0)).unwrap().clone();

@@ -945,7 +945,7 @@ impl Broker {
                 "routing policy requires a fresh route broker",
             ));
         }
-        crate::routing::Routing::new(config.clone())?;
+        crate::worker::preflight(&config)?;
         self.routing = Some(config);
         self.observations = true;
         Ok(())

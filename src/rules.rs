@@ -403,6 +403,7 @@ impl Worker {
 }
 
 pub struct Engine {
+    validation: crate::config::Validation,
     custom: Option<custom::State>,
     coordinated_step: bool,
     custom_owned: BTreeSet<u64>,
@@ -436,7 +437,22 @@ impl Engine {
         Self::build(config, Some(fence))
     }
     fn build(config: Config, fence: Option<crate::protocol::Fence>) -> io::Result<Self> {
-        config.validate().map_err(invalid)?;
+        let validation = if fence.is_some() {
+            crate::config::Validation::Coordinated
+        } else {
+            crate::config::Validation::Public
+        };
+        Self::compile(config, fence, validation)
+    }
+    pub(crate) fn baseline(config: Config) -> io::Result<Self> {
+        Self::compile(config, None, crate::config::Validation::Coordinated)
+    }
+    fn compile(
+        config: Config,
+        fence: Option<crate::protocol::Fence>,
+        validation: crate::config::Validation,
+    ) -> io::Result<Self> {
+        config.validate_for(validation).map_err(invalid)?;
         let custom = custom::State::new(&config, fence)?;
         let mut workers = config
             .rules
@@ -465,6 +481,7 @@ impl Engine {
             .map(|rule| Sequence::new(rule.clone(), &config, fence))
             .collect::<io::Result<Vec<_>>>()?;
         Ok(Self {
+            validation,
             custom,
             coordinated_step: false,
             custom_owned: BTreeSet::new(),
@@ -1065,7 +1082,7 @@ impl Engine {
             next.recognition_ready(custom.ready(), at)?;
             next
         } else {
-            Self::new(config)?
+            Self::compile(config, None, self.validation)?
         };
         next.push(Record::Header {
             version: crate::replay::FORMAT_VERSION,
@@ -1114,9 +1131,7 @@ impl Engine {
         transaction: &crate::rule_transactions::Transaction,
         at: Duration,
     ) -> io::Result<u64> {
-        let config = transaction
-            .prepare(&self.config, self.rule_revision)
-            .map_err(invalid)?;
+        let config = self.prepare_rules(transaction)?;
         if self.custom.is_some()
             && custom::definitions(&config)
                 .iter()
@@ -1137,6 +1152,14 @@ impl Engine {
             .ok_or_else(|| invalid("runtime rule revision exhausted"))?;
         self.commit_replacement(next, at, "runtime rules changed");
         Ok(self.rule_revision)
+    }
+    pub(crate) fn prepare_rules(
+        &self,
+        transaction: &crate::rule_transactions::Transaction,
+    ) -> io::Result<Config> {
+        transaction
+            .prepare_for(&self.config, self.rule_revision, self.validation)
+            .map_err(invalid)
     }
     fn commit_replacement(&mut self, mut next: Self, at: Duration, reason: &str) {
         self.cancel_all(at, reason);

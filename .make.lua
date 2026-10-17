@@ -193,8 +193,16 @@ make.recipe{ name = "test-custom-chains", desc = "private native custom-scope an
                sh.cargo("test", "--locked", "--lib", "recognition::tests::native_ticket_deadline")
              end }
 
+make.recipe{ name = "test-composed-worker", desc = "complete composed native plans through sole-worker commands",
+             run = function()
+               sh.cargo("test", "--locked", "--lib", "route_worker::tests::recognizers::composed::")
+               sh.cargo("test", "--locked", "--lib", "config::recognizer_walk_tests::coordinated_")
+               sh.cargo("test", "--locked", "--lib", "service::rule_control::tests::composed_native_")
+               sh.cargo("test", "--locked", "--lib", "service::rule_control::tests::a_public_flat_")
+             end }
+
 make.recipe{ name = "test-composition", desc = "native sequence routing and recursive recognizer approval",
-             deps = { "test-custom-chains" },
+             deps = { "test-custom-chains", "test-composed-worker" },
              run = function()
                sh.cargo("test", "--locked", "--lib", "rules::tests::composition::")
                sh.cargo("test", "--locked", "--lib", "routing::tests::sequence::")
@@ -255,6 +263,22 @@ make.recipe{
     io.stderr:write(tested.err or "")
     assert(tested.ok and (tested.out or ""):find("test result: ok. 1 passed;", 1, true),
            "native chain helper test failed or selected no case")
+  end,
+}
+
+make.recipe{
+  name = "test-composed-worker-helper",
+  desc = "test full worker plan reconstruction with the real unprivileged Lua helper",
+  deps = { "build" },
+  run = function()
+    local tested = oslo.run{ "env", "PREK_TEST_LUA_BINARY=" .. project_root() .. "/target/debug/" .. NAME,
+      "cargo", "test", "--locked", "--lib",
+      "route_worker::tests::recognizers::composed::helper::supervised_composed_plans_survive_real_private_configuration_reconstruction",
+      "--", "--exact", "--ignored", "--test-threads=1", capture = true }
+    io.write(tested.out or "")
+    io.stderr:write(tested.err or "")
+    assert(tested.ok and (tested.out or ""):find("test result: ok. 1 passed;", 1, true),
+           "native composed worker helper test failed or selected no case")
   end,
 }
 
@@ -330,6 +354,6 @@ make.alias("c", "compile")
 make.recipe{
   name = "verify",
   desc = "the whole local gate",
-  deps = { "fmt-check", "check-all", "test-all", "test-routing-helper", "test-composition-helper", "test-chain-helper", "test-root-session", "test-root-routing", "test-cage-startup", "clippy", "rustdoc" },
+  deps = { "fmt-check", "check-all", "test-all", "test-routing-helper", "test-composition-helper", "test-chain-helper", "test-composed-worker-helper", "test-root-session", "test-root-routing", "test-cage-startup", "clippy", "rustdoc" },
 }
 make.alias("v", "verify")

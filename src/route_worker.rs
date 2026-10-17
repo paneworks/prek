@@ -246,12 +246,12 @@ impl Stream {
         if config.mode != Mode::Route {
             return Err(invalid("routing worker requires route configuration"));
         }
-        Routing::new(crate::worker::preflight_profile(&config))?;
+        crate::worker::preflight(&config)?;
         let mut baseline = config.clone();
         for rule in &mut baseline.rules {
             rule.enabled = false;
         }
-        let mut baseline = Engine::new(baseline)?;
+        let mut baseline = Engine::baseline(baseline)?;
         baseline.push(Record::Header { version: 1 })?;
         let mut messages = Outbox::default();
         messages.push(Message::Configuration {
@@ -810,7 +810,7 @@ impl InputSink for Stream {
                     }
                 }
                 command => {
-                    if let Some(installation) = self.assembly.accept(command, now)? {
+                    if let Some(installation) = self.assembly.accept_coordinated(command, now)? {
                         let result = installation.config.and_then(|config| {
                             if config.mode != Mode::Route
                                 || self.generation.checked_add(1) != Some(installation.generation)
@@ -822,7 +822,7 @@ impl InputSink for Stream {
                                 rule.enabled = false;
                             }
                             let baseline = self.baseline.prepare_replacement(baseline, now)?;
-                            Routing::new(crate::worker::preflight_profile(&config))?;
+                            crate::worker::preflight(&config)?;
                             let names: Vec<_> = self.seats.keys().cloned().collect();
                             for name in names {
                                 self.teardown(&name, now);

@@ -29,6 +29,7 @@ pub(super) struct Pending {
     sent: bool,
 }
 pub(super) struct Rules {
+    validation: crate::config::Validation,
     recognizers: Vec<crate::recognition::Definition>,
     config: Option<Arc<crate::config::Config>>,
     revision: u64,
@@ -44,6 +45,11 @@ impl Rules {
     }
     pub(super) fn new(config: Option<Arc<crate::config::Config>>) -> Self {
         Self {
+            validation: if config.as_ref().is_some_and(|c| c.has_custom_composition()) {
+                crate::config::Validation::Coordinated
+            } else {
+                crate::config::Validation::Public
+            },
             recognizers: config
                 .as_ref()
                 .map_or_else(Vec::new, |config| config.recognizer_definitions()),
@@ -76,7 +82,7 @@ impl Rules {
             .ok_or_else(|| protocol::invalid("system policy disables runtime rule edits"))?;
         let next = proposal
             .transaction
-            .prepare(current, self.revision)
+            .prepare_for(current, self.revision, self.validation)
             .map_err(io::Error::other)?;
         if next
             .recognizer_definitions()

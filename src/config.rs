@@ -14,6 +14,12 @@ pub const SCHEMA_VERSION: u32 = 1;
 pub const MAX_CONFIG_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Validation {
+    Public,
+    Coordinated,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Millis(pub u64);
 impl Millis {
     pub fn duration(self) -> Duration {
@@ -557,6 +563,87 @@ mod recognizer_walk_tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn coordinated_validation_keeps_public_admission_closed_and_requires_a_real_coordinator() {
+        let mut config = profile(sequence(vec![
+            Trigger::Key { key: Key(30) },
+            custom("nested"),
+        ]));
+        config.rules[0].enabled = true;
+        config.rules[0].delivery = Delivery::Observe;
+        config.rules[0].scope = Scope::Everywhere;
+        config.rules[0].contexts = vec![Context::Desktop];
+        config.validate_for(Validation::Coordinated).unwrap();
+        let text = toml::to_string(&config).unwrap();
+        assert_eq!(
+            Config::parse_for(&text, Validation::Coordinated).unwrap(),
+            config
+        );
+        assert!(Config::parse(&text).is_err());
+        assert!(config.validate().is_err());
+        assert!(crate::rules::Engine::new(config.clone()).is_err());
+        assert!(crate::rules::Engine::baseline(config.clone()).is_err());
+        let fence = crate::protocol::Fence {
+            broker: crate::protocol::Epoch([1, 2]),
+            configuration: 1,
+            session: 1,
+        };
+        assert!(crate::rules::Engine::with_recognition(config.clone(), fence).is_ok());
+        crate::worker::preflight(&config).unwrap();
+        assert!(
+            Config::parse_for(
+                &format!("validation='coordinated'\n{text}"),
+                Validation::Coordinated
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn coordinated_plans_keep_permission_source_declaration_depth_and_timeout_validation() {
+        let valid = profile(sequence(vec![
+            Trigger::Key { key: Key(30) },
+            custom("nested"),
+        ]));
+        for violation in 0..6 {
+            let mut config = valid.clone();
+            match violation {
+                0 => config.policy.allow_input_events = false,
+                1 => config.rules[0].devices = vec!["unknown".into()],
+                2 => {
+                    if let Trigger::Sequence { timeout, .. } = &mut config.rules[0].trigger {
+                        *timeout = Millis(0);
+                    }
+                }
+                3 => {
+                    if let Trigger::Sequence { steps, .. } = &mut config.rules[0].trigger {
+                        steps.truncate(1);
+                    }
+                }
+                4 => {
+                    let mut bad = custom("nested");
+                    if let Trigger::Custom { recognizer, .. } = &mut bad {
+                        recognizer.reply_within = Millis(100);
+                    }
+                    config.recognizers = bad.recognizers().cloned().collect();
+                }
+                _ => {
+                    for _ in 0..9 {
+                        config.rules[0].trigger = sequence(vec![
+                            Trigger::Key { key: Key(30) },
+                            config.rules[0].trigger.clone(),
+                        ]);
+                    }
+                }
+            }
+            assert!(
+                config.validate_for(Validation::Coordinated).is_err(),
+                "violation={violation}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn nested_callbacks_require_context_and_are_excluded_from_unfenced_baselines() {
         let mut config = profile(sequence(vec![
             Trigger::Key { key: Key(30) },
@@ -574,6 +661,47 @@ mod recognizer_walk_tests {
         assert!(!baseline.rules[0].enabled);
         assert!(config.rules[0].enabled);
         assert_eq!(baseline.rules[0].trigger, config.rules[0].trigger);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn coordinated_route_preflight_checks_buffer_timing_before_disabling_callback_rules() {
+        let mut config = profile(sequence(vec![custom("first"), custom("last")]));
+        config.mode = Mode::Route;
+        config.rules[0].enabled = true;
+        config.rules[0].delivery = Delivery::Buffer;
+        config.timing.join_window = config.timing.decision_window;
+        config.validate_for(Validation::Coordinated).unwrap();
+        let error = crate::worker::preflight(&config).unwrap_err();
+        assert!(error.to_string().contains("join_window < decision_window"));
+        config.timing.join_window = Millis(1);
+        crate::worker::preflight(&config).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn coordinated_preflight_keeps_enabled_graph_exclusivity_and_compiled_count_bounds() {
+        let mut config = profile(sequence(vec![custom("first"), custom("last")]));
+        config.mode = Mode::Route;
+        config.rules[0].enabled = true;
+        config.rules[0].delivery = Delivery::Buffer;
+        let mut duplicate = config.rules[0].clone();
+        duplicate.id = "duplicate".into();
+        config.rules.push(duplicate);
+        let error = crate::worker::preflight(&config).unwrap_err();
+        assert!(error.to_string().contains("exclusive"), "{error}");
+        config.rules.truncate(1);
+        config.rules[0].trigger = sequence(vec![custom("first"); 16]);
+        config.rules = (0..257)
+            .map(|index| {
+                let mut rule = config.rules[0].clone();
+                rule.id = format!("rule-{index}");
+                rule.priority = index;
+                rule
+            })
+            .collect();
+        let error = crate::worker::preflight(&config).unwrap_err();
+        assert!(error.to_string().contains("4096 compiled"), "{error}");
     }
 }
 
@@ -929,6 +1057,13 @@ impl fmt::Display for ConfigError {
 impl std::error::Error for ConfigError {}
 
 impl Config {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn has_custom_composition(&self) -> bool {
+        self.rules.iter().any(|rule| {
+            matches!(rule.trigger, Trigger::Sequence { .. })
+                && rule.trigger.recognizers().next().is_some()
+        })
+    }
     pub(crate) fn recognizer_definitions(&self) -> Vec<crate::recognition::Definition> {
         let mut definitions = BTreeMap::new();
         for definition in self.recognizers.iter().chain(
@@ -953,14 +1088,20 @@ impl Config {
         }
     }
     pub fn parse(text: &str) -> Result<Self, ConfigError> {
+        Self::parse_for(text, Validation::Public)
+    }
+    pub(crate) fn parse_for(text: &str, validation: Validation) -> Result<Self, ConfigError> {
         if text.len() > MAX_CONFIG_BYTES {
             return Err(ConfigError("configuration exceeds 1 MiB".into()));
         }
         let config: Self = toml::from_str(text).map_err(|error| ConfigError(error.to_string()))?;
-        config.validate()?;
+        config.validate_for(validation)?;
         Ok(config)
     }
     pub fn validate(&self) -> Result<(), ConfigError> {
+        self.validate_for(Validation::Public)
+    }
+    pub(crate) fn validate_for(&self, validation: Validation) -> Result<(), ConfigError> {
         let fail = |message: String| Err(ConfigError(message));
         if self.version != SCHEMA_VERSION {
             return fail(format!("unsupported schema version {}", self.version));
@@ -1215,7 +1356,7 @@ impl Config {
                     "{prefix}.delivery: touch reservation needs a noninteractive region or an explicitly off display"
                 ));
             }
-            validate_trigger(&rule.trigger, &shapes, 0)
+            validate_trigger_for(&rule.trigger, &shapes, 0, validation)
                 .map_err(|message| ConfigError(format!("{prefix}.trigger: {message}")))?;
             validate_action(&rule.action)
                 .map_err(|message| ConfigError(format!("{prefix}.action: {message}")))?;
@@ -1599,6 +1740,14 @@ pub(crate) fn validate_trigger(
     shapes: &BTreeSet<&String>,
     depth: usize,
 ) -> Result<(), String> {
+    validate_trigger_for(trigger, shapes, depth, Validation::Public)
+}
+fn validate_trigger_for(
+    trigger: &Trigger,
+    shapes: &BTreeSet<&String>,
+    depth: usize,
+    validation: Validation,
+) -> Result<(), String> {
     if depth > 8 {
         return Err("sequence nesting exceeds eight levels".into());
     }
@@ -1614,7 +1763,7 @@ pub(crate) fn validate_trigger(
             timeout,
             wake,
         } => {
-            if depth != 0 {
+            if depth != 0 && validation == Validation::Public {
                 return Err(
                     "custom recognizers in sequences require coordinated step lifetimes".into(),
                 );
@@ -1693,7 +1842,7 @@ pub(crate) fn validate_trigger(
                 return Err("sequence exceeds 64 recognizer steps".into());
             }
             for step in steps {
-                validate_trigger(step, shapes, depth + 1)?;
+                validate_trigger_for(step, shapes, depth + 1, validation)?;
             }
             Ok(())
         }

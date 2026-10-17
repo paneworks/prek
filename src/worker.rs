@@ -266,7 +266,13 @@ pub(crate) fn preflight_profile(config: &Config) -> Config {
 /// Validate declarations and compile ordinary recognizers without creating an
 /// unfenced custom coordinator. Seat engines require an owning subscription.
 pub fn preflight(config: &Config) -> io::Result<()> {
-    Engine::new(preflight_profile(config)).map(|_| ())
+    config
+        .validate_for(crate::config::Validation::Coordinated)
+        .map_err(io::Error::other)?;
+    if config.mode == crate::config::Mode::Route {
+        crate::routing::Routing::validate_profile(config)?;
+    }
+    Engine::baseline(preflight_profile(config)).map(|_| ())
 }
 struct Registry {
     config: Config,
@@ -286,7 +292,7 @@ impl Registry {
         }
         Ok(Self {
             config,
-            baseline: Engine::new(baseline)?,
+            baseline: Engine::baseline(baseline)?,
             observers: BTreeMap::new(),
             blocked: BTreeMap::new(),
             revision: 0,
@@ -983,7 +989,7 @@ pub fn bootstrap(
             let Some(packet) = channel.receive::<Command>()? else {
                 break;
             };
-            if let Some(installation) = assembly.accept(packet.message, now)? {
+            if let Some(installation) = assembly.accept_coordinated(packet.message, now)? {
                 if installation.generation != 1 {
                     return Err(protocol::invalid("invalid startup generation"));
                 }
@@ -1173,7 +1179,7 @@ impl Stream {
                     }
                 }
                 command => {
-                    if let Some(installation) = self.assembly.accept(command, now)? {
+                    if let Some(installation) = self.assembly.accept_coordinated(command, now)? {
                         if self.control.len() + self.recognitions.len()
                             >= crate::protocol::MAX_QUEUED_PACKETS
                             || self
