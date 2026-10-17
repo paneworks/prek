@@ -24,6 +24,8 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
+pub mod handoff;
+
 nix::ioctl_write_ptr!(set_clock_id, b'E', 0xa0, libc::c_int);
 nix::ioctl_read_buf!(get_mt_slots, b'E', 0x0a, libc::c_int);
 nix::ioctl_read!(get_version, b'E', 0x01, libc::c_int);
@@ -61,6 +63,9 @@ pub struct StateProbe {
     raw: RawDevice,
 }
 impl StateProbe {
+    fn synchronize(&self) -> io::Result<()> {
+        self.raw.get_key_state().map(|_| ())
+    }
     /// Open the reader's node without resolving its discovery pathname again.
     /// Failure to reopen or loss of the original connection aborts preparation.
     pub fn new(reader: &RawDevice) -> io::Result<Self> {

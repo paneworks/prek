@@ -58,6 +58,18 @@ class KernelReceipt(unittest.TestCase):
                 with self.subTest(field=field, replacement=replacement), self.assertRaises(ValueError):
                     root.receipt(self.line(value))
 
+    def test_old_inventory_without_both_native_witness_cases_is_not_acceptance(self):
+        names = {name for name in root.EXPECTED if name.startswith("evdev_boundary::witness_")}
+        self.assertEqual(len(names), 2)
+        old = self.value()
+        old.update(tests=sorted(root.ALL_EXPECTED - names), passed=len(root.ALL_EXPECTED) - 2,
+                   routing_passed=len(root.EXPECTED) - 2)
+        with self.assertRaises(ValueError):
+            root.receipt(self.line(old))
+        inventory = "\n".join(f"{name}: test" for name in sorted(root.EXPECTED - names))
+        with self.assertRaises(ValueError):
+            root.test_inventory(inventory)
+
     def test_receipt_rejects_missing_foreign_or_uncorrelated_fields(self):
         for field in self.value():
             value = self.value()
@@ -346,7 +358,7 @@ class RootRunModel(unittest.TestCase):
     def test_model_success_correlates_both_executables_and_removes_controls(self):
         with self.model() as (args, path, registry, rules, commands, output):
             root.run(args)
-            self.assertEqual(root.receipt(output.getvalue())["passed"], 19)
+            self.assertEqual(root.receipt(output.getvalue())["passed"], 21)
             self.assertEqual({entry.name for entry in path.iterdir()}, {"devices", "rules"})
             self.assertEqual(list(rules.iterdir()), [])
             self.assertEqual((registry / "foreign-record").read_text(), "preserved")
