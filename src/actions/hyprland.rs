@@ -38,12 +38,7 @@ impl HyprlandAdapter {
     /// The host supplies a broker-approved desktop binding and context.
     pub fn new(client: Client, view: View) -> io::Result<Self> {
         view.validate()?;
-        let version = client.version();
-        if (version.major, version.minor, version.patch) != (0, 54, 3) {
-            return Err(io::Error::other(
-                "window actions require verified stock Hyprland 0.54.3",
-            ));
-        }
+        client.verify_window_actions()?;
         let adapter = Self {
             client,
             sampler: ContextSampler::default(),
@@ -194,6 +189,7 @@ impl HyprlandAdapter {
             {
                 return Ok(Completion::Unavailable);
             }
+            self.client.verify_legacy_dispatch_until(until)?;
             if monotonic()? >= expires || Instant::now() >= until {
                 return Ok(Completion::Cancelled);
             }

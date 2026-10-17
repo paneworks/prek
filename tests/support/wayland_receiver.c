@@ -32,15 +32,16 @@ struct app {
     struct wl_keyboard *keyboard;
     struct wl_touch *touch;
     struct wl_pointer *pointer;
+    struct wl_callback *frame_callback;
     struct xkb_context *xkb;
     struct xkb_keymap *keymap;
     struct xkb_state *key_state;
     FILE *log;
-    bool running, configured, dirty, touch_pending, presentation_requested, keys[KEYS];
+    bool running, configured, dirty, touch_pending, keys[KEYS];
     uint32_t depressed, latched, locked, group;
     unsigned buffers;
     int width, height;
-    uint64_t sequence, frames;
+    uint64_t sequence, frames, drawn_sequence;
     double pointer_x, pointer_y;
     char text[1024];
     struct contact contacts[CONTACTS];
@@ -79,11 +80,13 @@ static void receipt(struct app *app,const char *event,const char *detail) {
     }
     fprintf(app->log,"]}\n");
     if (fflush(app->log)) abort();
-    app->dirty=true;
-    draw(app);
+    if (strcmp(event,"rendered")) {app->dirty=true;draw(app);}
 }
 static void presented(void *data,struct wl_callback *callback,uint32_t time) {
-    wl_callback_destroy(callback);receipt(data,"rendered",NULL);
+    struct app *app=data;
+    wl_callback_destroy(callback);app->frame_callback=NULL;
+    char detail[80];snprintf(detail,sizeof(detail),"\"drawn_sequence\":%" PRIu64,app->drawn_sequence);
+    receipt(app,"rendered",detail);draw(app);
 }
 static const struct wl_callback_listener presentation_listener={.done=presented};
 static void released(void *data,struct wl_buffer *buffer) {
@@ -98,7 +101,7 @@ static void label(cairo_t *cr,int y,const char *text) {
     cairo_move_to(cr,18,y);cairo_show_text(cr,text);
 }
 static void draw(struct app *app) {
-    if (!app->configured || !app->dirty || app->touch_pending || app->buffers>=3) return;
+    if (!app->configured || !app->dirty || app->touch_pending || app->frame_callback || app->buffers>=3) return;
     /* Visible desktop windows can exceed 2048 logical pixels. Keep both the
        dimensions and total allocation bounded: at most 64 MiB per buffer. */
     if (app->width<1 || app->height<1 || app->width>8192 || app->height>8192
@@ -133,11 +136,9 @@ static void draw(struct app *app) {
     }
     cairo_set_source_rgb(cr,.95,.7,.2);cairo_rectangle(cr,app->pointer_x-4,app->pointer_y-4,8,8);cairo_fill(cr);
     cairo_destroy(cr);cairo_surface_destroy(surface);
-    if(!app->presentation_requested) {
-        app->presentation_requested=true;
-        struct wl_callback *callback=wl_surface_frame(app->surface);
-        wl_callback_add_listener(callback,&presentation_listener,app);
-    }
+    app->drawn_sequence=app->sequence;
+    app->frame_callback=wl_surface_frame(app->surface);
+    wl_callback_add_listener(app->frame_callback,&presentation_listener,app);
     wl_surface_attach(app->surface,buffer,0,0);wl_surface_damage_buffer(app->surface,0,0,app->width,app->height);wl_surface_commit(app->surface);
     app->dirty=false;
 }

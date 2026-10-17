@@ -1117,7 +1117,15 @@ The Rust host equivalents remain `HyprlandAdapter::new(client, view)`,
 authority setters. [The example](../examples/lua/window_actions.lua) declares
 protected touchscreen actions; offline compilation executes no effect.
 
-The adapter currently supports verified stock **Hyprland 0.54.3**. The exact
+The adapter supports **Hyprland 0.54.3** and exact **0.56.2** with a hyprlang
+config. For 0.56.2, `j/status.configProvider` must be `hyprlang` both before
+installation and immediately before mutation within the existing IPC deadline.
+Lua, missing, malformed and unknown providers refuse without mutation; there is
+no syntax fallback or mutation retry. This does not change Prek's own Luna API.
+Hyprland's Lua dispatch dialect remains unsupported. The provider-sensitive
+dispatch behavior is defined by the pinned
+[Hyprland source](https://github.com/hyprwm/Hyprland/blob/v0.56.2/src/debug/HyprCtl.cpp).
+The exact
 window address **and stableId**, output/geometry generation, positive numeric
 workspace and geometry are frozen at offer time. Missing or malformed targets,
 another binding/seat/fence, secure overlays, lock inhibition, expired context,

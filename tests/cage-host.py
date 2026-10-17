@@ -10,6 +10,11 @@ import tempfile
 import time
 
 
+def rendered_through(receipts, sequence):
+    return any(row["event"] == "rendered" and row.get("drawn_sequence", 0) >= sequence
+               for row in receipts)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cage", required=True)
@@ -164,17 +169,29 @@ def main():
             assert received[-1]["modifiers"] == {
                 "depressed": 0, "latched": 0, "locked": 0, "group": 0}
             assert any(row["modifiers"]["depressed"] for row in received)
-            if args.screencopy:
+            def wait_rendered(sequence):
+                deadline = time.monotonic() + 5
+                while not rendered_through(rows(), sequence):
+                    if cage.poll() is not None or time.monotonic() >= deadline:
+                        raise RuntimeError(f"receiver did not render through receipt {sequence}")
+                    time.sleep(0.01)
+
+            wait_rendered(max(row["sequence"] for row in received if row["event"] != "rendered"))
+            def capture(name):
+                if not args.screencopy:
+                    return
                 capture_env = dict(control_env, WAYLAND_DISPLAY=socket.name, WAYLAND_DEBUG="client")
                 monitors = subprocess.run([hyprctl, "-j", "monitors"], env=control_env,
                                           check=True, capture_output=True, text=True, timeout=3)
                 active = [item for item in json.loads(monitors.stdout) if not item.get("disabled", False)]
                 assert len(active) == 1
-                with (output / "receiver-screencopy.log").open("w") as capture_log:
+                with (output / "receiver-screencopy.log").open("a") as capture_log:
                     subprocess.run([str(args.screencopy), "-o", active[0]["name"],
-                                    str(output / "receiver-baseline.png")],
+                                    str(output / f"receiver-{name}.png")],
                                    env=capture_env, stdout=capture_log, stderr=capture_log,
                                    check=True, timeout=5)
+
+            capture("baseline")
             if args.prek_fixture:
                 if not args.prek_app:
                     parser.error("--prek-fixture requires --prek-app")
@@ -239,6 +256,8 @@ def main():
                         events = [row for row in received[start:] if row["event"] == "key"]
                         assert [(row["code"],row["state"]) for row in events] == expected
                         assert received[-1]["text"] == text and not received[-1]["keys"]
+                        wait_rendered(events[-1]["sequence"])
+                        capture(path.stem)
                         modifiers = [row for row in received[start:] if row["event"] == "modifiers"]
                         assert modifiers and all(row["modifiers"]["depressed"] == 0 and row["modifiers"]["latched"] == 0 and row["modifiers"]["locked"] == 0 for row in modifiers)
 

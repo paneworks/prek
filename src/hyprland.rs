@@ -322,7 +322,14 @@ impl Client {
     fn query_until(&self, kind: &str, until: Instant) -> io::Result<Value> {
         if !matches!(
             kind,
-            "version" | "devices" | "monitors" | "clients" | "activewindow" | "layers" | "locked"
+            "version"
+                | "devices"
+                | "monitors"
+                | "clients"
+                | "activewindow"
+                | "layers"
+                | "locked"
+                | "status"
         ) {
             return Err(invalid("unsupported compositor query"));
         }
@@ -394,6 +401,29 @@ impl Client {
 
     pub fn version(&self) -> &Version {
         &self.version
+    }
+    pub(crate) fn verify_window_actions(&self) -> io::Result<()> {
+        if !matches!(
+            (self.version.major, self.version.minor, self.version.patch),
+            (0, 54, 3) | (0, 56, 2)
+        ) {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "window actions require Hyprland 0.54.3 or 0.56.2 with hyprlang config",
+            ));
+        }
+        self.verify_legacy_dispatch_until(Instant::now() + REQUEST_TIME)
+    }
+    pub(crate) fn verify_legacy_dispatch_until(&self, until: Instant) -> io::Result<()> {
+        if (self.version.major, self.version.minor, self.version.patch) == (0, 56, 2)
+            && self.query_until("status", until)?["configProvider"].as_str() != Some("hyprlang")
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Hyprland 0.56.2 legacy dispatch requires the hyprlang config provider",
+            ));
+        }
+        Ok(())
     }
     pub(crate) fn lock_state(&self) -> io::Result<bool> {
         self.query("locked")?

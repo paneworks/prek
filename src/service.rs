@@ -1720,16 +1720,8 @@ impl Broker {
                         peer.uid(),
                         &self.policy.compositor_executable,
                     )?;
-                    if capabilities.contains(&Capability::HyprlandActions)
-                        && (
-                            client.version().major,
-                            client.version().minor,
-                            client.version().patch,
-                        ) != (0, 54, 3)
-                    {
-                        return Err(protocol::invalid(
-                            "window actions require verified stock Hyprland 0.54.3",
-                        ));
+                    if capabilities.contains(&Capability::HyprlandActions) {
+                        client.verify_window_actions()?;
                     }
                     let registration = self.logind.register(peer, &client)?;
                     self.verify_agent(connection.channel.peer().pid)?;

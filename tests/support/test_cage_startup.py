@@ -7,6 +7,33 @@ spec = importlib.util.spec_from_file_location("cage_inner", Path(__file__).paren
 inner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(inner)
 
+host_spec = importlib.util.spec_from_file_location("cage_host", Path(__file__).parents[1] / "cage-host.py")
+host = importlib.util.module_from_spec(host_spec)
+host_spec.loader.exec_module(host)
+
+
+class RenderedState(unittest.TestCase):
+    def test_initial_or_unversioned_frame_does_not_acknowledge_later_input(self):
+        for rows in ([], [{"event": "rendered"}],
+                     [{"event": "rendered", "drawn_sequence": 3, "sequence": 20}]):
+            with self.subTest(rows=rows):
+                self.assertFalse(host.rendered_through(rows, 10))
+
+    def test_current_callback_state_does_not_replace_the_submitted_watermark(self):
+        self.assertFalse(host.rendered_through([
+            {"event": "key", "sequence": 10},
+            {"event": "rendered", "sequence": 11, "drawn_sequence": 9, "text": "bA"}], 10))
+
+    def test_acknowledgement_can_cover_a_coalesced_state(self):
+        for drawn in (10, 12):
+            with self.subTest(drawn=drawn):
+                self.assertTrue(host.rendered_through([
+                    {"event": "rendered", "drawn_sequence": drawn}], 10))
+
+    def test_non_frame_receipt_cannot_acknowledge_a_draw(self):
+        self.assertFalse(host.rendered_through([
+            {"event": "key", "drawn_sequence": 20}], 10))
+
 
 class OutputReadiness(unittest.TestCase):
     def test_missing_zero_negative_and_disabled_outputs_are_unusable(self):

@@ -42,6 +42,7 @@ def main():
                HL_NO_SYSTEMD="1", AQ_BACKEND="wayland")
     config = output / "hyprland.conf"
     config.write_text("monitor = , 1280x720@60, auto, 1\n"
+                      "animations {\n enabled = false\n}\n"
                       "input {\n kb_layout = us\n}\n"
                       "misc {\n disable_hyprland_logo = true\n disable_splash_rendering = true\n}\n"
                       "debug {\n disable_logs = false\n}\n")

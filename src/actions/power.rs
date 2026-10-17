@@ -22,6 +22,7 @@ impl PowerAdapter {
     /// The host supplies the broker-approved binding and context, never Lua.
     pub fn new(client: Client, view: View) -> io::Result<Self> {
         view.validate()?;
+        client.verify_legacy_dispatch_until(Instant::now() + Duration::from_millis(200))?;
         let adapter = Self {
             client,
             sampler: ContextSampler::default(),
@@ -134,6 +135,7 @@ impl PowerAdapter {
                 return Ok(Completion::Unavailable);
             }
             // Sampling may consume the grant. Never start a late mutation.
+            self.client.verify_legacy_dispatch_until(until)?;
             if monotonic()? >= expires || Instant::now() >= until {
                 return Ok(Completion::Cancelled);
             }

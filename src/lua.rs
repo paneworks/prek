@@ -352,6 +352,7 @@ pub fn api() -> serde_json::Value {
         "system_permission": "policy.allow_hyprland_actions", "agent_flags": ["hyprland"],
         "named_handler_flags": ["lua","hyprland"], "broker_mode": "route",
         "version": "0.54.3", "host_api": "actions::Executor::set_hyprland_adapter(HyprlandAdapter)",
+        "additional_versions": ["0.56.2"], "config_provider": "hyprlang; verified via j/status on 0.56.2 before installation and each mutation",
         "capability": "hyprland_actions", "actions": ["close","move_left_and_follow","move_right_and_follow"],
         "excluded": ["reorder_up","reorder_down","scroll_stack"],
         "workspace_moves": "adjacent positive numeric workspace on a single-output desktop",

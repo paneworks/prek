@@ -27,6 +27,15 @@ Neither opens physical input devices or enables production routing.
 described in [the compositor notes](ubuntu-compositors.md#explicit-nested-wayland-test-variant).
 It passed the keyboard, Lua, mode-change and DPMS checks on NixOS with NVIDIA
 595.71.05. Its results are not unmodified stock compositor acceptance.
+The recipe runs separate mode/layer sessions and exercises frozen-target window
+moves, workspace follow and close with another owned window focused. The receiver uses a submitted-state sequence
+in each frame callback; keyboard batches and each touch frame must reach that
+watermark. The nested test config disables animations so its screencopy is not
+an intermediate opening frame. Frame callbacks establish compositor pacing, not
+physical display presentation; the keyboard fixture separately saves actual
+compositor pixels in `receiver-baseline.png`, `receiver-routed-keys.png` and
+`receiver-changed-keys.png`. Exact Hyprland 0.56.2 window/power effects require a
+verified hyprlang config provider; Lua/unknown providers refuse before mutation.
 `oslo make test-cage` retains the original unpatched Hyprland 0.54.3 fixture and
 adds window-action checks. On this NVIDIA setup it timed out waiting for usable
 nested output dimensions; the runner does not silently substitute the patch.

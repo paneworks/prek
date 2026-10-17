@@ -85,6 +85,9 @@ fn public_window_factory_uses_only_the_broker_instance_seat_process_and_fence() 
 }
 impl Fixture {
     fn new(mode: Mode) -> Self {
+        Self::with_version(mode, "0.54.3")
+    }
+    fn with_version(mode: Mode, version: &'static str) -> Self {
         let behavior = Arc::new(AtomicU64::new(0));
         let workspace = Arc::new(AtomicU64::new(3));
         let closed = Arc::new(AtomicBool::new(false));
@@ -102,6 +105,14 @@ impl Fixture {
                 let window = serde_json::json!({"address":"0x1234","stableId":if behavior==3 {"def"}else{"abc"},
                 "mapped":true,"hidden":false,"monitor":1,"workspace":{"id":workspace},"at":[0,0],"size":[300,400]});
                 match request {
+                b"j/status" => match behavior {
+                    6 => serde_json::json!({"configProvider":"lua"}).to_string(),
+                    7 => "{}".into(),
+                    8 => serde_json::json!({"configProvider":false}).to_string(),
+                    9 => "invalid json".into(),
+                    10 => {thread::sleep(Duration::from_millis(300)); "{}".into()},
+                    _ => serde_json::json!({"configProvider":"hyprlang"}).to_string(),
+                },
                 b"j/locked" => serde_json::json!({"locked":behavior==4}).to_string(),
                 b"j/layers" => "{}".into(),
                 b"j/activewindow" => if closed_copy.load(Ordering::Relaxed) || workspace==3 {"{}".into()} else {window.to_string()},
@@ -125,7 +136,7 @@ impl Fixture {
             }
             },
             Duration::ZERO,
-            "0.54.3",
+            version,
         );
         let client = server.client();
         let Consumer::Hyprland { pid, start, .. } = client.consumer() else {
@@ -233,33 +244,71 @@ impl Fixture {
 
 #[test]
 fn frozen_window_close_and_adjacent_moves_need_a_separate_grant_and_do_not_retry() {
-    for action in [
-        WindowAction::Close,
-        WindowAction::MoveLeftAndFollow,
-        WindowAction::MoveRightAndFollow,
-    ] {
-        let mut fixture = Fixture::new(Mode::Route);
-        fixture.offer(action);
-        assert!(
-            !fixture
-                .execute()
-                .iter()
-                .any(|request| matches!(request, Request::Complete { .. }))
-        );
-        assert_eq!(fixture.dispatches.load(Ordering::Relaxed), 0);
+    for version in ["0.54.3", "0.56.2"] {
+        for action in [
+            WindowAction::Close,
+            WindowAction::MoveLeftAndFollow,
+            WindowAction::MoveRightAndFollow,
+        ] {
+            let mut fixture = Fixture::with_version(Mode::Route, version);
+            fixture.offer(action);
+            assert!(
+                !fixture
+                    .execute()
+                    .iter()
+                    .any(|request| matches!(request, Request::Complete { .. }))
+            );
+            assert_eq!(fixture.dispatches.load(Ordering::Relaxed), 0);
+            fixture.grant();
+            assert_eq!(fixture.completion(), Completion::Applied);
+            assert_eq!(fixture.dispatches.load(Ordering::Relaxed), 1);
+            assert!(
+                fixture
+                    .executor
+                    .offer(
+                        fixture.view.fence,
+                        fixture.event(1, action),
+                        monotonic().unwrap()
+                    )
+                    .is_err()
+            );
+        }
+    }
+}
+
+#[test]
+fn changed_unknown_or_stalled_config_provider_refuses_window_mutation() {
+    for behavior in 6..=10 {
+        let mut fixture = Fixture::with_version(Mode::Route, "0.56.2");
+        fixture.offer(WindowAction::Close);
         fixture.grant();
-        assert_eq!(fixture.completion(), Completion::Applied);
-        assert_eq!(fixture.dispatches.load(Ordering::Relaxed), 1);
-        assert!(
-            fixture
-                .executor
-                .offer(
-                    fixture.view.fence,
-                    fixture.event(1, action),
-                    monotonic().unwrap()
-                )
-                .is_err()
+        fixture.behavior.store(behavior, Ordering::Relaxed);
+        assert_eq!(fixture.completion(), Completion::Unavailable);
+        assert_eq!(fixture.dispatches.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[test]
+fn window_initialization_refuses_non_hyprlang_provider_before_context_binding() {
+    let fixture = Fixture::new(Mode::Route);
+    for reply in [
+        r#"{"configProvider":"lua"}"#,
+        "{}",
+        r#"{"configProvider":null}"#,
+        "invalid",
+    ] {
+        let server = Server::with_version(
+            move |request| {
+                assert_eq!(request, b"j/status");
+                reply.into()
+            },
+            Duration::ZERO,
+            "0.56.2",
         );
+        let error = HyprlandAdapter::new(server.client(), fixture.view.clone())
+            .err()
+            .unwrap();
+        assert!(!error.to_string().contains("desktop context"));
     }
 }
 
@@ -413,6 +462,17 @@ fn window_adapter_binding_mode_generation_and_context_freshness_are_enforced() {
 #[test]
 fn unsupported_stock_versions_and_changed_context_bindings_cannot_install_or_recover() {
     let mut fixture = Fixture::new(Mode::Route);
+    for version in ["0.54.4", "0.55.4"] {
+        let server = Server::with_version(
+            |_| panic!("unsupported version must refuse before queries"),
+            Duration::ZERO,
+            version,
+        );
+        let error = HyprlandAdapter::new(server.client(), fixture.view.clone())
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    }
     let other = Server::new("{}", Duration::ZERO);
     assert!(HyprlandAdapter::new(other.client(), fixture.view.clone()).is_err());
     let mut wrong = fixture.view.clone();

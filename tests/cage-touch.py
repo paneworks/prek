@@ -76,7 +76,10 @@ def main():
             def frame(count):
                 send(4)
                 wait_for(lambda:len([row for row in rows()[start:] if row["event"] == "touch_frame"]) == count)
-                return [row for row in rows()[start:] if row["event"] == "touch_frame"][-1]
+                receipt = [row for row in rows()[start:] if row["event"] == "touch_frame"][-1]
+                wait_for(lambda:any(row["event"] == "rendered" and
+                                    row.get("drawn_sequence", 0) >= receipt["sequence"] for row in rows()))
+                return receipt
 
             send(1,7,0.25,0.25)
             send(1,12,0.75,0.25)

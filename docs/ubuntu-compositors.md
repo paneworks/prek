@@ -74,8 +74,9 @@ Hyprland's `/proc/PID/maps`. Each run retains `nested.json` and
 `hyprland-libraries.txt`. A missing, foreign or mixed override fails the run.
 The positive-output, rendered-receiver and parent-input-isolation guards remain
 enabled. A passing variant run is **not unmodified stock compositor acceptance**.
-The newer variant does not support `--windows`, whose action adapter remains
-pinned to Hyprland 0.54.3.
+The newer variant supports `--windows` with its explicit hyprlang config.
+Its recipe runs separate mode/layer sessions with input, power and frozen-target
+window checks. Hyprland 0.56.2's Lua dispatch dialect is refused, not guessed.
 
 Pass `--morf /absolute/path/to/morf --morf-shell /absolute/path/to/shell/init.lua`
 to exercise the real Morf lock provider and Caelestia controllers. An unwrapped

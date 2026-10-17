@@ -566,8 +566,9 @@ the mutation exercised in that run.
 starting receiver to the adjacent numeric workspace and back, following it,
 then close it after focus switches to the guard receiver. Stock IPC must confirm
 the exact window/workspace/focus, the target must acknowledge close, and the
-guard must remain alive. The adapter currently supports stock Hyprland 0.54.3
-and single-output workspace moves through protected `session --hyprland` opt-in.
+guard must remain alive. The adapter supports Hyprland 0.54.3 and exact 0.56.2
+with a verified hyprlang config provider, refusing its Lua dispatch dialect.
+Workspace moves require a single output and protected `session --hyprland` opt-in.
 Production takeover, reorder and scrolling-layout effects remain pending.
 [The reference](docs/lua-api.md#experimental-targeted-hyprland-window-adapter)
 documents the stock address-selector race between lifetime preflight and dispatch.
@@ -577,8 +578,11 @@ socketpair and a wlroots touch device. Its events use Cage's ordinary touch
 handlers and must reach the actual receiver as two identified contacts, precise
 coordinates, motion, four ordered touch frames and neutral releases. The driver
 refuses non-headless backends before startup and terminates on malformed input.
-No public input protocol or kernel input device is created. The receiver's first
-rendered-frame receipt establishes the mapped target before touch injection.
+No public input protocol or kernel input device is created. An initial frame
+callback establishes the mapped target; each touch frame then requires its own
+submitted-state watermark. Keyboard batches also wait for their watermark before
+the owned compositor is captured. Frame callbacks are pacing, not physical
+presentation evidence.
 
 These local checks prove keyboard/touch delivery and modeled keyboard consumption.
 Touch routing/consumption, cancellation, remapping/repeats, broker/lock integration and handoff races retain their own

@@ -345,7 +345,10 @@ make.recipe{ name = "test-cage", desc = "local GPU Cage/Hyprland keyboard, Lua a
              run = function() cage_test("cage-test", { "--layers", "--input", "--power", "--windows" }) end }
 
 make.recipe{ name = "test-cage-wayland-fix", desc = "explicit test-only patched nested compositor receipts",
-             run = function() cage_test("cage-test-wayland-fix", { "--modes", "--input", "--power" }) end }
+             run = function()
+               cage_test("cage-test-wayland-fix", { "--modes", "--input", "--power", "--windows" })
+               cage_test("cage-test-wayland-fix", { "--layers", "--input", "--power", "--windows" })
+             end }
 
 make.recipe{ name = "test-cage-touch", desc = "local GPU Cage two-contact delivery and neutral releases",
              run = function() cage_test("cage-touch-test", {}) end }
@@ -354,6 +357,9 @@ make.recipe{ name = "test-cage-startup", desc = "unprivileged nested output and 
              run = function()
                sh.python3("-m", "unittest", "discover", "-s", "tests/support", "-p", "test_cage_startup.py", "-v")
              end }
+
+make.recipe{ name = "test-hyprland", desc = "bound Hyprland queries, window and power adapter models",
+             run = function() sh.cargo("test", "--locked", "--test", "hyprland") end }
 
 make.recipe{ name = "check", desc = "type-check every target",
              run = function() sh.cargo("check", "--locked", "--all-targets") end }
@@ -428,7 +434,7 @@ make.recipe{
       "--out-link", project_root() .. "/target/distribution/check" }
     for _, check in ipairs{ "nixos-module", "lua-editor", "installed-cli", "distribution",
       "native-routing-helper", "native-composition-helper", "native-chain-helper",
-      "native-composed-worker-helper", "wayland-proxy", "root-session", "root-routing-receipts" } do
+      "native-composed-worker-helper", "wayland-proxy", "cage-startup", "root-session", "root-routing-receipts" } do
       command[#command + 1] = ".#checks." .. arch .. "." .. check
     end
     assert(oslo.run(command).ok, "immutable distribution checks failed")

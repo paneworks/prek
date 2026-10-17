@@ -211,6 +211,8 @@
     "unavailable": "nil for absent/stale/inhibited context, missing name or retired reference; known empty arrays remain empty"
   },
   "hyprland_adapter": {
+    "additional_versions": ["0.56.2"],
+    "config_provider": "hyprlang; verified via j/status on 0.56.2 before installation and each mutation",
     "actions": [
       "close",
       "move_left_and_follow",

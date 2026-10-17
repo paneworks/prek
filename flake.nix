@@ -295,6 +295,7 @@
           } ''
             mkdir -p fixtures/tests/support
             cp ${./tests/cage-inner.py} fixtures/tests/cage-inner.py
+            cp ${./tests/cage-host.py} fixtures/tests/cage-host.py
             cp ${./tests/support/test_cage_startup.py} fixtures/tests/support/test_cage_startup.py
             python3 -m unittest discover -s fixtures/tests/support -p test_cage_startup.py -v > "$out" 2>&1
           '';
