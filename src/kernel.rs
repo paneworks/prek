@@ -6,7 +6,7 @@
 //! import, and must be grabbed by their isolated receiver before any injection.
 
 use crate::{
-    input::{EV_SYN, Frame, RawEvent, SYN_REPORT},
+    input::{ABS_MT_SLOT, ABS_MT_TRACKING_ID, EV_SYN, Frame, RawEvent, SYN_REPORT},
     supervisor::{Heartbeat, Report, WorkerIdentity},
     transport::{Descriptor, permitted_property},
 };
@@ -295,6 +295,9 @@ impl Registry {
         descriptor.validate().map_err(invalid)?;
         if descriptor.is_isolated() != isolated {
             return Err(denied("descriptor isolation does not match publication"));
+        }
+        if owner.is_some() {
+            supported_backend(&descriptor)?;
         }
         let descriptor = descriptor
             .bind_publication(crate::protocol::Epoch::random()?)
@@ -655,6 +658,37 @@ fn supported_backend(descriptor: &Descriptor) -> io::Result<()> {
             io::ErrorKind::Unsupported,
             "nonzero fuzz would filter forwarded coordinates twice; compatibility is pending",
         ));
+    }
+    if let Some(slot) = descriptor.axes.get(&ABS_MT_SLOT) {
+        if slot.maximum >= 100 {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "uinput supports at most 100 Type B slots; leave source ungrabbed",
+            ));
+        }
+        let tracking = &descriptor.axes[&ABS_MT_TRACKING_ID];
+        if slot.flat != 0
+            || tracking.minimum != 0
+            || tracking.maximum != i32::from(u16::MAX)
+            || tracking.flat != 0
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "uinput Type B initialization would change slot/tracking-ID metadata",
+            ));
+        }
+    }
+    for (&code, axis) in &descriptor.axes {
+        let span = i64::from(axis.maximum) - i64::from(axis.minimum);
+        if i64::from(axis.flat) > span {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "axis {code} flat {} exceeds its native range {span}",
+                    axis.flat
+                ),
+            ));
+        }
     }
     Ok(())
 }
@@ -1092,6 +1126,7 @@ impl Drop for Virtual {
 #[cfg(test)]
 mod tests {
     mod fuzz;
+    mod geometry;
     mod publication;
     mod repeat;
     use super::*;

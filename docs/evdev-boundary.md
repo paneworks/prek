@@ -92,6 +92,25 @@ LEDs; it does not reconstruct held keys. See the upstream
 [console handler](https://github.com/torvalds/linux/blob/v6.18/drivers/tty/vt/keyboard.c).
 Do not treat an ungrab as consumer-neutral resynchronization.
 
+## Native axis representability
+
+Worker-bound publication and virtual creation both check the native backend
+before publishing metadata or opening `/dev/uinput`, respectively. The general
+input/replay model still accepts up to 256 slots; native uinput accepts at most
+100. Flat values must fit the axis span, calculated with wide signed arithmetic.
+See the upstream [uinput validator](https://github.com/torvalds/linux/blob/v6.18/drivers/input/misc/uinput.c).
+
+Type B initialization also resets slot/tracking flat values to zero and the
+tracking-ID range to `0..65535`; incompatible metadata is refused rather than
+silently changed. Resolution is preserved. See the
+[slot initializer](https://github.com/torvalds/linux/blob/v6.18/drivers/input/input-mt.c).
+The actual processed-metadata/ABI check remains required after creation.
+
+`oslo make test-native-geometry` checks these boundaries using ordinary models
+and private registry files. Its creation-order case deliberately invalidates
+the private publication so a regressed guard fails before any device open.
+This is not native kernel, compositor or routing acceptance.
+
 ## Nonzero fuzz is not an invertible transport
 
 Linux filters absolute events against the previous value, including each Type B
