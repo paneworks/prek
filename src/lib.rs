@@ -53,6 +53,8 @@ pub mod service;
 #[cfg(target_os = "linux")]
 pub mod session;
 #[cfg(target_os = "linux")]
+pub mod subscription_transfer;
+#[cfg(target_os = "linux")]
 pub mod supervisor;
 pub mod transport;
 #[cfg(target_os = "linux")]

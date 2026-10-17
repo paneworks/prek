@@ -1,6 +1,7 @@
 //! Private-channel fixtures model native readiness without opening device nodes.
 mod actual;
 mod composed;
+mod subscriptions;
 use super::*;
 use crate::{
     config::{Action, Delivery, Millis, Scope, Selector, Trigger},
@@ -215,12 +216,24 @@ impl Fixture {
         self.stream.service().unwrap();
     }
     fn subscribe(&mut self, owner: Subscription, revision: u64) {
-        self.send(Command::Subscriptions {
-            update: Subscriptions {
-                revision,
-                seats: vec![owner],
-            },
-        });
+        let mut sender = crate::subscription_transfer::Sender::default();
+        sender
+            .replace(
+                Subscriptions {
+                    revision,
+                    seats: vec![owner],
+                },
+                monotonic().unwrap(),
+            )
+            .unwrap();
+        for _ in 0..2048 {
+            sender.send(&mut self.parent, monotonic().unwrap()).unwrap();
+            self.stream.service().unwrap();
+            if !sender.pending() {
+                return;
+            }
+        }
+        panic!("private subscription transfer did not drain");
     }
     fn drain(&mut self) -> Vec<Message> {
         let mut messages = vec![];

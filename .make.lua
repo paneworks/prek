@@ -399,6 +399,13 @@ make.recipe{ name = "test-context-layouts", desc = "bound native context transfe
                sh.cargo("test", "--locked", "--test", "hyprland", "layouts::")
              end }
 
+make.recipe{ name = "test-subscription-transfer", desc = "bounded private worker updates and revocation barriers",
+             run = function()
+               sh.cargo("test", "--locked", "--lib", "subscription_transfer::tests::")
+               sh.cargo("test", "--locked", "--lib", "private_subscription_")
+               sh.cargo("test", "--locked", "--lib", "service::tests::native_layout")
+             end }
+
 make.recipe{
   name = "test-distribution",
   desc = "unprivileged Nix bundle validation and refusal tests",

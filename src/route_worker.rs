@@ -66,6 +66,7 @@ pub struct Stream {
     grabbed: BTreeSet<Source>,
     releases: BTreeMap<Source, (Fence, crate::supervisor::WorkerIdentity)>,
     assembly: Assembly,
+    subscriptions: crate::subscription_transfer::Assembly,
     messages: Outbox,
     pending: VecDeque<Pending>,
     pending_bytes: usize,
@@ -271,6 +272,7 @@ impl Stream {
             grabbed: BTreeSet::new(),
             releases: BTreeMap::new(),
             assembly: Assembly::default(),
+            subscriptions: crate::subscription_transfer::Assembly::default(),
             messages,
             pending: VecDeque::new(),
             pending_bytes: 0,
@@ -323,6 +325,120 @@ impl Stream {
             }
         });
     }
+    fn restrict_scopes(
+        &mut self,
+        scopes: &[crate::subscription_transfer::Scope],
+        now: Duration,
+    ) -> io::Result<()> {
+        crate::subscription_transfer::validate_scopes(scopes)?;
+        for scope in scopes {
+            if scope.fence.configuration != self.generation
+                || !self.config.policy.allowed_seats.contains(&scope.seat)
+            {
+                return Err(invalid("routing scope differs from configured policy"));
+            }
+            if let Some(seat) = self.seats.get(&scope.seat) {
+                scope.validate_transition(&seat.subscription)?;
+            }
+        }
+        let removed: Vec<_> = self
+            .seats
+            .iter()
+            .filter(|(_, seat)| !scopes.iter().any(|scope| scope.retains(&seat.subscription)))
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in removed {
+            self.teardown(&name, now);
+        }
+        for scope in scopes {
+            if let Some(seat) = self.seats.get_mut(&scope.seat) {
+                seat.subscription
+                    .capabilities
+                    .retain(|capability| scope.capabilities.contains(capability));
+                seat.routing
+                    .restrict_actions(&seat.subscription.capabilities);
+                self.sync_seat(&scope.seat, now)?;
+                self.collect(&scope.seat, now, None)?;
+            }
+        }
+        self.prune_reports(now);
+        Ok(())
+    }
+    fn expire_subscriptions(&mut self, now: Duration) -> io::Result<()> {
+        if let Some(scopes) = self.subscriptions.expire(now) {
+            for scope in scopes {
+                self.teardown(&scope.seat, now);
+                self.queue(Message::Outcome {
+                    report: Report::ContextLost {
+                        subscription: scope.identity(),
+                    },
+                })?;
+            }
+        }
+        Ok(())
+    }
+    fn apply_subscriptions(&mut self, update: Subscriptions, now: Duration) -> io::Result<()> {
+        let identities: Vec<_> = update.seats.iter().map(identity).collect();
+        if let Err(error) = self.subscriptions(update, now) {
+            if error
+                .get_ref()
+                .and_then(|error| error.downcast_ref::<crate::context::Rejection>())
+                .is_some_and(|rejection| {
+                    matches!(
+                        rejection,
+                        crate::context::Rejection::StaleSnapshot
+                            | crate::context::Rejection::StaleGeneration
+                    )
+                })
+            {
+                for subscription in identities {
+                    self.teardown(&subscription.seat, now);
+                    self.queue(Message::Outcome {
+                        report: Report::ContextLost { subscription },
+                    })?;
+                }
+            } else {
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+    fn transfer_subscriptions(&mut self, command: Command, now: Duration) -> io::Result<()> {
+        self.expire_subscriptions(now)?;
+        if let Command::SubscriptionsBegin {
+            revision, scopes, ..
+        } = &command
+            && !scopes.is_empty()
+            && scopes
+                .iter()
+                .all(|scope| scope.fence.configuration < self.generation)
+        {
+            return self.subscriptions.retire(*revision);
+        }
+        let deadline = self.subscriptions.deadline();
+        match self.subscriptions.accept(command, now)? {
+            Some(crate::subscription_transfer::Update::Scope(scopes)) => {
+                self.restrict_scopes(&scopes, now)?
+            }
+            Some(crate::subscription_transfer::Update::Complete(update)) => {
+                let now = monotonic()?;
+                if deadline.is_some_and(|deadline| now >= deadline) {
+                    for subscription in update.seats {
+                        self.teardown(&subscription.seat, now);
+                        self.queue(Message::Outcome {
+                            report: Report::ContextLost {
+                                subscription: subscription.identity(),
+                            },
+                        })?;
+                    }
+                } else {
+                    self.apply_subscriptions(update, now)?;
+                }
+            }
+            None => {}
+        }
+        Ok(())
+    }
     fn subscriptions(&mut self, update: Subscriptions, now: Duration) -> io::Result<()> {
         if update.revision <= self.revision || update.seats.len() > crate::service::MAX_CLIENTS {
             return Err(invalid("invalid routing subscription revision"));
@@ -347,6 +463,7 @@ impl Stream {
                 .context
                 .as_ref()
                 .ok_or_else(|| invalid("routing needs positive live context"))?;
+            context.validate_layouts()?;
             if context.binding.seat != subscription.seat
                 || context.snapshot.generation != subscription.fence.session
                 || subscription.consumer.is_none()
@@ -356,6 +473,14 @@ impl Stream {
             if let Some(seat) = self.seats.get(&subscription.seat)
                 && seat.subscription.fence == subscription.fence
             {
+                crate::subscription_transfer::Scope::from_subscription(subscription)
+                    .validate_transition(&seat.subscription)?;
+                if seat.subscription.context.as_ref().is_some_and(|old| {
+                    context.snapshot.revision < old.snapshot.revision
+                        || (context.snapshot.revision == old.snapshot.revision && context != old)
+                }) {
+                    return Err(invalid("routing context revision regressed or changed"));
+                }
                 let mut authority = seat.routing.authority().clone();
                 if seat
                     .subscription
@@ -366,9 +491,11 @@ impl Stream {
                     authority
                         .update(context.snapshot.clone(), now)
                         .map_err(io::Error::other)?;
+                } else {
+                    authority.tick(now);
                 }
                 if authority.generation() != subscription.fence.session {
-                    return Err(invalid("routing context expired"));
+                    return Err(io::Error::other(crate::context::Rejection::StaleSnapshot));
                 }
                 prepared.insert(subscription.seat.clone(), authority);
             } else {
@@ -741,6 +868,7 @@ impl InputSink for Stream {
     }
     fn service(&mut self) -> io::Result<()> {
         let now = monotonic()?;
+        self.expire_subscriptions(now)?;
         self.expire_admissions(now)?;
         if self
             .assembly
@@ -768,34 +896,28 @@ impl InputSink for Stream {
             let Some(packet) = self.channel.receive::<Command>()? else {
                 break;
             };
+            let now = monotonic()?;
             match packet.message {
                 command @ (Command::Recognition { .. } | Command::Rules { .. }) => {
                     self.enqueue(command, now)?
                 }
                 Command::Subscriptions { update } => {
-                    let identities: Vec<_> = update.seats.iter().map(identity).collect();
-                    if let Err(error) = self.subscriptions(update, now) {
-                        if error
-                            .get_ref()
-                            .and_then(|error| error.downcast_ref::<crate::context::Rejection>())
-                            .is_some_and(|rejection| {
-                                matches!(
-                                    rejection,
-                                    crate::context::Rejection::StaleSnapshot
-                                        | crate::context::Rejection::StaleGeneration
-                                )
-                            })
-                        {
-                            for subscription in identities {
-                                self.teardown(&subscription.seat, now);
-                                self.queue(Message::Outcome {
-                                    report: Report::ContextLost { subscription },
-                                })?;
-                            }
-                        } else {
-                            return Err(error);
-                        }
+                    if !update.seats.is_empty()
+                        && update
+                            .seats
+                            .iter()
+                            .all(|subscription| subscription.fence.configuration < self.generation)
+                    {
+                        self.subscriptions.retire(update.revision)?;
+                        continue;
                     }
+                    self.subscriptions.direct(update.revision)?;
+                    self.apply_subscriptions(update, monotonic()?)?;
+                }
+                command @ (Command::SubscriptionsBegin { .. }
+                | Command::SubscriptionsChunk { .. }
+                | Command::SubscriptionsCommit { .. }) => {
+                    self.transfer_subscriptions(command, monotonic()?)?
                 }
                 Command::Transport {
                     fence,
@@ -841,6 +963,7 @@ impl InputSink for Stream {
                             self.config = config;
                             self.baseline = baseline;
                             self.generation = installation.generation;
+                            self.subscriptions.cancel();
                             Ok(())
                         });
                         self.queue(Message::Configuration {
@@ -856,6 +979,7 @@ impl InputSink for Stream {
     }
     fn flush(&mut self) -> io::Result<()> {
         let now = monotonic()?;
+        self.expire_subscriptions(now)?;
         self.expire_admissions(now)?;
         self.prune_reports(now);
         for (source, output) in &mut self.outputs {
@@ -915,6 +1039,7 @@ impl InputSink for Stream {
                 ])
             })
             .chain(self.assembly.deadline())
+            .chain(self.subscriptions.deadline())
             .chain(self.pending.front().map(|pending| pending.received_at))
             .chain(
                 self.outputs

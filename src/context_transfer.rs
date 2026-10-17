@@ -350,16 +350,6 @@ pub(crate) mod tests {
         let original = native_view(Duration::from_secs(1), 160);
         let encoded = original.encode().unwrap();
         assert!(encoded.len() > protocol::MAX_PACKET);
-        let projected = original.context.as_ref().unwrap().recognition_copy();
-        assert!(projected.layouts.is_none());
-        assert_eq!(
-            projected.snapshot,
-            original.context.as_ref().unwrap().snapshot
-        );
-        assert_eq!(
-            projected.binding,
-            original.context.as_ref().unwrap().binding
-        );
         assert!(original.context.as_ref().unwrap().layouts.is_some());
         let mut assembly = Assembly::new(original.fence, Duration::from_secs(1)).unwrap();
         let mut result = None;

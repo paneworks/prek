@@ -853,7 +853,7 @@ fn run_broker(
     broker.enable_observations();
     let mut refresh = monotonic()?;
     let mut revision = 0u64;
-    let mut subscriptions = None;
+    let mut subscriptions = prek::subscription_transfer::Sender::default();
     let mut control_closed = false;
     let mut transfer = Some(prek::configuration::Transfer::new(text, 1)?);
     let mut installation = Some((
@@ -980,10 +980,13 @@ fn run_broker(
             revision = revision
                 .checked_add(1)
                 .ok_or_else(|| io::Error::other("worker subscription revision exhausted"))?;
-            subscriptions = Some(prek::worker::Subscriptions {
-                revision,
-                seats: broker.subscriptions(now)?,
-            });
+            subscriptions.replace(
+                prek::worker::Subscriptions {
+                    revision,
+                    seats: broker.subscriptions(now)?,
+                },
+                monotonic()?,
+            )?;
             refresh = now + prek::service::CONTEXT_REFRESH;
         }
         if !control_closed
@@ -1012,21 +1015,9 @@ fn run_broker(
         {
             broker.rule_command_sent(&seat, fence, id)?;
         }
-        if !control_closed
-            && (!startup || transfer.is_none())
-            && let Some(update) = subscriptions.as_ref()
-        {
-            match control.send(
-                &prek::configuration::Command::Subscriptions {
-                    update: prek::worker::Subscriptions {
-                        revision: update.revision,
-                        seats: update.seats.clone(),
-                    },
-                },
-                now,
-            ) {
-                Ok(true) => subscriptions = None,
-                Ok(false) => {}
+        if !control_closed && (!startup || transfer.is_none()) && subscriptions.pending() {
+            match subscriptions.send(&mut control, monotonic()?) {
+                Ok(()) => {}
                 Err(error) if worker_link_closed(&error) => control_closed = true,
                 Err(error) => return Err(error),
             }
@@ -1098,7 +1089,7 @@ fn run_broker(
                                 broker.install_lua_source(runtime_definition.as_ref())?;
                             }
                             refresh = monotonic()?;
-                            subscriptions = None;
+                            subscriptions.clear();
                         }
                     }
                     prek::worker::Message::Transport {
@@ -1144,7 +1135,7 @@ fn run_broker(
             fds.push(PollFd::new(
                 control.as_fd(),
                 PollFlags::POLLIN
-                    | if subscriptions.is_some()
+                    | if subscriptions.pending()
                         || transfer.is_some()
                         || broker.rules_wants_write()
                         || broker.recognitions_wants_write()

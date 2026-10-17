@@ -769,28 +769,7 @@ fn reply_size(reply: &Reply) -> io::Result<usize> {
 }
 
 fn subscriptions_fit(seats: &[Subscription]) -> bool {
-    #[derive(serde::Serialize)]
-    struct Update<'a> {
-        revision: u64,
-        seats: &'a [Subscription],
-    }
-    #[derive(serde::Serialize)]
-    #[serde(tag = "kind", rename_all = "snake_case")]
-    enum Command<'a> {
-        Subscriptions { update: Update<'a> },
-    }
-    protocol::encode(&protocol::Packet {
-        version: protocol::VERSION,
-        sequence: u64::MAX,
-        at: Duration::MAX,
-        message: Command::Subscriptions {
-            update: Update {
-                revision: u64::MAX,
-                seats,
-            },
-        },
-    })
-    .is_ok()
+    crate::subscription_transfer::fits(seats)
 }
 
 pub struct Broker {
@@ -1106,11 +1085,7 @@ impl Broker {
             .map(|bound| Subscription {
                 seat: bound.seat.clone(),
                 fence: bound.fence,
-                context: bound
-                    .context
-                    .value
-                    .as_ref()
-                    .map(|context| Box::new(context.recognition_copy())),
+                context: bound.context.value.clone(),
                 capabilities: bound
                     .capabilities
                     .iter()
@@ -1165,7 +1140,7 @@ impl Broker {
                     bound.context.state = State::Unknown;
                     bound.context.usable = false;
                     bound.context.error =
-                        Some("context snapshots exceed private transport packet limit".into());
+                        Some("context snapshots exceed private transfer bounds".into());
                     self.advance_session(&mut connection, now)?;
                 }
                 self.connections.insert(index, connection);
@@ -2794,7 +2769,7 @@ mod tests {
         assert!(feed.value.is_none());
     }
     #[test]
-    fn private_context_packet_limit_rejects_the_whole_snapshot() {
+    fn private_context_header_limit_rejects_the_whole_snapshot() {
         let subscription = Subscription {
             seat: "seat0".into(),
             fence: Fence {
@@ -2834,38 +2809,18 @@ mod tests {
     }
 
     #[test]
-    fn native_layout_inspection_cannot_exhaust_the_private_recognition_packet() {
-        let mut exercised = false;
-        for count in (32..=256).step_by(16) {
-            let view = crate::context_transfer::tests::native_view(Duration::ZERO, count);
-            let mut subscription = Subscription {
-                seat: "seat0".into(),
-                fence: view.fence,
-                context: view.context.clone(),
-                capabilities: BTreeSet::from([Capability::Context]),
-                consumer: None,
-            };
-            if subscriptions_fit(std::slice::from_ref(&subscription)) {
-                continue;
-            }
-            subscription.context = view
-                .context
-                .as_ref()
-                .map(|context| Box::new(context.recognition_copy()));
-            if subscriptions_fit(std::slice::from_ref(&subscription)) {
-                assert!(view.context.as_ref().unwrap().layouts.is_some());
-                assert_eq!(
-                    subscription.context.as_ref().unwrap().snapshot,
-                    view.context.as_ref().unwrap().snapshot
-                );
-                exercised = true;
-                break;
-            }
-        }
-        assert!(
-            exercised,
-            "fixture never exercised optional inspection packet pressure"
-        );
+    fn native_layout_private_transfer_preserves_the_complete_graph() {
+        let view = crate::context_transfer::tests::native_view(Duration::ZERO, 512);
+        let subscription = Subscription {
+            seat: "seat0".into(),
+            fence: view.fence,
+            context: view.context.clone(),
+            capabilities: BTreeSet::from([Capability::Context]),
+            consumer: None,
+        };
+        assert!(serde_json::to_vec(&subscription).unwrap().len() > protocol::MAX_PACKET);
+        assert!(subscriptions_fit(std::slice::from_ref(&subscription)));
+        assert_eq!(subscription.context, view.context);
     }
     fn progress(fence: Fence, ordinal: u64, stage: Stage) -> Reply {
         let phase = match stage {

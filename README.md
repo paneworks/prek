@@ -193,6 +193,9 @@ latest per-frame delta describes only that frame.
 Overflow or an expired observation lease revokes the affected stream while the
 worker continues reading input. Disconnect or registration replacement discards
 queued outcomes and requires fresh input on the next subscription.
+Complete context subscriptions use [bounded chunked transfers](docs/private-subscriptions.md).
+Revocation-only headers cannot grant rights or renew leases; only a validated
+whole body can activate them, using the original geometry capture time.
 
 `sudo prek reload` rereads the broker's configured system file. Clients cannot
 supply a different path or configuration. The parent validates and compiles one
@@ -497,7 +500,7 @@ input permissions or display server. Separate kernel tests in `tests/routing.rs`
 are ignored by default: they require a prepared isolated environment, root-owned
 runtime metadata and this package's udev rule. Every test event node is created
 by that harness; it never opens or grabs a production event node.
-`tests/supervisor.rs` runs eleven process gates for healthy/stalled workers,
+`tests/supervisor.rs` runs fourteen process gates for healthy/stalled workers,
 termination escalation, health-channel failure, worker identity and parent death.
 It uses a separate executable so fixtures run on their process's original thread.
 `tests/recovery.rs` and the other privileged kernel fixtures remain manual gates

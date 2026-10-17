@@ -29,6 +29,20 @@ pub enum Command {
     Subscriptions {
         update: Subscriptions,
     },
+    SubscriptionsBegin {
+        revision: u64,
+        bytes: usize,
+        scopes: Vec<crate::subscription_transfer::Scope>,
+    },
+    SubscriptionsChunk {
+        revision: u64,
+        offset: usize,
+        #[serde(with = "chunk_bytes")]
+        data: Vec<u8>,
+    },
+    SubscriptionsCommit {
+        revision: u64,
+    },
     Transport {
         fence: crate::protocol::Fence,
         source: crate::input::Source,

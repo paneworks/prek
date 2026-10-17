@@ -95,10 +95,13 @@ reads get 50 ms inside the existing total 200 ms budget; failure drops only the
 inspection graph unless lock inhibition invalidates all desktop context. The
 chunked user-context path exposes fresh copy-only `context.layouts()` data with
 lossless identities; see [the Lua reference](lua-api.md#native-layout-inspection).
-Graphs are deliberately not private-worker preclaim proof: their new inspection
-field is omitted from the private recognition projection, while its complete
-core geometry stays unchanged. Native action proof/transport remains a separate
-required integration gate before any layout-dependent ownership is enabled.
+The private worker receives the same complete graph and core geometry through
+bounded chunked subscription updates, not a truncated recognition projection.
+A compact scope header can revoke old registrations or capabilities immediately;
+only a complete validated body can activate or renew them. Original capture
+times remain unchanged. Graph delivery is **not** preclaim proof: camera bounds,
+rendered scope and native action authority remain required integration gates
+before any layout-dependent ownership is enabled.
 
 `oslo make test-hyprland` also runs closed-query Luna/JSON and socket models.
 `oslo make test-cage-lua-wayland-fix` exercises the actual read-only query on

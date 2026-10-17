@@ -15,6 +15,8 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+#[path = "supervisor/subscriptions.rs"]
+mod subscriptions;
 
 fn command(case: &str) -> Command {
     let executable = std::env::current_exe().unwrap();
@@ -41,6 +43,10 @@ fn worker_fixture() {
     }
     if case == "learn-fixture" {
         learn_fixture();
+        return;
+    }
+    if case == "subscriptions" {
+        subscriptions::child();
         return;
     }
     if case == "signal-supervisor" {
@@ -632,6 +638,10 @@ fn main() {
     // A separate executable gives fixtures a genuine exec-thread lifecycle;
     // no helper is installed with the application or opens any input device.
     let cases: &[(&str, fn())] = &[
+        (
+            "large private subscriptions preserve child health",
+            subscriptions::parent,
+        ),
         (
             "inherited observation sender rejected",
             inherited_observation_writer_cannot_impersonate_the_worker,

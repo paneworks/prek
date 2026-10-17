@@ -27,6 +27,7 @@ mod custom;
 
 const MAX_DISPATCHES: usize = 128;
 struct Route {
+    attached_at: Duration,
     router: Router,
     authorization: u64,
     ticket: u64,
@@ -193,6 +194,10 @@ impl Routing {
         self.capabilities = capabilities;
         self.capability_expires = at + crate::context::PROVIDER_LEASE;
     }
+    pub(crate) fn restrict_actions(&mut self, capabilities: &BTreeSet<Capability>) {
+        self.capabilities
+            .retain(|capability| capabilities.contains(capability));
+    }
     pub fn attach(
         &mut self,
         device: Device,
@@ -271,6 +276,7 @@ impl Routing {
         self.routes.insert(
             device.source,
             Route {
+                attached_at: at,
                 router,
                 authorization,
                 ticket: 0,
@@ -735,6 +741,9 @@ impl Routing {
     ) -> io::Result<()> {
         let sources: Vec<_> = self.routes.keys().cloned().collect();
         for source in sources {
+            if at < self.routes[&source].attached_at {
+                continue;
+            }
             if let Err(error) = self.routes.get_mut(&source).unwrap().router.advance(at) {
                 self.recover(&source);
                 return Err(fault(error));
@@ -1263,6 +1272,49 @@ mod tests {
             origin: Point { x: 0.0, y: 0.0 },
             transform: Transform::Normal,
         }
+    }
+    #[test]
+    fn private_subscription_action_restriction_preserves_generation_and_expiry() {
+        let mut routing = Routing::new(config()).unwrap();
+        routing.actions_available(
+            7,
+            BTreeSet::from([Capability::HyprlandActions, Capability::PowerActions]),
+            ms(10),
+        );
+        let expires = routing.capability_expires;
+        routing.restrict_actions(&BTreeSet::from([
+            Capability::PowerActions,
+            Capability::Commands,
+        ]));
+        assert_eq!(
+            routing.capabilities,
+            BTreeSet::from([Capability::PowerActions])
+        );
+        assert_eq!(routing.capability_generation, 7);
+        assert_eq!(routing.capability_expires, expires);
+        routing.restrict_actions(&BTreeSet::from([
+            Capability::HyprlandActions,
+            Capability::PowerActions,
+        ]));
+        assert_eq!(
+            routing.capabilities,
+            BTreeSet::from([Capability::PowerActions])
+        );
+        assert_eq!(routing.capability_expires, expires);
+    }
+    #[test]
+    fn private_subscription_readiness_before_input_does_not_advance_attach_watermark() {
+        let mut routing = Routing::new(config()).unwrap();
+        routing
+            .attach(device(), &ready(&device()), None, ms(10))
+            .unwrap();
+        assert_eq!(routing.engine.input_at(), ms(0));
+        routing.recognition_ready(false, ms(11)).unwrap();
+        assert_eq!(routing.engine.input_at(), ms(0));
+        assert_eq!(routing.routes[&device().source].attached_at, ms(10));
+        assert!(routing.recoveries.is_empty());
+        routing.push(Record::Tick { at: ms(12) }).unwrap();
+        assert_eq!(routing.engine.input_at(), ms(12));
     }
     fn ready(device: &Device) -> Ready {
         let descriptor = Descriptor::mirror(

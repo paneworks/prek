@@ -54,13 +54,6 @@ impl ProvidedContext {
         }
         Ok(())
     }
-    pub(crate) fn recognition_copy(&self) -> Self {
-        Self {
-            binding: self.binding.clone(),
-            snapshot: self.snapshot.clone(),
-            layouts: None,
-        }
-    }
 }
 impl Subscription {
     pub(crate) fn same_registration(&self, other: &Self) -> bool {
@@ -323,6 +316,77 @@ impl Registry {
             reports: VecDeque::new(),
             bytes: 0,
         })
+    }
+    fn restrict_scopes(
+        &mut self,
+        scopes: &[crate::subscription_transfer::Scope],
+        now: Duration,
+    ) -> io::Result<()> {
+        crate::subscription_transfer::validate_scopes(scopes)?;
+        for scope in scopes {
+            if scope.fence.configuration != self.baseline.generation()
+                || !self.config.policy.allowed_seats.contains(&scope.seat)
+            {
+                return Err(protocol::invalid(
+                    "subscription scope differs from configured policy",
+                ));
+            }
+            if let Some(observer) = self.observers.get(&scope.seat) {
+                scope.validate_transition(&observer.subscription)?;
+            }
+        }
+        let removed: Vec<_> = self
+            .observers
+            .values()
+            .filter(|observer| {
+                !scopes
+                    .iter()
+                    .any(|scope| scope.retains(&observer.subscription))
+            })
+            .map(|observer| observer.subscription.identity())
+            .collect();
+        for subscription in removed {
+            self.remove(&subscription);
+        }
+        let mut reports = Vec::new();
+        for scope in scopes {
+            if let Some(observer) = self.observers.get_mut(&scope.seat) {
+                observer
+                    .subscription
+                    .capabilities
+                    .retain(|capability| scope.capabilities.contains(capability));
+                observer.input_enabled = permits_input(&self.config, &observer.subscription, now);
+                reports.extend(observer.sync_recognition(&self.config, now)?);
+                reports.extend(observer.take_recognition_reports(None)?);
+            }
+        }
+        self.reports.retain(|(report, _)| {
+            self.observers
+                .get(&report.subscription().seat)
+                .is_some_and(|observer| {
+                    observer
+                        .subscription
+                        .same_registration(report.subscription())
+                        && (!matches!(report, Report::Input { .. })
+                            || permits_input(&self.config, &observer.subscription, now))
+                        && (!matches!(
+                            report,
+                            Report::Recognition { .. } | Report::RecognizerMetadata { .. }
+                        ) || crate::recognition::permitted_subscription(
+                            &self.config,
+                            &observer.subscription.capabilities,
+                            observer.subscription.context.as_deref(),
+                            &observer.subscription.seat,
+                            observer.subscription.fence.session,
+                            now,
+                        ))
+                })
+        });
+        self.bytes = self.reports.iter().map(|(_, bytes)| bytes).sum();
+        for report in reports {
+            self.queue(report, now)?;
+        }
+        Ok(())
     }
     fn update(&mut self, update: Subscriptions, now: Duration) -> io::Result<()> {
         if !update.seats.is_empty()
@@ -1044,6 +1108,7 @@ pub struct Stream {
     channel: Channel,
     registry: Registry,
     assembly: Assembly,
+    subscriptions: crate::subscription_transfer::Assembly,
     control: VecDeque<Message>,
     recognitions: VecDeque<PendingRecognition>,
 }
@@ -1059,6 +1124,7 @@ impl Stream {
             channel,
             registry: Registry::new(config)?,
             assembly: Assembly::default(),
+            subscriptions: crate::subscription_transfer::Assembly::default(),
             control: VecDeque::from([Message::Configuration {
                 generation: 1,
                 error: None,
@@ -1108,13 +1174,83 @@ impl Stream {
         }
         Ok(())
     }
+    fn expire_subscriptions(&mut self, now: Duration) -> io::Result<()> {
+        if let Some(scopes) = self.subscriptions.expire(now) {
+            for scope in scopes {
+                self.registry.context_lost(scope.identity(), now)?;
+            }
+        }
+        Ok(())
+    }
+    fn apply_subscriptions(&mut self, update: Subscriptions, now: Duration) -> io::Result<()> {
+        let contexts: Vec<_> = update
+            .seats
+            .iter()
+            .filter(|subscription| subscription.context.is_some())
+            .map(Subscription::identity)
+            .collect();
+        if let Err(error) = self.registry.update(update, now) {
+            if error
+                .get_ref()
+                .and_then(|error| error.downcast_ref::<crate::context::Rejection>())
+                .is_some_and(|rejection| {
+                    matches!(
+                        rejection,
+                        crate::context::Rejection::StaleSnapshot
+                            | crate::context::Rejection::StaleGeneration
+                    )
+                })
+            {
+                for subscription in contexts {
+                    self.registry.context_lost(subscription, now)?;
+                }
+            } else {
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+    fn transfer_subscriptions(&mut self, command: Command, now: Duration) -> io::Result<()> {
+        self.expire_subscriptions(now)?;
+        if let Command::SubscriptionsBegin {
+            revision, scopes, ..
+        } = &command
+            && !scopes.is_empty()
+            && scopes
+                .iter()
+                .all(|scope| scope.fence.configuration < self.generation())
+        {
+            return self.subscriptions.retire(*revision);
+        }
+        let deadline = self.subscriptions.deadline();
+        match self.subscriptions.accept(command, now)? {
+            Some(crate::subscription_transfer::Update::Scope(scopes)) => {
+                self.registry.restrict_scopes(&scopes, now)?
+            }
+            Some(crate::subscription_transfer::Update::Complete(update)) => {
+                let now = crate::ipc::monotonic()?;
+                if deadline.is_some_and(|deadline| now >= deadline) {
+                    for subscription in update.seats {
+                        self.registry.context_lost(subscription.identity(), now)?;
+                    }
+                } else {
+                    self.apply_subscriptions(update, now)?;
+                }
+            }
+            None => {}
+        }
+        Ok(())
+    }
     pub fn service(&mut self) -> io::Result<()> {
         let now = crate::ipc::monotonic()?;
+        self.expire_subscriptions(now)?;
         self.registry.expire(now)?;
         for _ in 0..8 {
             let Some(packet) = self.channel.receive::<Command>()? else {
                 break;
             };
+            let now = crate::ipc::monotonic()?;
+            self.registry.expire(now)?;
             match packet.message {
                 Command::Recognition {
                     seat,
@@ -1177,31 +1313,21 @@ impl Stream {
                     });
                 }
                 Command::Subscriptions { update } => {
-                    let contexts: Vec<_> = update
-                        .seats
-                        .iter()
-                        .filter(|subscription| subscription.context.is_some())
-                        .map(Subscription::identity)
-                        .collect();
-                    if let Err(error) = self.registry.update(update, now) {
-                        if error
-                            .get_ref()
-                            .and_then(|error| error.downcast_ref::<crate::context::Rejection>())
-                            .is_some_and(|rejection| {
-                                matches!(
-                                    rejection,
-                                    crate::context::Rejection::StaleSnapshot
-                                        | crate::context::Rejection::StaleGeneration
-                                )
-                            })
-                        {
-                            for subscription in contexts {
-                                self.registry.context_lost(subscription, now)?;
-                            }
-                        } else {
-                            return Err(error);
-                        }
+                    if !update.seats.is_empty()
+                        && update.seats.iter().all(|subscription| {
+                            subscription.fence.configuration < self.generation()
+                        })
+                    {
+                        self.subscriptions.retire(update.revision)?;
+                        continue;
                     }
+                    self.subscriptions.direct(update.revision)?;
+                    self.apply_subscriptions(update, crate::ipc::monotonic()?)?;
+                }
+                command @ (Command::SubscriptionsBegin { .. }
+                | Command::SubscriptionsChunk { .. }
+                | Command::SubscriptionsCommit { .. }) => {
+                    self.transfer_subscriptions(command, crate::ipc::monotonic()?)?
                 }
                 command => {
                     if let Some(installation) = self.assembly.accept(command, now)? {
@@ -1219,6 +1345,9 @@ impl Stream {
                         let result = installation.config.and_then(|config| {
                             self.registry.install(config, installation.generation, now)
                         });
+                        if result.is_ok() {
+                            self.subscriptions.cancel();
+                        }
                         self.control.push_back(Message::Configuration {
                             generation: installation.generation,
                             error: result.err().map(|error| {
@@ -1234,6 +1363,9 @@ impl Stream {
                 }
             }
         }
+        let now = crate::ipc::monotonic()?;
+        self.expire_subscriptions(now)?;
+        self.registry.expire(now)?;
         if self
             .assembly
             .deadline()
@@ -1245,6 +1377,7 @@ impl Stream {
     }
     pub fn flush(&mut self) -> io::Result<()> {
         let now = crate::ipc::monotonic()?;
+        self.expire_subscriptions(now)?;
         self.registry.expire(now)?;
         self.registry.reports.retain(|(report, _)| !matches!(report, Report::Recognition { ticket, .. } if now >= ticket.deadline));
         self.registry.bytes = self.registry.reports.iter().map(|(_, bytes)| bytes).sum();
@@ -1279,6 +1412,7 @@ impl Stream {
             .min()
             .into_iter()
             .chain(self.assembly.deadline())
+            .chain(self.subscriptions.deadline())
             .min()
     }
     pub fn config(&self) -> &Config {
@@ -1310,6 +1444,7 @@ mod tests {
         rules::Evidence,
     };
     mod recognizers;
+    mod subscriptions;
     fn ms(value: u64) -> Duration {
         Duration::from_millis(value)
     }
