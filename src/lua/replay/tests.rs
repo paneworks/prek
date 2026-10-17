@@ -91,6 +91,86 @@ fn lua_generic_replay_matches_cli_engine_and_keeps_unsigned_identities() {
     Definition::compile(&script, "replay.lua").unwrap();
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn custom_replay_uses_fresh_approved_closures_instead_of_the_live_callback_state() {
+    use crate::{
+        context::State,
+        replay::configured::tests::{context, device, frame},
+    };
+    let records = [
+        Record::Header { version: 1 },
+        context("seat0", 1, 1, 0, State::Desktop),
+        device("seat0", u64::MAX),
+        frame("seat0", u64::MAX, 1, 10, 1),
+    ];
+    let mut pushes = String::new();
+    for record in records {
+        pushes.push_str(&format!(
+            "r:push([==[{}]==])\n",
+            serde_json::to_string(&record).unwrap()
+        ));
+    }
+    let source = format!(
+        r#"
+local p=require('prek');local calls=0;local config
+local trigger=p.recognizers.define('offline',{{selectors={{'keys'}},inputs={{'key'}},reply_within='100ms'}},function(ticket)
+ if ticket.cause=='cancel' then assert(ticket.reason=='completed');return nil end
+ calls=calls+1
+ assert(not pcall(p.replay.new,config))
+ return {{phase='discrete',data={{calls=calls}}}}
+end)
+config=p.config.new{{policy={{allow_input_events=true,allowed_devices={{'keys'}}}},devices={{keys={{keys={{'KEY_A'}}}}}},
+ rules={{{{id='offline',devices={{'keys'}},contexts={{'desktop'}},scope='everywhere',delivery='observe',trigger=trigger,action=p.actions.event{{name='offline'}}}}}}}}
+assert(not pcall(p.replay.new,config))
+p.events.on('ready',function()
+ do
+  local r=p.replay.new(config)
+  {pushes}
+  local result=r:finish()
+  assert(result.mode=='rules' and #result.outcomes==1)
+  assert(result.outcomes[1].evidence.data.calls==1)
+  assert(result.outcomes[1].source.device=='18446744073709551615')
+ end
+ assert(calls==0)
+ p.log.info('isolated-replay-ok')
+end)
+return config
+"#
+    );
+    let definition = Definition::compile(&source, "isolated-replay.lua").unwrap();
+    for loaded in [false, true] {
+        let mut runtime = if loaded {
+            Runtime::load(&source, "isolated-replay.lua").unwrap()
+        } else {
+            definition.instantiate().unwrap()
+        };
+        for _ in 0..2 {
+            let logs = runtime
+                .dispatch(EventKind::Ready, &serde_json::json!({}))
+                .unwrap();
+            assert!(matches!(&logs[..],[log]if log.message=="isolated-replay-ok"));
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn shipped_custom_replay_example_executes_its_checked_fixture() {
+    let definition = Definition::compile(
+        include_str!("../../../examples/lua/custom_replay.lua"),
+        "custom_replay.lua",
+    )
+    .unwrap();
+    let mut runtime = definition.instantiate().unwrap();
+    let logs = runtime
+        .dispatch(EventKind::Ready, &serde_json::json!({}))
+        .unwrap();
+    assert!(
+        matches!(&logs[..],[log]if log.message=="custom-replay-checked"&&log.fields["outcomes"]==1)
+    );
+}
+
 #[test]
 fn generic_expectations_are_checked_and_mismatches_cannot_be_reused() {
     let records = records();

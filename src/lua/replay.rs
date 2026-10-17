@@ -19,24 +19,32 @@ const MAX_OUTCOMES: usize = 4096;
 enum Engine {
     Observations(Box<crate::replay::Replay>),
     Rules(Box<crate::rules::Engine>),
+    #[cfg(target_os = "linux")]
+    Configured(Box<crate::replay::configured::Configured>),
 }
 impl Engine {
     fn push(&mut self, record: Record) -> io::Result<()> {
         match self {
             Self::Observations(replay) => replay.push(record),
             Self::Rules(engine) => engine.push(record),
+            #[cfg(target_os = "linux")]
+            Self::Configured(engine) => engine.push(record),
         }
     }
     fn check(&self) -> io::Result<()> {
         match self {
             Self::Observations(replay) => replay.check(),
             Self::Rules(engine) => engine.check(),
+            #[cfg(target_os = "linux")]
+            Self::Configured(engine) => engine.check(),
         }
     }
     fn count(&self) -> usize {
         match self {
             Self::Observations(replay) => replay.observations().len(),
             Self::Rules(engine) => engine.events().len(),
+            #[cfg(target_os = "linux")]
+            Self::Configured(engine) => engine.events().len(),
         }
     }
     fn encoded(&self, from: usize, limit: usize) -> io::Result<String> {
@@ -45,8 +53,17 @@ impl Engine {
                 runtime::bounded_json(&replay.observations()[from..], limit)
             }
             Self::Rules(engine) => runtime::bounded_json(&engine.events()[from..], limit),
+            #[cfg(target_os = "linux")]
+            Self::Configured(engine) => runtime::bounded_json(&engine.events()[from..], limit),
         }?;
         String::from_utf8(bytes).map_err(io::Error::other)
+    }
+    fn finish(&mut self) -> io::Result<()> {
+        #[cfg(target_os = "linux")]
+        if let Self::Configured(engine) = self {
+            engine.finish(false)?;
+        }
+        Ok(())
     }
 }
 
@@ -65,6 +82,20 @@ struct Session {
     outcomes: usize,
 }
 impl Session {
+    #[cfg(target_os = "linux")]
+    fn approved(
+        config: Config,
+        source: Option<std::sync::Arc<Definition>>,
+        budget: crate::replay::configured::Budget,
+    ) -> io::Result<Self> {
+        let mut session = Self::new(None)?;
+        runtime::bounded_json(&config, MAX_CONFIG_BYTES)?;
+        session.engine = Some(Engine::Configured(Box::new(
+            crate::replay::configured::Configured::with_budget(config, source, budget)?,
+        )));
+        session.mode = "rules";
+        Ok(session)
+    }
     fn new(config: Option<Config>) -> io::Result<Self> {
         let (mode, engine) = match config {
             Some(config) => {
@@ -148,6 +179,7 @@ impl Session {
             if check {
                 engine.check()?;
             }
+            engine.finish()?;
             engine.encoded(0, MAX_BYTES)
         })();
         let json = self.fail(result)?;
@@ -230,6 +262,7 @@ fn configuration_budget<'gc>(ctx: luna::Context<'gc>, value: Value<'gc>) -> io::
 pub(super) fn register<'gc>(
     ctx: &luna::Context<'gc>,
     api: Table<'gc>,
+    host: Rc<RefCell<runtime::Host>>,
 ) -> Result<(), luna::Error<'gc>> {
     let sessions: Rc<RefCell<Vec<Weak<RefCell<Session>>>>> = Rc::default();
     api.set(
@@ -253,7 +286,20 @@ pub(super) fn register<'gc>(
             if active.len() >= MAX_HANDLES {
                 return Err(io::Error::other("too many open offline replays").into());
             }
-            let session = Rc::new(RefCell::new(Session::new(config)?));
+            #[cfg(target_os = "linux")]
+            let session = match config {
+                Some(config) => {
+                    let host = host.borrow();
+                    if !config.recognizer_definitions().is_empty() && (host.configuring || host.offline) {
+                        return Err(io::Error::other("custom replay requires an approved runtime source and cannot nest inside replay").into());
+                    }
+                    Session::approved(config, host.source.clone(), host.replay_budget.clone())?
+                }
+                None => Session::new(None)?,
+            };
+            #[cfg(not(target_os = "linux"))]
+            let session = { let _ = &host; Session::new(config)? };
+            let session = Rc::new(RefCell::new(session));
             active.push(Rc::downgrade(&session));
             let handle = Table::new(&ctx);
             for operation in ["push", "finish", "status", "close"] {

@@ -424,6 +424,17 @@
     "unavailable": "nil without a fresh owning desktop; empty array when no fresh native frame is available"
   },
   "offline_replay": {
+    "custom": {
+      "phase": "runtime",
+      "source": "fresh approved source VM per recorded seat; no live callback state",
+      "clock": "recorded time only; real execution budgets remain",
+      "maximum_shared_vms": 4,
+      "maximum_context_seats": 16,
+      "work_budget_ms": 250,
+      "nested_custom_replay": false,
+      "live_authority": false
+    },
+    "recorded_context": "configured replay only: record=context with at, binding and snapshot; generic and live engines reject it",
     "configuration": "validated copy; no live rule or policy change",
     "effects": false,
     "expectations": "finish(true) requires matching final expected or expected_rules; unchecked replay never claims a passing test",
@@ -723,13 +734,13 @@
       "signature": "actions.define(name, {requires = capabilities}, callback) -> Action"
     },
     {
-      "description": "Create an offline native observation replay, or a configured rule replay with a validated copied configuration; no device, desktop or action access.",
+      "description": "Create an offline observation or configured replay; custom callbacks require the approved runtime source and fresh isolated closures, never live effects.",
       "name": "replay.new",
       "phase": "configuration_and_runtime",
       "signature": "replay.new(config = nil) -> Replay"
     },
     {
-      "description": "Apply one bounded native recording JSON object; malformed, stale or excessive input retires the replay.",
+      "description": "Apply one bounded recording JSON object; configured context is simulation data only, and malformed, stale or excessive input retires the replay.",
       "name": "Replay.push",
       "receiver": "Replay",
       "signature": "replay:push(record_json) -> nil"

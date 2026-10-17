@@ -20,6 +20,9 @@ pub const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_RECORDS: usize = 100_000;
 pub const MAX_RECORDING_BYTES: usize = 64 * 1024 * 1024;
 
+#[cfg(target_os = "linux")]
+pub mod configured;
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "record", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Record {
@@ -44,6 +47,11 @@ pub enum Record {
     },
     Tick {
         at: Duration,
+    },
+    Context {
+        at: Duration,
+        binding: crate::context::Binding,
+        snapshot: Box<crate::context::Snapshot>,
     },
     Mapping {
         source: Source,
@@ -146,6 +154,11 @@ impl Replay {
             return Err(invalid("expected outcomes must be the final record"));
         }
         match record {
+            Record::Context { .. } => {
+                return Err(invalid(
+                    "recorded context requires configured offline replay",
+                ));
+            }
             Record::Absolute { source, state } => {
                 self.validate_source(&source)?;
                 let (device, normalizer) = self.devices.get_mut(&source.device).unwrap();

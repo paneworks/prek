@@ -391,6 +391,45 @@ impl Default for Authority {
     }
 }
 impl Authority {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn recorded(
+        binding: Binding,
+        snapshot: Snapshot,
+        at: Duration,
+    ) -> Result<Self, Rejection> {
+        snapshot.validate()?;
+        if snapshot.generation == 0
+            || snapshot.generation == u64::MAX
+            || snapshot.revision == 0
+            || snapshot.captured_at > at
+            || at - snapshot.captured_at > SNAPSHOT_MAX_AGE
+        {
+            return Err(Rejection::StaleSnapshot);
+        }
+        if binding.uid == 0
+            || [&binding.seat, &binding.session]
+                .iter()
+                .any(|name| name.len() > 1024 || name.chars().any(char::is_control))
+            || snapshot.state == State::Greeter && binding.kind != SessionKind::Greeter
+            || snapshot.state == State::Desktop && binding.kind != SessionKind::User
+        {
+            return Err(Rejection::Unbound);
+        }
+        let mut authority = Self::default();
+        authority.adopt(binding.clone(), snapshot.generation)?;
+        match snapshot.state {
+            State::Locked => authority.barrier = LockBarrier::Locked,
+            State::Locking => authority.barrier = LockBarrier::Locking,
+            State::Inactive | State::Unknown => authority.active = false,
+            State::Console => authority.console = Some(binding.seat),
+            _ => {}
+        }
+        authority.revision = snapshot.revision;
+        authority.acknowledged_at = Some(at);
+        authority.lease = Some(at.saturating_add(PROVIDER_LEASE));
+        authority.snapshot = Some(snapshot);
+        Ok(authority)
+    }
     pub fn generation(&self) -> u64 {
         self.generation
     }

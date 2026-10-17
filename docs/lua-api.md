@@ -1282,10 +1282,25 @@ for configured rule outcomes. The configuration is copied; subsequent Lua edits
 do not change the replay. Both configuration evaluation and runtime callbacks or
 tasks can use this API without live context or effect capabilities.
 
+Custom callbacks require runtime evaluation and the owning approved source
+snapshot. Each recorded seat gets fresh isolated source closures; replay never
+reuses or changes live callback state. Configuration-time custom replay and
+custom replay inside an offline callback are rejected. Native proposals, phase
+ordering, source incarnations, frozen targets, timeouts and cancellations use
+the ordinary Rust coordinator. Public nested-custom source admission remains
+closed; private native plan tests are not public composition acceptance.
+
 - `replay:push(record_json)` accepts one native recording JSON object, beginning
   with `{"record":"header","version":1}`. Use the existing recording format for
   device registration, frames, mapping, reconciliation, removal, ticks and final
-  expectations. JSON preserves full unsigned identities on input. Push has no
+  expectations. Configured replay additionally accepts
+  `{"record":"context","at":duration,"binding":Binding,"snapshot":Snapshot}`.
+  It must follow the header. Context generation/revision, session kind, bounds,
+  capture age and monotonic timestamps are validated. Session generation must
+  be below `u64::MAX`; timestamps reserve one hour below the signed 64-bit
+  nanosecond ceiling for native deadlines. Context is **simulation data**,
+  not authenticated provider or lock evidence. Generic replay and live engines
+  reject context records. JSON preserves full unsigned identities on input. Push has no
   file access, live input injection, context setter or action dispatch.
 - `replay:finish(check = false) -> ReplayResult` returns `{mode,records,bytes,
   checked,outcomes,json}` and releases the engine. `mode` is `observations` or
@@ -1313,7 +1328,31 @@ also follows normal VM retirement. Finish, close, errors and VM replacement
 release owned replay state. No commands, Morf controls or power actions contained
 in replay outcomes are executed.
 
+Up to four custom callback VMs are shared across all replay handles in one
+owning VM; at most 16 recorded context seats are retained. VMs are created only
+when a ticket reaches a callback and released on finish/close/failure. Each push
+and finish has a 250 ms aggregate host-work budget in addition to normal source
+and callback instruction/memory/wall limits. Long replay work still needs task
+wakes; this API does not make callback work asynchronous.
+
+Context, normalized input and wakes advance only on recording timestamps, not
+elapsed host time. Refresh context before its 250 ms lifetime; after revocation,
+a later context needs a new session generation. Session replacement reconciles
+held input before recognition resumes. Cleanup runs for delivered callbacks on
+source/context loss, completion and checked/unchecked finish. EOF cleanup does
+not add a recorded recognition outcome. Ordinary input subscribers, source timers,
+tasks and action handlers are not dispatched; callback logs are discarded.
+
+`prek replay PATH --config config.lua --check --json` uses this same driver and
+the compiled original source. Root callback execution is refused. A custom TOML
+model cannot recreate its closures; provide the original Lua source. CLI limits
+remain the recording format's larger file bounds. This is pure configured
+recognition, not proof of raw routing ownership, delivered input, rendered UI
+or physical behavior.
+
 See [offline_replay.lua](../examples/lua/offline_replay.lua) for both modes.
+The [custom replay example](../examples/lua/custom_replay.lua) runs a checked
+recorded-context fixture with a fresh source-bound callback.
 
 ## Limits, libraries and errors
 

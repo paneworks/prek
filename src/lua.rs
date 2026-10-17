@@ -43,6 +43,7 @@ pub use hooks::RuleHook;
 pub use modules::{Module, Sources};
 pub use recognizers::{Binding as RecognizerBinding, RecognitionResult};
 pub use rule_api::{RuleProposal, RuleReceipt};
+pub(crate) use runtime::bounded_json as bounded_replay_json;
 pub use runtime::{Definition, EventKind, LogRecord, MAX_SNAPSHOT_BYTES, Registration, Runtime};
 pub use scheduler::TimerRegistration;
 #[cfg(target_os = "linux")]
@@ -78,8 +79,8 @@ pub fn api() -> serde_json::Value {
         serde_json::json!({"name":"Task.cancel", "receiver":"Task", "signature":"task:cancel() -> nil", "description":"Cancel future resumes and release retained coroutine state at the next scheduler boundary."}),
         serde_json::json!({"name":"Task.status", "receiver":"Task", "signature":"task:status() -> TaskState", "description":"Inspect pending, running, sleeping, completed or cancelled state in the owning generation."}),
         serde_json::json!({"name":"actions.define", "signature":"actions.define(name, {requires = capabilities}, callback) -> Action", "description":"Register an approved generation-scoped named handler; resolve a bounded typed effect plan in the unprivileged session after a broker execution grant."}),
-        serde_json::json!({"name":"replay.new", "signature":"replay.new(config = nil) -> Replay", "phase":"configuration_and_runtime", "description":"Create an offline native observation replay, or a configured rule replay with a validated copied configuration; no device, desktop or action access."}),
-        serde_json::json!({"name":"Replay.push", "receiver":"Replay", "signature":"replay:push(record_json) -> nil", "description":"Apply one bounded native recording JSON object; malformed, stale or excessive input retires the replay."}),
+        serde_json::json!({"name":"replay.new", "signature":"replay.new(config = nil) -> Replay", "phase":"configuration_and_runtime", "description":"Create an offline observation or configured replay; custom callbacks require the approved runtime source and fresh isolated closures, never live effects."}),
+        serde_json::json!({"name":"Replay.push", "receiver":"Replay", "signature":"replay:push(record_json) -> nil", "description":"Apply one bounded recording JSON object; configured context is simulation data only, and malformed, stale or excessive input retires the replay."}),
         serde_json::json!({"name":"Replay.finish", "receiver":"Replay", "signature":"replay:finish(check = false) -> ReplayResult", "description":"Finish once, optionally require exact native expectations, and return copied outcomes plus lossless CLI-compatible JSON; release replay resources."}),
         serde_json::json!({"name":"Replay.status", "receiver":"Replay", "signature":"replay:status() -> ReplayStatus", "description":"Copy this generation-local replay's state, mode, record/byte counts and outcome count."}),
         serde_json::json!({"name":"Replay.close", "receiver":"Replay", "signature":"replay:close() -> nil", "description":"Idempotently discard this offline replay and release its open-handle capacity."}),
@@ -415,6 +416,8 @@ pub fn api() -> serde_json::Value {
         "phases":["configuration","runtime"],"effects":false,"io":false,
         "modes":["observations","rules"],"input":"one native versioned recording JSON object per push",
         "configuration":"validated copy; no live rule or policy change",
+        "custom":{"phase":"runtime","source":"fresh approved source VM per recorded seat; no live callback state","clock":"recorded time only; real execution budgets remain","maximum_shared_vms":4,"maximum_context_seats":16,"work_budget_ms":250,"nested_custom_replay":false,"live_authority":false},
+        "recorded_context":"configured replay only: record=context with at, binding and snapshot; generic and live engines reject it",
         "expectations":"finish(true) requires matching final expected or expected_rules; unchecked replay never claims a passing test",
         "identities":"outcome tables use canonical decimal strings for opaque identities and unsigned values above Lua's signed range; result.json preserves exact native CLI JSON",
         "lifetime":"owning VM generation; close/finish/error releases engine; no external handles",
@@ -854,7 +857,7 @@ fn instantiate(
             let module_loaders = Table::new(&ctx);
             ctx.globals().set(ctx, "__prek_modules", module_loaders)?;
             let actions: Table = module.get(ctx, "actions")?;
-            replay::register(&ctx, module.get(ctx, "replay")?)?;
+            replay::register(&ctx, module.get(ctx, "replay")?, host.clone())?;
             rule_api::register(&ctx, module.get(ctx, "rules")?, host.clone())?;
             rule_api::register_inspection(&ctx, module, host.clone())?;
             let rules: Table = module.get(ctx, "rules")?;

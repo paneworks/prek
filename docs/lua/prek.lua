@@ -850,12 +850,13 @@ function StatusAPI.current() error("Prek editor definition") end
 ---@field json string Exact native CLI-compatible JSON; unsigned identities retain their original JSON numbers.
 ---@field outcomes table[] Native observation/event schema; opaque identities are canonical decimal strings.
 ---Offline only, in configuration evaluation or runtime callbacks/tasks. Copies and validates config.
+---Custom callbacks require an approved runtime source and use isolated recorded-time VMs.
 ---@param config? prek.Config Omit for generic observations; supply for configured rule outcomes.
 ---@return prek.Replay
 function ReplayAPI.new(config) error("Prek editor definition") end
 ---@class prek.Replay
 local Replay = {}
----Apply one native recording JSON object, at most 32 KiB. Any record/limit error retires this replay.
+---Apply one recording JSON object, at most 32 KiB; configured context is offline simulation only.
 ---@param record_json string Recording format 1; first record must be its header.
 function Replay:push(record_json) error("Prek editor definition") end
 ---Finish once. Check requires a final matching expected/expected_rules record; no live effects.

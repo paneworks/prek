@@ -19,6 +19,170 @@ use std::{
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[test]
+fn custom_cli_replay_checks_actual_source_callbacks_without_executing_command_outcomes() {
+    use prek::{
+        context::{Binding, SessionKind, Snapshot, State},
+        rules::{Event, Evidence, Stage},
+    };
+    let directory = Directory::new();
+    let config = directory.0.join("custom.lua");
+    let path = directory.0.join("custom.jsonl");
+    let marker = directory.0.join("must-not-exist");
+    let command = format!("printf called > {}", marker.display());
+    fs::write(&config,format!(r#"
+local p=require('prek');local calls=0
+p.events.on('input',function()error('ordinary callback ran')end)
+local trigger=p.recognizers.define('offline',{{selectors={{'keys'}},inputs={{'key'}},reply_within='100ms',wake='10ms'}},function(ticket)
+ if ticket.cause=='cancel' then assert(calls==2 and ticket.reason=='completed');return nil end
+ calls=calls+1
+ if calls==1 then return nil end
+ assert(ticket.cause=='timer' and ticket.input.sequence=='1')
+ return {{phase='discrete',data={{calls=calls}}}}
+end)
+return p.config.new{{policy={{allow_input_events=true,allowed_devices={{'keys'}}}},
+ devices={{keys={{keys={{'KEY_A'}}}}}},rules={{{{id='offline',devices={{'keys'}},contexts={{'desktop'}},
+ scope='everywhere',delivery='observe',trigger=trigger,action=p.actions.command{{argv={{'sh','-c',[==[{command}]==]}}}}}}}}}}
+"#)).unwrap();
+    let source = Source {
+        device: u64::MAX,
+        generation: 1,
+        seat: "seat0".into(),
+    };
+    let expected = Event::Matched {
+        version: 1,
+        rule: "offline".into(),
+        id: 1,
+        ordinal: 1,
+        source: source.clone(),
+        at: Duration::from_millis(20),
+        config_generation: 1,
+        session_generation: 1,
+        stage: Stage::Discrete,
+        action: Action::Command {
+            argv: vec!["sh".into(), "-c".into(), command],
+        },
+        evidence: Evidence::Custom {
+            recognizer: "offline".into(),
+            data: serde_json::json!({"calls":2}),
+        },
+        window: None,
+        output: None,
+        workspace: None,
+    };
+    let mut records = vec![
+        Record::Header { version: 1 },
+        Record::Context {
+            at: Duration::ZERO,
+            binding: Binding {
+                seat: "seat0".into(),
+                session: "recorded".into(),
+                uid: 1000,
+                compositor_pid: 42,
+                compositor_start: 1,
+                kind: SessionKind::User,
+            },
+            snapshot: Box::new(Snapshot {
+                generation: 1,
+                revision: 1,
+                captured_at: Duration::ZERO,
+                state: State::Desktop,
+                outputs: vec![],
+                windows: vec![],
+                regions: vec![],
+                secure_overlay: false,
+            }),
+        },
+    ];
+    let Record::Device { mut device, .. } = serde_json::from_str::<Record>(
+        String::from_utf8(recording())
+            .unwrap()
+            .lines()
+            .nth(1)
+            .unwrap(),
+    )
+    .unwrap() else {
+        unreachable!()
+    };
+    device.source = source.clone();
+    device.capabilities.insert(EV_KEY, vec![30]);
+    records.push(Record::Device {
+        device,
+        keys: BTreeSet::new(),
+        contacts: vec![],
+    });
+    records.push(Record::Frame {
+        frame: Frame {
+            source,
+            sequence: 1,
+            at: Duration::from_millis(10),
+            events: vec![
+                RawEvent {
+                    kind: EV_KEY,
+                    code: 30,
+                    value: 1,
+                },
+                RawEvent {
+                    kind: EV_SYN,
+                    code: SYN_REPORT,
+                    value: 0,
+                },
+            ],
+        },
+    });
+    records.push(Record::Tick {
+        at: Duration::from_millis(20),
+    });
+    records.push(Record::ExpectedRules {
+        events: vec![expected.clone()],
+    });
+    let mut bytes = vec![];
+    for record in records {
+        write_record(&mut bytes, &record).unwrap();
+    }
+    fs::write(&path, bytes).unwrap();
+    let mut previous = None;
+    for _ in 0..2 {
+        let output = run(&[
+            "replay",
+            path.to_str().unwrap(),
+            "--config",
+            config.to_str().unwrap(),
+            "--check",
+            "--json",
+        ]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let actual: Vec<Event> = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(actual.as_slice(), std::slice::from_ref(&expected));
+        if let Some(previous) = &previous {
+            assert_eq!(previous, &output.stdout);
+        } else {
+            previous = Some(output.stdout);
+        }
+        assert!(!marker.exists());
+    }
+    let bad = fs::read_to_string(&path)
+        .unwrap()
+        .replace("\"calls\":2", "\"calls\":3");
+    fs::write(&path, bad).unwrap();
+    assert!(
+        !run(&[
+            "replay",
+            path.to_str().unwrap(),
+            "--config",
+            config.to_str().unwrap(),
+            "--check"
+        ])
+        .status
+        .success()
+    );
+    assert!(!marker.exists());
+}
+
+#[test]
 fn session_help_documents_explicit_desktop_opt_ins_without_enabling_routing() {
     let output = run(&["session", "--help"]);
     assert!(output.status.success());

@@ -773,6 +773,11 @@ impl Engine {
             .min()
     }
     pub fn push(&mut self, record: Record) -> io::Result<()> {
+        if matches!(record, Record::Context { .. }) {
+            return Err(invalid(
+                "recorded context requires configured offline replay",
+            ));
+        }
         if self.expected.is_some() {
             return Err(invalid("expected rule outcomes must be the final record"));
         }

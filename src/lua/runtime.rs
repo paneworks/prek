@@ -95,6 +95,9 @@ impl Definition {
             &sources.modules,
             &mut || Ok(()),
         )?;
+        Self::snapshot(sources, &mut runtime)
+    }
+    fn snapshot(sources: &super::Sources, runtime: &mut Runtime) -> Result<Self, ConfigError> {
         let definition = Self {
             api_version: API_VERSION,
             name: sources.name.clone(),
@@ -176,6 +179,7 @@ impl Definition {
             ));
         }
         runtime.recognizers = self.recognizers.clone();
+        runtime.host.borrow_mut().source = Some(std::sync::Arc::new(self.clone()));
         Ok(runtime)
     }
 }
@@ -207,6 +211,10 @@ pub struct LogRecord {
 }
 #[derive(Default)]
 pub(super) struct Host {
+    pub(super) offline: bool,
+    pub(super) source: Option<std::sync::Arc<Definition>>,
+    #[cfg(target_os = "linux")]
+    pub(super) replay_budget: crate::replay::configured::Budget,
     pub(super) configuring: bool,
     pub(super) running: bool,
     pub(super) rule_hooks: bool,
@@ -280,8 +288,24 @@ pub struct Runtime {
         std::collections::BTreeMap<u64, crate::recognition::Cancellation>,
 }
 impl Runtime {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn offline(&mut self, config: Config) -> Result<(), ConfigError> {
+        let handlers = self.handler_registrations()?;
+        self.config = config.clone();
+        let mut host = self.host.borrow_mut();
+        host.offline = true;
+        host.context_clock = None;
+        host.rules.initialize(config, handlers);
+        Ok(())
+    }
     pub fn load(source: &str, name: &str) -> Result<Self, ConfigError> {
-        instantiate(source, name, &Default::default(), &mut || Ok(()))
+        let mut runtime = instantiate(source, name, &Default::default(), &mut || Ok(()))?;
+        let definition = Definition::snapshot(
+            &super::Sources::single(source.into(), name.into()),
+            &mut runtime,
+        )?;
+        runtime.host.borrow_mut().source = Some(std::sync::Arc::new(definition));
+        Ok(runtime)
     }
     pub fn registrations(&mut self) -> Result<Vec<Registration>, ConfigError> {
         self.lua
@@ -433,7 +457,7 @@ impl Runtime {
         Ok(())
     }
 }
-pub(super) fn bounded_json<T: Serialize + ?Sized>(
+pub(crate) fn bounded_json<T: Serialize + ?Sized>(
     value: &T,
     maximum: usize,
 ) -> io::Result<Vec<u8>> {

@@ -13,7 +13,9 @@ real helper tests use explicit admission/context models.
 The sole routing worker also reconstructs complete native composed plans across
 private subscriptions, rule edits and configuration reloads. Its separate
 coordinated validator is not a public Lua/TOML option. Public composed source
-admission and deterministic custom replay remain gated; see
+admission remains gated. Deterministic custom replay runs actual isolated
+callbacks with recorded context through the CLI and Lua API; see
+[offline replay](lua-api.md#offline-replay) and
 [compiled native plans](routing-chains.md#compiled-plans-in-the-sole-worker).
 
 ## Lua constructor

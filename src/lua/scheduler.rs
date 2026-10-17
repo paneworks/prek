@@ -63,7 +63,8 @@ impl Runtime {
         self.host.borrow_mut().now = Some(now);
         #[cfg(target_os = "linux")]
         {
-            self.host.borrow_mut().context_clock = Some(Instant::now());
+            let mut host = self.host.borrow_mut();
+            host.context_clock = (!host.offline).then(Instant::now);
         }
         self.lua
             .try_enter(|ctx| {

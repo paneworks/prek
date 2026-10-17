@@ -4,7 +4,8 @@ The Rust `router::Router` transport model can retain several physical groups
 under one consuming decision. `routing::Routing` uses it for consuming built-in
 native sequences and coordinated custom-step ownership. Full compiled plans
 now survive private worker subscriptions, rule edits and configuration reloads.
-Public source admission and offline replay remain unfinished. Public custom
+Public source admission remains unfinished. Offline configured replay now runs
+isolated real callbacks without raw transport or live effect authority. Public custom
 sequence validation and production routing remain gated.
 
 The embedding must verify the active rule step, source incarnation, protected
@@ -150,4 +151,5 @@ through two complete plan generations, canonical device metadata, reader-delayed
 receipts, typed outer results and correlated leaf cleanup. Source callback
 declarations are compared exactly with the native plan. This is not full public
 composed source compilation, broker-to-kernel delivery, rendered/physical
-acceptance or offline replay. Production route-mode admission stays disabled.
+acceptance. Separate offline replay tests use native observation coordinators,
+not this raw transport. Production route-mode admission stays disabled.

@@ -705,15 +705,14 @@ fn run(command: Command) -> io::Result<()> {
             check,
             json,
         } => {
-            let config = compile_config(read_config(&config_path)?, &config_path)?.config;
-            let mut engine = prek::rules::Engine::new(config)?;
+            let compiled = compile_config(read_config(&config_path)?, &config_path)?;
+            let mut engine =
+                prek::replay::configured::Configured::new(compiled.config, compiled.runtime)?;
             prek::replay::visit(&mut BufReader::new(File::open(path)?), |record| {
                 engine.push(record)
             })?;
-            if check {
-                engine.check()?;
-            }
-            let events = engine.take_events();
+            engine.finish(check)?;
+            let events = engine.events();
             if json {
                 serde_json::to_writer(&mut output, &events).map_err(io::Error::other)?;
                 writeln!(output)?;
