@@ -141,6 +141,10 @@ impl Fixture {
                     let text=std::str::from_utf8(request).unwrap();
                     assert!(text.contains("w.stable_id==0xabc"));
                     assert!(text.contains("hl.get_window(\"address:0x1234\")"));
+                    assert!(text.contains("w.workspace.id==3"));
+                    assert!(text.contains("not m.active_special_workspace"));
+                    assert!(text.contains("m.scale==2.0 and m.transform==0"));
+                    assert!(text.contains("p.x==0.0 and p.y==0.0 and s.x==300.0 and s.y==400.0"));
                     dispatch_copy.fetch_add(1,Ordering::Relaxed);
                     if behavior!=1 {
                         if text.contains("hl.dsp.window.close({window=w})") {

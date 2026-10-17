@@ -574,8 +574,10 @@ then close it after focus switches to the guard receiver. Stock IPC must confirm
 the exact window/workspace/focus, the target must acknowledge close, and the
 guard must remain alive. The adapter supports Hyprland 0.54.3 and exact 0.56.2
 with a verified, frozen hyprlang or Lua config provider. Lua effects use typed
-factories with explicit targets and final lifetime/name guards, not arbitrary
-dispatch strings. Unknown or changed providers refuse without syntax fallback.
+factories with explicit targets and final lifetime, workspace, native goal-box
+and output-geometry guards, not arbitrary dispatch strings. These guards run
+inside the native factory; legacy address dispatch retains a read/dispatch race.
+Unknown or changed providers refuse without syntax fallback.
 Workspace moves require a single output and protected `session --hyprland` opt-in.
 Production takeover, reorder and scrolling-layout effects remain pending.
 [Continuous viewport planning](docs/hyprland-scrolling.md) documents the bounded

@@ -1,6 +1,6 @@
 //! Typed, explicitly targeted stock Hyprland window operations.
-//! Stable IDs are checked before dispatch, but stock address selectors cannot
-//! atomically guard against replacement between that check and the mutation.
+//! Lua dispatch checks frozen native lifetimes and geometry before mutation.
+//! Legacy address selectors retain a read/dispatch race.
 use crate::{
     config::{Screen, WindowAction},
     context::{OutputState, SessionKind, Snapshot, State, Window},
@@ -197,7 +197,9 @@ impl HyprlandAdapter {
             if monotonic()? >= expires || Instant::now() >= until {
                 return Ok(Completion::Cancelled);
             }
-            let request = self.dialect.window(&target.window.id, destination)?;
+            let request = self
+                .dialect
+                .window(&target.window, &target.output, destination)?;
             // One mutation only; never retry after any request bytes were written.
             let reply = self.client.exchange_effect(&request, until, &mut sent)?;
             if reply != b"ok" && reply != b"ok\n" {

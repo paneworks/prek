@@ -731,6 +731,15 @@ fn window_acceptance(
     if std::env::var("PREK_CAGE_CONFIG_PROVIDER").as_deref() == Ok("lua") {
         layout_acceptance(checking, binding, fence, app, &instance, output);
     }
+    let fractional_scale = if std::env::var("PREK_CAGE_CONFIG_PROVIDER").as_deref() == Ok("lua") {
+        let before = sampler.sample(checking, 1, SessionKind::User).unwrap();
+        assert_eq!(before.outputs.len(), 1);
+        let geometry = &before.outputs[0].geometry;
+        owned_monitor_scale(checking, &instance, &geometry.name, 1.6);
+        Some((geometry.name.clone(), geometry.scale))
+    } else {
+        None
+    };
     focus_owned_window(&target_id, &instance);
     let initial = sampler.sample(checking, 1, SessionKind::User).unwrap();
     let initial_window = initial
@@ -859,6 +868,16 @@ return p.config.new{mode='route',policy={allowed_devices={'keyboard'},allow_hypr
             .unwrap()
             .clone();
         assert_eq!(config.rules[index].output.as_ref(), Some(&window.output));
+        let output_scale = snapshot
+            .outputs
+            .iter()
+            .find(|state| state.geometry.name == window.output)
+            .unwrap()
+            .geometry
+            .scale;
+        if fractional_scale.is_some() {
+            assert_eq!((output_scale as f32).to_bits(), 1.6f32.to_bits());
+        }
         let expires = snapshot.captured_at + Duration::from_millis(250);
         let fresh = view(snapshot);
         executor.update_hyprland_context(fresh.clone()).unwrap();
@@ -996,15 +1015,48 @@ return p.config.new{mode='route',policy={allowed_devices={'keyboard'},allow_hypr
         assert!(guard_child.0.try_wait().unwrap().is_none());
         receipts.push(serde_json::json!({"action":config.rules[index].id,"completion":completion,"window":target_id,
             "workspace_before":window.workspace,"workspace_after":after,"target_closed":after.is_none(),
-            "guard_alive":true,"lua_capabilities_checked":true}));
+            "guard_alive":true,"lua_capabilities_checked":true,
+            "native_fractional_scale_tested":fractional_scale.is_some(),"output_scale":output_scale}));
     }
     session.stop().unwrap();
     settle(&mut session, &mut ignored);
+    if let Some((name, scale)) = fractional_scale {
+        owned_monitor_scale(checking, &instance, &name, scale);
+    }
     fs::write(
         output.join("hyprland-receipts.json"),
         serde_json::to_vec(&receipts).unwrap(),
     )
     .unwrap();
+}
+
+fn owned_monitor_scale(checking: &Client, instance: &str, name: &str, scale: f64) {
+    let command = format!(
+        "hl.monitor({{output={name:?},mode=\"1280x720@60\",position=\"auto\",scale={scale:?}}})"
+    );
+    let reply = std::process::Command::new(std::env::var_os("PREK_CAGE_HYPRCTL").unwrap())
+        .args(["eval", &command])
+        .env("HYPRLAND_INSTANCE_SIGNATURE", instance)
+        .output()
+        .unwrap();
+    assert!(reply.status.success());
+    assert_eq!(String::from_utf8(reply.stdout).unwrap().trim(), "ok");
+    let until = monotonic().unwrap() + Duration::from_secs(3);
+    let mut sampler = ContextSampler::default();
+    loop {
+        let snapshot = sampler.sample(checking, 1, SessionKind::User).unwrap();
+        if snapshot.outputs.iter().any(|state| {
+            state.geometry.name == name
+                && (state.geometry.scale as f32).to_bits() == (scale as f32).to_bits()
+        }) {
+            break;
+        }
+        assert!(
+            monotonic().unwrap() < until,
+            "owned fractional scale never settled"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn layout_acceptance(

@@ -1174,7 +1174,15 @@ within the existing IPC deadline. Changed, missing, malformed and unknown
 providers refuse without mutation; there is no syntax fallback or mutation retry.
 This does not change Prek's own Luna API. The Lua dialect uses closed, typed
 dispatcher factories with an explicit window or monitor. Its window factory
-checks the frozen `stable_id`; its power factory checks the monitor exists and
+checks the frozen `stable_id`, mapped state, workspace, output name, window goal
+box, and output position/pixel size/scale/transform/DPMS/active workspace before
+constructing an effect. An active special workspace refuses window effects.
+These checks run inside the same native Lua factory, closing the gap after
+the final context sample for those fields; a focus change does not select a
+different target. Output names are bounded byte-escaped Lua literals, not code.
+The expected native scale is reconstructed as binary32, matching Hyprland's
+stored float and its Lua getter; this is exact identity, not an epsilon test.
+Its power factory checks the monitor exists and
 has the frozen name before constructing an effect, never passing a nil monitor
 that could select every output. No user-supplied code or raw dispatch API is added.
 The provider-sensitive
@@ -1192,7 +1200,11 @@ from the starting window, rather than from later focus. Moves currently require
 a single-output desktop; cross-output workspace-rule topology remains pending.
 Numeric destinations must fit stock Hyprland's positive 32-bit workspace parser
 (`1..2147483647`); moving left from 1 or right from 2147483647 is unavailable.
-Reorder and scrolling-layout actions remain unavailable.
+Reorder and scrolling-layout actions remain unavailable. Legacy Hyprlang address
+dispatchers cannot enforce the same atomic window guards: they retain a
+read/dispatch race despite the pre-dispatch checks. Goal boxes do not establish
+rendered visibility, and these guards do not prove atomic lock/overlay state or
+monitor lifetime across removal/replacement. Production routing remains gated.
 
 Routing checks protected policy, current negotiated availability and a valid
 frozen target before claiming input. Missing/unsafe targets, a different active
