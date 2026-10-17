@@ -24,6 +24,7 @@ use std::{
 mod context;
 pub(crate) mod dispatch;
 pub mod layers;
+pub mod scrolling;
 pub use context::ContextSampler;
 
 const MAX_REPLY: usize = 2 * 1024 * 1024;

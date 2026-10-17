@@ -373,6 +373,7 @@ make.recipe{ name = "test-cage-startup", desc = "unprivileged nested output and 
 make.recipe{ name = "test-hyprland", desc = "bound Hyprland queries, window and power adapter models",
              run = function()
                sh.cargo("test", "--locked", "--lib", "hyprland::dispatch::tests")
+               sh.cargo("test", "--locked", "--lib", "hyprland::scrolling::tests")
                sh.cargo("test", "--locked", "--test", "hyprland")
              end }
 
