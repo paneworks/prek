@@ -176,9 +176,64 @@ impl Peer {
     }
 }
 
-struct Library {
+pub(crate) struct Library {
     handle: NonNull<libc::c_void>,
     _file: File,
+}
+impl Library {
+    pub(crate) fn open(path: &Path) -> io::Result<Self> {
+        let file = Self::pin(path)?;
+        if file.metadata()?.uid() != 0 {
+            return Err(denied("logind library must be a protected root-owned file"));
+        }
+        Self::load(file)
+    }
+    #[cfg(test)]
+    pub(crate) fn open_fixture(path: &Path) -> io::Result<Self> {
+        Self::load(Self::pin(path)?)
+    }
+    fn pin(path: &Path) -> io::Result<File> {
+        if !path.is_absolute() {
+            return Err(denied("logind library must be an absolute policy path"));
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(fs::canonicalize(path)?)?;
+        let stat = file.metadata()?;
+        if !stat.is_file() || stat.mode() & 0o022 != 0 {
+            return Err(denied("logind library must be a protected root-owned file"));
+        }
+        Ok(file)
+    }
+    fn load(file: File) -> io::Result<Self> {
+        let path = CString::new(format!("/proc/self/fd/{}", file.as_raw_fd())).unwrap();
+        // SAFETY: the selected library file and descriptor path remain retained.
+        let handle =
+            NonNull::new(unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) })
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "system libsystemd could not be loaded",
+                    )
+                })?;
+        Ok(Self {
+            handle,
+            _file: file,
+        })
+    }
+    pub(crate) fn symbol(&self, name: &std::ffi::CStr) -> io::Result<*mut libc::c_void> {
+        // SAFETY: the live retained library and terminated symbol name remain owned.
+        let pointer = unsafe { libc::dlsym(self.handle.as_ptr(), name.as_ptr()) };
+        if pointer.is_null() {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("missing libsystemd entry point: {}", name.to_string_lossy()),
+            ))
+        } else {
+            Ok(pointer)
+        }
+    }
 }
 impl Drop for Library {
     fn drop(&mut self) {
@@ -211,48 +266,14 @@ pub struct Logind {
 }
 impl Logind {
     pub fn open(library: &Path) -> io::Result<Self> {
-        if !library.is_absolute() {
-            return Err(denied("logind library must be an absolute policy path"));
-        }
-        let canonical = fs::canonicalize(library)?;
-        let file = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(canonical)?;
-        let stat = file.metadata()?;
-        if !stat.is_file() || stat.uid() != 0 || stat.mode() & 0o022 != 0 {
-            return Err(denied("logind library must be a protected root-owned file"));
-        }
-        let path = CString::new(format!("/proc/self/fd/{}", file.as_raw_fd())).unwrap();
-        // SAFETY: trusted, retained library file and a valid terminated path.
-        let handle =
-            NonNull::new(unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) })
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        "system libsystemd could not be loaded",
-                    )
-                })?;
-        let library = Library {
-            handle,
-            _file: file,
-        };
+        let library = Library::open(library)?;
         macro_rules! symbol {
             ($name:literal, $ty:ty) => {{
                 // SAFETY: the policy library implements the documented sd-login
                 // ABI. Every pointer is checked and the library remains owned.
-                let pointer = unsafe {
-                    libc::dlsym(
-                        library.handle.as_ptr(),
-                        concat!($name, "\0").as_ptr().cast(),
-                    )
-                };
-                if pointer.is_null() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        concat!("missing libsystemd entry point: ", $name),
-                    ));
-                }
+                let name =
+                    std::ffi::CStr::from_bytes_with_nul(concat!($name, "\0").as_bytes()).unwrap();
+                let pointer = library.symbol(name)?;
                 unsafe { std::mem::transmute::<*mut libc::c_void, $ty>(pointer) }
             }};
         }

@@ -66,6 +66,7 @@ let
   ];
   sessionArgs = [ (lib.getExe cfg.package) "session" "--socket" "/run/${cfg.runtimeDirectory}/control.sock" ]
     ++ lib.optional cfg.session.reconnect "--reconnect"
+    ++ lib.optionals cfg.session.reconnect [ "--logind-library" (toString cfg.logindLibrary) ]
     ++ lib.optional cfg.session.observations "--observations"
     ++ lib.optional cfg.session.context "--context"
     ++ lib.optional cfg.session.lua "--lua"

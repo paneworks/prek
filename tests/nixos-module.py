@@ -40,6 +40,7 @@ def main():
         assert "--rule-mutations" in help_text and "--hyprland" in help_text
         assert "--reconnect" in help_text
         assert ("--reconnect" in launcher.read_text()) == (name != "reconnectDisabled")
+        assert ("--logind-library" in launcher.read_text()) == (name != "reconnectDisabled")
         assert unit["KillMode"] == "control-group" and unit["TimeoutStopSec"] == 5
         assert unit["DeviceAllow"] == ["char-input r"]
         assert unit["NoNewPrivileges"] and unit["ProtectHome"] == "read-only"

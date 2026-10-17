@@ -550,6 +550,10 @@ fn session_help_documents_explicit_desktop_opt_ins_without_enabling_routing() {
     assert!(help.contains("--hyprland") && help.contains("protected-policy targeted Hyprland"));
     assert!(help.contains("--recognizers") && help.contains("native validated"));
     assert!(help.contains("--reconnect") && !help.contains("--reconnect-child"));
+    assert!(help.contains("--logind-library"));
+    let unwatched = run(&["session", "--logind-library", "/owned/library"]);
+    assert!(!unwatched.status.success());
+    assert!(String::from_utf8_lossy(&unwatched.stderr).contains("--reconnect"));
     let bounded = run(&["session", "--reconnect", "--duration", "1"]);
     assert!(!bounded.status.success());
     assert!(String::from_utf8_lossy(&bounded.stderr).contains("cannot be used with"));

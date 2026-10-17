@@ -158,6 +158,10 @@ source policy. `session.enable=false` omits the launcher from the system profile
 while retaining the broker, useful when an existing session hook starts the
 selected `prek` executable directly. `session.package` exposes the generated
 launcher to other upstream modules.
+The reconnecting launcher also passes the protected `logindLibrary` to its
+read-only sleep watcher. Broker pre-sleep coordination and the optional
+user-launched delay-only probe are described in
+[the sleep contract](suspend-epoch.md#authoritative-logind-preparation).
 `session.reconnect=false` restores one-shot foreground behavior. Reconnection
 does not retry policy rejection, malformed protocol, orderly exit or an external
 agent signal/crash. Broker transport loss and a confirmed retired clock epoch

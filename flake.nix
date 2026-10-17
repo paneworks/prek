@@ -101,6 +101,10 @@
             inherit pkgs;
             package = self.packages.${system}.default;
           };
+          root-sleep-watch-test = import ./tests/root-sleep-watch.nix {
+            inherit pkgs;
+            package = self.packages.${system}.default;
+          };
           default = pkgs.rustPlatform.buildRustPackage {
             pname = "prek";
             version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
@@ -115,6 +119,8 @@
               ];
             };
             cargoLock.lockFile = ./Cargo.lock;
+            nativeCheckInputs = [ pkgs.dbus ];
+            PREK_TEST_SYSTEMD_LIBRARY = "${pkgs.systemd}/lib/libsystemd.so.0";
             cargoLock.outputHashes = {
               "luna-0.5.1" = "sha256-gCdX/Ni2RbK69KMJFVzK72QSuDFVVQM2deiKXH3AvoI=";
             };
@@ -347,6 +353,18 @@
             inherit pkgs package;
             module = self.nixosModules.default;
           };
+          root-sleep-watch = pkgs.runCommand "prek-root-sleep-watch-check" {
+            nativeBuildInputs = [ pkgs.shellcheck ];
+          } ''
+            bash -n ${./tests/run-root-sleep-watch.sh}
+            shellcheck ${./tests/run-root-sleep-watch.sh}
+            bash -n ${self.packages.${system}.root-sleep-watch-test}/bin/prek-root-sleep-watch-test
+            shellcheck ${self.packages.${system}.root-sleep-watch-test}/bin/prek-root-sleep-watch-test
+            ${package.nativeTests}/libexec/prek-native-tests --list --ignored > inventory
+            for probe in library_preflight root_delay_preflight; do
+              grep -Fx "sleep_watch::native_probe::$probe: test" inventory >> "$out"
+            done
+          '';
           lua-editor = pkgs.runCommand "prek-lua-editor-check" {
             nativeBuildInputs = [ pkgs.python3 pkgs.lua-language-server ];
           } ''
@@ -367,7 +385,8 @@
           crossCc = "${crossPkgs.stdenv.cc}/bin/${crossPkgs.stdenv.cc.targetPrefix}cc";
         in {
           msrv = pkgs.mkShell {
-            packages = with pkgs; [ rust-bin.stable."1.88.0".default python3 shellcheck ];
+            packages = with pkgs; [ rust-bin.stable."1.88.0".default python3 shellcheck dbus ];
+            PREK_TEST_SYSTEMD_LIBRARY = "${pkgs.systemd}/lib/libsystemd.so.0";
           };
           cross-aarch64 = pkgs.mkShell {
             packages = [
@@ -384,8 +403,9 @@
             LD_LIBRARY_PATH = "";
           };
           default = pkgs.mkShell {
+            PREK_TEST_SYSTEMD_LIBRARY = "${pkgs.systemd}/lib/libsystemd.so.0";
             packages = with pkgs; [
-              rustc cargo rustfmt clippy rust-analyzer git-cliff python3 shellcheck actionlint
+              rustc cargo rustfmt clippy rust-analyzer git-cliff python3 shellcheck actionlint dbus
             ];
           };
         });

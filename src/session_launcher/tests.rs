@@ -1,6 +1,20 @@
 use super::*;
 
 #[test]
+fn observed_sleep_boundary_restarts_outage_budget_without_renewing_launch_rate() {
+    let mut budget = Budget::default();
+    budget.attempt(Duration::ZERO).unwrap();
+    budget.outage = None;
+    budget.attempt(WINDOW + WINDOW).unwrap();
+    for _ in 1..16 {
+        budget.outage = None;
+        budget.attempt(WINDOW + WINDOW).unwrap();
+    }
+    budget.outage = None;
+    assert!(budget.attempt(WINDOW + WINDOW).is_err());
+}
+
+#[test]
 fn budgets_bound_outages_and_ready_crash_loops_independently() {
     let mut budget = Budget::default();
     budget.attempt(Duration::ZERO).unwrap();

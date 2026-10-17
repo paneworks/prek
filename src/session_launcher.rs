@@ -4,7 +4,7 @@ use std::{
     collections::VecDeque,
     io,
     os::{
-        fd::{AsRawFd, FromRawFd, OwnedFd},
+        fd::{AsFd, AsRawFd, FromRawFd, OwnedFd},
         unix::process::CommandExt,
     },
     process::{Child, Command},
@@ -188,7 +188,7 @@ impl Owned {
         }
         Ok(())
     }
-    fn wait(&self, timeout: Duration) -> io::Result<()> {
+    fn wait(&self, timeout: Duration, sleep: Option<&crate::sleep_watch::Watch>) -> io::Result<()> {
         let mut events = vec![libc::pollfd {
             fd: self.exit.as_raw_fd(),
             events: libc::POLLIN,
@@ -198,6 +198,13 @@ impl Owned {
             events.push(libc::pollfd {
                 fd: self.ready.as_raw_fd(),
                 events: libc::POLLIN,
+                revents: 0,
+            });
+        }
+        if let Some(sleep) = sleep {
+            events.push(libc::pollfd {
+                fd: sleep.as_fd().as_raw_fd(),
+                events: sleep.events()?,
                 revents: 0,
             });
         }
@@ -281,19 +288,46 @@ impl Budget {
 /// Re-execute only after an explicitly retryable exit, never concurrently.
 /// CLOCK_BOOTTIME bounds this authority-free guardian's lifecycle, not input.
 pub fn run(mut command: impl FnMut() -> Command) -> io::Result<()> {
+    run_with_sleep(&mut command, None)
+}
+pub fn run_with_sleep(
+    mut command: impl FnMut() -> Command,
+    mut sleep: Option<crate::sleep_watch::Watch>,
+) -> io::Result<()> {
     let signals = crate::supervisor::TerminationSignals::install()?;
     let mut budget = Budget::default();
+    let mut generation = 0;
     loop {
         if signals.requested() {
             return Ok(());
         }
+        if let Some(sleep) = sleep.as_mut() {
+            let state = sleep.step()?;
+            if state.generation != generation {
+                generation = state.generation;
+                budget.outage = None;
+            }
+            if state.preparing {
+                sleep.wait(Duration::from_millis(250))?;
+                continue;
+            }
+        }
         let started = boottime()?;
         budget.attempt(started)?;
         let mut child = Owned::spawn(&mut command())?;
-        loop {
+        let boundary = loop {
             if signals.requested() {
                 child.stop()?;
                 return Ok(());
+            }
+            if let Some(sleep) = sleep.as_mut() {
+                let state = sleep.step()?;
+                if state.preparing || state.generation != generation {
+                    child.stop()?;
+                    generation = state.generation;
+                    budget.outage = None;
+                    break true;
+                }
             }
             child.read_ready()?;
             if child.accepted {
@@ -306,24 +340,38 @@ pub fn run(mut command: impl FnMut() -> Command) -> io::Result<()> {
                 if status.code() != Some(i32::from(RETRY_EXIT)) {
                     return Err(io::Error::other(format!("session agent stopped: {status}")));
                 }
-                break;
+                break false;
             }
             if !child.accepted && boottime()?.saturating_sub(started) >= STARTUP {
                 child.stop()?;
-                break;
+                break false;
             }
-            child.wait(if child.accepted {
-                Duration::from_secs(1)
-            } else {
-                (started + STARTUP).saturating_sub(boottime()?)
-            })?;
-        }
+            child.wait(
+                if child.accepted {
+                    Duration::from_secs(1)
+                } else {
+                    (started + STARTUP).saturating_sub(boottime()?)
+                },
+                sleep.as_ref(),
+            )?;
+        };
         drop(child);
+        if boundary {
+            continue;
+        }
         eprintln!("Session agent retired; reconnecting with fresh process authority.");
         let until = boottime()? + RETRY;
         while boottime()? < until {
             if signals.requested() {
                 return Ok(());
+            }
+            if let Some(sleep) = sleep.as_mut() {
+                let state = sleep.step()?;
+                if state.preparing || state.generation != generation {
+                    generation = state.generation;
+                    budget.outage = None;
+                    break;
+                }
             }
             thread::sleep(POLL);
         }

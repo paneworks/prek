@@ -39,6 +39,55 @@ compositor and provider check. Policy rejection and orderly exit stop the
 launcher. The shared systemd user manager is not a substitute for owning logind
 membership. See [launcher bounds and stopping](nixos.md#start-the-owning-session-agent).
 
+## Authoritative logind preparation
+
+The production broker also watches `PrepareForSleep` on the fixed system bus
+socket `/run/dbus/system_bus_socket`. It ignores environment-selected bus
+addresses, authenticates logind's unique owner as UID 0 and pins that owner for
+the watcher lifetime. A subscription and initial `PreparingForSleep` snapshot
+cover startup during preparation. Queued prepare/cancel pairs retain a boundary
+even when the final state is awake. Owner replacement, malformed notifications,
+bus loss or an excessive work queue retire the watcher rather than rebinding it.
+
+After configuration validation, the broker takes only a `sleep`/`delay`
+inhibitor and rechecks the boundary before starting its worker. Startup while
+preparing opens no input. A later boundary stops supervision before further
+broker dispatch, reaps the input worker and closes compiler/control/broker
+owners before releasing the inhibitor. The resource container preserves that
+ordering on errors too. Resume or canceled sleep requires a fresh broker
+process, not renewal of old authority. The existing systemd failure restart
+provides that new process.
+
+The same-login guardian uses a read-only watcher when
+`session --reconnect --logind-library /protected/libsystemd.so.0` is selected.
+The NixOS launcher supplies its configured library automatically. It stops and
+reaps even an unregistered child across a boundary, waits while preparation is
+active and clears only the reconnect outage budget. Its launch-rate bound is
+not reset. It takes no inhibitor and grants no input/context authority.
+
+This follows the [logind inhibitor contract](https://systemd.io/INHIBITOR_LOCKS/).
+Delay is bounded by logind policy, not an indefinite block. It does not take
+power/lid-key handling locks or change laptop policies. Forced sleep, low-level
+kernel autosuspend and a stalled coordinator cannot be claimed covered by a
+successful delay acquisition. Consumer neutral/rollback, actual hardware and
+the complete lock/greeter/provider matrix remain separate gates; routing stays
+disabled. The clock-discontinuity guard remains necessary.
+
+### User-launched root API probe
+
+```sh
+oslo make build-root-sleep-watch   # build only, no privileged execution
+oslo make test-sleep-watch-library # unprivileged ABI check, no bus access
+./tests/run-root-sleep-watch.sh   # run yourself when ready
+```
+
+The script logs to `target/root-sleep-watch/latest/probe.log` and
+`result.json`. Its root-side timeout is 15 seconds plus two seconds kill grace.
+It authenticates the real system provider, acquires only its own temporary delay
+inhibitor, finds its own PID/UID entry and verifies removal after closing it.
+It does not request suspend, stop services, change VT or open input. This is an
+API/descriptor-lifetime probe, not a suspend or consumer-release acceptance test.
+
 ## Limits and verification
 
 `oslo make test-suspend-epoch` checks interval intersection, delayed and ambiguous

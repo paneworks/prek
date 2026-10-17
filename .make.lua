@@ -196,6 +196,19 @@ make.recipe{ name = "test-handoff-boundary", desc = "bounded evdev fanout-prefix
 make.recipe{ name = "test-suspend-epoch", desc = "suspend-sensitive process clocks and native IO/reaping gates",
              run = function() sh.cargo("test", "--locked", "--lib", "process_clock::tests::") end }
 
+make.recipe{ name = "test-sleep-watch", desc = "authoritative sleep-provider lifecycle and private bus models",
+             run = function() sh.cargo("test", "--locked", "--lib", "sleep_watch::tests::") end }
+
+make.recipe{ name="build-root-sleep-watch",desc="build user-launched delay-only root probe without running it",
+             run=function()
+               sh.mkdir("-p","target/root-sleep-watch")
+               assert(oslo.run{"nix","--option","eval-cache","false","--extra-experimental-features","nix-command flakes","--max-jobs","1","--cores","2","build","--no-write-lock-file","--out-link",project_root().."/target/root-sleep-watch/probe",".#root-sleep-watch-test"}.ok,"root sleep probe build failed")
+             end }
+
+make.recipe{ name="test-sleep-watch-library",desc="unprivileged protected library ABI without system bus access",
+             deps={"build-root-sleep-watch"},
+             run=function() assert(oslo.run{project_root().."/target/root-sleep-watch/probe/bin/prek-root-sleep-watch-test","--check-library"}.ok,"protected sleep library preflight failed") end }
+
 make.recipe{ name = "test-session-reconnect", desc = "same-login native agent re-execution, bounds and termination",
              run = function()
                sh.cargo("test", "--locked", "--lib", "session_launcher::tests::")
@@ -544,7 +557,7 @@ make.recipe{
       "--out-link", project_root() .. "/target/distribution/check" }
     for _, check in ipairs{ "nixos-module", "lua-editor", "installed-cli", "distribution",
       "native-routing-helper", "native-composition-helper", "native-chain-helper",
-      "native-composed-worker-helper", "wayland-proxy", "cage-startup", "root-session", "root-routing-receipts" } do
+      "native-composed-worker-helper", "wayland-proxy", "cage-startup", "root-session", "root-routing-receipts", "root-sleep-watch" } do
       command[#command + 1] = ".#checks." .. arch .. "." .. check
     end
     assert(oslo.run(command).ok, "immutable distribution checks failed")

@@ -87,6 +87,9 @@ enum Command {
         reconnect: bool,
         #[arg(long, hide = true)]
         reconnect_child: bool,
+        /// Trusted libsystemd for read-only sleep notifications in the guardian.
+        #[arg(long, requires = "reconnect")]
+        logind_library: Option<PathBuf>,
         #[arg(long, default_value = "/run/prek/control.sock")]
         socket: PathBuf,
         /// Defaults to HYPRLAND_INSTANCE_SIGNATURE; the broker verifies it.
@@ -431,6 +434,7 @@ fn run(command: Command) -> io::Result<()> {
         Command::Session {
             reconnect,
             reconnect_child,
+            logind_library,
             socket,
             instance,
             json,
@@ -470,9 +474,14 @@ fn run(command: Command) -> io::Result<()> {
                 }
                 let executable = std::env::current_exe()?;
                 let instance = session_instance(instance)?;
-                return prek::session_launcher::run(|| {
-                    options.command(&executable, &socket, &instance)
-                });
+                let sleep = logind_library
+                    .as_deref()
+                    .map(prek::sleep_watch::Watch::open)
+                    .transpose()?;
+                return prek::session_launcher::run_with_sleep(
+                    || options.command(&executable, &socket, &instance),
+                    sleep,
+                );
             }
             let mut ready = reconnect_child
                 .then(prek::session_launcher::Ready::connect)
@@ -853,6 +862,26 @@ fn run_broker(
     let (text, config, runtime_definition) = (compiled.text, compiled.config, compiled.runtime);
     // Compile before touching runtime state or starting the device worker.
     prek::worker::preflight(&config)?;
+    let signals = TerminationSignals::install()?;
+    let mut sleep = prek::sleep_watch::Watch::open(library)?;
+    let (delay, sleep_generation) = loop {
+        if signals.requested() {
+            return Ok(());
+        }
+        let before = sleep.step()?;
+        if before.preparing {
+            sleep.wait(Duration::from_millis(250))?;
+            continue;
+        }
+        let delay = sleep.delay()?;
+        let after = sleep.step()?;
+        if after.preparing || after.generation != before.generation {
+            drop(delay);
+            continue;
+        }
+        break (delay, after.generation);
+    };
+    monotonic()?;
     std::fs::create_dir_all(runtime)?;
     let endpoint = Endpoint::bind(runtime, true)?;
     let mut broker = Broker::open(
@@ -867,7 +896,6 @@ fn run_broker(
         },
     )?;
     broker.install_lua_source(runtime_definition.as_ref())?;
-    let signals = TerminationSignals::install()?;
     let mut command = std::process::Command::new(std::env::current_exe()?);
     command
         .arg("observe-worker")
@@ -879,8 +907,14 @@ fn run_broker(
     if let Some(duration) = duration {
         command.arg("--duration").arg(duration.to_string());
     }
-    let (mut supervisor, mut control) = Supervisor::spawn_controlled(command)?;
-    broker.bind_input_worker(&supervisor, &control)?;
+    let (supervisor, control) = Supervisor::spawn_controlled(command)?;
+    let mut lifetime = prek::sleep_watch::Inhibited::new(
+        (None::<prek::lua_compiler::Job>, control, broker),
+        supervisor,
+        delay,
+    );
+    let ((compiler, control, broker), supervisor) = lifetime.parts();
+    broker.bind_input_worker(supervisor, control)?;
     broker.enable_observations();
     let mut refresh = monotonic()?;
     let mut revision = 0u64;
@@ -893,9 +927,25 @@ fn run_broker(
         runtime_definition,
         monotonic()? + prek::configuration::INSTALL_TIMEOUT,
     ));
-    let mut compiler: Option<prek::lua_compiler::Job> = None;
     let mut startup = true;
     loop {
+        let state = sleep.step()?;
+        if state.preparing || state.generation != sleep_generation {
+            supervisor.request_stop()?;
+            let report = supervisor.wait()?;
+            broker.input_worker_exited(&report)?;
+            drop(lifetime);
+            while sleep.step()?.preparing {
+                if signals.requested() {
+                    return Ok(());
+                }
+                sleep.wait(Duration::from_millis(250))?;
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "sleep boundary quiesced; restart broker with fresh process/input authority",
+            ));
+        }
         if signals.requested() {
             supervisor.request_stop()?;
         }
@@ -937,7 +987,7 @@ fn run_broker(
                         .extension()
                         .is_some_and(|extension| extension == "lua")
                     {
-                        compiler = Some(spawn_compiler(text, config_path)?);
+                        *compiler = Some(spawn_compiler(text, config_path)?);
                         Ok(None)
                     } else {
                         let compiled = compile_config(text, config_path)?;
@@ -971,7 +1021,7 @@ fn run_broker(
         if let Some(job) = compiler.as_mut() {
             match job.step() {
                 Ok(Some(compiled)) => {
-                    compiler = None;
+                    *compiler = None;
                     match prek::worker::preflight(&compiled.config) {
                         Ok(_) => {
                             let generation =
@@ -994,13 +1044,13 @@ fn run_broker(
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    compiler = None;
+                    *compiler = None;
                     broker.finish_reload(Err(error.to_string()), now)?;
                 }
             }
         }
         if !control_closed && let Some(snapshot) = transfer.as_mut() {
-            match snapshot.send(&mut control, now) {
+            match snapshot.send(control, now) {
                 Ok(true) => transfer = None,
                 Ok(false) => {}
                 Err(error) if worker_link_closed(&error) => control_closed = true,
@@ -1047,7 +1097,7 @@ fn run_broker(
             broker.rule_command_sent(&seat, fence, id)?;
         }
         if !control_closed && (!startup || transfer.is_none()) && subscriptions.pending() {
-            match subscriptions.send(&mut control, monotonic()?) {
+            match subscriptions.send(control, monotonic()?) {
                 Ok(()) => {}
                 Err(error) if worker_link_closed(&error) => control_closed = true,
                 Err(error) => return Err(error),
@@ -1073,7 +1123,7 @@ fn run_broker(
                         worker,
                         fence,
                         source,
-                    } => broker.input_released(&control, worker, fence, &source)?,
+                    } => broker.input_released(control, worker, fence, &source)?,
                     prek::worker::Message::RulesChanged {
                         seat,
                         fence,
@@ -1134,9 +1184,7 @@ fn run_broker(
                         }
                     }
                     prek::worker::Message::MorfReady { activation } => {
-                        if let Some(command) =
-                            broker.activate_morf_handoff(&control, &activation)?
-                        {
+                        if let Some(command) = broker.activate_morf_handoff(control, &activation)? {
                             let _ = control.send(&command, monotonic()?)?;
                         }
                     }
@@ -1158,7 +1206,11 @@ fn run_broker(
         let timeout =
             PollTimeout::try_from(until.saturating_sub(monotonic()?)).map_err(io::Error::other)?;
         let mut fds = broker.poll_sources();
-        if let Some(job) = &compiler {
+        fds.push(PollFd::new(
+            sleep.as_fd(),
+            PollFlags::from_bits_truncate(sleep.events()?),
+        ));
+        if let Some(job) = compiler.as_ref() {
             fds.extend(job.poll_sources());
         }
         fds.push(PollFd::new(supervisor.as_fd(), PollFlags::POLLIN));
