@@ -2,8 +2,8 @@
 
 The Rust `router::Router` transport model can retain several physical groups
 under one consuming decision. `routing::Routing` uses it for consuming built-in
-native sequences. Custom leaf-to-parent proposal ownership, composed callbacks
-and their full worker/source integration remain unfinished. Public custom
+native sequences and private custom-step ownership checks. The full composed
+worker/source path and offline replay remain unfinished. Public custom
 sequence validation and production routing remain gated.
 
 The embedding must verify the active rule step, source incarnation, protected
@@ -87,4 +87,37 @@ hold a shared immutable claim receipt, so completing a prefix or forwarding a
 later ordinary group cannot retarget the result. Dispatch validates source and
 authorization lifetime, the original frozen target/context/config and expiry.
 An expired queued begin cancels the series and drains held state; updates cannot
-be dispatched as a new series. These paths do not admit custom composition.
+be dispatched as a new series. These paths do not open public custom composition.
+
+## Private custom-step ownership
+
+At ticket issue and reply, the native engine derives the active custom leaf and
+its exact sequence parent after advancing the drained input watermark. It
+rechecks the parent's frozen target, current step, sources and group deadlines.
+Routing requires complete parent source coverage with live source generations,
+transport authorizations and latest opaque raw-chain tokens. A claimed parent
+winner is translated to the exact leaf ID only after this proof succeeds; the
+callback supplies neither parent IDs nor ownership tokens.
+
+The first request binds the leaf to its parent and full source/token map.
+Subsequent requests and replies cannot create or replace that binding. A changed
+prefix token invalidates the reply even when the current leaf's own source is
+unchanged. Aggregate custom scope bindings are limited to 4096 source entries;
+candidate and transport retirement remove them. Ordinary input that preceded
+step admission cannot become prefix evidence after the fact.
+
+Each pending ticket is independently shortened to the earliest original raw
+buffer decision, in addition to its reply window and native parent/leaf expiry.
+This contraction updates the saved ticket and byte accounting, not the candidate
+lifetime: after a valid claim, continuous updates may outlive the old buffer
+decision while the parent and reply windows remain valid. On rejection, the
+raw scheduler uses wall time capped by the original decision for FIFO fallback,
+without advancing physical input through unread records. Missed output slack
+requires transport recovery rather than a renewed epoch or a past-due replay.
+
+`oslo make test-custom-chains` covers configured private Routing models and
+ticket contraction; `oslo make test-chain-helper` additionally runs a real
+supervised Lua child through native hold/custom/custom Routing and correlated
+cleanup. These use explicit model source/readiness/context authority. They are
+not the complete sole-routing-worker composition/source-approval path, public
+configuration admission, kernel capture or rendered/physical acceptance.

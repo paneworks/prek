@@ -8,6 +8,19 @@ use crate::{
     recognition::{Definition, InputKind, Phase as CustomPhase, Proposal, Retirement, Ticket},
 };
 
+impl Engine {
+    pub(crate) fn add_routing_sequence_fixture(&mut self, rule: Rule) {
+        assert!(self.routing);
+        let fence = self.custom.as_ref().unwrap().fence;
+        let mut sequence = Sequence::new(rule, &self.config, Some(fence)).unwrap();
+        for step in &mut sequence.steps {
+            step.push(Record::Header { version: 1 }).unwrap();
+        }
+        self.sequences.push(sequence);
+        self.enable_routing();
+    }
+}
+
 fn custom(name: &str) -> Trigger {
     Trigger::Custom {
         recognizer: Definition {

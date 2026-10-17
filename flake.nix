@@ -159,6 +159,7 @@
               cp ${./docs/morf.md} "$out/share/doc/prek/morf.md"
               cp ${./docs/root-routing.md} "$out/share/doc/prek/root-routing.md"
               cp ${./docs/recognizers.md} "$out/share/doc/prek/recognizers.md"
+              cp ${./docs/routing-chains.md} "$out/share/doc/prek/routing-chains.md"
               for preset in minimal desktop phone; do
                 "$out/bin/prek" init --preset "$preset" \
                   --output "$out/share/prek/presets/$preset.lua"
@@ -225,6 +226,13 @@
             PREK_TEST_LUA_BINARY=${package}/bin/prek \
               ${package.nativeTests}/libexec/prek-native-tests \
               --exact rules::tests::composition::helper::supervised_retained_touch_handoffs_use_one_native_coordinator \
+              --ignored --test-threads=1 > "$out" 2>&1 || { cat "$out"; exit 1; }
+            ${pkgs.gnugrep}/bin/grep -F 'test result: ok. 1 passed; 0 failed;' "$out" || { cat "$out"; exit 1; }
+          '';
+          native-chain-helper = pkgs.runCommand "prek-native-chain-helper-check" {} ''
+            PREK_TEST_LUA_BINARY=${package}/bin/prek \
+              ${package.nativeTests}/libexec/prek-native-tests \
+              --exact routing::tests::custom::chains::helper::supervised_custom_steps_use_complete_native_routing_scopes \
               --ignored --test-threads=1 > "$out" 2>&1 || { cat "$out"; exit 1; }
             ${pkgs.gnugrep}/bin/grep -F 'test result: ok. 1 passed; 0 failed;' "$out" || { cat "$out"; exit 1; }
           '';

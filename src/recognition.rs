@@ -737,6 +737,37 @@ impl Gate {
         );
         Ok(ticket)
     }
+    /// Shorten one native ticket without changing its candidate lifetime.
+    pub(crate) fn bound_deadline(
+        &mut self,
+        ticket: &mut Ticket,
+        deadline: Duration,
+        now: Duration,
+    ) -> io::Result<()> {
+        let pending = self
+            .pending
+            .get(&ticket.id)
+            .ok_or_else(|| invalid("unknown native ticket"))?;
+        if pending.ticket != *ticket {
+            return Err(invalid("native ticket binding changed"));
+        }
+        let mut bounded = ticket.clone();
+        bounded.deadline = deadline.min(ticket.deadline);
+        if bounded.deadline <= now {
+            return Err(invalid("native ticket deadline expired"));
+        }
+        let bytes = encoded_size(&bounded, MAX_FRAME_BYTES)?;
+        let total = self.bytes - pending.bytes + bytes;
+        if total > MAX_BYTES {
+            return Err(invalid("native ticket byte budget exceeded"));
+        }
+        let pending = self.pending.get_mut(&ticket.id).unwrap();
+        pending.ticket = bounded.clone();
+        pending.bytes = bytes;
+        self.bytes = total;
+        *ticket = bounded;
+        Ok(())
+    }
     /// Recheck trusted current state immediately before ordinary arbitration.
     /// Every known ticket is consumed even when its response is rejected.
     pub fn validate(

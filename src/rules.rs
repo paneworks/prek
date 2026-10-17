@@ -144,6 +144,12 @@ pub(crate) struct RouteIntent {
     pub rule: Rule,
     candidate: Candidate,
 }
+#[derive(Default)]
+pub(crate) struct RecognitionOwnership {
+    pub ownership: Option<crate::router::Ownership>,
+    pub winner: Option<u64>,
+    pub deadline: Option<Duration>,
+}
 impl RouteIntent {
     pub fn hyprland_target_available(&self, authority: &Authority, at: Duration) -> bool {
         let Some(permit) = self.candidate.permit.as_ref() else {
@@ -577,16 +583,12 @@ impl Engine {
             );
         }
         for sequence in &self.sequences {
-            result.extend(sequence.pending.values().map(|pending| {
-                let mut candidate = pending.first.clone();
-                candidate.id = pending.id;
-                candidate.sources = pending.sources.clone();
-                candidate.source_inputs = pending.source_inputs.clone();
-                RouteIntent {
-                    rule: sequence.rule.clone(),
-                    candidate,
-                }
-            }));
+            result.extend(
+                sequence
+                    .pending
+                    .values()
+                    .map(|pending| pending.route_intent(&sequence.rule)),
+            );
         }
         result
     }
@@ -1747,6 +1749,16 @@ struct PendingSequence {
     after_input: Option<u64>,
 }
 impl PendingSequence {
+    fn route_intent(&self, rule: &Rule) -> RouteIntent {
+        let mut candidate = self.first.clone();
+        candidate.id = self.id;
+        candidate.sources = self.sources.clone();
+        candidate.source_inputs = self.source_inputs.clone();
+        RouteIntent {
+            rule: rule.clone(),
+            candidate,
+        }
+    }
     fn admits_input(&self, candidate: &Candidate) -> bool {
         self.after_input.is_none_or(|watermark| {
             candidate.started_input > watermark

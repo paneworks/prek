@@ -91,6 +91,52 @@ fn rejecting_a_chain_replays_all_frames_once_with_one_fixed_delivery_offset() {
 }
 
 #[test]
+fn clocked_rejection_anchors_delivery_at_original_deadline_without_advancing_unread_input() {
+    let mut router = router(Limits::default());
+    let token = first(&mut router);
+    second(&mut router, &token);
+    router.cancel_after_input(1, 1, ms(60), ms(300)).unwrap();
+    assert_eq!(router.last_at, ms(60));
+    assert_eq!(router.delivery_offset(), ms(300));
+    router.push(down(5, 70, 0, 30), None, ms(70)).unwrap();
+    for (at, sequence) in [(300, 1), (310, 2), (350, 3), (360, 4), (370, 5)] {
+        let scheduled = router.due_after_input(ms(at)).unwrap().unwrap().clone();
+        assert_eq!(scheduled.frame.sequence, sequence);
+        router
+            .delivered_after_input(scheduled.ticket, ms(at))
+            .unwrap();
+    }
+    assert_eq!(router.last_at, ms(70));
+}
+
+#[test]
+fn clocked_rejection_before_decision_uses_wall_time_and_after_slack_requires_recovery() {
+    for now in [200, 310, 350] {
+        let mut router = router(Limits::default());
+        let token = first(&mut router);
+        second(&mut router, &token);
+        let result = router.cancel_after_input(1, 1, ms(60), ms(now));
+        assert_eq!(router.last_at, ms(60));
+        if now != 350 {
+            result.unwrap();
+            assert_eq!(router.delivery_offset(), ms(now.min(300)));
+            assert_eq!(
+                router
+                    .due_after_input(ms(now))
+                    .unwrap()
+                    .unwrap()
+                    .frame
+                    .sequence,
+                1
+            );
+        } else {
+            assert_eq!(result, Err(Fault::MissedDelivery));
+            assert!(router.recover().is_some());
+        }
+    }
+}
+
+#[test]
 fn continuing_at_the_original_decision_boundary_forwards_instead_of_renewing() {
     let mut router = router(Limits::default());
     let one = first(&mut router);

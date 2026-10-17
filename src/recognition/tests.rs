@@ -58,6 +58,100 @@ fn proposal(ticket: &Ticket, phase: Phase) -> Proposal {
         data: serde_json::json!({"confidence":0.9}),
     }
 }
+
+#[test]
+fn native_ticket_deadline_contraction_preserves_the_continuous_candidate_lifetime() {
+    let at = Duration::ZERO;
+    let mut gate = Gate::new(fence(), vec![definition(true)]).unwrap();
+    let mut current = candidate(at);
+    let mut ticket = gate.offer("custom", &current, &input(at, 1), at).unwrap();
+    gate.bound_deadline(&mut ticket, Duration::from_millis(10), at)
+        .unwrap();
+    assert_eq!(ticket.deadline, Duration::from_millis(10));
+    assert_eq!(gate.active[&current.id].candidate.expires, current.expires);
+    gate.validate(
+        proposal(&ticket, Phase::Begin),
+        &current,
+        Duration::from_millis(1),
+    )
+    .unwrap();
+    gate.expire(Duration::from_millis(30));
+    current.ownership = Some(Ownership::Claimed);
+    current.winner = Some(current.id);
+    let at = Duration::from_millis(31);
+    let update = gate.offer("custom", &current, &input(at, 2), at).unwrap();
+    assert_eq!(update.deadline, Duration::from_millis(51));
+    assert_eq!(
+        gate.validate(proposal(&update, Phase::Update), &current, at)
+            .unwrap()
+            .unwrap()
+            .ordinal,
+        2
+    );
+}
+
+#[test]
+fn native_ticket_deadline_updates_internal_validation_and_refuses_stale_bindings_atomically() {
+    let at = Duration::ZERO;
+    let mut gate = Gate::new(fence(), vec![definition(false)]).unwrap();
+    let current = candidate(at);
+    let mut ticket = gate.offer("custom", &current, &input(at, 1), at).unwrap();
+    let original = ticket.clone();
+    let bytes = gate.bytes;
+    let mut forged = ticket.clone();
+    forged.rule = "foreign".into();
+    assert!(
+        gate.bound_deadline(&mut forged, Duration::from_millis(10), at)
+            .is_err()
+    );
+    assert!(gate.bound_deadline(&mut ticket, at, at).is_err());
+    assert_eq!(gate.bytes, bytes);
+    assert_eq!(gate.pending[&ticket.id].ticket, original);
+    gate.bound_deadline(&mut ticket, Duration::from_secs(1), at)
+        .unwrap();
+    assert_eq!(ticket, original);
+    gate.bound_deadline(&mut ticket, Duration::from_millis(10), at)
+        .unwrap();
+    assert!(
+        gate.validate(
+            proposal(&ticket, Phase::Discrete),
+            &current,
+            Duration::from_millis(10)
+        )
+        .is_err()
+    );
+    assert_eq!(gate.pending(), 0);
+}
+
+#[test]
+fn native_ticket_deadline_contraction_reaccounts_encoded_byte_growth_and_overflow() {
+    let at = Duration::from_millis(980);
+    let bound = Duration::from_nanos(999_999_999);
+    for saturated in [false, true] {
+        let mut gate = Gate::new(fence(), vec![definition(false)]).unwrap();
+        let mut ticket = gate
+            .offer("custom", &candidate(at), &input(at, 1), at)
+            .unwrap();
+        let original = ticket.clone();
+        let old_bytes = gate.bytes;
+        if saturated {
+            gate.bytes = MAX_BYTES;
+        }
+        let result = gate.bound_deadline(&mut ticket, bound, at);
+        if saturated {
+            assert!(result.is_err());
+            assert_eq!(ticket, original);
+            assert_eq!(gate.bytes, MAX_BYTES);
+            assert_eq!(gate.pending[&ticket.id].ticket, original);
+            assert_eq!(gate.pending[&ticket.id].bytes, old_bytes);
+        } else {
+            result.unwrap();
+            assert!(gate.bytes > old_bytes);
+            assert_eq!(gate.bytes, encoded_size(&ticket, MAX_FRAME_BYTES).unwrap());
+            assert_eq!(gate.pending[&ticket.id].bytes, gate.bytes);
+        }
+    }
+}
 fn retained_touch(at: Duration) -> Event {
     let mut event = input(at, 9);
     let Event::Frame {

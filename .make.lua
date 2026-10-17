@@ -187,7 +187,14 @@ make.recipe{ name = "test", desc = "the suite",
              run = function() sh.cargo("test", "--locked", "--all-targets") end }
 make.alias("t", "test")
 
+make.recipe{ name = "test-custom-chains", desc = "private native custom-scope and ticket-deadline checks",
+             run = function()
+               sh.cargo("test", "--locked", "--lib", "routing::tests::custom::chains::")
+               sh.cargo("test", "--locked", "--lib", "recognition::tests::native_ticket_deadline")
+             end }
+
 make.recipe{ name = "test-composition", desc = "native sequence routing and recursive recognizer approval",
+             deps = { "test-custom-chains" },
              run = function()
                sh.cargo("test", "--locked", "--lib", "rules::tests::composition::")
                sh.cargo("test", "--locked", "--lib", "routing::tests::sequence::")
@@ -232,6 +239,22 @@ make.recipe{
     io.stderr:write(tested.err or "")
     assert(tested.ok and (tested.out or ""):find("test result: ok. 1 passed;", 1, true),
            "native composition helper test failed or selected no case")
+  end,
+}
+
+make.recipe{
+  name = "test-chain-helper",
+  desc = "test private consuming chains with the real unprivileged Lua helper",
+  deps = { "build" },
+  run = function()
+    local tested = oslo.run{ "env", "PREK_TEST_LUA_BINARY=" .. project_root() .. "/target/debug/" .. NAME,
+      "cargo", "test", "--locked", "--lib",
+      "routing::tests::custom::chains::helper::supervised_custom_steps_use_complete_native_routing_scopes",
+      "--", "--exact", "--ignored", "--test-threads=1", capture = true }
+    io.write(tested.out or "")
+    io.stderr:write(tested.err or "")
+    assert(tested.ok and (tested.out or ""):find("test result: ok. 1 passed;", 1, true),
+           "native chain helper test failed or selected no case")
   end,
 }
 
@@ -307,6 +330,6 @@ make.alias("c", "compile")
 make.recipe{
   name = "verify",
   desc = "the whole local gate",
-  deps = { "fmt-check", "check-all", "test-all", "test-routing-helper", "test-composition-helper", "test-root-session", "test-root-routing", "test-cage-startup", "clippy", "rustdoc" },
+  deps = { "fmt-check", "check-all", "test-all", "test-routing-helper", "test-composition-helper", "test-chain-helper", "test-root-session", "test-root-routing", "test-cage-startup", "clippy", "rustdoc" },
 }
 make.alias("v", "verify")

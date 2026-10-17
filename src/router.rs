@@ -752,6 +752,38 @@ impl Router {
     pub fn cancel(&mut self, id: u64, authorization: u64, at: Duration) -> Result<(), Fault> {
         self.authorized(id, authorization)?;
         self.advance(at)?;
+        self.cancel_at(at)
+    }
+    pub(crate) fn cancel_after_input(
+        &mut self,
+        id: u64,
+        authorization: u64,
+        input_at: Duration,
+        now: Duration,
+    ) -> Result<(), Fault> {
+        self.authorized(id, authorization)?;
+        if input_at > now || now < self.delivery_at {
+            return self.fail(Fault::BackwardTime);
+        }
+        self.advance(input_at)?;
+        let mut release_at = now;
+        if self.ownership() == Some(Ownership::Pending) {
+            let group = self.group.as_ref().unwrap();
+            if let Some(Candidate {
+                policy: Policy::Buffer { decision, .. },
+                ..
+            }) = group.candidate
+            {
+                let Some(deadline) = group.first.checked_add(decision) else {
+                    return self.fail(Fault::Overflow);
+                };
+                release_at = release_at.min(deadline);
+            }
+        }
+        self.cancel_at(release_at)?;
+        self.delivery_clock(now)
+    }
+    fn cancel_at(&mut self, at: Duration) -> Result<(), Fault> {
         match self.ownership() {
             Some(Ownership::Pending) => self.forward(at)?,
             Some(Ownership::Claimed) => {

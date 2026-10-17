@@ -1,6 +1,7 @@
 //! Native coordinator execution with explicit context/readiness models. These
 //! fixtures neither open evdev/uinput nor establish kernel routing acceptance.
 use super::*;
+mod chains;
 use crate::{
     config::{Millis, Mode},
     protocol::{Epoch, Fence},

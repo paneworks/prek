@@ -358,18 +358,26 @@ counting earlier motion. Admission does not advance the drained input clock.
 A custom step completed after the group is fully neutral may instead wait for
 a genuinely fresh group. Final custom proposals retain their original expiry
 when translated to a parent outcome.
-Public custom-sequence validation remains closed: consuming group/ownership
-integration, full worker/helper integration and
-offline custom replay are still required. These fixtures do not constitute that
+Public custom-sequence validation remains closed: full sole-worker/source
+integration and offline custom replay are still required. These fixtures do not constitute that
 API, privileged, device or rendered acceptance.
 The [native raw-group chain API](routing-chains.md) provides bounded multi-group
 buffer/reserve, FIFO fallback and opaque ownership proofs. Built-in native
 sequences use these through `routing::Routing`, with actual per-source step
-admission and immutable dispatch receipts. Custom leaf-to-parent ownership and
-the full composed worker/source path still need integration.
+admission and immutable dispatch receipts. Private custom ticket issue and reply
+now validate complete native parent scopes before translating ownership to the
+exact leaf. Leaf bindings cannot be created by replies or retargeted to another
+parent/source token; their aggregate source metadata is bounded. Each ticket
+also preserves the original pending buffer decision without shortening an
+already-claimed continuous candidate's lifetime. The full composed worker/source
+path and public admission still need integration.
 `oslo make test-composition-helper` exercises a private native hold-to-custom-to-
 custom-to-native-motion plan with source-bound callbacks in the actual supervised executable;
 it is not public source admission or consuming-route acceptance.
+`oslo make test-chain-helper` separately runs an actual supervised Lua child
+through private consuming hold/custom/custom Routing, with exact parent/leaf
+proofs and correlated cleanup acknowledgements. This is still model source,
+readiness and context authority, not the complete sole-worker or physical path.
 
 Built-in native sequences join a later step's eligible sources before its match,
 so an explicitly reserved second-device press cannot escape while a hold matures.

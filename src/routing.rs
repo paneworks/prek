@@ -23,6 +23,7 @@ use std::{
     time::Duration,
 };
 mod chain;
+mod custom;
 
 const MAX_DISPATCHES: usize = 128;
 struct Route {
@@ -48,6 +49,7 @@ struct Dispatch {
 pub struct Routing {
     chains: BTreeMap<u64, BTreeMap<Source, ChainToken>>,
     custom_groups: BTreeMap<u64, (Source, u64, u64)>,
+    custom_chains: BTreeMap<u64, custom::BoundCustom>,
     deferred_custom: VecDeque<RouteOutcome>,
     deferred_bytes: usize,
     engine: Engine,
@@ -152,6 +154,7 @@ impl Routing {
         Ok(Self {
             chains: BTreeMap::new(),
             custom_groups: BTreeMap::new(),
+            custom_chains: BTreeMap::new(),
             deferred_custom: VecDeque::new(),
             deferred_bytes: 0,
             engine,
@@ -706,6 +709,8 @@ impl Routing {
                     || self.won.contains_key(id))
             });
         self.cleanup_chains(&active);
+        self.custom_chains
+            .retain(|id, _| self.engine.recognition_candidate_live(*id));
         if self.events.len() > 16384 {
             let sources: Vec<_> = self.routes.keys().cloned().collect();
             for source in sources {
@@ -768,12 +773,11 @@ impl Routing {
                         || !active.iter().any(|intent| intent.id() == id)
                             && !outcomes.iter().any(|outcome| outcome.intent.id() == id))
                 {
-                    let route = self.routes.get_mut(&source).unwrap();
-                    if matches!(route.router.ownership(), Some(Ownership::Claimed)) {
-                        route
-                            .router
-                            .cancel(route.ticket, route.authorization, at)
-                            .map_err(fault)?;
+                    if matches!(
+                        self.routes[&source].router.ownership(),
+                        Some(Ownership::Claimed)
+                    ) {
+                        self.cancel_route(&source, at, now)?;
                     }
                     self.dispatches
                         .retain(|dispatch| dispatch.outcome.intent.id() != id);
@@ -865,14 +869,23 @@ impl Routing {
                         )
                     })
             {
-                let route = self.routes.get_mut(&source).unwrap();
-                route
-                    .router
-                    .cancel(route.ticket, route.authorization, at)
-                    .map_err(fault)?;
+                self.cancel_route(&source, at, now)?;
             }
         }
         Ok(())
+    }
+    fn cancel_route(&mut self, source: &Source, at: Duration, now: Duration) -> io::Result<()> {
+        let route = self.routes.get_mut(source).unwrap();
+        match route
+            .router
+            .cancel_after_input(route.ticket, route.authorization, at, now)
+        {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.recover(source);
+                Err(fault(error))
+            }
+        }
     }
     pub fn due(&mut self, source: &Source, at: Duration) -> io::Result<Option<&Scheduled>> {
         let advance = self
@@ -996,13 +1009,17 @@ impl Routing {
         now: Duration,
     ) -> io::Result<Vec<crate::recognition::Ticket>> {
         self.push_at(Record::Tick { at }, now)?;
-        let routes = &self.routes;
-        let groups = &self.custom_groups;
+        let mut scopes = custom::CustomRoutes {
+            routes: &self.routes,
+            chains: &self.chains,
+            groups: &self.custom_groups,
+            bindings: &mut self.custom_chains,
+            at,
+            now,
+        };
         let tickets = self
             .engine
-            .recognition_requests_with(at, |source, rule, id| {
-                custom_ownership(routes, groups, source, rule, id)
-            })?;
+            .recognition_requests_with(at, |leaf, owner| scopes.ownership(leaf, owner, true))?;
         self.push_at(Record::Tick { at }, now)?;
         Ok(tickets)
     }
@@ -1020,14 +1037,19 @@ impl Routing {
         now: Duration,
     ) -> io::Result<()> {
         self.push_at(Record::Tick { at: input_at }, now)?;
-        let routes = &self.routes;
-        let groups = &self.custom_groups;
-        let result = self.engine.recognition_response_clocked(
-            proposal,
-            input_at,
+        let mut scopes = custom::CustomRoutes {
+            routes: &self.routes,
+            chains: &self.chains,
+            groups: &self.custom_groups,
+            bindings: &mut self.custom_chains,
+            at: input_at,
             now,
-            |source, rule, id| custom_ownership(routes, groups, source, rule, id),
-        );
+        };
+        let result =
+            self.engine
+                .recognition_response_clocked(proposal, input_at, now, |leaf, owner| {
+                    scopes.ownership(leaf, owner, false)
+                });
         let synchronized = self.push_at(Record::Tick { at: input_at }, now);
         result.and(synchronized)
     }
@@ -1107,6 +1129,8 @@ impl Routing {
                 .cancel_sequence(id, self.engine.input_at(), "routing transport retired");
         }
         self.chains.retain(|_, scope| !scope.contains_key(source));
+        self.custom_chains
+            .retain(|_, binding| !binding.tokens.contains_key(source));
         self.engine.retire_routing_recognition(source);
         self.custom_groups
             .retain(|_, (bound, _, _)| bound != source);

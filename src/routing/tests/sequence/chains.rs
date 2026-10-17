@@ -273,13 +273,11 @@ fn delayed_frame_admission_cannot_claim_after_the_original_buffer_wall_deadline(
             },
         ],
     };
-    routing.push_at(Record::Frame { frame }, ms(350)).unwrap();
+    assert!(routing.push_at(Record::Frame { frame }, ms(350)).is_err());
     assert!(routing.engine.route_intents().is_empty());
     assert!(routing.take_dispatches(ms(350)).is_empty());
-    assert_ne!(
-        routing.routes[&first.source].router.ownership(),
-        Some(Ownership::Claimed)
-    );
+    assert!(!routing.routes.contains_key(&first.source));
+    assert_eq!(routing.take_recoveries().len(), 1);
 }
 
 fn touch_key_sequence() -> Routing {

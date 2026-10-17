@@ -577,6 +577,28 @@ impl Engine {
             && self.validate_route(&intent, at).is_ok())
         .then_some(intent)
     }
+    pub(crate) fn recognition_scope(
+        &self,
+        id: u64,
+        at: Duration,
+    ) -> Option<(RouteIntent, RouteIntent)> {
+        let intent = self.custom_intent(id, at)?;
+        let owner = if let Some((sequence, _)) = self.custom_location(id)?.step {
+            let sequence = &self.sequences[sequence];
+            sequence
+                .pending
+                .get(&intent.source().seat)?
+                .route_intent(&sequence.rule)
+        } else {
+            intent.clone()
+        };
+        Some((intent, owner))
+    }
+    pub(crate) fn recognition_candidate_live(&self, id: u64) -> bool {
+        self.custom
+            .as_ref()
+            .is_some_and(|custom| custom.live.contains(&id))
+    }
     fn custom_cancel(&mut self, id: u64, at: Duration, reason: &str) {
         if let Some(location) = self.custom_location(id) {
             let engine = self.custom_engine_mut(location);
@@ -739,12 +761,12 @@ impl Engine {
             .min()
     }
     pub fn recognition_requests(&mut self, at: Duration) -> io::Result<Vec<Ticket>> {
-        self.recognition_requests_with(at, |_, _, _| (None, None))
+        self.recognition_requests_with(at, |_, _| RecognitionOwnership::default())
     }
     pub(crate) fn recognition_requests_with(
         &mut self,
         at: Duration,
-        ownership: impl Fn(&Source, &Rule, u64) -> (Option<Ownership>, Option<u64>),
+        mut ownership: impl FnMut(&RouteIntent, &RouteIntent) -> RecognitionOwnership,
     ) -> io::Result<Vec<Ticket>> {
         self.advance(at)?;
         let Some(custom) = self.custom.as_mut() else {
@@ -754,12 +776,12 @@ impl Engine {
         custom.bytes = 0;
         let mut tickets = Vec::new();
         for offer in offers {
-            let Some(intent) = self.custom_intent(offer.candidate, at) else {
+            let Some((intent, owner)) = self.recognition_scope(offer.candidate, at) else {
                 self.custom_cancel(offer.candidate, at, "custom eligibility changed");
                 continue;
             };
-            let (ownership, winner) = ownership(intent.source(), &intent.rule, intent.id());
-            let current = self.custom_candidate(&intent, ownership, winner)?;
+            let proof = ownership(&intent, &owner);
+            let current = self.custom_candidate(&intent, proof.ownership, proof.winner)?;
             let Trigger::Custom { recognizer, .. } = &intent.rule.trigger else {
                 unreachable!()
             };
@@ -786,7 +808,19 @@ impl Engine {
                 }
             };
             match result {
-                Ok(ticket) => tickets.push(ticket),
+                Ok(mut ticket) => {
+                    if proof.deadline.is_some_and(|deadline| {
+                        gate.bound_deadline(&mut ticket, deadline, at).is_err()
+                    }) {
+                        self.custom_cancel(
+                            offer.candidate,
+                            at,
+                            "custom ownership deadline refused",
+                        );
+                    } else {
+                        tickets.push(ticket);
+                    }
+                }
                 Err(_) => self.custom_cancel(offer.candidate, at, "custom ticket refused"),
             }
         }
@@ -836,13 +870,13 @@ impl Engine {
         })
     }
     pub fn recognition_response(&mut self, proposal: Proposal, at: Duration) -> io::Result<()> {
-        self.recognition_response_with(proposal, at, |_, _, _| (None, None))
+        self.recognition_response_with(proposal, at, |_, _| RecognitionOwnership::default())
     }
     pub(crate) fn recognition_response_with(
         &mut self,
         proposal: Proposal,
         at: Duration,
-        ownership: impl Fn(&Source, &Rule, u64) -> (Option<Ownership>, Option<u64>),
+        ownership: impl FnMut(&RouteIntent, &RouteIntent) -> RecognitionOwnership,
     ) -> io::Result<()> {
         self.recognition_response_clocked(proposal, at, at, ownership)
     }
@@ -854,14 +888,16 @@ impl Engine {
         input_at: Duration,
         now: Duration,
     ) -> io::Result<()> {
-        self.recognition_response_clocked(proposal, input_at, now, |_, _, _| (None, None))
+        self.recognition_response_clocked(proposal, input_at, now, |_, _| {
+            RecognitionOwnership::default()
+        })
     }
     pub(crate) fn recognition_response_clocked(
         &mut self,
         proposal: Proposal,
         input_at: Duration,
         at: Duration,
-        ownership: impl Fn(&Source, &Rule, u64) -> (Option<Ownership>, Option<u64>),
+        mut ownership: impl FnMut(&RouteIntent, &RouteIntent) -> RecognitionOwnership,
     ) -> io::Result<()> {
         if input_at > at || self.last_at.is_some_and(|last| input_at < last) {
             return Err(invalid("custom reply clock regressed"));
@@ -872,13 +908,13 @@ impl Engine {
             .as_ref()
             .and_then(|custom| custom.gate.candidate(proposal.ticket))
             .ok_or_else(|| invalid("unknown custom recognition ticket"))?;
-        let Some(intent) = self.custom_intent(id, at) else {
+        let Some((intent, owner)) = self.recognition_scope(id, at) else {
             self.custom_cancel(id, at, "custom recognition is no longer eligible");
             self.custom_sync(at, Retirement::Cancelled);
             return Err(invalid("custom recognition is no longer eligible"));
         };
-        let (ownership, winner) = ownership(intent.source(), &intent.rule, intent.id());
-        let candidate = self.custom_candidate(&intent, ownership, winner)?;
+        let proof = ownership(&intent, &owner);
+        let candidate = self.custom_candidate(&intent, proof.ownership, proof.winner)?;
         let validation = self
             .custom
             .as_mut()
