@@ -81,10 +81,12 @@ both native scrolling directions, swaps the same app up and back down, checks
 the actual native pair permutation and saves `reorder-{down,up}-*.png` with
 named receiver labels. Before capture it requires matching configure, frame
 and actual `wp_presentation` feedback for each expected visible surface. Real
-PPM pixels must contain each receiver's RGB marker at its native position;
-the PNG and rendering receipts are retained alongside the native permutation.
-A black frame observed during development was rejected by this check; the
-presentation-backed development fixture passed both native directions.
+PPM pixels must contain each receiver's RGB marker at its native position.
+Capture waits at most three seconds and 64 frames for those pixels, retaining
+the first unready frame; it never repeats the native action. The PNG is encoded
+from that exact validated RGB buffer and decoded back to byte-identical RGB.
+The PNG, PPM, capture-attempt count and rendering receipts are retained alongside
+the native permutation. Black frames and exhausted capture budgets fail.
 
 The GUI receipts explicitly mark modeled claims/grants and absent physical
 takeover. They do not establish native broker, physical app-content or full G08

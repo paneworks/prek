@@ -6,6 +6,13 @@ pkgs.stdenv.mkDerivation {
   dontUnpack = true;
   nativeBuildInputs = [ pkgs.pkg-config pkgs.wayland-scanner ];
   buildInputs = [ pkgs.wayland pkgs.libxkbcommon pkgs.cairo ];
+  nativeCheckInputs = [ pkgs.diffutils pkgs.coreutils ];
+  doCheck = true;
+  checkPhase = ''
+    runHook preCheck
+    bash ${./run-receiver-images.sh} "$PWD/prek-wayland-receiver"
+    runHook postCheck
+  '';
   buildPhase = ''
     runHook preBuild
     wayland-scanner client-header ${pkgs.wayland-protocols}/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml xdg-shell-client-protocol.h

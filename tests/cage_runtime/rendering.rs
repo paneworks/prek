@@ -3,9 +3,9 @@ use serde::Serialize;
 use serde_json::Value;
 use std::{
     fs,
-    io::Read,
+    io::{Read, Write},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     time::Duration,
 };
 
@@ -39,6 +39,19 @@ struct Ppm<'a> {
     width: usize,
     height: usize,
     pixels: &'a [u8],
+}
+struct PixelGate {
+    until: Duration,
+    attempts: usize,
+}
+impl PixelGate {
+    fn check(&mut self, now: Duration, matched: bool) -> Result<bool, &'static str> {
+        self.attempts += 1;
+        if now >= self.until || self.attempts > 64 {
+            return Err("owned screenshot never contained the expected presented pixels");
+        }
+        Ok(matched)
+    }
 }
 impl<'a> Ppm<'a> {
     fn parse(bytes: &'a [u8]) -> Result<Self, &'static str> {
@@ -251,8 +264,32 @@ pub(super) fn capture(
                 .success()
         );
     };
-    screenshot("ppm", &pixels);
-    let bytes = read(&pixels, 64 * 1024 * 1024);
+    let mut gate = PixelGate {
+        until: monotonic().unwrap() + Duration::from_secs(3),
+        attempts: 0,
+    };
+    let bytes = loop {
+        screenshot("ppm", &pixels);
+        let bytes = read(&pixels, 64 * 1024 * 1024);
+        let image = Ppm::parse(&bytes).unwrap();
+        assert_eq!(
+            (image.width as f64, image.height as f64),
+            (state.geometry.pixel_width, state.geometry.pixel_height)
+        );
+        if gate
+            .check(
+                monotonic().unwrap(),
+                visible.iter().all(|app| image.marker(app.pixel, app.color)),
+            )
+            .unwrap()
+        {
+            break bytes;
+        }
+        if gate.attempts == 1 {
+            fs::copy(&pixels, output.join(format!("{stem}-unready-first.ppm"))).unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
     let image = Ppm::parse(&bytes).unwrap();
     assert_eq!(
         (image.width as f64, image.height as f64),
@@ -267,14 +304,62 @@ pub(super) fn capture(
             app.pixel
         );
     }
-    screenshot("png", &capture);
-    fs::write(output.join(format!("{stem}-rendering.json")),serde_json::to_vec(&serde_json::json!({"status":"passed","pixels":pixels,"capture":capture,"visible":visible})).unwrap()).unwrap();
+    let receiver = std::env::var_os("PREK_CAGE_RECEIVER").unwrap();
+    let dimensions = [image.width.to_string(), image.height.to_string()];
+    let mut encoder = Command::new(&receiver)
+        .arg("--rgb-png")
+        .args(&dimensions)
+        .arg(&capture)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    encoder
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(image.pixels)
+        .unwrap();
+    assert!(encoder.wait().unwrap().success());
+    let decoded = Command::new(receiver)
+        .arg("--png-rgb")
+        .args(&dimensions)
+        .arg(&capture)
+        .output()
+        .unwrap();
+    assert!(decoded.status.success());
+    assert!(
+        decoded.stdout == image.pixels,
+        "PNG differs from the exact validated capture pixels"
+    );
+    fs::write(output.join(format!("{stem}-rendering.json")),serde_json::to_vec(&serde_json::json!({"status":"passed","pixels":pixels,"capture":capture,"visible":visible,"capture_attempts":gate.attempts,"png_exact_rgb":true})).unwrap()).unwrap();
     capture
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pixel_gate_waits_for_actual_pixels_with_fixed_time_and_attempt_bounds() {
+        let mut gate = PixelGate {
+            until: Duration::from_secs(3),
+            attempts: 0,
+        };
+        assert_eq!(gate.check(Duration::ZERO, false), Ok(false));
+        assert_eq!(gate.check(Duration::from_secs(1), true), Ok(true));
+        let mut gate = PixelGate {
+            until: Duration::from_secs(3),
+            attempts: 0,
+        };
+        for _ in 0..64 {
+            assert_eq!(gate.check(Duration::ZERO, false), Ok(false));
+        }
+        assert!(gate.check(Duration::ZERO, true).is_err());
+        let mut gate = PixelGate {
+            until: Duration::from_secs(3),
+            attempts: 0,
+        };
+        assert!(gate.check(Duration::from_secs(3), true).is_err());
+    }
     #[test]
     fn ppm_parser_preserves_binary_whitespace_and_checks_exact_dimensions() {
         let mut bytes = b"P6\n# test\n1 1\n255\n".to_vec();

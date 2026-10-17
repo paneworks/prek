@@ -275,9 +275,38 @@ static const struct xdg_surface_listener surface_listener={.configure=configure}
 static void size(void *data,struct xdg_toplevel *toplevel,int32_t width,int32_t height,struct wl_array *states) {struct app *app=data;if(width>0)app->width=width;if(height>0)app->height=height;}
 static void closed(void *data,struct xdg_toplevel *toplevel) {((struct app *)data)->running=false;}
 static const struct xdg_toplevel_listener toplevel_listener={.configure=size,.close=closed};
+static cairo_status_t png_write(void *data,const unsigned char *bytes,unsigned length) {
+    return fwrite(bytes,1,length,data)==length?CAIRO_STATUS_SUCCESS:CAIRO_STATUS_WRITE_ERROR;
+}
+static int image_convert(int argc,char **argv,bool encode) {
+    if(argc!=5)return 2;
+    char *end=NULL;long width=strtol(argv[2],&end,10);if(!*argv[2] || *end || width<1 || width>8192)return 2;
+    long height=strtol(argv[3],&end,10);if(!*argv[3] || *end || height<1 || height>8192 || width*height>64*1024*1024/3)return 2;
+    cairo_surface_t *surface=encode?cairo_image_surface_create(CAIRO_FORMAT_RGB24,width,height):cairo_image_surface_create_from_png(argv[4]);
+    if(cairo_surface_status(surface)!=CAIRO_STATUS_SUCCESS || cairo_image_surface_get_width(surface)!=width || cairo_image_surface_get_height(surface)!=height)return 1;
+    cairo_format_t format=cairo_image_surface_get_format(surface);if(format!=CAIRO_FORMAT_RGB24 && format!=CAIRO_FORMAT_ARGB32)return 1;
+    cairo_surface_flush(surface);unsigned char *pixels=cairo_image_surface_get_data(surface);int stride=cairo_image_surface_get_stride(surface);
+    for(long y=0;y<height;y++)for(long x=0;x<width;x++) {
+        uint32_t *pixel=(uint32_t *)(pixels+y*stride+x*4);unsigned char rgb[3];
+        if(encode) {if(fread(rgb,1,3,stdin)!=3)return 1;*pixel=((uint32_t)rgb[0]<<16)|((uint32_t)rgb[1]<<8)|rgb[2];}
+        else {if(format==CAIRO_FORMAT_ARGB32 && (*pixel>>24)!=255)return 1;rgb[0]=*pixel>>16;rgb[1]=*pixel>>8;rgb[2]=*pixel;if(fwrite(rgb,1,3,stdout)!=3)return 1;}
+    }
+    int result=0;
+    if(encode) {
+        if(fgetc(stdin)!=EOF)return 1;
+        cairo_surface_mark_dirty(surface);int fd=open(argv[4],O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);if(fd<0)return 1;
+        FILE *output=fdopen(fd,"wb");if(!output){close(fd);return 1;}
+        result=cairo_surface_write_to_png_stream(surface,png_write,output)!=CAIRO_STATUS_SUCCESS;
+        if(fclose(output))result=1;if(result)unlink(argv[4]);
+    } else if(fflush(stdout))result=1;
+    cairo_surface_destroy(surface);return result;
+}
 int main(int argc,char **argv) {
     const char *vm=getenv("PREK_CAGE_VM"), *host=getenv("PREK_CAGE_HOST");
-    if(argc!=2 || !((vm && !strcmp(vm,"1")) || (host && !strcmp(host,"1")))){fprintf(stderr,"use an explicitly owned Cage test session and supply a receipt path\n");return 2;}
+    if(!((vm && !strcmp(vm,"1")) || (host && !strcmp(host,"1"))))return 2;
+    if(argc>1 && !strcmp(argv[1],"--rgb-png"))return image_convert(argc,argv,true);
+    if(argc>1 && !strcmp(argv[1],"--png-rgb"))return image_convert(argc,argv,false);
+    if(argc!=2){fprintf(stderr,"supply an owned receipt path\n");return 2;}
     int fd=open(argv[1],O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);if(fd<0){perror("receipt file");return 1;}
     struct app app={.running=true,.width=600,.height=800};app.log=fdopen(fd,"w");if(!app.log)abort();
     const char *label=getenv("PREK_TEST_RECEIVER_LABEL");if(!label)label="Prek Wayland input receiver";
