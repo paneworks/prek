@@ -88,6 +88,9 @@ impl Fixture {
         Self::with_version(mode, "0.54.3")
     }
     fn with_version(mode: Mode, version: &'static str) -> Self {
+        Self::with_provider(mode, version, "hyprlang")
+    }
+    fn with_provider(mode: Mode, version: &'static str, provider: &'static str) -> Self {
         let behavior = Arc::new(AtomicU64::new(0));
         let workspace = Arc::new(AtomicU64::new(3));
         let closed = Arc::new(AtomicBool::new(false));
@@ -106,12 +109,12 @@ impl Fixture {
                 "mapped":true,"hidden":false,"monitor":1,"workspace":{"id":workspace},"at":[0,0],"size":[300,400]});
                 match request {
                 b"j/status" => match behavior {
-                    6 => serde_json::json!({"configProvider":"lua"}).to_string(),
+                    6 => serde_json::json!({"configProvider":if provider=="lua" {"hyprlang"} else {"lua"}}).to_string(),
                     7 => "{}".into(),
                     8 => serde_json::json!({"configProvider":false}).to_string(),
                     9 => "invalid json".into(),
                     10 => {thread::sleep(Duration::from_millis(300)); "{}".into()},
-                    _ => serde_json::json!({"configProvider":"hyprlang"}).to_string(),
+                    _ => serde_json::json!({"configProvider":provider}).to_string(),
                 },
                 b"j/locked" => serde_json::json!({"locked":behavior==4}).to_string(),
                 b"j/layers" => "{}".into(),
@@ -121,12 +124,31 @@ impl Fixture {
                     "width":if behavior==5{1200}else{1080},"height":1920,"scale":2.0,"x":0,"y":0,"transform":0,
                     "activeWorkspace":{"id":workspace},"dpmsStatus":true}]).to_string(),
                 b"/dispatch closewindow address:0x1234"|b"/dispatch movetoworkspace 2,address:0x1234"|b"/dispatch movetoworkspace 4,address:0x1234" => {
+                    assert_eq!(provider,"hyprlang");
                     dispatch_copy.fetch_add(1,Ordering::Relaxed);
                     if behavior!=1 {
                         match request {
                             b"/dispatch closewindow address:0x1234"=>closed_copy.store(true,Ordering::Relaxed),
                             b"/dispatch movetoworkspace 2,address:0x1234"=>workspace_copy.store(2,Ordering::Relaxed),
                             _=>workspace_copy.store(4,Ordering::Relaxed),
+                        }
+                    }
+                    if behavior==2 {thread::sleep(Duration::from_millis(300));}
+                    "ok".into()
+                },
+                request if request.starts_with(b"/dispatch (function() ") => {
+                    assert_eq!(provider,"lua");
+                    let text=std::str::from_utf8(request).unwrap();
+                    assert!(text.contains("w.stable_id==0xabc"));
+                    assert!(text.contains("hl.get_window(\"address:0x1234\")"));
+                    dispatch_copy.fetch_add(1,Ordering::Relaxed);
+                    if behavior!=1 {
+                        if text.contains("hl.dsp.window.close({window=w})") {
+                            closed_copy.store(true,Ordering::Relaxed);
+                        } else {
+                            assert!(text.contains("follow=true"));
+                            let workspace=if text.contains("workspace=\"2\"") {2} else {assert!(text.contains("workspace=\"4\""));4};
+                            workspace_copy.store(workspace,Ordering::Relaxed);
                         }
                     }
                     if behavior==2 {thread::sleep(Duration::from_millis(300));}
@@ -244,13 +266,17 @@ impl Fixture {
 
 #[test]
 fn frozen_window_close_and_adjacent_moves_need_a_separate_grant_and_do_not_retry() {
-    for version in ["0.54.3", "0.56.2"] {
+    for (version, provider) in [
+        ("0.54.3", "hyprlang"),
+        ("0.56.2", "hyprlang"),
+        ("0.56.2", "lua"),
+    ] {
         for action in [
             WindowAction::Close,
             WindowAction::MoveLeftAndFollow,
             WindowAction::MoveRightAndFollow,
         ] {
-            let mut fixture = Fixture::with_version(Mode::Route, version);
+            let mut fixture = Fixture::with_provider(Mode::Route, version, provider);
             fixture.offer(action);
             assert!(
                 !fixture
@@ -278,21 +304,45 @@ fn frozen_window_close_and_adjacent_moves_need_a_separate_grant_and_do_not_retry
 
 #[test]
 fn changed_unknown_or_stalled_config_provider_refuses_window_mutation() {
-    for behavior in 6..=10 {
-        let mut fixture = Fixture::with_version(Mode::Route, "0.56.2");
-        fixture.offer(WindowAction::Close);
-        fixture.grant();
-        fixture.behavior.store(behavior, Ordering::Relaxed);
-        assert_eq!(fixture.completion(), Completion::Unavailable);
-        assert_eq!(fixture.dispatches.load(Ordering::Relaxed), 0);
+    for provider in ["hyprlang", "lua"] {
+        for behavior in 6..=10 {
+            let mut fixture = Fixture::with_provider(Mode::Route, "0.56.2", provider);
+            fixture.offer(WindowAction::Close);
+            fixture.grant();
+            fixture.behavior.store(behavior, Ordering::Relaxed);
+            assert_eq!(fixture.completion(), Completion::Unavailable);
+            assert_eq!(fixture.dispatches.load(Ordering::Relaxed), 0);
+        }
     }
 }
 
 #[test]
-fn window_initialization_refuses_non_hyprlang_provider_before_context_binding() {
+fn lua_window_effects_keep_lifetime_lock_geometry_and_single_attempt_guards() {
+    for behavior in 1..=5 {
+        let mut fixture = Fixture::with_provider(Mode::Route, "0.56.2", "lua");
+        fixture.offer(WindowAction::Close);
+        fixture.grant();
+        fixture.behavior.store(behavior, Ordering::Relaxed);
+        assert_eq!(
+            fixture.completion(),
+            if behavior <= 2 {
+                Completion::Uncertain
+            } else {
+                Completion::Unavailable
+            }
+        );
+        assert_eq!(
+            fixture.dispatches.load(Ordering::Relaxed),
+            u64::from(behavior <= 2)
+        );
+    }
+}
+
+#[test]
+fn window_initialization_refuses_unknown_provider_before_context_binding() {
     let fixture = Fixture::new(Mode::Route);
     for reply in [
-        r#"{"configProvider":"lua"}"#,
+        r#"{"configProvider":"other"}"#,
         "{}",
         r#"{"configProvider":null}"#,
         "invalid",

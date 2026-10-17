@@ -35,6 +35,34 @@ class RenderedState(unittest.TestCase):
             {"event": "key", "drawn_sequence": 20}], 10))
 
 
+class ConfigProvider(unittest.TestCase):
+    def test_each_config_has_its_own_extension_and_deterministic_output(self):
+        name, source = inner.configuration("lua")
+        self.assertEqual(name, "hyprland.lua")
+        self.assertIn('hl.monitor({output="",mode="1280x720@60"', source)
+        self.assertIn('animations={enabled=false}', source)
+        name, source = inner.configuration("hyprlang")
+        self.assertEqual(name, "hyprland.conf")
+        self.assertIn("monitor = , 1280x720@60", source)
+        self.assertNotIn("hl.monitor", source)
+
+    def test_focus_dialect_never_uses_current_focus_or_interpolated_selectors(self):
+        self.assertEqual(host.focus_arguments("hyprlang", "0x1234"),
+                         ["dispatch", "focuswindow", "address:0x1234"])
+        self.assertEqual(host.focus_arguments("lua", "0x1234"),
+                         ["dispatch", 'hl.dsp.focus({window="address:0x1234"})'])
+        for value in ("active", "0x0", "0x1;exit", '0x1"', "0x10000000000000000"):
+            for provider in ("lua", "hyprlang"):
+                with self.subTest(value=value, provider=provider), self.assertRaises(ValueError):
+                    host.focus_arguments(provider, value)
+
+    def test_unknown_provider_does_not_fall_back_to_legacy(self):
+        with self.assertRaises(ValueError):
+            inner.configuration("other")
+        with self.assertRaises(ValueError):
+            host.focus_arguments("other", "0x1234")
+
+
 class OutputReadiness(unittest.TestCase):
     def test_missing_zero_negative_and_disabled_outputs_are_unusable(self):
         for monitors in (None, [], [{}], [{"width": 0, "height": 720}],

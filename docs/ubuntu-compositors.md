@@ -76,7 +76,9 @@ The positive-output, rendered-receiver and parent-input-isolation guards remain
 enabled. A passing variant run is **not unmodified stock compositor acceptance**.
 The newer variant supports `--windows` with its explicit hyprlang config.
 Its recipe runs separate mode/layer sessions with input, power and frozen-target
-window checks. Hyprland 0.56.2's Lua dispatch dialect is refused, not guessed.
+window checks. `oslo make test-cage-lua-wayland-fix` repeats them with an actual
+Lua config and typed, provider-bound Lua dispatch. Neither recipe silently tries
+another mutation dialect after a failure.
 
 Pass `--morf /absolute/path/to/morf --morf-shell /absolute/path/to/shell/init.lua`
 to exercise the real Morf lock provider and Caelestia controllers. An unwrapped

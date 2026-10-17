@@ -31,6 +31,7 @@ fn address(id: &str) -> io::Result<&str> {
 
 pub struct HyprlandAdapter {
     client: Client,
+    dialect: crate::hyprland::dispatch::Dialect,
     sampler: ContextSampler,
     view: View,
 }
@@ -38,9 +39,10 @@ impl HyprlandAdapter {
     /// The host supplies a broker-approved desktop binding and context.
     pub fn new(client: Client, view: View) -> io::Result<Self> {
         view.validate()?;
-        client.verify_window_actions()?;
+        let dialect = client.verify_window_actions()?;
         let adapter = Self {
             client,
+            dialect,
             sampler: ContextSampler::default(),
             view,
         };
@@ -189,16 +191,13 @@ impl HyprlandAdapter {
             {
                 return Ok(Completion::Unavailable);
             }
-            self.client.verify_legacy_dispatch_until(until)?;
+            if self.client.dispatch_dialect_until(until)? != self.dialect {
+                return Ok(Completion::Unavailable);
+            }
             if monotonic()? >= expires || Instant::now() >= until {
                 return Ok(Completion::Cancelled);
             }
-            let address = address(&target.window.id)?;
-            let request = if let Some(destination) = destination {
-                format!("/dispatch movetoworkspace {destination},address:{address}")
-            } else {
-                format!("/dispatch closewindow address:{address}")
-            };
+            let request = self.dialect.window(&target.window.id, destination)?;
             // One mutation only; never retry after any request bytes were written.
             let reply = self.client.exchange_effect(&request, until, &mut sent)?;
             if reply != b"ok" && reply != b"ok\n" {

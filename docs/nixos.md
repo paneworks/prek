@@ -13,6 +13,7 @@ nix develop --no-write-lock-file
 oslo make verify
 oslo make test-cage-touch
 oslo make test-cage-wayland-fix
+oslo make test-cage-lua-wayland-fix
 ```
 
 The Cage recipes use the NixOS graphics driver directly, with one Nix build job
@@ -34,8 +35,10 @@ watermark. The nested test config disables animations so its screencopy is not
 an intermediate opening frame. Frame callbacks establish compositor pacing, not
 physical display presentation; the keyboard fixture separately saves actual
 compositor pixels in `receiver-baseline.png`, `receiver-routed-keys.png` and
-`receiver-changed-keys.png`. Exact Hyprland 0.56.2 window/power effects require a
-verified hyprlang config provider; Lua/unknown providers refuse before mutation.
+`receiver-changed-keys.png`. Exact Hyprland 0.56.2 window/power effects freeze and
+verify the hyprlang or Lua provider; unknown/changed providers refuse before
+mutation. The Lua recipe starts `hyprland.lua`, verifies actual `j/status`, and
+uses typed Lua dispatch for both setup focus and the granted application effects.
 `oslo make test-cage` retains the original unpatched Hyprland 0.54.3 fixture and
 adds window-action checks. On this NVIDIA setup it timed out waiting for usable
 nested output dimensions; the runner does not silently substitute the patch.

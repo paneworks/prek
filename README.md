@@ -567,9 +567,14 @@ starting receiver to the adjacent numeric workspace and back, following it,
 then close it after focus switches to the guard receiver. Stock IPC must confirm
 the exact window/workspace/focus, the target must acknowledge close, and the
 guard must remain alive. The adapter supports Hyprland 0.54.3 and exact 0.56.2
-with a verified hyprlang config provider, refusing its Lua dispatch dialect.
+with a verified, frozen hyprlang or Lua config provider. Lua effects use typed
+factories with explicit targets and final lifetime/name guards, not arbitrary
+dispatch strings. Unknown or changed providers refuse without syntax fallback.
 Workspace moves require a single output and protected `session --hyprland` opt-in.
 Production takeover, reorder and scrolling-layout effects remain pending.
+`oslo make test-cage-lua-wayland-fix` runs the same mode/layer, input, power and
+window checks with an actual Lua-config compositor. Like the legacy variant,
+it explicitly uses the test-only Aquamarine startup patch, not stock acceptance.
 [The reference](docs/lua-api.md#experimental-targeted-hyprland-window-adapter)
 documents the stock address-selector race between lifetime preflight and dispatch.
 

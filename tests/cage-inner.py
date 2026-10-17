@@ -26,12 +26,30 @@ def aquamarine_libraries(maps, expected=None):
     return dict(declared_test_override=expected, loaded_libraries=libraries)
 
 
+def configuration(provider):
+    if provider == "lua":
+        return "hyprland.lua", (
+            'hl.monitor({output="",mode="1280x720@60",position="auto",scale=1})\n'
+            'hl.config({animations={enabled=false},input={kb_layout="us"},'
+            'misc={disable_hyprland_logo=true,disable_splash_rendering=true},'
+            'debug={disable_logs=false}})\n')
+    if provider != "hyprlang":
+        raise ValueError("unknown owned compositor config provider")
+    return "hyprland.conf", (
+        "monitor = , 1280x720@60, auto, 1\n"
+        "animations {\n enabled = false\n}\n"
+        "input {\n kb_layout = us\n}\n"
+        "misc {\n disable_hyprland_logo = true\n disable_splash_rendering = true\n}\n"
+        "debug {\n disable_logs = false\n}\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hyprland", required=True)
     parser.add_argument("--receiver", required=True)
     parser.add_argument("--proxy", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--hyprland-config", choices=("hyprlang", "lua"), default="hyprlang")
     args = parser.parse_args()
     output = Path(args.output)
     runtime = Path(os.environ["XDG_RUNTIME_DIR"])
@@ -40,12 +58,9 @@ def main():
     env = dict(os.environ, WAYLAND_DISPLAY=upstream.name,
                LIBSEAT_BACKEND="seatd", SEATD_SOCK=str(runtime / "no-seatd"),
                HL_NO_SYSTEMD="1", AQ_BACKEND="wayland")
-    config = output / "hyprland.conf"
-    config.write_text("monitor = , 1280x720@60, auto, 1\n"
-                      "animations {\n enabled = false\n}\n"
-                      "input {\n kb_layout = us\n}\n"
-                      "misc {\n disable_hyprland_logo = true\n disable_splash_rendering = true\n}\n"
-                      "debug {\n disable_logs = false\n}\n")
+    filename, content = configuration(args.hyprland_config)
+    config = output / filename
+    config.write_text(content)
     children = []
 
     def wait_for(condition, child):
@@ -92,12 +107,19 @@ def main():
             # As in Mold, the nested compositor gets an explicit output rather
             # than relying on Hyprland's unreported fallback monitor (-1).
             wait_for(lambda:usable_outputs(monitors()),hyprland)
+            if args.hyprland_config == "lua":
+                status = subprocess.run([hyprctl, "-j", "status"], env=control_env,
+                                        capture_output=True, text=True, check=True, timeout=3)
+                (output / "hyprland-status.json").write_text(status.stdout)
+                if json.loads(status.stdout).get("configProvider") != "lua":
+                    raise RuntimeError("owned compositor did not select the requested Lua provider")
             maps = Path(f"/proc/{hyprland.pid}/maps").read_text()
             (output / "hyprland-libraries.txt").write_text(maps)
             libraries = aquamarine_libraries(maps, os.environ.get("PREK_CAGE_AQUAMARINE"))
             report = output / "nested.json"
             temporary = output / "nested.json.new"
             temporary.write_text(json.dumps({"socket":str(nested), "hyprland_pid":hyprland.pid,
+                                             "config_provider":args.hyprland_config,
                                              "aquamarine":libraries}))
             temporary.replace(report)
             receiver_env = dict(env, WAYLAND_DISPLAY=nested.name)

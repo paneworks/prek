@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import select
 import subprocess
@@ -15,12 +16,23 @@ def rendered_through(receipts, sequence):
                for row in receipts)
 
 
+def focus_arguments(provider, address):
+    if not re.fullmatch(r"0x[0-9a-fA-F]{1,16}", address) or int(address, 16) == 0:
+        raise ValueError("invalid owned window address")
+    if provider == "lua":
+        return ["dispatch", f'hl.dsp.focus({{window="address:{address}"}})']
+    if provider != "hyprlang":
+        raise ValueError("unknown owned compositor config provider")
+    return ["dispatch", "focuswindow", f"address:{address}"]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cage", required=True)
     parser.add_argument("--receiver", required=True)
     parser.add_argument("--keyboard", required=True)
     parser.add_argument("--hyprland", required=True)
+    parser.add_argument("--hyprland-config", choices=("hyprlang", "lua"), default="hyprlang")
     parser.add_argument("--inner", required=True)
     parser.add_argument("--proxy", required=True)
     parser.add_argument("--prek-fixture")
@@ -99,6 +111,7 @@ def main():
 
     with (output / "cage.log").open("w") as log:
         command = [os.sys.executable, args.inner, "--hyprland", args.hyprland,
+                   "--hyprland-config", args.hyprland_config,
                    "--receiver", args.receiver, "--proxy", args.proxy, "--output", str(output)]
         # Mold's visible path connects nested Hyprland through the private proxy
         # directly to the host display; only the headless path needs outer Cage.
@@ -143,7 +156,7 @@ def main():
                 if cage.poll() is not None or time.monotonic() >= deadline:
                     raise RuntimeError("owned receiver did not map before keyboard focus")
                 time.sleep(0.02)
-            subprocess.run([hyprctl,"dispatch","focuswindow","class:^(prek-cage-receiver)$"],
+            subprocess.run([hyprctl] + focus_arguments(args.hyprland_config, mapped[0]["address"]),
                            env=control_env,stdout=log,stderr=log,check=True,timeout=3)
             deadline = time.monotonic() + 5
             while not any(row["event"] == "keyboard_enter" for row in rows()):
@@ -202,6 +215,7 @@ def main():
                                    PREK_CAGE_INPUT_TEST="1" if args.input else "0")
                 fixture_env["PREK_CAGE_POWER_TEST"] = "1" if args.power else "0"
                 fixture_env["PREK_CAGE_WINDOW_TEST"] = "1" if args.windows else "0"
+                fixture_env["PREK_CAGE_CONFIG_PROVIDER"] = args.hyprland_config
                 fixture_env["PREK_CAGE_RECEIVER"] = args.receiver
                 fixture_env["PREK_CAGE_HYPRCTL"] = str(Path(args.hyprland).parent / "hyprctl")
                 instances = [path.parent.name for path in (runtime / "hypr").glob("*/.socket2.sock")]

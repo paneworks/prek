@@ -60,7 +60,7 @@ impl Server {
                     stream
                         .set_read_timeout(Some(Duration::from_secs(1)))
                         .unwrap();
-                    let mut bytes = [0; 128];
+                    let mut bytes = [0; 4096];
                     let length = stream.read(&mut bytes).unwrap_or(0);
                     if length == 0 {
                         continue;

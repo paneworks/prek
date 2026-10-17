@@ -1117,14 +1117,21 @@ The Rust host equivalents remain `HyprlandAdapter::new(client, view)`,
 authority setters. [The example](../examples/lua/window_actions.lua) declares
 protected touchscreen actions; offline compilation executes no effect.
 
-The adapter supports **Hyprland 0.54.3** and exact **0.56.2** with a hyprlang
-config. For 0.56.2, `j/status.configProvider` must be `hyprlang` both before
-installation and immediately before mutation within the existing IPC deadline.
-Lua, missing, malformed and unknown providers refuse without mutation; there is
-no syntax fallback or mutation retry. This does not change Prek's own Luna API.
-Hyprland's Lua dispatch dialect remains unsupported. The provider-sensitive
+The adapter supports **Hyprland 0.54.3** and exact **0.56.2**. For 0.56.2,
+`j/status.configProvider` must be `hyprlang` or `lua`. The adapter freezes the
+selected dialect at installation and rechecks it immediately before mutation
+within the existing IPC deadline. Changed, missing, malformed and unknown
+providers refuse without mutation; there is no syntax fallback or mutation retry.
+This does not change Prek's own Luna API. The Lua dialect uses closed, typed
+dispatcher factories with an explicit window or monitor. Its window factory
+checks the frozen `stable_id`; its power factory checks the monitor exists and
+has the frozen name before constructing an effect, never passing a nil monitor
+that could select every output. No user-supplied code or raw dispatch API is added.
+The provider-sensitive
 dispatch behavior is defined by the pinned
 [Hyprland source](https://github.com/hyprwm/Hyprland/blob/v0.56.2/src/debug/HyprCtl.cpp).
+The factories follow the pinned
+[Lua dispatcher bindings](https://github.com/hyprwm/Hyprland/blob/v0.56.2/src/config/lua/bindings/LuaBindingsDispatchers.cpp).
 The exact
 window address **and stableId**, output/geometry generation, positive numeric
 workspace and geometry are frozen at offer time. Missing or malformed targets,

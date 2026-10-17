@@ -212,7 +212,8 @@
   },
   "hyprland_adapter": {
     "additional_versions": ["0.56.2"],
-    "config_provider": "hyprlang; verified via j/status on 0.56.2 before installation and each mutation",
+    "config_provider": "hyprlang or lua; frozen at installation and rechecked via j/status before each 0.56.2 mutation",
+    "lua_dispatch": "closed typed factories check frozen stable_id or explicit monitor name; no raw dispatch API, nil target or syntax fallback",
     "actions": [
       "close",
       "move_left_and_follow",

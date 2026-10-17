@@ -22,6 +22,7 @@ use std::{
 };
 
 mod context;
+pub(crate) mod dispatch;
 pub mod layers;
 pub use context::ContextSampler;
 
@@ -402,28 +403,23 @@ impl Client {
     pub fn version(&self) -> &Version {
         &self.version
     }
-    pub(crate) fn verify_window_actions(&self) -> io::Result<()> {
+    pub(crate) fn verify_window_actions(&self) -> io::Result<dispatch::Dialect> {
         if !matches!(
             (self.version.major, self.version.minor, self.version.patch),
             (0, 54, 3) | (0, 56, 2)
         ) {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "window actions require Hyprland 0.54.3 or 0.56.2 with hyprlang config",
+                "window actions require Hyprland 0.54.3 or 0.56.2",
             ));
         }
-        self.verify_legacy_dispatch_until(Instant::now() + REQUEST_TIME)
+        self.dispatch_dialect_until(Instant::now() + REQUEST_TIME)
     }
-    pub(crate) fn verify_legacy_dispatch_until(&self, until: Instant) -> io::Result<()> {
-        if (self.version.major, self.version.minor, self.version.patch) == (0, 56, 2)
-            && self.query_until("status", until)?["configProvider"].as_str() != Some("hyprlang")
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "Hyprland 0.56.2 legacy dispatch requires the hyprlang config provider",
-            ));
+    pub(crate) fn dispatch_dialect_until(&self, until: Instant) -> io::Result<dispatch::Dialect> {
+        if (self.version.major, self.version.minor, self.version.patch) == (0, 56, 2) {
+            return dispatch::Dialect::parse(&self.query_until("status", until)?["configProvider"]);
         }
-        Ok(())
+        Ok(dispatch::Dialect::Hyprlang)
     }
     pub(crate) fn lock_state(&self) -> io::Result<bool> {
         self.query("locked")?

@@ -15,6 +15,7 @@ use std::{
 
 pub struct PowerAdapter {
     client: Client,
+    dialect: crate::hyprland::dispatch::Dialect,
     sampler: ContextSampler,
     view: View,
 }
@@ -22,9 +23,10 @@ impl PowerAdapter {
     /// The host supplies the broker-approved binding and context, never Lua.
     pub fn new(client: Client, view: View) -> io::Result<Self> {
         view.validate()?;
-        client.verify_legacy_dispatch_until(Instant::now() + Duration::from_millis(200))?;
+        let dialect = client.dispatch_dialect_until(Instant::now() + Duration::from_millis(200))?;
         let adapter = Self {
             client,
+            dialect,
             sampler: ContextSampler::default(),
             view,
         };
@@ -135,15 +137,13 @@ impl PowerAdapter {
                 return Ok(Completion::Unavailable);
             }
             // Sampling may consume the grant. Never start a late mutation.
-            self.client.verify_legacy_dispatch_until(until)?;
+            if self.client.dispatch_dialect_until(until)? != self.dialect {
+                return Ok(Completion::Unavailable);
+            }
             if monotonic()? >= expires || Instant::now() >= until {
                 return Ok(Completion::Cancelled);
             }
-            let request = format!(
-                "/dispatch dpms {} {}",
-                if screen == Screen::On { "on" } else { "off" },
-                target.geometry.name
-            );
+            let request = self.dialect.power(&target.geometry.name, screen)?;
             let reply = self.client.exchange_effect(&request, until, &mut sent);
             let Ok(reply) = reply else {
                 return Ok(if sent {

@@ -639,6 +639,30 @@ impl Drop for OwnedReceiver {
     }
 }
 
+fn focus_owned_window(id: &str, instance: &str) {
+    let address = prek::config::hyprland_window_address(id).unwrap();
+    let selector = format!("address:{address}");
+    let args = match std::env::var("PREK_CAGE_CONFIG_PROVIDER").as_deref() {
+        Ok("lua") => vec![
+            "dispatch".to_owned(),
+            format!("hl.dsp.focus({{window={selector:?}}})"),
+        ],
+        Ok("hyprlang") | Err(std::env::VarError::NotPresent) => {
+            vec!["dispatch".to_owned(), "focuswindow".to_owned(), selector]
+        }
+        other => panic!("invalid owned compositor config provider: {other:?}"),
+    };
+    assert!(
+        std::process::Command::new(std::env::var_os("PREK_CAGE_HYPRCTL").unwrap())
+            .args(args)
+            .env("HYPRLAND_INSTANCE_SIGNATURE", instance)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
 fn window_acceptance(
     checking: &Client,
     binding: &Binding,
@@ -686,20 +710,7 @@ fn window_acceptance(
     let Consumer::Hyprland { instance, .. } = checking.consumer() else {
         panic!()
     };
-    let target_address = target_id.split_once(':').unwrap().0;
-    assert!(
-        std::process::Command::new(std::env::var_os("PREK_CAGE_HYPRCTL").unwrap())
-            .args([
-                "dispatch",
-                "focuswindow",
-                &format!("address:{target_address}")
-            ])
-            .env("HYPRLAND_INSTANCE_SIGNATURE", &instance)
-            .stdout(std::process::Stdio::null())
-            .status()
-            .unwrap()
-            .success()
-    );
+    focus_owned_window(&target_id, &instance);
     let initial = sampler.sample(checking, 1, SessionKind::User).unwrap();
     let initial_window = initial
         .windows
@@ -874,14 +885,7 @@ return p.config.new{mode='route',policy={allowed_devices={'keyboard'},allow_hypr
         if action == WindowAction::Close {
             // Change focus only through the owned nested compositor. The offer
             // already froze the target; closing active/focused would kill guard.
-            let address = guard_id.split_once(':').unwrap().0;
-            let status = std::process::Command::new(std::env::var_os("PREK_CAGE_HYPRCTL").unwrap())
-                .args(["dispatch", "focuswindow", &format!("address:{address}")])
-                .env("HYPRLAND_INSTANCE_SIGNATURE", &instance)
-                .stdout(std::process::Stdio::null())
-                .status()
-                .unwrap();
-            assert!(status.success());
+            focus_owned_window(&guard_id, &instance);
             let current = sampler.sample(checking, 1, SessionKind::User).unwrap();
             assert!(
                 current

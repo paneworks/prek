@@ -26,6 +26,9 @@ impl Fixture {
         Self::with_version(mode, "0.55.4")
     }
     fn with_version(mode: Mode, version: &'static str) -> Self {
+        Self::with_provider(mode, version, "hyprlang")
+    }
+    fn with_provider(mode: Mode, version: &'static str, provider: &'static str) -> Self {
         let behavior = Arc::new(AtomicU64::new(0));
         let state = Arc::new(AtomicBool::new(true));
         let dispatches = Arc::new(AtomicU64::new(0));
@@ -35,8 +38,8 @@ impl Fixture {
             move |request| {
                 let behavior = behavior_copy.load(Ordering::Relaxed);
                 match request {
-                b"j/status"=>if behavior==7 {serde_json::json!({"configProvider":"lua"}).to_string()}
-                    else {serde_json::json!({"configProvider":"hyprlang"}).to_string()},
+                b"j/status"=>if behavior==7 {serde_json::json!({"configProvider":if provider=="lua" {"hyprlang"} else {"lua"}}).to_string()}
+                    else {serde_json::json!({"configProvider":provider}).to_string()},
                 b"j/locked"=> {
                     if behavior==6 {thread::sleep(Duration::from_millis(100));}
                     serde_json::json!({"locked":behavior==4}).to_string()
@@ -46,8 +49,20 @@ impl Fixture {
                     "width":if behavior==3{1200}else{1080},"height":1920,"scale":2.0,"x":0,"y":0,"transform":0,
                     "activeWorkspace":{"id":1},"dpmsStatus":state_copy.load(Ordering::Relaxed)}]).to_string(),
                 b"/dispatch dpms off panel"|b"/dispatch dpms on panel"=> {
+                    assert_eq!(provider,"hyprlang");
                     dispatch_copy.fetch_add(1,Ordering::Relaxed);
                     if behavior!=1 {state_copy.store(request==b"/dispatch dpms on panel",Ordering::Relaxed);}
+                    if behavior==2 {thread::sleep(Duration::from_millis(300));}
+                    "ok".into()
+                }
+                request if request.starts_with(b"/dispatch (function() ") => {
+                    assert_eq!(provider,"lua");
+                    let text=std::str::from_utf8(request).unwrap();
+                    assert!(text.contains("hl.get_monitor(\"panel\")"));
+                    assert!(text.contains("m.name==\"panel\""));
+                    assert!(text.contains("monitor=m"));
+                    dispatch_copy.fetch_add(1,Ordering::Relaxed);
+                    if behavior!=1 {state_copy.store(text.contains("action=\"on\""),Ordering::Relaxed);}
                     if behavior==2 {thread::sleep(Duration::from_millis(300));}
                     "ok".into()
                 }
@@ -169,36 +184,60 @@ impl Fixture {
     }
 }
 #[test]
-fn hyprlang_provider_is_checked_before_each_0562_power_effect() {
-    for changed in [false, true] {
-        let mut fixture = Fixture::with_version(Mode::Route, "0.56.2");
+fn frozen_provider_is_checked_before_each_0562_power_effect() {
+    for provider in ["hyprlang", "lua"] {
+        for changed in [false, true] {
+            let mut fixture = Fixture::with_provider(Mode::Route, "0.56.2", provider);
+            fixture.offer(1);
+            fixture.granted(1);
+            if changed {
+                fixture.behavior.store(7, Ordering::Relaxed);
+            }
+            assert_eq!(
+                fixture.completion(),
+                if changed {
+                    Completion::Unavailable
+                } else {
+                    Completion::Applied
+                }
+            );
+            assert_eq!(
+                fixture.dispatches.load(Ordering::Relaxed),
+                u64::from(!changed)
+            );
+        }
+    }
+}
+
+#[test]
+fn lua_power_effects_keep_lock_geometry_and_single_attempt_guards() {
+    for behavior in 1..=4 {
+        let mut fixture = Fixture::with_provider(Mode::Route, "0.56.2", "lua");
         fixture.offer(1);
         fixture.granted(1);
-        if changed {
-            fixture.behavior.store(7, Ordering::Relaxed);
-        }
+        fixture.behavior.store(behavior, Ordering::Relaxed);
         assert_eq!(
             fixture.completion(),
-            if changed {
-                Completion::Unavailable
+            if behavior <= 2 {
+                Completion::Uncertain
             } else {
-                Completion::Applied
+                Completion::Unavailable
             }
         );
         assert_eq!(
             fixture.dispatches.load(Ordering::Relaxed),
-            u64::from(!changed)
+            u64::from(behavior <= 2)
         );
     }
 }
 
 #[test]
-fn power_initialization_refuses_a_0562_lua_provider_without_dispatching() {
+fn power_initialization_refuses_an_unknown_provider_without_dispatching() {
     let fixture = Fixture::new(Mode::Route);
     let server = Server::with_version(
         |request| {
             assert_eq!(request, b"j/status");
-            serde_json::json!({"configProvider":"lua"}).to_string()
+            serde_json::json!({"configProvider":"other"}).to_string()
         },
         Duration::ZERO,
         "0.56.2",

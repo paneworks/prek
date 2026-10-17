@@ -353,13 +353,22 @@ make.recipe{ name = "test-cage-wayland-fix", desc = "explicit test-only patched 
 make.recipe{ name = "test-cage-touch", desc = "local GPU Cage two-contact delivery and neutral releases",
              run = function() cage_test("cage-touch-test", {}) end }
 
+make.recipe{ name = "test-cage-lua-wayland-fix", desc = "typed window/power effects in an owned Lua-config compositor",
+             run = function()
+               cage_test("cage-test-wayland-fix", { "--hyprland-config", "lua", "--modes", "--input", "--power", "--windows" })
+               cage_test("cage-test-wayland-fix", { "--hyprland-config", "lua", "--layers", "--input", "--power", "--windows" })
+             end }
+
 make.recipe{ name = "test-cage-startup", desc = "unprivileged nested output and library-provenance checks",
              run = function()
                sh.python3("-m", "unittest", "discover", "-s", "tests/support", "-p", "test_cage_startup.py", "-v")
              end }
 
 make.recipe{ name = "test-hyprland", desc = "bound Hyprland queries, window and power adapter models",
-             run = function() sh.cargo("test", "--locked", "--test", "hyprland") end }
+             run = function()
+               sh.cargo("test", "--locked", "--lib", "hyprland::dispatch::tests")
+               sh.cargo("test", "--locked", "--test", "hyprland")
+             end }
 
 make.recipe{ name = "check", desc = "type-check every target",
              run = function() sh.cargo("check", "--locked", "--all-targets") end }
