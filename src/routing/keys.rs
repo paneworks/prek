@@ -28,6 +28,9 @@ impl KeyWork {
     pub fn source(&self) -> &Source {
         self.dispatch.outcome.intent.source()
     }
+    pub fn position(&self) -> Option<crate::input::InputPosition> {
+        self.dispatch.outcome.intent.position()
+    }
     pub fn affects(&self, source: &Source) -> bool {
         self.dispatch.outcome.intent.sources().contains(source) || self.source() == source
     }

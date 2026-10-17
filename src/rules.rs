@@ -6,7 +6,7 @@ use crate::{
     config::{Action, Config, Direction, Rule, Scope, Trigger},
     context::{Authority, InputContext, Permit, Rejection},
     gestures::{Mapping, Phase, Space, TouchEvent, TouchGesture, TouchRecognizer, TouchSettings},
-    input::{Change, Contact, Device, KeyState, NormalizedFrame, Source},
+    input::{Change, Contact, Device, InputPosition, KeyState, NormalizedFrame, Source},
     keys::{Chord, Hold, KeyObservation, Keys, Repeat},
     paths::{CaptureIdentity, MatchOutcome, Matcher, PathCapture, ShapeMatch, Stroke},
     replay::{Observation, Record, Replay},
@@ -19,6 +19,7 @@ use std::{
 };
 mod continuation;
 mod custom;
+mod edges;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -138,6 +139,8 @@ struct Candidate {
     source_inputs: BTreeMap<Source, u64>,
     peak_contacts: usize,
     peak_at: Duration,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    position: Option<crate::input::InputPosition>,
 }
 #[derive(Clone)]
 pub(crate) struct RouteIntent {
@@ -151,6 +154,9 @@ pub(crate) struct RecognitionOwnership {
     pub deadline: Option<Duration>,
 }
 impl RouteIntent {
+    pub(crate) fn position(&self) -> Option<crate::input::InputPosition> {
+        self.candidate.position
+    }
     pub(crate) fn window_id(&self) -> Option<&str> {
         self.candidate
             .permit
@@ -638,6 +644,9 @@ impl Engine {
         intent: &RouteIntent,
         at: Duration,
     ) -> Result<(), Rejection> {
+        if self.candidate_cancelled(intent) {
+            return Err(Rejection::ContextDenied);
+        }
         if intent.candidate.session_generation != self.authority.generation() {
             return Err(Rejection::StaleGeneration);
         }
@@ -648,6 +657,13 @@ impl Engine {
             .ok_or(Rejection::SourceChanged)?;
         let permit = intent.candidate.permit.as_ref().ok_or(Rejection::Unbound)?;
         self.authority.validate(permit, input(state, at))
+    }
+
+    fn candidate_cancelled(&self, intent: &RouteIntent) -> bool {
+        intent
+            .candidate
+            .cancelled
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub(crate) fn source_current(&self, source: &Source) -> bool {
@@ -938,7 +954,7 @@ impl Engine {
             }
         }
         if let Record::Tick { at } = &record {
-            self.advance(*at)?;
+            self.advance(*at, self.input_watermark)?;
         }
         let context = SequenceContext {
             devices: &self.devices,
@@ -1117,6 +1133,7 @@ impl Engine {
         }
         next.replay.inherit_history(&self.replay);
         next.generation = generation;
+        next.input_watermark = self.input_watermark;
         next.next_id = self.next_id;
         next.authority = self.authority.clone();
         if self.routing {
@@ -1177,7 +1194,7 @@ impl Engine {
         next.events = std::mem::take(&mut self.events);
         *self = next;
     }
-    fn advance(&mut self, at: Duration) -> io::Result<()> {
+    fn advance(&mut self, at: Duration, after_frame: u64) -> io::Result<()> {
         if self.last_at.is_some_and(|last| at < last) {
             self.cancel_all(at, "time moved backwards");
             self.conditions.reset();
@@ -1213,7 +1230,14 @@ impl Engine {
                     .collect(),
                 _ => Vec::new(),
             };
-            report_signals(worker, signals, self.generation, at, &mut self.events);
+            report_signals(
+                worker,
+                signals,
+                self.generation,
+                at,
+                InputPosition::after_frame(after_frame),
+                &mut self.events,
+            );
             let expired: Vec<_> = worker
                 .candidates
                 .iter()
@@ -1241,44 +1265,26 @@ impl Engine {
         }
         let source = &frame.raw.source;
         let at = frame.raw.at;
-        self.advance(at)?;
+        self.advance(
+            at,
+            self.input_watermark
+                .checked_sub(1)
+                .ok_or_else(|| invalid("unpositioned input frame"))?,
+        )?;
         let allowed = policy_selected(&self.config, &self.devices[&source.device].device);
-        for change in &frame.changes {
-            if !allowed {
-                break;
-            }
-            if let Change::Key { code, state } = *change {
-                self.conditions
-                    .update(source, code, state, at)
-                    .map_err(invalid)?;
-            }
-        }
         let state = self
             .devices
             .get_mut(&source.device)
             .ok_or_else(|| invalid("unregistered frame source"))?;
         state.input_watermark = self.input_watermark;
         state.last_input = Some((frame.raw.sequence, at));
-        for change in &frame.changes {
-            if let Change::Key {
-                code,
-                state: key_state,
-            } = *change
-            {
-                match key_state {
-                    KeyState::Press => {
-                        state.keys.insert(code);
-                    }
-                    KeyState::Release => {
-                        state.keys.remove(&code);
-                    }
-                    _ => {}
-                }
-            }
-        }
         state.contacts = frame.contacts.clone();
+        self.key_edges(&frame, allowed)?;
         let state = &self.devices[&source.device];
         for worker in &mut self.workers {
+            if matches!(worker.rule.trigger, Trigger::Key { .. }) {
+                continue;
+            }
             let finish = match worker.rule.trigger {
                 Trigger::Shape {
                     fingers: None,
@@ -1357,9 +1363,8 @@ impl Engine {
                         &mut self.events,
                     )?;
                 }
-                Trigger::Key { key }
-                | Trigger::ButtonTaps { key, .. }
-                | Trigger::ButtonHold { key, .. } => {
+                Trigger::Key { .. } => unreachable!(),
+                Trigger::ButtonTaps { key, .. } | Trigger::ButtonHold { key, .. } => {
                     let key = key.0;
                     for change in &frame.changes {
                         if let Change::Key {
@@ -1390,10 +1395,6 @@ impl Engine {
                                     .insert(source.clone(), state.input_watermark);
                             }
                             let signals = match &mut worker.recognizer {
-                                Recognizer::Key => vec![Signal::Edge {
-                                    source: source.clone(),
-                                    down: key_state == KeyState::Press,
-                                }],
                                 Recognizer::Taps(buttons)
                                     if worker.candidates.contains_key(source) =>
                                 {
@@ -1427,7 +1428,14 @@ impl Engine {
                                 }
                                 _ => unreachable!(),
                             };
-                            report_signals(worker, signals, self.generation, at, &mut self.events);
+                            report_signals(
+                                worker,
+                                signals,
+                                self.generation,
+                                at,
+                                InputPosition::after_frame(self.input_watermark),
+                                &mut self.events,
+                            );
                             if key_state == KeyState::Release {
                                 if matches!(worker.rule.trigger, Trigger::ButtonTaps { .. }) {
                                     if let Some(candidate) = worker.candidates.get_mut(source) {
@@ -1501,7 +1509,14 @@ impl Engine {
                                 .into_iter()
                                 .map(Signal::Key)
                                 .collect();
-                            report_signals(worker, signals, self.generation, at, &mut self.events);
+                            report_signals(
+                                worker,
+                                signals,
+                                self.generation,
+                                at,
+                                InputPosition::after_frame(self.input_watermark),
+                                &mut self.events,
+                            );
                             let Recognizer::Keys(keys) = &worker.recognizer else {
                                 unreachable!()
                             };
@@ -1560,6 +1575,7 @@ impl Engine {
                                     }],
                                     self.generation,
                                     at,
+                                    InputPosition::after_frame(self.input_watermark),
                                     &mut self.events,
                                 );
                             }
@@ -1643,7 +1659,14 @@ impl Engine {
                             touch.reconcile(at, !frame.contacts.is_empty());
                             Vec::new()
                         };
-                        report_signals(worker, signals, self.generation, at, &mut self.events);
+                        report_signals(
+                            worker,
+                            signals,
+                            self.generation,
+                            at,
+                            InputPosition::after_frame(self.input_watermark),
+                            &mut self.events,
+                        );
                     }
                     if frame.contacts.is_empty() {
                         worker.touch_active.remove(source);
@@ -1778,11 +1801,13 @@ struct PendingSequence {
     progress: bool,
     previous: Option<Candidate>,
     after_input: Option<u64>,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 impl PendingSequence {
     fn route_intent(&self, rule: &Rule) -> RouteIntent {
         let mut candidate = self.first.clone();
         candidate.id = self.id;
+        candidate.cancelled = self.cancelled.clone();
         candidate.sources = self.sources.clone();
         candidate.source_inputs = self.source_inputs.clone();
         RouteIntent {
@@ -1909,6 +1934,9 @@ impl Sequence {
     }
     fn cancel(&mut self, seat: &str, at: Duration, reason: &str, events: &mut Vec<Event>) {
         if let Some(pending) = self.pending.remove(seat) {
+            pending
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::Release);
             events.push(Event::Cancelled {
                 version: 1,
                 rule: self.rule.id.clone(),
@@ -1995,6 +2023,7 @@ impl Sequence {
                 progress: false,
                 previous: None,
                 after_input: None,
+                cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
         Ok(())
@@ -2299,6 +2328,8 @@ impl Sequence {
                 if self.routing {
                     let mut candidate = pending.first.clone();
                     candidate.id = pending.id;
+                    candidate.cancelled = pending.cancelled.clone();
+                    candidate.position = trace.candidate.position;
                     candidate.sources = pending.sources.clone();
                     candidate.source_inputs = pending.source_inputs.clone();
                     self.outcomes.push(RouteOutcome {
@@ -2905,6 +2936,7 @@ fn shape_frame(
                                 }],
                                 context.generation,
                                 at,
+                                InputPosition::after_frame(state.input_watermark),
                                 events,
                             )
                         }
@@ -3024,6 +3056,8 @@ fn start_candidate(
                     source_inputs: BTreeMap::from([(source.clone(), state.input_watermark)]),
                     peak_contacts: state.contacts.len(),
                     peak_at: at,
+                    cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    position: None,
                 },
             );
         }
@@ -3111,6 +3145,9 @@ fn cancel_candidate(
     events: &mut Vec<Event>,
 ) {
     if let Some(candidate) = worker.candidates.remove(source) {
+        candidate
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Release);
         events.push(Event::Cancelled {
             version: 1,
             rule: worker.rule.id.clone(),
@@ -3184,6 +3221,7 @@ fn report_signals(
     signals: Vec<Signal>,
     generation: u64,
     at: Duration,
+    position: InputPosition,
     events: &mut Vec<Event>,
 ) {
     for signal in signals {
@@ -3350,6 +3388,7 @@ fn report_signals(
             if matches!(stage, Stage::Update | Stage::End) && !candidate.progress {
                 continue;
             }
+            candidate.position = Some(position);
             events.push(Event::Matched {
                 version: 1,
                 rule: worker.rule.id.clone(),

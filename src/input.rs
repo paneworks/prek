@@ -56,6 +56,23 @@ pub struct Frame {
     pub events: Vec<RawEvent>,
 }
 
+/// Raw event offset under one coordinator's increasing frame watermark.
+/// `usize::MAX` denotes the boundary after that frame.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct InputPosition {
+    pub frame: u64,
+    pub event: usize,
+}
+
+impl InputPosition {
+    pub(crate) fn after_frame(frame: u64) -> Self {
+        Self {
+            frame,
+            event: usize::MAX,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Axis {

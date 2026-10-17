@@ -106,10 +106,29 @@ quickly by an up must still emit the pair, whereas lost authority must not
 finish an unwritten chord. Submission serials and the output clock survive an
 idle output being wrapped in a new actor. Timely unchanged grant renewals keep
 held work valid; revoked, expired or exhausted epochs never resurrect old work.
+Retained route scopes share an irreversible cancellation token. Candidate or
+sequence cancellation invalidates previously dequeued work even before the
+caller forwards the diagnostic cancellation event. Normal completion leaves
+that token valid for a queued down/up pair. Sequence roots and rebased held-touch
+children have distinct tokens; a canceled ancestor cannot start a continuation.
 Scheduling failures are terminal. Explicit retirement may still drain releases
 through a healthy sink after a scheduling timeout, but the failed actor is not
 reusable. A failed sink retains its exact uncertain frame and cannot prove
 neutrality.
+
+Plain `Key` triggers evaluate activation conditions at each normalized key edge,
+in original raw-event order. A later activation press cannot authorize an earlier
+trigger press in the same report. `KeyWork::position()` retains the original
+event offset under the coordinator's increasing input-frame watermark, including
+offsets occupied by metadata and ignored duplicate edges. Rule/configuration
+replacement preserves the watermark. Interleaved key matches are dequeued by
+position, not grouped by gesture ID. A sequence ending in a key inherits that
+final edge's position. This does not change other recognizers' frame-level
+condition evaluation or allow arbitrary sequence steps within one report.
+Non-key reports and asynchronous completions use the current after-frame
+boundary (`event == usize::MAX`); timers advanced before a new input report use
+the previous frame's boundary. A due timer cannot be sorted behind the new
+report's first key merely because both have the same timestamp.
 
 The forwarding loop must interleave raw and generated writes, not drain every
 generated action before forwarding ordinary input. For consuming work, prior raw
@@ -136,6 +155,8 @@ permit structures. Broader resource-policy acceptance remains open. Callers must
 retire/recover on acceptance errors instead of silently dropping required input
 releases, and must never pass untrusted JSON frames as source-repeat evidence.
 
+`oslo make test-key-positions` runs device-free original-position, edge-ordered
+activation, retained-cancellation and held-touch continuation regressions.
 `oslo make test-key-worker` runs device-free scope, ordering, ownership,
 cancellation, timeout and bounds regressions. `oslo make test-key-worker-cage`
 drives the actual scheduler through owned protocol keyboards and a rendered app

@@ -475,9 +475,15 @@ impl Routing {
             }
         }
         outcomes.retain(|outcome| !matches!(&outcome.event, Event::Matched { id, ordinal, stage: crate::rules::Stage::Update, .. } if updates.get(id).is_some_and(|latest| ordinal != latest)));
-        outcomes.sort_by_key(|outcome| match &outcome.event {
-            Event::Matched { id, ordinal, .. } => (*id, *ordinal),
-            _ => (0, 0),
+        let boundary = crate::input::InputPosition::after_frame(self.engine.input_watermark());
+        outcomes.sort_by_key(|outcome| {
+            (
+                outcome.intent.position().unwrap_or(boundary),
+                match &outcome.event {
+                    Event::Matched { id, ordinal, .. } => (*id, *ordinal),
+                    _ => (0, 0),
+                },
+            )
         });
         let claims = self.engine.take_route_claims();
         let mut active = self.engine.route_intents();

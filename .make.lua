@@ -432,6 +432,12 @@ make.recipe{ name="test-key-worker",desc="scoped key scheduling, repeats and raw
                sh.cargo("test","--locked","--lib","routing::keys::tests")
              end }
 
+make.recipe{ name="test-key-positions",desc="ordered key edges, original positions and retained cancellation scopes; no devices",
+             run=function()
+               sh.cargo("test","--locked","--lib","rules::edges::tests")
+               sh.cargo("test","--locked","--lib","rules::tests::composition::motion")
+             end }
+
 make.recipe{ name="test-native-key-worker",desc="managed generated-output slots, publication replies and native worker policy; no devices",
              run=function()
                sh.cargo("test","--locked","--lib","route_worker::keys::tests")

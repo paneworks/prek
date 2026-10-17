@@ -9,7 +9,10 @@ pub(super) fn candidate(
     watermark: u64,
     id: u64,
 ) -> Result<Candidate, &'static str> {
-    if previous.contacts.is_empty()
+    if previous
+        .cancelled
+        .load(std::sync::atomic::Ordering::Acquire)
+        || previous.contacts.is_empty()
         || previous.source != state.device.source
         || previous.contacts != state.contacts.iter().map(|contact| contact.id).collect()
         || state
@@ -25,6 +28,8 @@ pub(super) fn candidate(
     }
     let mut candidate = previous.clone();
     candidate.id = id;
+    candidate.cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    candidate.position = None;
     candidate.ordinal = 0;
     candidate.progress = false;
     candidate.started = at;

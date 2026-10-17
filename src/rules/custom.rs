@@ -768,7 +768,7 @@ impl Engine {
         at: Duration,
         mut ownership: impl FnMut(&RouteIntent, &RouteIntent) -> RecognitionOwnership,
     ) -> io::Result<Vec<Ticket>> {
-        self.advance(at)?;
+        self.advance(at, self.input_watermark)?;
         let Some(custom) = self.custom.as_mut() else {
             return Ok(Vec::new());
         };
@@ -902,7 +902,7 @@ impl Engine {
         if input_at > at || self.last_at.is_some_and(|last| input_at < last) {
             return Err(invalid("custom reply clock regressed"));
         }
-        self.advance(input_at)?;
+        self.advance(input_at, self.input_watermark)?;
         let id = self
             .custom
             .as_ref()
@@ -964,6 +964,7 @@ impl Engine {
             }],
             engine.generation,
             validated.observed_at,
+            InputPosition::after_frame(input_watermark),
             &mut engine.events,
         );
         if let Some(trace) = worker.matches.last_mut()

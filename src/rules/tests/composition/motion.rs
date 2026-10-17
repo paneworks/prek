@@ -58,6 +58,32 @@ fn final_touch(event: &Event) -> &TouchGesture {
 }
 
 #[test]
+fn a_continued_touch_has_its_own_scope_and_rejects_cancelled_ancestors() {
+    use std::sync::{Arc, atomic::Ordering};
+    let mut engine = native(swipe(true));
+    let ticket = start(&mut engine);
+    let source = device(1).source;
+    let previous = engine.sequences[0].steps[0].workers[0].candidates[&source].clone();
+    complete(&mut engine, &ticket, 30);
+    let current = engine.sequences[0].steps[1].workers[0].candidates[&source].clone();
+    assert!(!Arc::ptr_eq(&previous.cancelled, &current.cancelled));
+    current.cancelled.store(true, Ordering::Release);
+    assert!(!previous.cancelled.load(Ordering::Acquire));
+    previous.cancelled.store(true, Ordering::Release);
+    assert!(
+        continuation::candidate(
+            &previous,
+            &engine.devices[&source.device],
+            &engine.authority,
+            ms(40),
+            engine.input_watermark,
+            engine.next_id + 1
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn swipe_rebases_old_motion_and_emits_one_new_begin_update_end_identity() {
     let mut engine = native(swipe(true));
     let ticket = start(&mut engine);
