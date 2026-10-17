@@ -1,5 +1,6 @@
 """Private local Cage/nested Hyprland keyboard check, following mold's sandbox."""
 import argparse
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -43,6 +44,10 @@ def main():
                         help="verify a Lua mode switch while its rule and layer stay enabled")
     parser.add_argument("--input", action="store_true",
                         help="verify normalized source observations through worker IPC and Lua")
+    parser.add_argument("--keyboard-quiesce", action="store_true",
+                        help="characterize per-device disable without granting production handoff")
+    parser.add_argument("--keyboard-quiesce-check", type=Path,
+                        default=Path(__file__).parent / "support/keyboard_quiesce.py")
     parser.add_argument("--hardware-rendering", action="store_true",
                         help="use the selected GPU driver instead of forcing Mesa software rendering")
     parser.add_argument("--power", action="store_true",
@@ -67,6 +72,8 @@ def main():
                         default=os.environ.get("VISIBLE") == "1")
     parser.add_argument("--output", default="target/cage-host")
     args = parser.parse_args()
+    if args.keyboard_quiesce and any((args.layers,args.modes,args.input,args.power,args.windows,args.morf)):
+        parser.error("--keyboard-quiesce is a separate owned-session characterization")
     if args.morf_shell and not args.morf:
         parser.error("--morf-shell requires --morf with the actual ELF")
     if (args.morf_root_probe or args.morf_root_probe_socket) and not args.morf_shell:
@@ -113,6 +120,8 @@ def main():
         command = [os.sys.executable, args.inner, "--hyprland", args.hyprland,
                    "--hyprland-config", args.hyprland_config,
                    "--receiver", args.receiver, "--proxy", args.proxy, "--output", str(output)]
+        if args.keyboard_quiesce:
+            command.append("--receiver-sync-probe")
         # Mold's visible path connects nested Hyprland through the private proxy
         # directly to the host display; only the headless path needs outer Cage.
         if not args.visible:
@@ -189,7 +198,8 @@ def main():
                         raise RuntimeError(f"receiver did not render through receipt {sequence}")
                     time.sleep(0.01)
 
-            wait_rendered(max(row["sequence"] for row in received if row["event"] != "rendered"))
+            wait_rendered(max(row["sequence"] for row in received if row["event"] not in
+                              ("sync", "rendered", "presented", "presentation_discarded")))
             def capture(name):
                 if not args.screencopy:
                     return
@@ -205,7 +215,12 @@ def main():
                                    check=True, timeout=5)
 
             capture("baseline")
-            if args.prek_fixture:
+            if args.keyboard_quiesce:
+                spec = importlib.util.spec_from_file_location("keyboard_quiesce", args.keyboard_quiesce_check)
+                quiesce = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(quiesce)
+                quiesce.validate_result(quiesce.run(args, control_env, output, socket, rows, wait_rendered, capture))
+            if args.prek_fixture and not args.keyboard_quiesce:
                 if not args.prek_app:
                     parser.error("--prek-fixture requires --prek-app")
                 fixture_env = dict(env, PREK_LOCAL_CAGE="1", PREK_CAGE_OUTPUT=str(output),
@@ -382,7 +397,7 @@ def main():
                         + (["--root-probe-socket", str(args.morf_root_probe_socket)] if args.morf_root_probe_socket else []),
                         env=env, check=True, timeout=90)
             session_name = "visible nested Hyprland" if args.visible else "local Cage/nested Hyprland"
-            print(f"PASS: {session_name} delivered B and Shift+A, six ordered key events, "
+            print(f"Baseline PASS: {session_name} delivered B and Shift+A, six ordered key events, "
                   f"text bA and neutral modifier cleanup. Receipts: {receipts}")
         finally:
             if keyboard is not None:

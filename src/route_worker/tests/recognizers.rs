@@ -210,7 +210,14 @@ impl Fixture {
                 },
             })
             .unwrap();
-        self.stream.publish_source(&device.source, now).unwrap();
+        let input = self.stream.seats["seat0"]
+            .routing
+            .input_states(now)
+            .into_iter()
+            .find(|input| input.source() == &device.source);
+        if let Some(input) = input {
+            self.stream.report_input("seat0", input, now).unwrap();
+        }
     }
     fn send(&mut self, command: Command) {
         assert!(self.parent.send(&command, monotonic().unwrap()).unwrap());

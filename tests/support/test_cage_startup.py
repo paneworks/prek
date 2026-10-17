@@ -11,6 +11,74 @@ host_spec = importlib.util.spec_from_file_location("cage_host", Path(__file__).p
 host = importlib.util.module_from_spec(host_spec)
 host_spec.loader.exec_module(host)
 
+quiesce_spec = importlib.util.spec_from_file_location("keyboard_quiesce", Path(__file__).parent / "keyboard_quiesce.py")
+quiesce = importlib.util.module_from_spec(quiesce_spec)
+quiesce_spec.loader.exec_module(quiesce)
+
+
+class KeyboardQuiescence(unittest.TestCase):
+    def test_incomplete_or_positive_handoff_claims_cannot_pass_characterization(self):
+        value = dict(version=1, status="passed", source="owned_wayland_virtual_keyboard", config_provider="lua",
+                     device_disable_is_neutral=False, disabled_release_dropped=True, reenabled_press_dropped=True,
+                     final_neutral=True, production_route_tested=False, kernel_input_tested=False, unmodified_stock_acceptance=False,
+                     captures=[dict(phase=phase, attempts=1, through=10, sha256="a" * 64) for phase in
+                               ["neutral-before", "held-prefix", "disabled-release", "reenabled-press", "neutral-after"]])
+        self.assertEqual(quiesce.validate_result(value), value)
+        for missing in [None, {}, [], True]:
+            with self.subTest(missing=missing), self.assertRaises(ValueError):
+                quiesce.validate_result(missing)
+        for key in value:
+            missing = dict(value)
+            del missing[key]
+            with self.subTest(missing=key), self.assertRaises(ValueError):
+                quiesce.validate_result(missing)
+        for change in [dict(production_route_tested=True), dict(kernel_input_tested=True), dict(unmodified_stock_acceptance=True),
+                       dict(final_neutral=False), dict(version=True), dict(captures=[]), dict(captures=value["captures"] * 2),
+                       dict(captures=list(reversed(value["captures"])))]:
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                quiesce.validate_result(dict(value, **change))
+
+    def test_config_dialects_and_device_name_are_explicit(self):
+        self.assertEqual(quiesce.enabled_arguments("lua", "virtual-keyboard-1", False),
+                         ["eval", 'hl.device({name="virtual-keyboard-1",enabled=false})'])
+        self.assertEqual(quiesce.enabled_arguments("hyprlang", "virtual-keyboard-1", True),
+                         ["keyword", "device[virtual-keyboard-1]:enabled", "true"])
+        for provider, name, enabled in [("other", "virtual-keyboard", True), ("lua", 'x";exit', True),
+                                        ("hyprlang", "x]:enabled", True), ("lua", "", True),
+                                        ("lua", "x" * 129, True), ("lua", "keyboard", 1)]:
+            with self.subTest(provider=provider, name=name), self.assertRaises(ValueError):
+                quiesce.enabled_arguments(provider, name, enabled)
+
+    def test_old_request_with_a_later_callback_is_not_a_post_producer_barrier(self):
+        rows = [{"event": "sync", "requested_ns": 99, "sequence": 100},
+                {"event": "sync", "requested_ns": 100, "sequence": 101},
+                {"event": "rendered", "requested_ns": 102, "sequence": 102},
+                {"event": "sync", "requested_ns": True, "sequence": 103}]
+        self.assertIsNone(quiesce.snapshot_after(rows, 100))
+        current = dict(event="sync", requested_ns=101, sequence=104)
+        self.assertEqual(quiesce.snapshot_after(rows + [current], 100), current)
+
+    def test_pixels_require_both_application_identity_and_matching_held_state(self):
+        width, height = 64, 32
+        pixels = bytearray(width * height * 3)
+        for x, color in [(12, (0, 0, 255)), (28, (255, 0, 0))]:
+            start = (12 * width + x) * 3
+            pixels[start:start + 3] = bytes(color)
+        self.assertTrue(quiesce.check_pixels(pixels, width, height, [0, 0], True))
+        self.assertFalse(quiesce.check_pixels(pixels, width, height, [0, 0], False))
+        pixels[(12 * width + 12) * 3:(12 * width + 12) * 3 + 3] = bytes((255, 0, 0))
+        self.assertFalse(quiesce.check_pixels(pixels, width, height, [0, 0], True))
+        self.assertFalse(quiesce.check_pixels(bytes(len(pixels)), width, height, [0, 0], True))
+
+    def test_capture_bounds_and_coordinates_are_not_guessed(self):
+        for width, height, position, held in [(64, 32, [64, 0], True), (0, 32, [0, 0], True),
+                                             (64, 32, [0.5, 0], True), (64, 32, [0, 0], 1),
+                                             (64, 32, [0], True)]:
+            with self.subTest(position=position, held=held), self.assertRaises(ValueError):
+                quiesce.check_pixels(bytes(64 * 32 * 3), width, height, position, held)
+        with self.assertRaises(ValueError):
+            quiesce.check_pixels(b"", 64, 32, [0, 0], True)
+
 
 class RenderedState(unittest.TestCase):
     def test_initial_or_unversioned_frame_does_not_acknowledge_later_input(self):

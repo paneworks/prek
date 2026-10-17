@@ -86,6 +86,46 @@ can transfer between devices, a rollback preserved all ordinary input, or a
 neutral snapshot is atomic. Those are remaining live handoff gates, not reasons
 to enable CLI routing after a model pass.
 
+Input-core grab acquisition does not itself wait for an RCU grace period.
+Release does, and the console keyboard handler's `start` callback refreshes
+LEDs; it does not reconstruct held keys. See the upstream
+[console handler](https://github.com/torvalds/linux/blob/v6.18/drivers/tty/vt/keyboard.c).
+Do not treat an ungrab as consumer-neutral resynchronization.
+
+## Per-device disable is not a neutral handoff
+
+Hyprland v0.56.2 assigns the keyboard's `enabled` flag and ignores key/modifier
+events while disabled. It does not thereby release the application's held
+keys. Its pointer/libinput disable path is different. See its
+[input manager](https://github.com/hyprwm/Hyprland/blob/v0.56.2/src/managers/input/InputManager.cpp).
+
+`oslo make test-keyboard-quiesce` exercises this failure with one owned
+Wayland-protocol keyboard and a real rendered application, using both legacy
+and Lua Hyprland configuration. It selects the explicitly **test-only Aquamarine
+Wayland startup fix**, not an unmodified-stock acceptance fixture. Host input,
+evdev/uinput, console and production broker routing are not tested or altered.
+
+The application receives a held C. After behaviorally qualifying disable, the
+source releases C but the application stays held. After qualifying re-enable,
+a fresh C press is also suppressed; only its later release restores neutrality.
+Diagnostic Z batches confirm actual device behavior rather than trusting a
+configuration reply or sleeping for an assumed refresh interval.
+
+In this optional fixture mode, the receiver issues at most one `wl_display.sync`
+at a time on a coalesced 20 ms timer. Only a request timestamp **after** the
+keyboard producer's completed roundtrip fences a snapshot. An old request with
+a late callback cannot qualify. This orders this controlled Wayland protocol
+test; it is not an evdev/libinput drain acknowledgement for arbitrary apps.
+Idle sync observations do not request redraws.
+
+Every phase requires the actual application state and a rendered watermark.
+Real captures must contain both the receiver's identity pixel and the matching
+red-held/green-neutral pixel. Capture retries do not repeat input or configuration
+effects; first unmatched images are retained. Five phase captures, full command/
+synthetic-event trace and `keyboard-quiesce-result.json` remain under the attempt's
+`target/cage-host/run-*`. A passing **negative** characterization explicitly
+retains `production_route_tested=false` and `kernel_input_tested=false`.
+
 `oslo make test-handoff-boundary` exercises the protocol with scripted ports,
 including an in-flight pre-grab fanout and faults. These are models, not kernel
 proof. Two new ignored kernel cases in the fixed user-launched runner challenge
@@ -134,7 +174,12 @@ Output shutdown still precedes actual original-fd closure and release acknowledg
 
 `reader_cutover` defaults to refusal; it is not a readiness or policy grant.
 The private routing `Stream` does not yet opt into this interface, and its live
-admission/neutral/rollback/consumer/console obligations remain open. A user-run
+admission/neutral/rollback/consumer/console obligations remain open. Its former
+grab-and-blind-discard path has been removed: complete metadata/model snapshots
+still return `Unsupported` before grabbing, draining, ungrabbing, attaching live
+routing, asking Morf to activate, or emitting native `Ready`. Source-neutral queries are not promoted to
+consumer-neutral acknowledgements. This is a safety refusal, not a completed
+takeover protocol. A user-run
 synthetic loop case checks prefix/callback/tail ordering, one downstream output
 and output-before-original-close teardown. Library tests exercise the same
 assembler, queue, dispatcher and cancellation helpers without opening devices.
@@ -199,6 +244,10 @@ Published descriptors and consumer receipts carry the full marker. Validation
 of a serialized descriptor only checks its shape; callers cannot submit an
 already bound descriptor for kernel publication or choose its creation identity.
 Prior publication metadata or consumer receipts cannot complete a new gate.
+The private worker constructs feedback and readiness from the actual owned
+publication's bound descriptor, not the unbound mirror from before publication.
+The base descriptor is consumed by the registry; its per-creation identity is
+then shared by both preparation paths.
 The public descriptor JSON fields are unchanged. The identity is not secret,
 an input permission, a consumer acknowledgement or a `Ready` token.
 

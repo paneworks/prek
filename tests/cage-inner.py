@@ -56,6 +56,7 @@ def main():
     parser.add_argument("--proxy", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--hyprland-config", choices=("hyprlang", "lua"), default="hyprlang")
+    parser.add_argument("--receiver-sync-probe", action="store_true")
     args = parser.parse_args()
     output = Path(args.output)
     runtime = Path(os.environ["XDG_RUNTIME_DIR"])
@@ -138,7 +139,8 @@ def main():
                                              "aquamarine":libraries}))
             temporary.replace(report)
             receiver_env = dict(env, WAYLAND_DISPLAY=nested.name)
-            receiver = subprocess.Popen([args.receiver, str(output / "receipts.jsonl")],
+            receiver = subprocess.Popen([args.receiver, str(output / "receipts.jsonl")] +
+                                        (["--sync-probe"] if args.receiver_sync_probe else []),
                                         env=receiver_env, stdout=hypr_log, stderr=hypr_log)
             children.append(receiver)
             while receiver.poll() is None and hyprland.poll() is None:

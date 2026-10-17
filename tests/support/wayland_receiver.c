@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/timerfd.h>
 #include <time.h>
 #include <unistd.h>
 #include <wayland-client.h>
@@ -34,6 +35,8 @@ struct app {
     struct wl_touch *touch;
     struct wl_pointer *pointer;
     struct wl_callback *frame_callback;
+    struct wl_callback *sync_callback;
+    uint64_t sync_requested;
     struct wp_presentation *presentation;
     struct xkb_context *xkb;
     struct xkb_keymap *keymap;
@@ -87,7 +90,33 @@ static void receipt(struct app *app,const char *event,const char *detail) {
     }
     fprintf(app->log,"]}\n");
     if (fflush(app->log)) abort();
-    if (strcmp(event,"rendered") && strcmp(event,"presented") && strcmp(event,"presentation_discarded")) {app->dirty=true;draw(app);}
+    if (strcmp(event,"rendered") && strcmp(event,"presented") && strcmp(event,"presentation_discarded") && strcmp(event,"sync")) {app->dirty=true;draw(app);}
+}
+static void sync_done(void *data,struct wl_callback *callback,uint32_t serial) {
+    struct app *app=data;wl_callback_destroy(callback);app->sync_callback=NULL;
+    char detail[96];snprintf(detail,sizeof(detail),"\"requested_ns\":%" PRIu64,app->sync_requested);
+    receipt(app,"sync",detail);
+}
+static const struct wl_callback_listener sync_listener={.done=sync_done};
+static int probe_dispatch(struct app *app,int timer) {
+    while(wl_display_prepare_read(app->display)!=0)if(wl_display_dispatch_pending(app->display)<0)return -1;
+    int flushed=wl_display_flush(app->display);
+    if(flushed<0 && errno!=EAGAIN){wl_display_cancel_read(app->display);return -1;}
+    struct pollfd fds[2]={{wl_display_get_fd(app->display),POLLIN|(flushed<0?POLLOUT:0),0},{timer,POLLIN,0}};
+    int ready=poll(fds,2,1000);
+    if(ready<0){wl_display_cancel_read(app->display);return errno==EINTR?0:-1;}
+    if(fds[0].revents&POLLIN){if(wl_display_read_events(app->display)<0)return -1;}
+    else wl_display_cancel_read(app->display);
+    if(fds[0].revents&(POLLERR|POLLHUP|POLLNVAL))return -1;
+    if(wl_display_dispatch_pending(app->display)<0)return -1;
+    if(fds[1].revents&POLLIN){
+        uint64_t ticks;if(read(timer,&ticks,sizeof(ticks))!=(ssize_t)sizeof(ticks))return -1;
+        if(!app->sync_callback){
+            app->sync_requested=clock_ns();app->sync_callback=wl_display_sync(app->display);
+            wl_callback_add_listener(app->sync_callback,&sync_listener,app);
+        }
+    }
+    return 0;
 }
 static void presented(void *data,struct wl_callback *callback,uint32_t time) {
     struct app *app=data;
@@ -146,6 +175,8 @@ static void draw(struct app *app) {
     bool target=!strcmp(app->label,"hyprland-target"),guard=!strcmp(app->label,"hyprland-guard");
     cairo_set_source_rgb(cr,target?1:0,guard?1:0,(!target && !guard)?1:0);
     cairo_rectangle(cr,8,8,8,8);cairo_fill(cr);
+    bool held=false;for(unsigned i=0;i<KEYS;i++)if(app->keys[i]){held=true;break;}
+    cairo_set_source_rgb(cr,held?1:0,held?0:1,0);cairo_rectangle(cr,24,8,8,8);cairo_fill(cr);
     cairo_set_source_rgb(cr,.85,.94,1);cairo_select_font_face(cr,"monospace",CAIRO_FONT_SLANT_NORMAL,CAIRO_FONT_WEIGHT_NORMAL);cairo_set_font_size(cr,18);
     label(cr,30,app->label);
     char line[1100];snprintf(line,sizeof(line),"receipts: %" PRIu64 "  touch frames: %" PRIu64,app->sequence,app->frames);label(cr,60,line);
@@ -306,7 +337,8 @@ int main(int argc,char **argv) {
     if(!((vm && !strcmp(vm,"1")) || (host && !strcmp(host,"1"))))return 2;
     if(argc>1 && !strcmp(argv[1],"--rgb-png"))return image_convert(argc,argv,true);
     if(argc>1 && !strcmp(argv[1],"--png-rgb"))return image_convert(argc,argv,false);
-    if(argc!=2){fprintf(stderr,"supply an owned receipt path\n");return 2;}
+    bool probe=argc==3 && !strcmp(argv[2],"--sync-probe");
+    if(argc!=2 && !probe){fprintf(stderr,"supply an owned receipt path\n");return 2;}
     int fd=open(argv[1],O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);if(fd<0){perror("receipt file");return 1;}
     struct app app={.running=true,.width=600,.height=800};app.log=fdopen(fd,"w");if(!app.log)abort();
     const char *label=getenv("PREK_TEST_RECEIVER_LABEL");if(!label)label="Prek Wayland input receiver";
@@ -320,6 +352,14 @@ int main(int argc,char **argv) {
     struct xdg_surface *surface=xdg_wm_base_get_xdg_surface(app.wm,app.surface);xdg_surface_add_listener(surface,&surface_listener,&app);
     struct xdg_toplevel *toplevel=xdg_surface_get_toplevel(surface);xdg_toplevel_add_listener(toplevel,&toplevel_listener,&app);xdg_toplevel_set_title(toplevel,app.label);xdg_toplevel_set_app_id(toplevel,"prek-cage-receiver");
     wl_surface_commit(app.surface);
-    while(app.running && wl_display_dispatch(app.display)>=0){}
+    int timer=-1;
+    if(probe){
+        timer=timerfd_create(CLOCK_MONOTONIC,TFD_CLOEXEC|TFD_NONBLOCK);if(timer<0)abort();
+        struct itimerspec interval={.it_interval={0,20000000},.it_value={0,20000000}};
+        if(timerfd_settime(timer,0,&interval,NULL))abort();
+    }
+    while(app.running && (probe?probe_dispatch(&app,timer):wl_display_dispatch(app.display))>=0){}
+    if(app.sync_callback)wl_callback_destroy(app.sync_callback);
+    if(timer>=0)close(timer);
     app.configured=false;receipt(&app,"closed",NULL);wl_display_disconnect(app.display);fclose(app.log);return 0;
 }

@@ -8,7 +8,7 @@ use crate::{
     configuration::{Assembly, Command},
     input::{Device, Frame, Source},
     ipc::{Channel, monotonic},
-    kernel::{Flush, Registry, Virtual},
+    kernel::{Flush, Publication, Registry, Virtual},
     linux::{self, InputSink, ReaderBuffer, ReaderDisposition},
     protocol::{self, Fence},
     replay::Record,
@@ -33,7 +33,6 @@ struct Seat {
     subscription: Subscription,
     routing: Routing,
     expires: Duration,
-    reported: bool,
     started: Duration,
     recognizer_ready: Option<bool>,
     input_enabled: bool,
@@ -53,6 +52,39 @@ struct Output {
     started: Duration,
     in_flight: Option<u64>,
     sequence: u64,
+}
+struct NativePreparation {
+    descriptor: Descriptor,
+    readiness: Readiness,
+}
+impl NativePreparation {
+    fn new(
+        publication: &Publication,
+        consumer: crate::transport::Consumer,
+        now: Duration,
+    ) -> io::Result<Self> {
+        let descriptor = publication.descriptor().clone();
+        let readiness = Readiness::new(descriptor.clone(), consumer, now).map_err(invalid)?;
+        Ok(Self {
+            descriptor,
+            readiness,
+        })
+    }
+}
+fn consumer_boundary(
+    gate: &mut Readiness,
+    descriptor: &Descriptor,
+    evidence: &crate::transport::ConsumerEvidence,
+    feedback: bool,
+    now: Duration,
+) -> io::Result<()> {
+    gate.metadata(descriptor, now).map_err(invalid)?;
+    gate.consumer(evidence, now).map_err(invalid)?;
+    gate.feedback(feedback, now).map_err(invalid)?;
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "native consumer prefix/drain/neutral/rollback boundary is not implemented; leave source ungrabbed",
+    ))
 }
 pub struct Stream {
     channel: Channel,
@@ -534,7 +566,6 @@ impl Stream {
                         subscription: subscription.clone(),
                         routing,
                         expires: now + protocol::MAX_PACKET_AGE,
-                        reported: false,
                         started: now,
                         recognizer_ready: None,
                         input_enabled: false,
@@ -696,17 +727,18 @@ impl InputSink for Stream {
                 BTreeMap::new(),
             )
             .map_err(invalid)?;
-            let feedback = descriptor
+            let publication = self.registry.prepare_for_worker(descriptor, health)?;
+            let subscription = self.seats[&device.source.seat].subscription.clone();
+            let preparation =
+                NativePreparation::new(&publication, subscription.consumer.clone().unwrap(), now)?;
+            let feedback = preparation
+                .descriptor
                 .capabilities
                 .contains_key(&17)
-                .then(|| linux::feedback::LedFeedback::new(raw, &descriptor))
+                .then(|| linux::feedback::LedFeedback::new(raw, &preparation.descriptor))
                 .transpose()?;
             let state_probe = linux::StateProbe::new(raw)?;
-            let output = Virtual::create(
-                self.registry
-                    .prepare_for_worker(descriptor.clone(), health)?,
-            )?;
-            let subscription = self.seats[&device.source.seat].subscription.clone();
+            let output = Virtual::create(publication)?;
             if self.releases.len() >= 4096 {
                 return Err(invalid("too many pending reader releases"));
             }
@@ -714,8 +746,6 @@ impl InputSink for Stream {
                 device.source.clone(),
                 (subscription.fence, health.worker_identity()),
             );
-            let readiness = Readiness::new(descriptor, subscription.consumer.clone().unwrap(), now)
-                .map_err(invalid)?;
             self.outputs.insert(
                 device.source.clone(),
                 Output {
@@ -728,7 +758,7 @@ impl InputSink for Stream {
                     virtual_device: output,
                     state_probe: Some(state_probe),
                     feedback,
-                    readiness: Some(readiness),
+                    readiness: Some(preparation.readiness),
                     consumer: None,
                     offered: Duration::ZERO,
                     started: now,
@@ -762,8 +792,7 @@ impl InputSink for Stream {
             output.admission.cancel_pending();
             return Ok(ReaderDisposition::Keep);
         }
-        // Complete frames awaiting the watermark and partial assembler state
-        // belong to observation. Let the sole loop deliver them before grab.
+        // Pending complete and partial frames remain on the observation path.
         if !buffer.is_drained() {
             output.admission.cancel_pending();
             return Ok(ReaderDisposition::Keep);
@@ -772,79 +801,18 @@ impl InputSink for Stream {
             output.admission.cancel_pending();
             return Ok(ReaderDisposition::Keep);
         }
-        if !output.admission.allowed(monotonic()?) {
-            if let Some(activation) = output.admission.request(now).map_err(invalid)? {
-                self.queue(Message::MorfReady { activation })?;
-            }
-            return Ok(ReaderDisposition::Keep);
-        }
-        let gate = output.readiness.as_mut().unwrap();
-        gate.metadata(output.virtual_device.descriptor(), now)
-            .map_err(invalid)?;
-        gate.consumer(evidence, now).map_err(invalid)?;
-        gate.feedback(output.feedback.is_some(), now)
-            .map_err(invalid)?;
-        gate.neutral(true, now).map_err(invalid)?;
-        let ready = output
-            .readiness
-            .take()
-            .unwrap()
-            .finish(now)
-            .map_err(invalid)?;
-        raw.grab()?;
-        // A handoff cannot convert already held input into a new gesture.
+        consumer_boundary(
+            output.readiness.as_mut().unwrap(),
+            output.virtual_device.descriptor(),
+            evidence,
+            output.feedback.is_some(),
+            now,
+        )?;
         if !output.admission.allowed(monotonic()?)
-            || !output.state_probe.as_ref().unwrap().is_neutral(device)?
+            && let Some(activation) = output.admission.request(now).map_err(invalid)?
         {
-            self.outputs.remove(&device.source);
-            raw.ungrab()?;
-            return Ok(ReaderDisposition::Reopen);
+            self.queue(Message::MorfReady { activation })?;
         }
-        // TODO: this drain cannot distinguish pre-grab backlog from events
-        // arriving after grab. The software-buffer gate above does not solve
-        // that kernel race. CLI routing must remain disabled until consumer
-        // acknowledgement establishes the complete ownership boundary.
-        let mut discarded = 0usize;
-        loop {
-            let fetched = raw.fetch_events().map(|events| events.count());
-            match fetched {
-                Ok(count) => {
-                    if count == 0 {
-                        break;
-                    }
-                    discarded += count;
-                    if discarded > 65_536 {
-                        let _ = raw.ungrab();
-                        return Err(invalid("input handoff backlog exceeds bounded drain"));
-                    }
-                }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
-                Err(error) => {
-                    let _ = raw.ungrab();
-                    return Err(error);
-                }
-            }
-        }
-        if !output.admission.allowed(monotonic()?) {
-            self.outputs.remove(&device.source);
-            raw.ungrab()?;
-            return Ok(ReaderDisposition::Reopen);
-        }
-        let seat = self.seats.get_mut(&device.source.seat).unwrap();
-        if let Err(error) = seat.routing.attach(device.clone(), &ready, None, now) {
-            let _ = raw.ungrab();
-            return Err(error);
-        }
-        output.state_probe = None;
-        self.grabbed.insert(device.source.clone());
-        if !seat.reported {
-            seat.reported = true;
-            let subscription = identity(&seat.subscription);
-            self.queue(Message::Outcome {
-                report: Report::Ready { subscription },
-            })?;
-        }
-        self.publish_source(&device.source, now)?;
         Ok(ReaderDisposition::Keep)
     }
     fn push(&mut self, record: Record) -> io::Result<()> {
@@ -1113,6 +1081,7 @@ impl Drop for Stream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod preparation;
     mod recognizers;
 
     fn ended(seat: &str, reason_bytes: usize) -> Message {

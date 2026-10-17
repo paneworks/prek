@@ -208,6 +208,9 @@ make.recipe{ name="test-virtual-publication",desc="nonce-bound virtual lifetimes
                sh.cargo("test","--locked","--lib","linux::discovery::tests::")
              end }
 
+make.recipe{ name="test-native-preparation",desc="published native descriptor binding and refusal before unproven takeover",
+             run=function() sh.cargo("test","--locked","--lib","route_worker::tests::preparation::") end }
+
 make.recipe{ name = "test-suspend-epoch", desc = "suspend-sensitive process clocks and native IO/reaping gates",
              run = function() sh.cargo("test", "--locked", "--lib", "process_clock::tests::") end }
 
@@ -392,6 +395,12 @@ make.recipe{ name = "test-cage-stock", desc = "modern pinned stock Cage/Hyprland
 
 make.recipe{ name = "test-cage-lua-stock", desc = "modern stock Cage/Hyprland with an actual Lua config",
              run = function() cage_test("cage-test-stock", { "--hyprland-config", "lua", "--modes", "--input", "--power", "--windows" }) end }
+
+make.recipe{ name="test-keyboard-quiesce",desc="real held-key disable characterization with explicit test-only Wayland backend fix",
+             run=function()
+               cage_test("cage-test-wayland-fix",{"--keyboard-quiesce"})
+               cage_test("cage-test-wayland-fix",{"--keyboard-quiesce","--hyprland-config","lua"})
+             end }
 
 make.recipe{ name = "test-cage-wayland-fix", desc = "explicit test-only patched nested compositor receipts",
              run = function()

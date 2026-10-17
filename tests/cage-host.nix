@@ -40,6 +40,7 @@ pkgs.writeShellScriptBin "prek-cage-host-test" ''
     --hyprland ${hyprland}/bin/Hyprland \
     --inner ${./cage-inner.py} --proxy ${./support/wlproxy.py} --morf-lock-check ${./support/morf-lock.py} \
     --morf-control-check ${./support/morf-controls.py} \
+    --keyboard-quiesce-check ${./support/keyboard_quiesce.py} \
     --screencopy ${pkgs.grim}/bin/grim \
     --receiver ${receiver}/bin/prek-wayland-receiver \
     --keyboard ${keyboard}/bin/prek-wayland-keyboard \

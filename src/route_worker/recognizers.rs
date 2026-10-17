@@ -54,7 +54,12 @@ impl Stream {
         }
         states.into_values().collect()
     }
-    fn report_input(&mut self, seat: &str, mut input: Input, now: Duration) -> io::Result<()> {
+    pub(super) fn report_input(
+        &mut self,
+        seat: &str,
+        mut input: Input,
+        now: Duration,
+    ) -> io::Result<()> {
         let Some(owner) = self.seats.get(seat) else {
             return Ok(());
         };
@@ -401,20 +406,6 @@ impl Stream {
             _ => {}
         }
         Ok(inputs)
-    }
-    pub(super) fn publish_source(&mut self, source: &Source, now: Duration) -> io::Result<()> {
-        let Some(seat) = self.seats.get(&source.seat) else {
-            return Ok(());
-        };
-        if let Some(input) = seat
-            .routing
-            .input_states(now)
-            .into_iter()
-            .find(|input| input.source() == source)
-        {
-            self.report_input(&source.seat, input, now)?;
-        }
-        Ok(())
     }
     pub(super) fn prune_reports(&mut self, now: Duration) -> io::Result<()> {
         let config = &self.config;

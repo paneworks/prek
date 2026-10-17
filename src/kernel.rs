@@ -517,6 +517,9 @@ pub struct Publication {
     metadata: Metadata,
 }
 impl Publication {
+    pub(crate) fn descriptor(&self) -> &Descriptor {
+        &self.descriptor
+    }
     fn verify(&self) -> io::Result<()> {
         let (metadata, inode) = self.directory.read_record(&self.metadata.marker)?;
         if inode != self.inode || metadata != self.metadata {

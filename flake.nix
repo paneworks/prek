@@ -326,6 +326,7 @@
             cp ${./tests/cage-inner.py} fixtures/tests/cage-inner.py
             cp ${./tests/cage-host.py} fixtures/tests/cage-host.py
             cp ${./tests/support/test_cage_startup.py} fixtures/tests/support/test_cage_startup.py
+            cp ${./tests/support/keyboard_quiesce.py} fixtures/tests/support/keyboard_quiesce.py
             python3 -m unittest discover -s fixtures/tests/support -p test_cage_startup.py -v > "$out" 2>&1
           '';
           wayland-proxy = pkgs.runCommand "prek-wayland-proxy-check" {
