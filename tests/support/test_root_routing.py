@@ -47,19 +47,66 @@ def fuzz_output(**changes):
     return root.FUZZ_RESULT + json.dumps(value) + "\ntest result: ok. 1 passed; 0 failed; 0 ignored;\n"
 
 
+def key_output(**changes):
+    value = dict(version=1, status="passed", uid=0, physical_devices_opened=0,
+                 native_preparation_tested=True, generated_role_metadata_verified=True,
+                 native_key_output_tested=True, native_cancel_before_write_tested=True,
+                 native_repeat_event_tested=True, native_partial_write_tested=False,
+                 broker_authorization_tested=False, compositor_delivery_tested=False,
+                 worker_binding_tested=False, owned_device_removed=True)
+    value.update(changes)
+    return root.KEY_OUTPUT_RESULT + json.dumps(value) + "\ntest result: ok. 1 passed; 0 failed; 0 ignored;\n"
+
+
 class KernelReceipt(unittest.TestCase):
     def value(self):
-        return dict(version=4, status="passed", uid=0, kernel=os.uname().release,
+        return dict(version=5, status="passed", uid=0, kernel=os.uname().release,
                     tests=sorted(root.ALL_EXPECTED), passed=len(root.ALL_EXPECTED),
                     routing_passed=len(root.EXPECTED), recovery_passed=8, physical_devices_opened=0,
                     repeat_characterization_passed=1, repeat_passthrough_tested=False,
                     fuzz_characterization_passed=1, fuzz_passthrough_tested=False,
+                    generated_key_output_passed=1, generated_key_output_authorization_tested=False,
+                    generated_key_output_compositor_tested=False, generated_key_output_partial_write_tested=False,
                     model_desktop_context=True, production_route_admission_tested=False,
                     compositor_consumer_retirement_tested=False, rule_removed=True, registry_clean=True,
                     unrelated_registry_preserved=True, recovery_controls_removed=True)
 
     def line(self, value):
         return root.PREFIX + json.dumps(value) + "\n"
+
+    def test_generated_key_output_requires_one_exact_inventory(self):
+        root.key_output_inventory(root.KEY_OUTPUT_CASE + ": test\n")
+        for output in ["", (root.KEY_OUTPUT_CASE + ": test\n") * 2, root.FUZZ_CASE + ": test\n"]:
+            with self.subTest(output=output), self.assertRaises(ValueError):
+                root.key_output_inventory(output)
+
+    def test_generated_key_output_scope_is_complete_exact_and_typed(self):
+        valid = key_output()
+        self.assertTrue(root.key_output_result(valid)["native_key_output_tested"])
+        for output in ["", valid * 2, key_output(extra=True), valid.replace("1 passed", "0 passed"),
+                       root.KEY_OUTPUT_RESULT + "{", valid.replace(root.KEY_OUTPUT_RESULT, "FOREIGN=")]:
+            with self.subTest(output=output), self.assertRaises((ValueError, TypeError)):
+                root.key_output_result(output)
+        original = json.loads(valid.splitlines()[0][len(root.KEY_OUTPUT_RESULT):])
+        for field in original:
+            missing = dict(original)
+            del missing[field]
+            with self.subTest(missing=field), self.assertRaises(ValueError):
+                root.key_output_result(root.KEY_OUTPUT_RESULT + json.dumps(missing) + "\ntest result: ok. 1 passed; 0 failed; 0 ignored;\n")
+            for replacement in [None, "foreign", True, False, 0, 1, []]:
+                if type(replacement) is type(original[field]) and replacement == original[field]:
+                    continue
+                with self.subTest(field=field, replacement=replacement), self.assertRaises(ValueError):
+                    root.key_output_result(key_output(**{field: replacement}))
+
+    def test_v4_receipt_without_generated_output_is_not_current_acceptance(self):
+        old = self.value()
+        old.update(version=4, passed=24, tests=sorted(root.ALL_EXPECTED - {root.KEY_OUTPUT_CASE}))
+        for field in list(old):
+            if field.startswith("generated_key_output_"):
+                del old[field]
+        with self.assertRaises(ValueError):
+            root.receipt(self.line(old))
 
     def test_one_correlated_receipt_is_required(self):
         value = self.value()
@@ -128,7 +175,7 @@ class KernelReceipt(unittest.TestCase):
 
     def test_old_receipt_without_fuzz_characterization_is_not_acceptance(self):
         value = self.value()
-        value.update(version=3, tests=sorted(root.ALL_EXPECTED - {root.FUZZ_CASE}), passed=23)
+        value.update(version=3, tests=sorted(root.ALL_EXPECTED - {root.FUZZ_CASE, root.KEY_OUTPUT_CASE}), passed=23)
         del value["fuzz_characterization_passed"]
         del value["fuzz_passthrough_tested"]
         with self.assertRaises(ValueError):
@@ -439,7 +486,7 @@ class RootRunModel(unittest.TestCase):
                 if argv[0] == "/nix/store/model/recovery":
                     return subprocess.CompletedProcess(argv, 0, recovery_inventory())
                 if argv[0] == "/nix/store/model/native":
-                    self.assertIn(argv[1], (root.REPEAT_CASE, root.FUZZ_CASE))
+                    self.assertIn(argv[1], (root.REPEAT_CASE, root.FUZZ_CASE, root.KEY_OUTPUT_CASE))
                     self.assertEqual(argv[2:], ["--exact", "--list", "--ignored"])
                     return subprocess.CompletedProcess(argv, 0, argv[1] + ": test\n")
                 self.assertEqual(argv, ["/nix/store/model/udevadm", "control", "--reload-rules"])
@@ -451,9 +498,9 @@ class RootRunModel(unittest.TestCase):
                 if effect is not None:
                     effect(argv[0], path, registry, rules)
                 if argv[0] == "/nix/store/model/native":
-                    self.assertIn(argv[1], (root.REPEAT_CASE, root.FUZZ_CASE))
+                    self.assertIn(argv[1], (root.REPEAT_CASE, root.FUZZ_CASE, root.KEY_OUTPUT_CASE))
                     self.assertEqual(argv[2:], ["--exact", "--ignored", "--nocapture", "--test-threads=1"])
-                    return repeat_output() if argv[1] == root.REPEAT_CASE else fuzz_output()
+                    return {root.REPEAT_CASE: repeat_output, root.FUZZ_CASE: fuzz_output, root.KEY_OUTPUT_CASE: key_output}[argv[1]]()
                 if argv[0] == "/nix/store/model/recovery":
                     control = path / Path(env["PREK_RECOVERY_DIRECTORY"]).name
                     info = control.stat()
@@ -475,11 +522,11 @@ class RootRunModel(unittest.TestCase):
     def test_model_success_correlates_all_executables_and_removes_controls(self):
         with self.model() as (args, path, registry, rules, commands, output):
             root.run(args)
-            self.assertEqual(root.receipt(output.getvalue())["passed"], 24)
+            self.assertEqual(root.receipt(output.getvalue())["passed"], 25)
             self.assertEqual({entry.name for entry in path.iterdir()}, {"devices", "rules"})
             self.assertEqual(list(rules.iterdir()), [])
             self.assertEqual((registry / "foreign-record").read_text(), "preserved")
-            self.assertEqual(commands.call_count, 6)
+            self.assertEqual(commands.call_count, 7)
 
     def test_model_all_executable_failures_remove_only_original_rule(self):
         for failure in ["routing", "recovery", "native"]:
@@ -491,7 +538,7 @@ class RootRunModel(unittest.TestCase):
                     root.run(args)
                 self.assertEqual(list(rules.iterdir()), [])
                 self.assertEqual((registry / "foreign-record").read_text(), "preserved")
-                self.assertEqual(commands.call_count, 6)
+                self.assertEqual(commands.call_count, 7)
                 self.assertNotIn(root.PREFIX, output.getvalue())
 
     def test_model_malformed_repeat_evidence_removes_the_rule_without_acceptance(self):
@@ -501,7 +548,7 @@ class RootRunModel(unittest.TestCase):
                     root.run(args)
             self.assertEqual(list(rules.iterdir()), [])
             self.assertEqual((registry / "foreign-record").read_text(), "preserved")
-            self.assertEqual(commands.call_count, 6)
+            self.assertEqual(commands.call_count, 7)
             self.assertNotIn(root.PREFIX, output.getvalue())
 
     def test_model_malformed_fuzz_evidence_removes_the_rule_without_acceptance(self):
@@ -511,7 +558,17 @@ class RootRunModel(unittest.TestCase):
                     root.run(args)
             self.assertEqual(list(rules.iterdir()), [])
             self.assertEqual((registry / "foreign-record").read_text(), "preserved")
-            self.assertEqual(commands.call_count, 6)
+            self.assertEqual(commands.call_count, 7)
+            self.assertNotIn(root.PREFIX, output.getvalue())
+
+    def test_model_malformed_generated_output_cleans_its_rule_without_acceptance(self):
+        with self.model() as (args, _, registry, rules, commands, output):
+            with mock.patch.object(root, "key_output_result", side_effect=ValueError("invalid generated output evidence")):
+                with self.assertRaisesRegex(ValueError, "invalid generated output evidence"):
+                    root.run(args)
+            self.assertEqual(list(rules.iterdir()), [])
+            self.assertEqual((registry / "foreign-record").read_text(), "preserved")
+            self.assertEqual(commands.call_count, 7)
             self.assertNotIn(root.PREFIX, output.getvalue())
 
     def test_model_registry_changes_are_retained_and_cannot_pass(self):

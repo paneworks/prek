@@ -10,6 +10,9 @@
 //! [`transport`] and [`router`] model virtual-device preflight and bounded raw
 //! forwarding; kernel takeover and session dispatch remain separate gates.
 
+#[cfg(test)]
+extern crate self as prek;
+
 #[cfg(target_os = "linux")]
 pub mod actions;
 mod buttons;

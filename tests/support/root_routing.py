@@ -36,7 +36,9 @@ REPEAT_CASE = "kernel::tests::repeat::isolated_uinput_repeat_timer_and_consumer_
 REPEAT_RESULT = "PREK_UINPUT_REPEAT_RESULT="
 FUZZ_CASE = "kernel::tests::fuzz::isolated_uinput_fuzz_refiltering_and_slot_restore_are_not_transparent"
 FUZZ_RESULT = "PREK_UINPUT_FUZZ_RESULT="
-ALL_EXPECTED = EXPECTED | RECOVERY_EXPECTED | {REPEAT_CASE, FUZZ_CASE}
+KEY_OUTPUT_CASE = "keys::native::tests::isolated_generated_keyboard_executes_owned_keys_and_exact_cancellation"
+KEY_OUTPUT_RESULT = "PREK_GENERATED_KEY_OUTPUT_RESULT="
+ALL_EXPECTED = EXPECTED | RECOVERY_EXPECTED | {REPEAT_CASE, FUZZ_CASE, KEY_OUTPUT_CASE}
 RECOVERY_INVENTORY = "PREK_KERNEL_RECOVERY_INVENTORY_V1"
 RECOVERY_RESULT = "PREK_KERNEL_RECOVERY_RESULT="
 EXECUTION_TIMEOUT = 90
@@ -130,15 +132,43 @@ def fuzz_result(stdout):
     return value
 
 
+def key_output_inventory(stdout):
+    names = [line.removesuffix(": test") for line in stdout.splitlines() if line.endswith(": test")]
+    if names != [KEY_OUTPUT_CASE]:
+        raise ValueError("generated key output executable has a different inventory")
+
+
+def key_output_result(stdout):
+    results = re.findall(r"^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored;", stdout, re.M)
+    values = [json.loads(line[len(KEY_OUTPUT_RESULT):]) for line in stdout.splitlines() if line.startswith(KEY_OUTPUT_RESULT)]
+    if results != [("1", "0", "0")] or len(values) != 1 or not isinstance(values[0], dict):
+        raise ValueError("generated key output did not execute exactly once")
+    value = values[0]
+    expected = dict(version=1, status="passed", uid=0, physical_devices_opened=0,
+                    native_preparation_tested=True, generated_role_metadata_verified=True,
+                    native_key_output_tested=True, native_cancel_before_write_tested=True,
+                    native_repeat_event_tested=True, native_partial_write_tested=False,
+                    broker_authorization_tested=False, compositor_delivery_tested=False,
+                    worker_binding_tested=False, owned_device_removed=True)
+    if set(value) != set(expected):
+        raise ValueError("generated key output has a different schema")
+    for key, wanted in expected.items():
+        if type(value[key]) is not type(wanted) or value[key] != wanted:
+            raise ValueError(f"invalid generated key output: {key}")
+    return value
+
+
 def receipt(stdout):
     values = [json.loads(line[len(PREFIX):]) for line in stdout.splitlines() if line.startswith(PREFIX)]
     if len(values) != 1 or not isinstance(values[0], dict):
         raise ValueError("expected exactly one complete isolated kernel receipt")
     value = values[0]
-    expected = dict(version=4, status="passed", uid=0, passed=len(ALL_EXPECTED),
+    expected = dict(version=5, status="passed", uid=0, passed=len(ALL_EXPECTED),
                     routing_passed=len(EXPECTED), recovery_passed=len(RECOVERY_EXPECTED),
                     repeat_characterization_passed=1, repeat_passthrough_tested=False,
                     fuzz_characterization_passed=1, fuzz_passthrough_tested=False,
+                    generated_key_output_passed=1, generated_key_output_authorization_tested=False,
+                    generated_key_output_compositor_tested=False, generated_key_output_partial_write_tested=False,
                     physical_devices_opened=0, model_desktop_context=True,
                     production_route_admission_tested=False, compositor_consumer_retirement_tested=False,
                     rule_removed=True, registry_clean=True, unrelated_registry_preserved=True, recovery_controls_removed=True)
@@ -291,6 +321,9 @@ def run(args):
     listed = subprocess.run([args.native, FUZZ_CASE, "--exact", "--list", "--ignored"], env=env,
                             capture_output=True, text=True, check=True, timeout=10)
     fuzz_inventory(listed.stdout)
+    listed = subprocess.run([args.native, KEY_OUTPUT_CASE, "--exact", "--list", "--ignored"], env=env,
+                            capture_output=True, text=True, check=True, timeout=10)
+    key_output_inventory(listed.stdout)
     if not stat.S_ISCHR(os.stat("/dev/uinput").st_mode):
         raise RuntimeError("/dev/uinput is unavailable; the runner does not load kernel modules")
     with directories() as (parent, registry, rules):
@@ -317,6 +350,7 @@ def run(args):
             test_result(output)
             repeat_result(execute([args.native, REPEAT_CASE, "--exact", "--ignored", "--nocapture", "--test-threads=1"], env))
             fuzz_result(execute([args.native, FUZZ_CASE, "--exact", "--ignored", "--nocapture", "--test-threads=1"], env))
+            key_output_result(execute([args.native, KEY_OUTPUT_CASE, "--exact", "--ignored", "--nocapture", "--test-threads=1"], env))
             with recovery_directory(parent) as (name, run_identity):
                 recovery_env = dict(env, PREK_RECOVERY_DIRECTORY=f"/run/prek/{name}",
                                     PREK_RECOVERY_IDENTITY=f"{run_identity[0]}:{run_identity[1]}")
@@ -328,10 +362,12 @@ def run(args):
             raise RuntimeError("isolated device metadata remains; preserving it for inspection")
         if registry_snapshot(registry) != original_registry:
             raise RuntimeError("unrelated registry state changed; preserving it for inspection")
-    print(PREFIX + json.dumps(dict(version=4, status="passed", uid=0, kernel=os.uname().release,
+    print(PREFIX + json.dumps(dict(version=5, status="passed", uid=0, kernel=os.uname().release,
           tests=sorted(ALL_EXPECTED), passed=len(ALL_EXPECTED), routing_passed=len(EXPECTED), recovery_passed=8, physical_devices_opened=0,
           repeat_characterization_passed=1, repeat_passthrough_tested=False,
           fuzz_characterization_passed=1, fuzz_passthrough_tested=False,
+          generated_key_output_passed=1, generated_key_output_authorization_tested=False,
+          generated_key_output_compositor_tested=False, generated_key_output_partial_write_tested=False,
           model_desktop_context=True, production_route_admission_tested=False,
           compositor_consumer_retirement_tested=False, rule_removed=True, registry_clean=True,
           unrelated_registry_preserved=True, recovery_controls_removed=True)), flush=True)

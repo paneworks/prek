@@ -1,5 +1,7 @@
 //! Seat-scoped key conditions, chords, layers and synthetic-key ownership.
 //! Output execution uses an explicitly supplied frame sink in [`output`].
+#[cfg(target_os = "linux")]
+pub mod native;
 pub mod output;
 use crate::{
     config::Layer,

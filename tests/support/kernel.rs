@@ -298,6 +298,15 @@ impl Receiver {
         }
     }
 
+    pub fn keys(&self) -> Vec<u16> {
+        self.raw
+            .get_key_state()
+            .unwrap()
+            .iter()
+            .map(|key| key.0)
+            .collect()
+    }
+
     pub fn next(&mut self, timeout: Duration) -> Option<Frame> {
         if let Some(frame) = self.pending.pop_front() {
             return Some(frame);
@@ -370,7 +379,7 @@ pub fn send(output: &mut Virtual, sequence: u64, events: &[(u16, u16, i32)]) {
     }
 }
 
-fn receiver_identity() -> Consumer {
+pub fn receiver_identity() -> Consumer {
     let stat = fs::read_to_string("/proc/self/stat").unwrap();
     let fields = stat
         .rsplit_once(')')

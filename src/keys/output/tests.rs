@@ -580,6 +580,35 @@ fn t46_native_virtual_output_implements_the_same_sink_without_opening_a_device()
 }
 
 #[test]
+fn t46_native_key_role_refuses_a_physical_counterpart_before_any_io() {
+    let generated =
+        crate::transport::Descriptor::generated_keyboard(source(0), BTreeMap::new()).unwrap();
+    native_key_role(&generated).unwrap();
+    let device = crate::transport::tests::touch();
+    let mut physical = crate::transport::Descriptor::mirror(
+        &device,
+        crate::transport::KernelIdentity {
+            bus: 3,
+            vendor: device.vendor,
+            product: device.product,
+            version: 1,
+        },
+        None,
+        &BTreeMap::new(),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    physical.class = crate::transport::Class::Keyboard;
+    assert_eq!(
+        native_key_role(&physical).unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    let mut changed = generated;
+    changed.class = crate::transport::Class::Mouse;
+    assert!(native_key_role(&changed).is_err());
+}
+
+#[test]
 fn t46_cancellation_never_finishes_an_unwritten_chord_tail() {
     for count in 0..=3 {
         let (mut output, state) = model();

@@ -18,6 +18,7 @@ const FRESHNESS: Duration = Duration::from_millis(250);
 pub(crate) struct Marker<'a> {
     pub base: &'a str,
     pub publication: Option<&'a str>,
+    pub generated: bool,
 }
 impl<'a> Marker<'a> {
     pub fn parse(marker: &'a str) -> Result<Self, &'static str> {
@@ -25,12 +26,22 @@ impl<'a> Marker<'a> {
             return Err("device marker exceeds bounds");
         }
         let parts = marker.split('/').collect::<Vec<_>>();
-        let (device, generation, publication) = match parts.as_slice() {
-            ["prek", device, generation] => (*device, *generation, None),
-            ["prek", "test", device, generation] => (*device, *generation, None),
-            ["prek", device, generation, publication] => (*device, *generation, Some(*publication)),
+        let (device, generation, publication, generated) = match parts.as_slice() {
+            ["prek", device, generation] => (*device, *generation, None, false),
+            ["prek", "test", device, generation] => (*device, *generation, None, false),
+            ["prek", "keys", device, generation] => (*device, *generation, None, true),
+            ["prek", "test", "keys", device, generation] => (*device, *generation, None, true),
+            ["prek", device, generation, publication] => {
+                (*device, *generation, Some(*publication), false)
+            }
             ["prek", "test", device, generation, publication] => {
-                (*device, *generation, Some(*publication))
+                (*device, *generation, Some(*publication), false)
+            }
+            ["prek", "keys", device, generation, publication] => {
+                (*device, *generation, Some(*publication), true)
+            }
+            ["prek", "test", "keys", device, generation, publication] => {
+                (*device, *generation, Some(*publication), true)
             }
             _ => return Err("invalid Prek device marker"),
         };
@@ -48,7 +59,11 @@ impl<'a> Marker<'a> {
             return Err("device marker requires canonical nonempty hexadecimal identity");
         }
         let base = publication.map_or(marker, |nonce| &marker[..marker.len() - nonce.len() - 1]);
-        Ok(Self { base, publication })
+        Ok(Self {
+            base,
+            publication,
+            generated,
+        })
     }
 }
 
@@ -82,7 +97,7 @@ pub enum Class {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Descriptor {
-    original: Device,
+    origin: Origin,
     isolated: bool,
     pub source: Source,
     pub name: String,
@@ -100,6 +115,18 @@ pub struct Descriptor {
     /// Required consumer settings, keyed by the virtual identity. Supplied by
     /// trusted device policy; copying capability bits does not preserve these.
     pub consumer_settings: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(
+    tag = "kind",
+    content = "device",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum Origin {
+    Physical(Box<Device>),
+    GeneratedKeyboard,
 }
 
 fn bounded(value: &str) -> bool {
@@ -128,10 +155,15 @@ pub(crate) fn permitted_property(key: &str) -> bool {
 
 impl Descriptor {
     pub(crate) fn isolated_fixture(&self) -> bool {
-        self.original.identity.starts_with("test:")
-            && self.original.name.starts_with("Prek test ")
-            && self.original.physical.starts_with("fixture/")
-            && self.original.path.is_empty()
+        match &self.origin {
+            Origin::Physical(original) => {
+                original.identity.starts_with("test:")
+                    && original.name.starts_with("Prek test ")
+                    && original.physical.starts_with("fixture/")
+                    && original.path.is_empty()
+            }
+            Origin::GeneratedKeyboard => true,
+        }
     }
 
     pub(crate) fn for_isolated(mut self) -> Result<Self, &'static str> {
@@ -180,13 +212,18 @@ impl Descriptor {
     /// allow observations to be compared, but are not permission to alter the
     /// requested device after its policy checks have passed.
     pub fn validate(&self) -> Result<(), &'static str> {
-        let mut expected = Self::mirror(
-            &self.original,
-            self.identity,
-            self.repeat,
-            &self.udev,
-            self.consumer_settings.clone(),
-        )?;
+        let mut expected = match &self.origin {
+            Origin::Physical(original) => Self::mirror(
+                original,
+                self.identity,
+                self.repeat,
+                &self.udev,
+                self.consumer_settings.clone(),
+            )?,
+            Origin::GeneratedKeyboard => {
+                Self::generated_keyboard(self.source.clone(), self.consumer_settings.clone())?
+            }
+        };
         if self.isolated {
             expected.mark_isolated()?;
         }
@@ -204,6 +241,70 @@ impl Descriptor {
             return Err("descriptor was changed after preparation");
         }
         Ok(())
+    }
+
+    pub fn is_generated_keyboard(&self) -> bool {
+        matches!(self.origin, Origin::GeneratedKeyboard)
+    }
+
+    /// Prepare a separate per-seat keyboard without a physical source counterpart.
+    pub fn generated_keyboard(
+        source: Source,
+        consumer_settings: BTreeMap<String, String>,
+    ) -> Result<Self, &'static str> {
+        if source.generation == 0
+            || source.seat.is_empty()
+            || source.seat.len() > 128
+            || source.seat.chars().any(char::is_control)
+        {
+            return Err("generated keyboard requires a bounded seat and nonzero incarnation");
+        }
+        if consumer_settings.len() > 64
+            || consumer_settings
+                .iter()
+                .any(|(key, value)| !bounded(key) || !bounded(value))
+        {
+            return Err("invalid consumer settings");
+        }
+        let keys = (1..=0xff)
+            .chain(0x160..=0x21f)
+            .chain(0x224..=0x2bf)
+            .chain(0x2e8..=0x2ff)
+            .collect();
+        let marker = format!(
+            "prek/keys/{:016x}/{:016x}",
+            source.device, source.generation
+        );
+        Ok(Self {
+            origin: Origin::GeneratedKeyboard,
+            isolated: false,
+            name: format!("Prek virtual {:016x} generated keyboard", source.device),
+            marker,
+            identity: KernelIdentity {
+                bus: 6,
+                vendor: 0,
+                product: 0,
+                version: 1,
+            },
+            class: Class::Keyboard,
+            capabilities: BTreeMap::from([
+                (crate::input::EV_SYN, vec![crate::input::SYN_REPORT]),
+                (EV_KEY, keys),
+            ]),
+            properties: Vec::new(),
+            axes: BTreeMap::new(),
+            repeat: None,
+            udev: BTreeMap::from([
+                ("ID_INPUT".into(), "1".into()),
+                ("ID_INPUT_KEY".into(), "1".into()),
+                ("ID_INPUT_KEYBOARD".into(), "1".into()),
+                ("ID_SEAT".into(), source.seat.clone()),
+                ("PREK_VIRTUAL".into(), "1".into()),
+                ("PREK_GENERATED_KEYBOARD".into(), "1".into()),
+            ]),
+            consumer_settings,
+            source,
+        })
     }
 
     pub fn mirror(
@@ -356,7 +457,7 @@ impl Descriptor {
             name.push(character);
         }
         Ok(Self {
-            original: original.clone(),
+            origin: Origin::Physical(Box::new(original.clone())),
             isolated: false,
             source: original.source.clone(),
             name,
@@ -425,21 +526,22 @@ pub struct Readiness {
 /// The kernel backend must still bind this token to its own prepared descriptors.
 #[derive(Debug)]
 pub struct Ready {
-    original: Device,
-    source: Source,
-    marker: String,
+    descriptor: Descriptor,
     at: Duration,
 }
 
 impl Ready {
     pub fn matches(&self, device: &Device) -> bool {
-        &self.original == device
+        matches!(&self.descriptor.origin, Origin::Physical(original) if original.as_ref() == device)
+    }
+    pub fn matches_generated(&self, descriptor: &Descriptor) -> bool {
+        descriptor.is_generated_keyboard() && &self.descriptor == descriptor
     }
     pub fn source(&self) -> &Source {
-        &self.source
+        &self.descriptor.source
     }
     pub fn marker(&self) -> &str {
-        &self.marker
+        &self.descriptor.marker
     }
     pub fn valid_at(&self, at: Duration) -> bool {
         at >= self.at && at - self.at <= FRESHNESS
@@ -551,9 +653,7 @@ impl Readiness {
             return Err("metadata, live consumer, feedback and neutral handoff are all required");
         }
         Ok(Ready {
-            original: self.descriptor.original,
-            source: self.descriptor.source,
-            marker: self.descriptor.marker,
+            descriptor: self.descriptor,
             at,
         })
     }

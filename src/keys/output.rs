@@ -617,12 +617,24 @@ fn invalid(message: impl Into<String>) -> io::Error {
 }
 
 #[cfg(target_os = "linux")]
+fn native_key_role(descriptor: &crate::transport::Descriptor) -> io::Result<()> {
+    if !descriptor.is_generated_keyboard() || descriptor.class != crate::transport::Class::Keyboard
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "key output requires a separate generated keyboard",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 impl Sink for crate::kernel::Virtual {
     fn source(&self) -> &Source {
         &self.descriptor().source
     }
     fn supports_key(&self, code: u16) -> bool {
-        self.descriptor().class == crate::transport::Class::Keyboard
+        native_key_role(self.descriptor()).is_ok()
             && self
                 .descriptor()
                 .capabilities
@@ -630,15 +642,18 @@ impl Sink for crate::kernel::Virtual {
                 .is_some_and(|keys| keys.contains(&code))
     }
     fn enqueue(&mut self, frame: &Frame) -> io::Result<()> {
+        native_key_role(self.descriptor())?;
         Self::enqueue(self, frame)
     }
     fn flush(&mut self) -> io::Result<Progress> {
+        native_key_role(self.descriptor())?;
         Self::flush(self).map(|value| match value {
             crate::kernel::Flush::Complete => Progress::Complete,
             crate::kernel::Flush::Pending => Progress::Pending,
         })
     }
     fn abort(&mut self) -> io::Result<Vec<RawEvent>> {
+        native_key_role(self.descriptor())?;
         self.cancel_pending()
     }
 }

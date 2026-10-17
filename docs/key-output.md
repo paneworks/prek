@@ -11,6 +11,41 @@ closed. The native `kernel::Virtual` sink adapter is compiled; device-free tests
 exercise the driver and native byte-prefix accounting. Its kernel execution is
 not verified. The real Cage tests use owned protocol keyboards, not kernel devices.
 
+## Native preparation
+
+`keys::native::Prepared::new` prepares a generated keyboard using the current
+worker's supervisor `Heartbeat`. `Descriptor::generated_keyboard` has its own
+origin, `prek/keys` marker namespace and protected `PREK_GENERATED_KEYBOARD=1`
+metadata; it is not a fabricated physical counterpart. Its fixed keyboard-only
+capabilities exclude the BTN ranges in the
+[Linux input event definitions](https://github.com/torvalds/linux/blob/v6.18/include/uapi/linux/input-event-codes.h),
+axes, switches, LEDs and kernel autorepeat. Physical publication entry points
+reject generated descriptors, and generated readiness cannot authorize a
+physical grab.
+
+Native preparation also separates consumers: production publications accept
+compositor/console consumers, not the test-only isolated receiver. Isolated
+generated publications accept only their explicitly isolated receiver, not a
+production compositor/console acknowledgement.
+
+The preparation keeps its native device private and unwritten. The caller
+obtains `descriptor()` observations for its authenticated consumer registration,
+calls `observe(evidence)`, and retries `activate()` until it returns an
+output driver. Activation requires processed protected metadata, exact evdev ABI,
+owned-node key neutrality and current matching consumer evidence within the
+five-second preparation deadline. Native preparation reads its own monotonic
+clock and checks it again after the native metadata/state probes. `None` means
+waiting; an error discards the
+unwritten device/publication. Activation is one-shot. `deadline()` supplies the
+worker's bounded readiness wakeup deadline, not a forwarding-loop implementation.
+
+The caller still enforces one active generated keyboard per seat and the complete
+current authority fence. Production broker/worker action binding, delegated input,
+poll integration and native execution acceptance remain unfinished.
+`./tests/run-root-routing.sh` includes a user-launched isolated generated-keyboard
+test with persistent logs; see [root testing](root-routing.md). The agent does not
+run it. `oslo make test-generated-keyboard` executes only device-free models.
+
 ## Claims
 
 - `Claim.owner`: `Owner::Physical(SourceKey)` for a remap, or

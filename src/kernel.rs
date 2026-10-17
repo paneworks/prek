@@ -62,6 +62,15 @@ fn denied(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, message.into())
 }
 
+fn require_purpose(descriptor: &Descriptor, generated: bool) -> io::Result<()> {
+    if descriptor.is_generated_keyboard() != generated {
+        return Err(denied(
+            "device publication purpose differs from the requested path",
+        ));
+    }
+    Ok(())
+}
+
 /// The marker is a fixed grammar, never a caller-supplied filesystem path.
 fn filename(marker: &str) -> io::Result<CString> {
     let marker = crate::transport::Marker::parse(marker).map_err(invalid)?;
@@ -83,6 +92,9 @@ struct Metadata {
 impl Metadata {
     fn validate(&self, marker: &str) -> io::Result<()> {
         filename(marker)?;
+        let generated = crate::transport::Marker::parse(marker)
+            .map_err(invalid)?
+            .generated;
         if self.version != 2
             || crate::transport::Marker::parse(marker)
                 .map_err(invalid)?
@@ -96,6 +108,12 @@ impl Metadata {
                 .get("PREK_PUBLICATION")
                 .is_none_or(|value| value != marker)
             || self.isolated != marker.starts_with("prek/test/")
+            || generated
+                != self
+                    .properties
+                    .get("PREK_GENERATED_KEYBOARD")
+                    .is_some_and(|value| value == "1")
+            || !generated && self.properties.contains_key("PREK_GENERATED_KEYBOARD")
             || self
                 .properties
                 .get("PREK_VIRTUAL")
@@ -107,6 +125,7 @@ impl Metadata {
             if !(permitted_property(key)
                 || key == "PREK_VIRTUAL"
                 || key == "PREK_PUBLICATION"
+                || generated && key == "PREK_GENERATED_KEYBOARD"
                 || self.isolated && matches!(key.as_str(), "PREK_TEST" | "LIBINPUT_IGNORE_DEVICE"))
                 || value.is_empty()
                 || value.len() > 1024
@@ -366,6 +385,7 @@ impl Registry {
 
     /// Prepare a physical counterpart's metadata before UI_DEV_CREATE.
     pub fn prepare(&self, descriptor: Descriptor) -> io::Result<Publication> {
+        require_purpose(&descriptor, false)?;
         self.publish(descriptor, false, None)
     }
 
@@ -373,6 +393,7 @@ impl Registry {
     /// Its downstream event receiver must exclusively grab its own virtual
     /// node before injection, so the console also receives no test keystrokes.
     pub fn prepare_isolated(&self, descriptor: Descriptor) -> io::Result<Publication> {
+        require_purpose(&descriptor, false)?;
         self.publish(descriptor.for_isolated().map_err(denied)?, true, None)
     }
 
@@ -383,6 +404,7 @@ impl Registry {
         descriptor: Descriptor,
         health: &Heartbeat,
     ) -> io::Result<Publication> {
+        require_purpose(&descriptor, false)?;
         self.prepare_bound(descriptor, health, false)
     }
 
@@ -391,7 +413,23 @@ impl Registry {
         descriptor: Descriptor,
         health: &Heartbeat,
     ) -> io::Result<Publication> {
+        require_purpose(&descriptor, false)?;
         self.prepare_bound(descriptor.for_isolated().map_err(denied)?, health, true)
+    }
+
+    pub fn prepare_generated_for_worker(
+        &self,
+        descriptor: Descriptor,
+        health: &Heartbeat,
+    ) -> io::Result<Publication> {
+        require_purpose(&descriptor, true)?;
+        self.prepare_bound(descriptor, health, false)
+    }
+
+    /// Publish only an isolated generated keyboard for a user-launched kernel fixture.
+    pub fn prepare_generated_isolated(&self, descriptor: Descriptor) -> io::Result<Publication> {
+        require_purpose(&descriptor, true)?;
+        self.publish(descriptor.for_isolated().map_err(denied)?, true, None)
     }
 
     fn prepare_bound(
@@ -849,6 +887,18 @@ impl Virtual {
     /// Verify processed udev properties and the actual evdev ABI of this owned
     /// virtual node. Node existence alone is never consumer readiness.
     pub fn processed_metadata(&self) -> io::Result<bool> {
+        Ok(self.processed_device()?.is_some())
+    }
+
+    pub(crate) fn generated_neutral(&self) -> io::Result<bool> {
+        require_purpose(self.descriptor(), true)?;
+        let Some(raw) = self.processed_device()? else {
+            return Ok(false);
+        };
+        Ok(raw.get_key_state()?.iter().next().is_none())
+    }
+
+    fn processed_device(&self) -> io::Result<Option<RawDevice>> {
         if !self.created || self.stopped {
             return Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
@@ -858,7 +908,7 @@ impl Virtual {
         self.publication.verify()?;
         let nodes = self.event_nodes()?;
         if nodes.is_empty() {
-            return Ok(false);
+            return Ok(None);
         }
         if nodes.len() != 1 {
             return Err(invalid("virtual device has ambiguous event nodes"));
@@ -869,7 +919,7 @@ impl Virtual {
             .open(&nodes[0])
         {
             Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
         };
         use std::os::unix::fs::FileTypeExt;
@@ -880,7 +930,7 @@ impl Virtual {
         let publication = crate::linux::DevicePublication::read(file.as_fd())?;
         let spec = self.descriptor();
         if !processed_publication(&publication, spec)? {
-            return Ok(false);
+            return Ok(None);
         }
         let raw = RawDevice::from_fd(file.into())?;
         let id = raw.input_id();
@@ -947,10 +997,10 @@ impl Virtual {
             return Err(invalid("created virtual axes differ"));
         }
         if !publication.current(raw.as_fd(), &nodes[0]) || self.event_nodes()? != nodes {
-            return Ok(false);
+            return Ok(None);
         }
         self.publication.verify()?;
-        Ok(true)
+        Ok(Some(raw))
     }
 
     /// Discover only this owned virtual node. Absence is not readiness; the
@@ -1147,6 +1197,7 @@ impl Drop for Virtual {
 #[cfg(test)]
 mod tests {
     mod fuzz;
+    mod generated;
     mod geometry;
     mod publication;
     mod repeat;

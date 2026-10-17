@@ -51,6 +51,15 @@ it cannot enable production fuzz routing. Every owned node must pass processed
 metadata/ABI verification and be grabbed before injection. This case requires
 an actual user-launched run; building its binary is not execution evidence.
 
+A generated-keyboard gate uses the real key output driver, role-separated native
+publication and readiness preparation. Its own isolated evdev receiver is grabbed
+before any key is emitted. It checks overlapping remap owners, modifier chords,
+value-2 repeat delivery, cancel-before-write, sibling/context cleanup, stale press
+rejection, final kernel key neutrality and owned-device removal. It opens no
+physical input and does not prove partial native writes, compositor delivery,
+worker integration or broker authorization. This test is compiled but has not
+been executed by the agent; launch the same root script below to obtain evidence.
+
 Fourteen routing gates cover keyboard/mouse/touchpad forwarding, keyboard LED feedback,
 including the actual bounded source-write bridge, intact partial hardware frames,
 queued key releases and recovery after a wrapped uinput feedback ring,
@@ -106,14 +115,17 @@ Logs belong to your regular user under `target/root-routing/run-*`; `latest`
 points to that attempt. `console.log` records build, wrapper and cleanup output;
 `kernel.log` retains root probe stdout. `status.json` records running/passed/failed
 and the final exit code. `receipt.json` is written only after checking one complete
-version-4 root receipt, the exact fourteen routing, eight recovery and two transport
-characterization inventories, all twenty-four tests actually executed and passed,
+version-5 root receipt, the exact fourteen routing, eight recovery, two transport
+characterization and one generated-keyboard inventory, all twenty-five tests actually executed and passed,
 cleanup flags and the explicit scope limits. The recovery summary must match its
 eight per-case results. The repeat case must supply its complete typed observation
 record and exactly one passing test result; the receipt explicitly retains
 `repeat_passthrough_tested=false`. The fuzz case likewise requires its complete
 typed observation record and exactly one passing result, while retaining
-`fuzz_passthrough_tested=false`. Older version-2/3 receipts are not current acceptance.
+`fuzz_passthrough_tested=false`. The generated-keyboard case requires a complete
+typed record and one passing result, retaining false authorization, compositor,
+worker-binding and partial-native-write scope flags. Older version-2/3/4 receipts
+are not current acceptance.
 Skips and zero-test runs
 cannot pass. Tell the agent when the script finishes so it can inspect these files.
 

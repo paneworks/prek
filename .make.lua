@@ -426,6 +426,12 @@ make.recipe{ name="test-key-output",desc="transactional remap and chord ownershi
                sh.cargo("test","--locked","--lib","kernel::tests::cancelled_key_batch")
              end }
 
+make.recipe{ name="test-generated-keyboard",desc="generated keyboard role, publication and readiness models; no devices",
+             run=function()
+               sh.cargo("test","--locked","--lib","keys::native::tests")
+               sh.cargo("test","--locked","--lib","kernel::tests::generated")
+             end }
+
 make.recipe{ name="test-key-output-cage",desc="actual key output driver and app rendering on owned protocol keyboards",
              run=function()
                cage_test("cage-test-wayland-fix",{"--key-output","--hyprland-config","lua"})
