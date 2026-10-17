@@ -69,11 +69,7 @@ fn read_json<T: for<'a> Deserialize<'a>>(directory: &Directory, name: &str) -> T
         if let Some(value) = directory.read(name).unwrap() {
             return value;
         }
-        assert!(
-            Instant::now() < deadline,
-            "fixture did not publish {}",
-            name
-        );
+        assert!(Instant::now() < deadline, "fixture did not publish {name}");
         thread::sleep(Duration::from_millis(10));
     }
 }

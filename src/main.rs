@@ -1878,16 +1878,14 @@ fn run_session(
                             } else {
                                 runtime.notify(kind, payload)
                             }
+                        } else if kind != prek::lua::EventKind::Matched
+                            && matches!(event.as_ref(), prek::rules::Event::Matched { .. })
+                        {
+                            lua_pending
+                                .push(prek::lua::EventKind::Matched, payload.clone())
+                                .and_then(|()| lua_pending.push(kind, payload))
                         } else {
-                            if kind != prek::lua::EventKind::Matched
-                                && matches!(event.as_ref(), prek::rules::Event::Matched { .. })
-                            {
-                                lua_pending
-                                    .push(prek::lua::EventKind::Matched, payload.clone())
-                                    .and_then(|()| lua_pending.push(kind, payload))
-                            } else {
-                                lua_pending.push(kind, payload)
-                            }
+                            lua_pending.push(kind, payload)
                         };
                         if let Err(error) = result {
                             eprintln!("Lua runtime unavailable: {error}");

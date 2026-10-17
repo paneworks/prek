@@ -1,0 +1,110 @@
+name: native Nix application bundles
+
+on:
+  workflow_call:
+    inputs:
+      revision:
+        required: true
+        type: string
+      tag:
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-24.04
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      PREK_SYSTEM: ${{ matrix.system }}
+      PREK_REVISION: ${{ inputs.revision }}
+      PREK_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision }}
+      - uses: DeterminateSystems/nix-installer-action@main
+      - name: Build installed application and all native helper gates
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PREK_REVISION"
+          test "$(nix eval --impure --raw --expr builtins.currentSystem)" = "$PREK_SYSTEM"
+          nix build --no-write-lock-file --max-jobs 1 --cores 2 --out-link package .#default
+          checks=(nixos-module lua-editor installed-cli distribution native-routing-helper
+                  native-composition-helper native-chain-helper native-composed-worker-helper
+                  wayland-proxy root-session root-routing-receipts)
+          for check in "${checks[@]}"; do
+            nix build --no-write-lock-file --max-jobs 1 --cores 2 --no-link ".#checks.${PREK_SYSTEM}.${check}"
+          done
+      - name: Export complete offline cache bundle
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
+          args=()
+          if [[ -n "$PREK_TAG" ]]; then args+=(--tag "$PREK_TAG"); fi
+          python3 scripts/nix-dist.py export --package package --version "$version" \
+            --system "$PREK_SYSTEM" --revision "$PREK_REVISION" "${args[@]}" \
+            --output "out/prek-${version}-${PREK_SYSTEM}-nix.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prek-nix-${{ matrix.system }}
+          path: |
+            out/*.tar.gz
+            out/*.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  download-only:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-24.04
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    env:
+      PREK_SYSTEM: ${{ matrix.system }}
+      PREK_REVISION: ${{ inputs.revision }}
+      PREK_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: actions/download-artifact@v4
+        with:
+          name: prek-nix-${{ matrix.system }}
+          path: downloaded
+      - name: Import on a fresh native runner without builders or checkout
+        run: |
+          set -euo pipefail
+          cd downloaded
+          cat ./*.sha256 > SHA256SUMS
+          sha256sum --check SHA256SUMS
+          archives=(*.tar.gz)
+          test "${#archives[@]}" -eq 1
+          mkdir unpacked
+          tar --extract --gzip --file "${archives[0]}" --directory unpacked --no-same-owner
+          bundles=(unpacked/prek-*-"${PREK_SYSTEM}"-nix)
+          test "${#bundles[@]}" -eq 1
+          cd "${bundles[0]}"
+          args=()
+          if [[ -n "$PREK_TAG" ]]; then args+=(--tag "$PREK_TAG"); fi
+          python3 install.py verify --system "$PREK_SYSTEM" --revision "$PREK_REVISION" "${args[@]}"
+          python3 install.py import --trust-unsigned --require-missing | tee ../import-receipt.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prek-import-${{ matrix.system }}
+          path: downloaded/unpacked/import-receipt.json
+          if-no-files-found: error

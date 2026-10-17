@@ -9,23 +9,10 @@ permissions:
   contents: read
 
 jobs:
-  nixos-module:
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [ubuntu-24.04, ubuntu-24.04-arm]
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@main
-      - name: Check installed module, Lua editor, native helpers and Wayland proxy
-        run: |
-          prek_system="$(nix eval --impure --raw --expr builtins.currentSystem)"
-          nix build --no-write-lock-file ".#checks.${prek_system}.nixos-module" ".#checks.${prek_system}.lua-editor" ".#checks.${prek_system}.native-routing-helper" ".#checks.${prek_system}.native-composition-helper" ".#checks.${prek_system}.wayland-proxy"
-          nix build --no-write-lock-file ".#checks.${prek_system}.root-session" ".#checks.${prek_system}.root-routing-receipts"
+  distribution:
+    uses: ./.github/workflows/nix-bundles.yml
+    with:
+      revision: ${{ github.event.pull_request.head.sha || github.sha }}
 
   verify:
     env:
@@ -52,23 +39,5 @@ jobs:
           restore-keys: |
             cargo-${{ runner.os }}-${{ runner.arch }}-${{ matrix.rust }}-
       - name: Verify
-        run: |
-          set -euo pipefail
-          cargo fmt --all -- --check
-          python3 -m unittest discover -s tests/support -p test_root_session.py -v
-          python3 -m unittest discover -s tests/support -p test_root_routing.py -v
-          cargo check --locked --all-targets --all-features
-          cargo clippy --locked --all-targets --all-features -- -Dwarnings
-          cargo test --locked --all-targets --all-features
-          RUSTDOCFLAGS='-D warnings' cargo doc --locked --no-deps
-          cargo build --locked --bin prek
-          PREK_TEST_LUA_BINARY="$PWD/target/debug/prek" cargo test --locked --lib \
-            route_worker::tests::recognizers::actual::supervised_callbacks_cross_the_sole_worker_protocol_with_native_ownership \
-            -- --exact --ignored --test-threads=1 | tee target/native-routing-helper.log
-          grep -F 'test result: ok. 1 passed; 0 failed;' target/native-routing-helper.log
-          PREK_TEST_LUA_BINARY="$PWD/target/debug/prek" cargo test --locked --lib \
-            rules::tests::composition::helper::supervised_retained_touch_handoffs_use_one_native_coordinator \
-            -- --exact --ignored --test-threads=1 | tee target/native-composition-helper.log
-          grep -F 'test result: ok. 1 passed; 0 failed;' target/native-composition-helper.log
-          cargo run --locked -- --help
+        run: bash tests/run-rust-gate.sh
 

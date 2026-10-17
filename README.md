@@ -620,6 +620,12 @@ Linux. CI runs builds and tests natively on `ubuntu-24.04` and
 `ubuntu-24.04-arm`, including the Rust 1.88 minimum. These jobs are configured;
 a local cross-build does not establish native ARM execution or phone behavior.
 
+`oslo make dist-nix` exports an actual native application closure, including
+installed presets, module and Lua metadata. Releases use explicitly labelled
+Nix bundles, not portable standalone executables or source `.crate` files.
+See [distribution and offline verification](docs/distribution.md) for runtime
+requirements, trust boundaries, import/update instructions and CI evidence.
+
 Like Mold, the phone shell targets postmarketOS/Alpine's musl loader:
 
 ```sh

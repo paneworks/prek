@@ -349,8 +349,82 @@ make.recipe{ name = "test-cage-startup", desc = "unprivileged nested output and 
 make.recipe{ name = "check", desc = "type-check every target",
              run = function() sh.cargo("check", "--locked", "--all-targets") end }
 
+make.recipe{
+  name = "test-distribution",
+  desc = "unprivileged Nix bundle validation and refusal tests",
+  run = function()
+    sh.python3("-m", "unittest", "discover", "-s", "tests/support", "-p", "test_nix_dist.py", "-v")
+    sh.bash("-n", "tests/run-rust-gate.sh")
+    sh.shellcheck("tests/run-rust-gate.sh")
+    sh.bash("-n", "tests/run-dist-offline.sh")
+    sh.shellcheck("tests/run-dist-offline.sh")
+    sh.actionlint()
+  end,
+}
+
+make.recipe{
+  name = "verify-msrv",
+  desc = "run the native Rust gate using the declared 1.88 minimum toolchain",
+  run = function()
+    assert(oslo.run{ "env", "CARGO_TARGET_DIR=target/msrv", "nix", "--option", "eval-cache", "false",
+      "--extra-experimental-features", "nix-command flakes", "--max-jobs", "1", "--cores", "2",
+      "develop", "--no-write-lock-file", ".#msrv", "--command", "bash", "tests/run-rust-gate.sh" }.ok,
+      "minimum Rust version gate failed")
+  end,
+}
+
+make.recipe{
+  name = "dist-nix",
+  desc = "build and export the native application as a Nix closure bundle",
+  run = function()
+    local root = project_root()
+    sh.mkdir("-p", root .. "/target/distribution")
+    assert(oslo.run{ "nix", "--option", "eval-cache", "false", "--extra-experimental-features",
+      "nix-command flakes", "--max-jobs", "1", "--cores", "2", "build", "--no-write-lock-file",
+      "--out-link", root .. "/target/distribution/package", ".#default" }.ok, "native package failed")
+    local system = oslo.run{ "nix", "--extra-experimental-features", "nix-command", "eval", "--impure",
+      "--raw", "--expr", "builtins.currentSystem", capture = true }
+    local revision = oslo.run{ "git", "rev-parse", "HEAD", capture = true }
+    assert(system.ok and revision.ok, "distribution metadata unavailable")
+    local arch = (system.out or ""):match("^%s*(.-)%s*$")
+    local args = { "python3", "scripts/nix-dist.py", "export", "--package", root .. "/target/distribution/package",
+      "--replace", "--version", VERSION, "--system", arch, "--revision", (revision.out or ""):match("^%s*(.-)%s*$"),
+      "--output", root .. "/target/distribution/prek-" .. VERSION .. "-" .. arch .. "-nix.tar.gz" }
+    if not oslo.run{ "git", "diff", "--quiet", "HEAD" }.ok then args[#args + 1] = "--dirty" end
+    assert(oslo.run(args).ok, "native closure export failed")
+  end,
+}
+
 make.recipe{ name = "check-all", desc = "type-check every target, every feature",
              run = function() sh.cargo("check", "--locked", "--all-targets", "--all-features") end }
+
+make.recipe{
+  name = "test-dist-offline",
+  desc = "import the bundle into an empty isolated store with builders disabled",
+  run = function()
+    assert(oslo.run{ "bash", "tests/run-dist-offline.sh" }.ok, "isolated closure import failed")
+  end,
+}
+
+make.recipe{
+  name = "check-dist-nix",
+  desc = "immutable installed module, editor, helper and distribution gates",
+  run = function()
+    local system = oslo.run{ "nix", "--extra-experimental-features", "nix-command", "eval", "--impure",
+      "--raw", "--expr", "builtins.currentSystem", capture = true }
+    assert(system.ok, "native Nix system unavailable")
+    local arch = (system.out or ""):match("^%s*(.-)%s*$")
+    local command = { "nix", "--option", "eval-cache", "false", "--extra-experimental-features",
+      "nix-command flakes", "--max-jobs", "1", "--cores", "2", "build", "--no-write-lock-file",
+      "--out-link", project_root() .. "/target/distribution/check" }
+    for _, check in ipairs{ "nixos-module", "lua-editor", "installed-cli", "distribution",
+      "native-routing-helper", "native-composition-helper", "native-chain-helper",
+      "native-composed-worker-helper", "wayland-proxy", "root-session", "root-routing-receipts" } do
+      command[#command + 1] = ".#checks." .. arch .. "." .. check
+    end
+    assert(oslo.run(command).ok, "immutable distribution checks failed")
+  end,
+}
 
 make.recipe{ name = "clippy", desc = "clippy, with warnings denied",
              run = function()
@@ -382,6 +456,6 @@ make.alias("c", "compile")
 make.recipe{
   name = "verify",
   desc = "the whole local gate",
-  deps = { "fmt-check", "check-all", "test-all", "test-routing-helper", "test-composition-helper", "test-chain-helper", "test-composed-worker-helper", "test-root-session", "test-root-routing", "test-cage-startup", "clippy", "rustdoc" },
+  deps = { "fmt-check", "check-all", "test-all", "test-routing-helper", "test-composition-helper", "test-chain-helper", "test-composed-worker-helper", "test-root-session", "test-root-routing", "test-cage-startup", "test-distribution", "clippy", "rustdoc" },
 }
 make.alias("v", "verify")

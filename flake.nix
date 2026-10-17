@@ -147,6 +147,10 @@
               substitute ${./udev/70-prek.rules} "$out/lib/udev/rules.d/70-prek.rules" \
                 --replace-fail '@prek@' "$out/bin/prek"
               mkdir -p "$out/share/doc/prek"
+              cp ${./LICENSE} "$out/share/doc/prek/LICENSE"
+              ${pkgs.python3}/bin/python3 ${./scripts/vendor-notices.py} \
+                --vendor "$cargoDeps" --output "$out/share/doc/prek/dependency-notices"
+              cp ${./docs/distribution.md} "$out/share/doc/prek/distribution.md"
               cp ${./docs/lua-api.md} "$out/share/doc/prek/lua-api.md"
               cp ${./docs/lua-api.json} "$out/share/doc/prek/lua-api.json"
               mkdir -p "$out/share/prek/lua"
@@ -217,6 +221,22 @@
           pkgs = nixpkgs.legacyPackages.${system};
           package = self.packages.${system}.default;
         in {
+          distribution = pkgs.runCommand "prek-distribution-check" {
+            nativeBuildInputs = [ pkgs.python3 ];
+          } ''
+            mkdir -p source/scripts source/tests/support
+            cp ${./scripts/nix-dist.py} source/scripts/nix-dist.py
+            cp ${./scripts/vendor-notices.py} source/scripts/vendor-notices.py
+            cp ${./tests/support/test_nix_dist.py} source/tests/support/test_nix_dist.py
+            cd source
+            python3 -m unittest discover -s tests/support -p test_nix_dist.py -v > "$out" 2>&1
+          '';
+          installed-cli = pkgs.runCommand "prek-installed-cli-check" {
+            nativeBuildInputs = [ pkgs.python3 ];
+          } ''
+            python3 ${./scripts/nix-dist.py} smoke --package ${package} \
+              --version ${package.version} > "$out"
+          '';
           native-routing-helper = pkgs.runCommand "prek-native-routing-helper-check" {} ''
             PREK_TEST_LUA_BINARY=${package}/bin/prek \
               ${package.nativeTests}/libexec/prek-native-tests \
@@ -331,6 +351,9 @@
           crossPkgs = import nixpkgs { inherit system; crossSystem.config = crossTriple; };
           crossCc = "${crossPkgs.stdenv.cc}/bin/${crossPkgs.stdenv.cc.targetPrefix}cc";
         in {
+          msrv = pkgs.mkShell {
+            packages = with pkgs; [ rust-bin.stable."1.88.0".default python3 shellcheck ];
+          };
           cross-aarch64 = pkgs.mkShell {
             packages = [
               (pkgs.rust-bin.stable.latest.default.override { targets = [ crossTriple ]; })
@@ -347,7 +370,7 @@
           };
           default = pkgs.mkShell {
             packages = with pkgs; [
-              rustc cargo rustfmt clippy rust-analyzer git-cliff python3 shellcheck
+              rustc cargo rustfmt clippy rust-analyzer git-cliff python3 shellcheck actionlint
             ];
           };
         });
