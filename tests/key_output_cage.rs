@@ -184,7 +184,7 @@ fn source(device: u64) -> Source {
         seat: "seat0".into(),
     }
 }
-fn remap(device: u64, code: u16) -> Claim {
+fn remap(serial: u64, device: u64, code: u16) -> Claim {
     Claim {
         owner: Owner::Physical(SourceKey {
             source: source(device),
@@ -192,6 +192,7 @@ fn remap(device: u64, code: u16) -> Claim {
         }),
         origin: Some(source(device)),
         configuration: 1,
+        serial,
     }
 }
 fn chord(id: u64, device: u64) -> Claim {
@@ -203,6 +204,7 @@ fn chord(id: u64, device: u64) -> Claim {
         },
         origin: Some(source(device)),
         configuration: 1,
+        serial: id,
     }
 }
 fn drain(output: &mut Output<Keyboard>) {
@@ -286,8 +288,8 @@ fn local_cage_generated_key_output() {
     let mut generated = Output::new(Keyboard::open(&output, socket, 100)).unwrap();
     physical.send(1, &[(42, 1)]);
     phase(&output, 0, "bA", &[42]);
-    let a = remap(1, 30);
-    let b = remap(2, 31);
+    let a = remap(1, 1, 30);
+    let b = remap(2, 2, 31);
     generated
         .hold(a.clone(), &[42], monotonic().unwrap())
         .unwrap();
@@ -296,7 +298,7 @@ fn local_cage_generated_key_output() {
         .hold(b.clone(), &[42], monotonic().unwrap())
         .unwrap();
     generated
-        .tap(chord(1, 3), &[42, 30], monotonic().unwrap())
+        .tap(chord(3, 3), &[42, 30], monotonic().unwrap())
         .unwrap();
     drain(&mut generated);
     phase(&output, 1, "bAA", &[42]);
@@ -309,11 +311,11 @@ fn local_cage_generated_key_output() {
     physical.send(3, &[(42, 0)]);
     phase(&output, 3, "bAAA", &[]);
     generated
-        .tap(chord(2, 3), &[30], monotonic().unwrap())
+        .tap(chord(4, 3), &[30], monotonic().unwrap())
         .unwrap();
     drain(&mut generated);
     generated
-        .tap(chord(3, 3), &[42, 30], monotonic().unwrap())
+        .tap(chord(5, 3), &[42, 30], monotonic().unwrap())
         .unwrap();
     assert_eq!(generated.flush().unwrap(), Progress::Pending);
     generated
@@ -321,20 +323,83 @@ fn local_cage_generated_key_output() {
         .unwrap();
     drain(&mut generated);
     phase(&output, 4, "bAAAa", &[]);
-    generated.hold(a, &[42], monotonic().unwrap()).unwrap();
+    generated
+        .hold(remap(6, 1, 30), &[42], monotonic().unwrap())
+        .unwrap();
     drain(&mut generated);
-    generated.hold(b, &[42], monotonic().unwrap()).unwrap();
+    generated
+        .hold(remap(7, 2, 31), &[42], monotonic().unwrap())
+        .unwrap();
     generated
         .retire_source(&source(1), monotonic().unwrap())
         .unwrap();
     drain(&mut generated);
     phase(&output, 5, "bAAAa", &[42]);
     generated
-        .tap(chord(4, 2), &[42, 30], monotonic().unwrap())
+        .tap(chord(8, 2), &[42, 30], monotonic().unwrap())
         .unwrap();
     drain(&mut generated);
     generated
         .retire_source(&source(2), monotonic().unwrap())
+        .unwrap();
+    drain(&mut generated);
+    phase(&output, 6, "bAAAaA", &[]);
+    let sibling = chord(9, 4);
+    generated
+        .hold(sibling, &[42], monotonic().unwrap())
+        .unwrap();
+    drain(&mut generated);
+    let task = chord(10, 4);
+    generated
+        .tap(task.clone(), &[42, 30], monotonic().unwrap())
+        .unwrap();
+    assert_eq!(generated.flush().unwrap(), Progress::Pending);
+    generated.cancel(&task, monotonic().unwrap()).unwrap();
+    drain(&mut generated);
+    assert!(generated.down(42));
+    phase(&output, 7, "bAAAaA", &[42]);
+    generated.cancel_all(monotonic().unwrap()).unwrap();
+    drain(&mut generated);
+    assert!(!generated.retiring());
+    phase(&output, 8, "bAAAaA", &[]);
+    let old = remap(11, 4, 30);
+    generated
+        .hold(old.clone(), &[42], monotonic().unwrap())
+        .unwrap();
+    drain(&mut generated);
+    generated.cancel(&old, monotonic().unwrap()).unwrap();
+    drain(&mut generated);
+    generated
+        .hold(remap(12, 4, 30), &[42], monotonic().unwrap())
+        .unwrap();
+    drain(&mut generated);
+    assert_eq!(
+        generated
+            .release(&old, monotonic().unwrap())
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert_eq!(
+        generated
+            .repeat(&old, monotonic().unwrap())
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert_eq!(
+        generated
+            .cancel(&old, monotonic().unwrap())
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    physical.send(4, &[(30, 1), (30, 0)]);
+    phase(&output, 9, "bAAAaAA", &[42]);
+    generated.cancel_all(monotonic().unwrap()).unwrap();
+    drain(&mut generated);
+    generated
+        .tap(chord(13, 4), &[30], monotonic().unwrap())
         .unwrap();
     drain(&mut generated);
     generated.retire(monotonic().unwrap()).unwrap();
@@ -342,8 +407,8 @@ fn local_cage_generated_key_output() {
     assert!(generated.settled());
     assert!(generated.into_sink().is_ok());
     drop(physical);
-    phase(&output, 6, "bAAAaA", &[]);
-    fs::write(output.join("key-output-runtime-result.json"), serde_json::to_vec(&json!({"status":"passed","phases":7,
+    phase(&output, 10, "bAAAaAAa", &[]);
+    fs::write(output.join("key-output-runtime-result.json"), serde_json::to_vec(&json!({"status":"passed","phases":11,
         "source":"two_owned_wayland_virtual_keyboards","production_route_tested":false,"kernel_input_tested":false,
         "unmodified_stock_acceptance":false,"test_backpressure":true})).unwrap()).unwrap();
 }

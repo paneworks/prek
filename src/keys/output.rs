@@ -30,12 +30,13 @@ pub trait Sink {
     fn abort(&mut self) -> io::Result<Vec<RawEvent>>;
 }
 
-/// Generated owner IDs are increasing output serials within each configuration.
+/// Submission serials identify one accepted press or generated action.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Claim {
     pub owner: Owner,
     pub origin: Option<Source>,
     pub configuration: u64,
+    pub serial: u64,
 }
 
 struct Held {
@@ -62,6 +63,7 @@ pub struct Output<S: Sink> {
     logical: LogicalKeys,
     held: BTreeMap<Owner, Held>,
     receipts: BTreeMap<u64, u64>,
+    cancelled_claims: BTreeMap<Owner, Claim>,
     retired_sources: BTreeMap<u64, u64>,
     retired_generation: u64,
     closing: bool,
@@ -81,6 +83,7 @@ impl<S: Sink> Output<S> {
             logical: LogicalKeys::default(),
             held: BTreeMap::new(),
             receipts: BTreeMap::new(),
+            cancelled_claims: BTreeMap::new(),
             retired_sources: BTreeMap::new(),
             retired_generation: 0,
             closing: false,
@@ -132,16 +135,18 @@ impl<S: Sink> Output<S> {
             }
             return Err(invalid("key owner is already bound"));
         }
-        if matches!(claim.owner, Owner::Synthetic { id, .. } if self.receipts.get(&claim.configuration).is_some_and(|last| id <= *last))
+        if self
+            .receipts
+            .get(&claim.configuration)
+            .is_some_and(|last| claim.serial <= *last)
         {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
-                "synthetic key output serial is stale or already accepted",
+                "key output serial is stale or already accepted",
             ));
         }
         if self.held.len() >= MAX_OWNERS
-            || matches!(claim.owner, Owner::Synthetic { .. })
-                && !self.receipts.contains_key(&claim.configuration)
+            || !self.receipts.contains_key(&claim.configuration)
                 && self.receipts.len() >= MAX_RECEIPT_GENERATIONS
         {
             return Err(invalid("key output owner or action receipt limit exceeded"));
@@ -190,6 +195,42 @@ impl<S: Sink> Output<S> {
             }],
             None,
         )
+    }
+
+    /// Cancel one exact accepted claim, including its pending unwritten press tail.
+    pub fn cancel(&mut self, claim: &Claim, at: Duration) -> io::Result<Progress> {
+        self.live(self.at)?;
+        self.validate_binding(claim)?;
+        if self.held.contains_key(&claim.owner)
+            || self.pending.as_ref().is_some_and(
+                |pending| matches!(&pending.mutation, Mutation::Add(held) if held.claim == *claim),
+            )
+        {
+            self.cancelled_claims
+                .insert(claim.owner.clone(), claim.clone());
+        }
+        self.at = self.at.max(at);
+        self.cleanup()
+    }
+
+    /// Cancel current claims without retiring their source or configuration.
+    pub fn cancel_all(&mut self, at: Duration) -> io::Result<Progress> {
+        self.live(self.at)?;
+        self.cancelled_claims.extend(
+            self.held
+                .values()
+                .map(|held| (held.claim.owner.clone(), held.claim.clone())),
+        );
+        if let Some(Pending {
+            mutation: Mutation::Add(held),
+            ..
+        }) = &self.pending
+        {
+            self.cancelled_claims
+                .insert(held.claim.owner.clone(), held.claim.clone());
+        }
+        self.at = self.at.max(at);
+        self.cleanup()
     }
 
     /// Permanently retire this source incarnation and all older incarnations of its device.
@@ -288,6 +329,7 @@ impl<S: Sink> Output<S> {
             || self.pending.is_some()
             || !self.held.is_empty()
             || !self.logical.counts.is_empty()
+            || !self.cancelled_claims.is_empty()
         {
             Err(Box::new(self))
         } else {
@@ -301,6 +343,9 @@ impl<S: Sink> Output<S> {
             .held
             .get(&claim.owner)
             .is_some_and(|held| held.claim != *claim)
+            || self.pending.as_ref().is_some_and(|pending| {
+                matches!(&pending.mutation, Mutation::Add(held) if held.claim.owner == claim.owner && held.claim != *claim)
+            })
         {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -311,9 +356,9 @@ impl<S: Sink> Output<S> {
     }
 
     fn validate_claim(&self, claim: &Claim) -> io::Result<()> {
-        if claim.owner.seat() != self.source.seat || claim.configuration == 0 {
+        if claim.owner.seat() != self.source.seat || claim.configuration == 0 || claim.serial == 0 {
             return Err(invalid(
-                "key owner requires this seat and a nonzero configuration",
+                "key owner requires this seat and nonzero configuration/serial",
             ));
         }
         if let Some(source) = &claim.origin {
@@ -330,10 +375,10 @@ impl<S: Sink> Output<S> {
                 }
             }
             Owner::Synthetic { generation, id, .. }
-                if *generation != claim.configuration || *id == 0 =>
+                if *generation != claim.configuration || *id != claim.serial =>
             {
                 return Err(invalid(
-                    "synthetic key owner requires nonzero generation and ID",
+                    "synthetic key owner must match its configuration and serial",
                 ));
             }
             _ => {}
@@ -343,6 +388,7 @@ impl<S: Sink> Output<S> {
 
     fn cancelled(&self, claim: &Claim) -> bool {
         self.closing
+            || self.cancelled_claims.get(&claim.owner) == Some(claim)
             || claim.origin.as_ref().is_some_and(|source| {
                 self.retired_sources
                     .get(&source.device)
@@ -352,6 +398,12 @@ impl<S: Sink> Output<S> {
     }
 
     fn cleanup(&mut self) -> io::Result<Progress> {
+        self.cancelled_claims.retain(|owner, claim| {
+            self.held.get(owner).is_some_and(|held| held.claim == *claim)
+                || self.pending.as_ref().is_some_and(|pending| {
+                    matches!(&pending.mutation, Mutation::Add(held) if held.claim == *claim)
+                })
+        });
         if let Some(pending) = &self.pending {
             let cancel = match &pending.mutation {
                 Mutation::Add(held) => self.cancelled(&held.claim),
@@ -375,6 +427,11 @@ impl<S: Sink> Output<S> {
                 ));
             }
             self.pending = None;
+            self.cancelled_claims.retain(|owner, claim| {
+                self.held
+                    .get(owner)
+                    .is_some_and(|held| held.claim == *claim)
+            });
             let releases = prefix
                 .iter()
                 .rev()
@@ -429,13 +486,9 @@ impl<S: Sink> Output<S> {
         release_after: Option<Owner>,
         force_sync: bool,
     ) -> io::Result<Progress> {
-        if let Mutation::Add(held) = &mutation
-            && matches!(held.claim.owner, Owner::Synthetic { generation, .. } if generation > self.retired_generation)
-        {
-            let Owner::Synthetic { id, .. } = held.claim.owner else {
-                unreachable!()
-            };
-            self.receipts.insert(held.claim.configuration, id);
+        if let Mutation::Add(held) = &mutation {
+            self.receipts
+                .insert(held.claim.configuration, held.claim.serial);
         }
         if events.is_empty() && !force_sync {
             if let Err(error) = self.commit(&mutation) {
@@ -500,6 +553,7 @@ impl<S: Sink> Output<S> {
                 for owner in owners {
                     self.logical.release_owner(owner);
                     self.held.remove(owner);
+                    self.cancelled_claims.remove(owner);
                 }
             }
         }

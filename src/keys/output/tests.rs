@@ -92,6 +92,7 @@ fn physical(device: u64, code: u16) -> Claim {
         }),
         origin: Some(source(device)),
         configuration: 1,
+        serial: u64::from(code),
     }
 }
 fn synthetic(id: u64, generation: u64, origin: Option<Source>) -> Claim {
@@ -103,6 +104,7 @@ fn synthetic(id: u64, generation: u64, origin: Option<Source>) -> Claim {
         },
         origin,
         configuration: generation,
+        serial: id,
     }
 }
 fn model() -> (Output<TestSink>, Rc<RefCell<State>>) {
@@ -179,10 +181,11 @@ fn t46_partial_frames_commit_once_only_after_the_whole_frame() {
 
 #[test]
 fn t46_overlapping_remaps_keep_the_last_owner_and_duplicate_edges_do_not_rebind() {
-    for same_device in [false, true] {
+    for (device, code) in [(1, 31), (2, 30), (2, 31)] {
         let (mut output, state) = model();
         let a = physical(1, 30);
-        let b = physical(if same_device { 1 } else { 2 }, 31);
+        let mut b = physical(device, code);
+        b.serial = 31;
         output.hold(a.clone(), &[125], Duration::ZERO).unwrap();
         drain(&mut output);
         assert_eq!(
@@ -240,7 +243,7 @@ fn t46_generated_chord_never_releases_an_overlapping_remap_modifier() {
     output.hold(remap.clone(), &[42], Duration::ZERO).unwrap();
     drain(&mut output);
     output
-        .tap(synthetic(1, 1, Some(source(2))), &[42, 30], Duration::ZERO)
+        .tap(synthetic(32, 1, Some(source(2))), &[42, 30], Duration::ZERO)
         .unwrap();
     drain(&mut output);
     assert!(output.down(42));
@@ -257,7 +260,7 @@ fn t46_source_retirement_survives_backpressure_and_cancels_source_bound_syntheti
     let (mut output, state) = model();
     output.hold(physical(2, 31), &[42], Duration::ZERO).unwrap();
     drain(&mut output);
-    let claim = synthetic(1, 1, Some(source(1)));
+    let claim = synthetic(32, 1, Some(source(1)));
     output
         .hold(claim.clone(), &[29, 30], Duration::from_millis(10))
         .unwrap();
@@ -776,6 +779,7 @@ fn t46_old_source_releases_do_not_touch_a_reconnected_remap() {
     drain(&mut output);
     let mut fresh = old.clone();
     fresh.origin.as_mut().unwrap().generation = 2;
+    fresh.serial += 1;
     let Owner::Physical(key) = &mut fresh.owner else {
         unreachable!()
     };
@@ -826,4 +830,332 @@ fn t46_zero_device_identity_remains_valid_with_a_nonzero_incarnation() {
     drain(&mut output);
     assert!(!output.down(42));
     assert_eq!(state.borrow().frames.len(), 2);
+}
+
+#[test]
+fn t46_exact_task_cancellation_discards_every_unwritten_chord_prefix_and_keeps_a_sibling() {
+    for prefix in 0..=3 {
+        let (mut output, state) = model();
+        let sibling = synthetic(1, 1, Some(source(1)));
+        let task = synthetic(2, 1, Some(source(1)));
+        output.hold(sibling.clone(), &[42], Duration::ZERO).unwrap();
+        drain(&mut output);
+        output.tap(task.clone(), &[29, 30], Duration::ZERO).unwrap();
+        state.borrow_mut().steps.push_back(Step::Prefix(prefix));
+        output.flush().unwrap();
+        output.cancel(&task, Duration::ZERO).unwrap();
+        drain(&mut output);
+        let mut expected = events(&[(42, 1)]);
+        let submitted = events(&[(29, 1), (30, 1)]);
+        expected.extend_from_slice(&submitted[..prefix]);
+        if prefix > 0 {
+            let ups = submitted[..prefix]
+                .iter()
+                .rev()
+                .filter(|event| event.kind == EV_KEY)
+                .map(|event| (event.code, 0))
+                .collect::<Vec<_>>();
+            expected.extend(events(&ups));
+        }
+        assert_eq!(state.borrow().events, expected, "prefix {prefix}");
+        assert!(output.down(42));
+        assert!(!output.down(29) && !output.down(30));
+        assert!(!output.retiring());
+        assert!(output.cancelled_claims.is_empty());
+        assert_eq!(
+            output
+                .tap(task, &[29, 30], Duration::ZERO)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        output
+            .tap(synthetic(3, 1, Some(source(1))), &[30], Duration::ZERO)
+            .unwrap();
+        drain(&mut output);
+        assert!(output.down(42));
+        output.cancel(&sibling, Duration::ZERO).unwrap();
+        drain(&mut output);
+        assert!(!output.down(42));
+    }
+}
+
+#[test]
+fn t46_task_cancellation_releases_only_its_overlapping_remap_and_allows_a_new_press() {
+    let (mut output, state) = model();
+    let a = physical(1, 30);
+    let b = physical(1, 31);
+    output.hold(a.clone(), &[42], Duration::ZERO).unwrap();
+    drain(&mut output);
+    output.hold(b.clone(), &[42], Duration::ZERO).unwrap();
+    assert_eq!(
+        output.cancel(&a, Duration::ZERO).unwrap(),
+        Progress::Complete
+    );
+    assert!(output.down(42));
+    assert!(output.cancelled_claims.is_empty());
+    assert_eq!(state.borrow().frames.len(), 1);
+    output.cancel(&b, Duration::ZERO).unwrap();
+    drain(&mut output);
+    let mut fresh = a.clone();
+    fresh.serial = 32;
+    output.hold(fresh.clone(), &[29], Duration::ZERO).unwrap();
+    drain(&mut output);
+    assert!(output.down(29));
+    assert_eq!(
+        output.cancel(&a, Duration::ZERO).unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    output.cancel(&fresh, Duration::ZERO).unwrap();
+    drain(&mut output);
+    assert!(output.into_sink().is_ok());
+}
+
+#[test]
+fn t46_stale_cancellation_cannot_abort_a_rebound_pending_press() {
+    let (mut output, state) = model();
+    let old = physical(1, 30);
+    output.hold(old.clone(), &[42], Duration::ZERO).unwrap();
+    drain(&mut output);
+    output.release(&old, Duration::ZERO).unwrap();
+    drain(&mut output);
+    let mut fresh = old.clone();
+    fresh.serial += 1;
+    output.hold(fresh.clone(), &[29], Duration::ZERO).unwrap();
+    state.borrow_mut().steps.push_back(Step::Prefix(1));
+    output.flush().unwrap();
+    let frames = state.borrow().frames.len();
+    for mut stale in [old.clone(), fresh.clone()] {
+        if stale.serial == fresh.serial {
+            stale.configuration += 1;
+        }
+        assert_eq!(
+            output.cancel(&stale, Duration::ZERO).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert!(state.borrow().pending.is_some());
+        assert_eq!(state.borrow().frames.len(), frames);
+    }
+    assert!(output.cancelled_claims.is_empty());
+    drain(&mut output);
+    assert!(output.down(29));
+    output.cancel(&fresh, Duration::ZERO).unwrap();
+    drain(&mut output);
+    assert!(!output.down(29));
+}
+
+#[test]
+fn t46_cancel_all_compensates_a_partial_add_then_releases_all_current_owners() {
+    let (mut output, state) = model();
+    output
+        .hold(synthetic(1, 1, None), &[42, 29], Duration::from_secs(1))
+        .unwrap();
+    drain(&mut output);
+    let old = physical(1, 30);
+    output
+        .hold(old.clone(), &[42], Duration::from_secs(1))
+        .unwrap();
+    output
+        .hold(
+            synthetic(31, 1, Some(source(1))),
+            &[29, 30],
+            Duration::from_secs(1),
+        )
+        .unwrap();
+    state.borrow_mut().steps.push_back(Step::Prefix(1));
+    output.flush().unwrap();
+    output.cancel_all(Duration::ZERO).unwrap();
+    assert!(!output.settled());
+    drain(&mut output);
+    assert_eq!(state.borrow().frames[2].events, events(&[(30, 0)]));
+    assert_eq!(state.borrow().frames[3].events, events(&[(29, 0), (42, 0)]));
+    assert_eq!(state.borrow().frames[3].at, Duration::from_secs(1));
+    assert!(output.held.is_empty() && output.cancelled_claims.is_empty());
+    assert!(output.logical.counts.is_empty() && output.retired_sources.is_empty());
+    assert_eq!(output.retired_generation, 0);
+    assert!(!output.retiring());
+    let mut fresh = old.clone();
+    fresh.serial = 32;
+    output
+        .hold(fresh.clone(), &[42], Duration::from_secs(1))
+        .unwrap();
+    drain(&mut output);
+    assert_eq!(
+        output.release(&old, Duration::ZERO).unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    output.cancel_all(Duration::ZERO).unwrap();
+    drain(&mut output);
+    assert!(output.into_sink().is_ok());
+}
+
+#[test]
+fn t46_cancel_all_during_a_partial_release_finishes_each_up_once() {
+    let (mut output, state) = model();
+    let claim = synthetic(1, 1, None);
+    output
+        .hold(claim.clone(), &[42, 29], Duration::ZERO)
+        .unwrap();
+    drain(&mut output);
+    output.release(&claim, Duration::ZERO).unwrap();
+    state.borrow_mut().steps.push_back(Step::Prefix(1));
+    output.flush().unwrap();
+    output.cancel_all(Duration::ZERO).unwrap();
+    drain(&mut output);
+    assert_eq!(
+        state.borrow().events,
+        [events(&[(42, 1), (29, 1)]), events(&[(29, 0), (42, 0)])].concat()
+    );
+    assert_eq!(state.borrow().frames.len(), 2);
+    assert!(output.cancelled_claims.is_empty() && output.held.is_empty());
+    assert!(!output.retiring());
+}
+
+#[test]
+fn t46_task_cancellation_during_repeat_does_not_retire_the_physical_source() {
+    for prefix in 0..=2 {
+        let (mut output, state) = model();
+        let old = physical(1, 30);
+        output.hold(old.clone(), &[42], Duration::ZERO).unwrap();
+        drain(&mut output);
+        output.repeat(&old, Duration::ZERO).unwrap();
+        state.borrow_mut().steps.push_back(Step::Prefix(prefix));
+        output.flush().unwrap();
+        output.cancel(&old, Duration::ZERO).unwrap();
+        drain(&mut output);
+        assert_eq!(
+            state
+                .borrow()
+                .events
+                .iter()
+                .filter(|event| event.kind == EV_KEY && event.value == 2)
+                .count(),
+            usize::from(prefix > 0)
+        );
+        assert_eq!(
+            state
+                .borrow()
+                .events
+                .iter()
+                .filter(|event| event.kind == EV_KEY && event.value == 0)
+                .count(),
+            1
+        );
+        assert!(!output.down(42));
+        let mut fresh = old;
+        fresh.serial += 1;
+        output.hold(fresh, &[42], Duration::ZERO).unwrap();
+        drain(&mut output);
+        assert!(output.down(42));
+        assert!(output.cancelled_claims.is_empty() && output.retired_sources.is_empty());
+    }
+}
+
+#[test]
+fn t46_cancelling_a_sibling_preserves_an_unrelated_pending_claim_on_the_same_source() {
+    let (mut output, state) = model();
+    let old = synthetic(1, 1, Some(source(1)));
+    let pending = synthetic(2, 1, Some(source(1)));
+    output.hold(old.clone(), &[42], Duration::ZERO).unwrap();
+    drain(&mut output);
+    output.hold(pending.clone(), &[29], Duration::ZERO).unwrap();
+    state.borrow_mut().steps.push_back(Step::Prefix(1));
+    output.flush().unwrap();
+    assert_eq!(
+        output.cancel(&old, Duration::ZERO).unwrap(),
+        Progress::Pending
+    );
+    assert!(state.borrow().pending.is_some());
+    drain(&mut output);
+    assert!(!output.down(42) && output.down(29));
+    assert_eq!(state.borrow().frames.len(), 3);
+    assert_eq!(
+        state.borrow().events,
+        [events(&[(42, 1)]), events(&[(29, 1)]), events(&[(42, 0)])].concat()
+    );
+    output.cancel(&pending, Duration::ZERO).unwrap();
+    drain(&mut output);
+    assert!(output.cancelled_claims.is_empty());
+}
+
+#[test]
+fn t46_unknown_task_cancellations_do_not_allocate_receipts_or_tracking() {
+    let (mut output, state) = model();
+    for serial in 1..=5000 {
+        assert_eq!(
+            output
+                .cancel(&synthetic(serial, 1, None), Duration::ZERO)
+                .unwrap(),
+            Progress::Complete
+        );
+        assert!(output.cancelled_claims.is_empty() && output.receipts.is_empty());
+    }
+    assert!(state.borrow().frames.is_empty());
+}
+
+#[test]
+fn t46_press_serials_fence_delayed_release_repeat_cancel_and_hold_replay() {
+    let (mut output, state) = model();
+    let old = physical(1, 30);
+    output.hold(old.clone(), &[42], Duration::ZERO).unwrap();
+    drain(&mut output);
+    output.release(&old, Duration::ZERO).unwrap();
+    drain(&mut output);
+    let mut fresh = old.clone();
+    fresh.serial += 1;
+    output.hold(fresh.clone(), &[42], Duration::ZERO).unwrap();
+    drain(&mut output);
+    let frames = state.borrow().frames.len();
+    assert_eq!(
+        output.release(&old, Duration::ZERO).unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert_eq!(
+        output.repeat(&old, Duration::ZERO).unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert_eq!(
+        output.cancel(&old, Duration::ZERO).unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert!(output.hold(old.clone(), &[42], Duration::ZERO).is_err());
+    assert!(output.down(42));
+    assert_eq!(state.borrow().frames.len(), frames);
+    output.release(&fresh, Duration::ZERO).unwrap();
+    drain(&mut output);
+    assert_eq!(
+        output.hold(old, &[42], Duration::ZERO).unwrap_err().kind(),
+        io::ErrorKind::AlreadyExists
+    );
+    assert_eq!(output.receipts.len(), 1);
+}
+
+#[test]
+fn t46_physical_press_receipts_are_bounded_across_actions_and_configurations() {
+    let (mut output, _) = model();
+    let mut claim = physical(1, 30);
+    for serial in 1..=5000 {
+        claim.serial = serial;
+        output.hold(claim.clone(), &[42], Duration::ZERO).unwrap();
+        drain(&mut output);
+        output.cancel(&claim, Duration::ZERO).unwrap();
+        drain(&mut output);
+        assert_eq!(output.receipts.len(), 1);
+        assert!(output.cancelled_claims.is_empty());
+    }
+    for configuration in 2..=MAX_RECEIPT_GENERATIONS as u64 {
+        claim.configuration = configuration;
+        claim.serial = 1;
+        output.hold(claim.clone(), &[42], Duration::ZERO).unwrap();
+        drain(&mut output);
+        output.cancel_all(Duration::ZERO).unwrap();
+        drain(&mut output);
+    }
+    claim.configuration += 1;
+    assert!(output.hold(claim.clone(), &[42], Duration::ZERO).is_err());
+    output.retire_generation(1, Duration::ZERO).unwrap();
+    output.hold(claim, &[42], Duration::ZERO).unwrap();
+    drain(&mut output);
+    assert_eq!(output.receipts.len(), MAX_RECEIPT_GENERATIONS);
+    assert!(output.down(42));
 }

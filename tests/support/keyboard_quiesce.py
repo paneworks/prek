@@ -511,7 +511,9 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
     expected = [("physical-held", "bA", [42]), ("overlapping-remap-chord", "bAA", [42]),
                 ("remaps-released-physical-held", "bAAA", [42]), ("physical-neutral", "bAAA", []),
                 ("cancelled-unwritten-chord", "bAAAa", []), ("retired-remap-one-owner", "bAAAa", [42]),
-                ("source-retired-neutral", "bAAAaA", [])]
+                ("source-retired-neutral", "bAAAaA", []), ("task-cancelled-sibling-held", "bAAAaA", [42]),
+                ("context-cancelled-neutral", "bAAAaA", []), ("rebound-press-kept", "bAAAaAA", [42]),
+                ("context-reentered-neutral", "bAAAaAAa", [])]
     fixture_env = dict(env, PREK_LOCAL_CAGE="1", PREK_CAGE_OUTPUT=str(output), PREK_CAGE_KEYBOARD=args.keyboard,
                        PREK_CAGE_KEY_SOCKET=str(socket))
     before = {device["address"] for device in json.loads(command(["-j", "devices"]))["keyboards"]}
@@ -544,12 +546,12 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
     if after != before:
         raise RuntimeError("owned key-output producer did not retire")
     result = json.loads((output / "key-output-runtime-result.json").read_text())
-    wanted = dict(status="passed", phases=7, source="two_owned_wayland_virtual_keyboards", production_route_tested=False,
+    wanted = dict(status="passed", phases=11, source="two_owned_wayland_virtual_keyboards", production_route_tested=False,
                   kernel_input_tested=False, unmodified_stock_acceptance=False, test_backpressure=True)
     if json.dumps(result, sort_keys=True) != json.dumps(wanted, sort_keys=True):
         raise RuntimeError("invalid key-output runtime receipt")
     result.update(captures=pictures, observations=phases, config_provider=args.hyprland_config,
                   dependency_override=env.get("PREK_CAGE_AQUAMARINE"))
     (output / "key-output-result.json").write_text(json.dumps(result, indent=2) + "\n")
-    print("PASS: actual key-output driver preserved physical-side Shift, overlapping remaps, source cleanup and cancelled unwritten chord; seven rendered app phases.")
+    print("PASS: actual key-output driver preserved overlapping owners, exact task cancellation, stale-press fencing and context reentry; eleven rendered app phases.")
     return result
