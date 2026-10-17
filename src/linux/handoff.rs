@@ -3,7 +3,8 @@ use super::{RawDevice, StateProbe, libc, reopen_readonly, set_clock_id};
 use crate::input::{EV_SYN, SYN_DROPPED, SYN_REPORT};
 use evdev::InputEvent;
 use std::{
-    io,
+    error::Error,
+    fmt, io,
     os::fd::{AsFd, AsRawFd},
     time::{Duration, Instant},
 };
@@ -25,6 +26,76 @@ pub struct Cut {
     pub observed: Vec<InputEvent>,
     /// Original events read beyond that prefix, preceding the reader's queue.
     pub retained: Vec<InputEvent>,
+}
+
+/// Original events consumed by an unsuccessful handoff attempt.
+#[derive(Default)]
+pub struct ReadJournal {
+    original: Vec<InputEvent>,
+    matched: usize,
+    witness: usize,
+    frozen: bool,
+    acquired: bool,
+}
+impl ReadJournal {
+    /// Every original event read by the failed operation, including an unchecked final batch.
+    pub fn original(&self) -> &[InputEvent] {
+        &self.original
+    }
+    pub fn into_original(self) -> Vec<InputEvent> {
+        self.original
+    }
+    /// Exact equal events matched before the first mismatch or read failure.
+    pub fn matched_prefix(&self) -> usize {
+        self.matched
+    }
+    /// Witness events read during classification, including an invalid final batch.
+    pub fn witness_events(&self) -> usize {
+        self.witness
+    }
+    /// The synchronized witness was completely drained, validated and report-terminated.
+    pub fn witness_frozen(&self) -> bool {
+        self.frozen
+    }
+    /// This attempt acquired the grab; this does not describe current ownership or release.
+    pub fn grab_acquired(&self) -> bool {
+        self.acquired
+    }
+}
+impl fmt::Debug for ReadJournal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReadJournal")
+            .field("original_events", &self.original.len())
+            .field("matched_prefix", &self.matched)
+            .field("witness_events", &self.witness)
+            .field("witness_frozen", &self.frozen)
+            .field("grab_acquired", &self.acquired)
+            .finish()
+    }
+}
+/// Failed operation with its cause and non-authorizing raw-read journal.
+#[derive(Debug)]
+pub struct ReadFailure {
+    cause: io::Error,
+    journal: ReadJournal,
+}
+impl ReadFailure {
+    pub fn journal(&self) -> &ReadJournal {
+        &self.journal
+    }
+    pub fn into_parts(self) -> (io::Error, ReadJournal) {
+        (self.cause, self.journal)
+    }
+}
+impl fmt::Display for ReadFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.cause, f)
+    }
+}
+impl Error for ReadFailure {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.cause)
+    }
 }
 
 /// Exclusively borrow a nonblocking, unfiltered monotonic reader at an assembler
@@ -115,6 +186,7 @@ struct Protocol<P: Port> {
     phase: Phase,
     owned: bool,
     cut: Option<Cut>,
+    journal: ReadJournal,
 }
 impl<P: Port> Protocol<P> {
     fn new(port: P) -> Self {
@@ -123,22 +195,44 @@ impl<P: Port> Protocol<P> {
             phase: Phase::Preparing,
             owned: false,
             cut: None,
+            journal: ReadJournal::default(),
         }
+    }
+    fn failure(&mut self, cause: io::Error) -> io::Error {
+        self.phase = Phase::Failed;
+        io::Error::new(
+            cause.kind(),
+            ReadFailure {
+                cause,
+                journal: std::mem::take(&mut self.journal),
+            },
+        )
+    }
+    fn read(&mut self, client: Client, budget: &mut Budget) -> io::Result<Vec<InputEvent>> {
+        let events = read(&mut self.port, client, budget)?;
+        if client == Client::Reader {
+            self.journal.original.extend(events.iter().copied());
+        } else if self.phase == Phase::Grabbed {
+            self.journal.witness = self.journal.witness.saturating_add(events.len());
+        }
+        budget.check()?;
+        Ok(events)
     }
     fn require(&mut self, phase: Phase) -> io::Result<()> {
         if self.phase != phase {
-            self.phase = Phase::Failed;
-            Err(invalid("evdev handoff phase is invalid or retired"))
+            Err(self.failure(invalid("evdev handoff phase is invalid or retired")))
         } else {
             Ok(())
         }
     }
     fn prepare(&mut self) -> io::Result<Preparation> {
         self.require(Phase::Preparing)?;
+        self.journal = ReadJournal::default();
         let result = (|| {
             let mut budget = Budget::new();
-            while !read(&mut self.port, Client::Witness, &mut budget)?.is_empty() {}
-            let observed = read(&mut self.port, Client::Reader, &mut budget)?;
+            while !self.read(Client::Witness, &mut budget)?.is_empty() {}
+            let observed = self.read(Client::Reader, &mut budget)?;
+            self.journal.original.clear();
             if observed.is_empty() {
                 self.phase = Phase::Armed;
                 Ok(Preparation::Armed)
@@ -146,23 +240,18 @@ impl<P: Port> Protocol<P> {
                 Ok(Preparation::Observe(observed))
             }
         })();
-        if result.is_err() {
-            self.phase = Phase::Failed;
-        }
-        result
+        result.map_err(|error| self.failure(error))
     }
     fn grab(&mut self) -> io::Result<()> {
         self.require(Phase::Armed)?;
         match self.port.grab() {
             Ok(()) => {
                 self.owned = true;
+                self.journal.acquired = true;
                 self.phase = Phase::Grabbed;
                 Ok(())
             }
-            Err(error) => {
-                self.phase = Phase::Failed;
-                Err(error)
-            }
+            Err(error) => Err(self.failure(error)),
         }
     }
     fn classify_inner(&mut self) -> io::Result<Cut> {
@@ -170,7 +259,7 @@ impl<P: Port> Protocol<P> {
         self.port.synchronize()?;
         let mut observed = Vec::new();
         loop {
-            let events = read(&mut self.port, Client::Witness, &mut budget)?;
+            let events = self.read(Client::Witness, &mut budget)?;
             if events.is_empty() {
                 break;
             }
@@ -183,10 +272,11 @@ impl<P: Port> Protocol<P> {
         {
             return Err(invalid("frozen evdev witness ends inside a frame"));
         }
+        self.journal.frozen = true;
         let mut matched = 0;
         let mut retained = Vec::new();
         while matched < observed.len() {
-            let events = read(&mut self.port, Client::Reader, &mut budget)?;
+            let events = self.read(Client::Reader, &mut budget)?;
             if events.is_empty() {
                 return Err(invalid(
                     "original evdev reader lacks the frozen witness prefix",
@@ -199,6 +289,7 @@ impl<P: Port> Protocol<P> {
                         return Err(invalid("evdev witness and original prefix differ"));
                     }
                     matched += 1;
+                    self.journal.matched = matched;
                 } else {
                     retained.push(event);
                 }
@@ -215,10 +306,7 @@ impl<P: Port> Protocol<P> {
                 self.phase = Phase::Classified;
                 Ok(self.cut.as_ref().unwrap())
             }
-            Err(error) => {
-                self.phase = Phase::Failed;
-                Err(error)
-            }
+            Err(error) => Err(self.failure(error)),
         }
     }
     fn commit(&mut self) -> io::Result<Cut> {
@@ -266,7 +354,6 @@ fn read(port: &mut impl Port, client: Client, budget: &mut Budget) -> io::Result
         match port.read(client) {
             Ok(events) => {
                 budget.events = budget.events.saturating_add(events.len());
-                budget.check()?;
                 return Ok(events);
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {

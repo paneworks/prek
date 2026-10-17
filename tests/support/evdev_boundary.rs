@@ -6,7 +6,7 @@ use prek::{
     kernel::Virtual,
     linux::{
         StateProbe,
-        handoff::{Handoff, Preparation},
+        handoff::{Handoff, Preparation, ReadFailure},
     },
 };
 
@@ -147,6 +147,42 @@ fn witness_prefix_retains_concurrent_motion_after_the_grab() {
         .collect();
     assert_eq!(tuples(&actual), expected);
     assert!(receiver.raw.is_grabbed());
+    receiver.raw.ungrab().unwrap();
+    let mut handoff = Handoff::new(&mut receiver.raw).unwrap();
+    assert_eq!(handoff.prepare().unwrap(), Preparation::Armed);
+    send(&mut source, 100, &[(EV_REL, 0, 101)]);
+    handoff.grab().unwrap();
+    send(&mut source, 101, &[(EV_REL, 0, 102)]);
+    let cut = handoff.classify().unwrap();
+    let expected: Vec<_> = cut.observed.iter().chain(&cut.retained).copied().collect();
+    let matched = cut.observed.len();
+    let error = handoff.classify().unwrap_err();
+    let failure = error
+        .into_inner()
+        .unwrap()
+        .downcast::<ReadFailure>()
+        .unwrap();
+    let (_, journal) = failure.into_parts();
+    assert_eq!(journal.original(), expected);
+    assert_eq!(journal.matched_prefix(), matched);
+    assert!(journal.witness_frozen() && journal.grab_acquired());
+    assert!(handoff.commit().is_err());
+    assert!(!receiver.raw.is_grabbed());
+    let mut actual = journal.into_original();
+    match receiver.raw.fetch_events() {
+        Ok(events) => actual.extend(events),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+        Err(error) => panic!("unread recovery tail: {error}"),
+    }
+    assert_eq!(
+        tuples(&actual),
+        [
+            (EV_REL, 0, 101),
+            (EV_SYN, 0, 0),
+            (EV_REL, 0, 102),
+            (EV_SYN, 0, 0)
+        ]
+    );
 }
 
 #[test]

@@ -365,3 +365,162 @@ fn failed_release_is_not_a_successful_descriptor_close_acknowledgement() {
     assert!(script.borrow().grabbed);
     assert_eq!(script.borrow().calls, [Call::Release]);
 }
+
+fn recovered(error: io::Error) -> (io::Error, ReadJournal) {
+    error
+        .into_inner()
+        .unwrap()
+        .downcast::<ReadFailure>()
+        .unwrap()
+        .into_parts()
+}
+
+#[test]
+fn failed_prefix_comparison_preserves_the_entire_original_read_including_its_tail() {
+    let (mut protocol, script) = grabbed();
+    let mut prefix = frame(1);
+    prefix.extend(frame(2));
+    let mut read = frame(1);
+    read.extend(frame(9));
+    read.extend(frame(8675309));
+    script.borrow_mut().witness.push_back(Ok(prefix.clone()));
+    script.borrow_mut().reader.push_back(Ok(read.clone()));
+    let error = protocol.classify().unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert!(!format!("{error:?}").contains("8675309"));
+    assert!(!error.to_string().contains("8675309"));
+    let (cause, journal) = recovered(error);
+    assert!(cause.to_string().contains("prefix differ"));
+    assert_eq!(journal.original(), read);
+    assert_eq!(journal.matched_prefix(), 2);
+    assert_eq!(journal.witness_events(), prefix.len());
+    assert!(journal.witness_frozen() && journal.grab_acquired());
+    assert!(script.borrow().grabbed);
+    assert!(protocol.commit().is_err());
+    assert_eq!(journal.into_original(), read);
+    drop(protocol);
+    assert!(!script.borrow().grabbed);
+}
+
+#[test]
+fn a_late_original_read_failure_does_not_discard_an_already_matched_partial_prefix() {
+    for kind in [io::ErrorKind::WouldBlock, io::ErrorKind::BrokenPipe] {
+        let (mut protocol, script) = grabbed();
+        let prefix = frame(3);
+        script.borrow_mut().witness.push_back(Ok(prefix.clone()));
+        script
+            .borrow_mut()
+            .reader
+            .extend([Ok(prefix[..1].to_vec()), Err(kind.into())]);
+        let (_, journal) = recovered(protocol.classify().unwrap_err());
+        assert_eq!(journal.original(), &prefix[..1]);
+        assert_eq!(journal.matched_prefix(), 1);
+        assert_eq!(journal.witness_events(), 2);
+        assert!(journal.witness_frozen() && journal.grab_acquired());
+    }
+}
+
+#[test]
+fn synchronization_loss_keeps_the_original_batch_without_promoting_it_to_a_cut() {
+    let (mut protocol, script) = grabbed();
+    let prefix = frame(4);
+    let mut read = prefix.clone();
+    read.extend(lost());
+    read.extend(frame(5));
+    script.borrow_mut().witness.push_back(Ok(prefix));
+    script.borrow_mut().reader.push_back(Ok(read.clone()));
+    let (_, journal) = recovered(protocol.classify().unwrap_err());
+    assert_eq!(journal.original(), read);
+    assert_eq!(journal.matched_prefix(), 0);
+    assert!(journal.witness_frozen());
+    assert!(protocol.commit().is_err());
+}
+
+#[test]
+fn budget_exhaustion_after_a_successful_original_read_preserves_even_the_final_batch() {
+    let (mut protocol, script) = grabbed();
+    let mut read = frame(6);
+    read.extend(vec![
+        InputEvent::new(crate::input::EV_REL, 0, 8675309);
+        MAX_EVENTS
+    ]);
+    script.borrow_mut().witness.push_back(Ok(frame(6)));
+    script.borrow_mut().reader.push_back(Ok(read.clone()));
+    let error = protocol.classify().unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    let (_, journal) = recovered(error);
+    assert!(journal.original() == read.as_slice());
+    assert_eq!(journal.matched_prefix(), 0);
+    assert!(journal.witness_frozen() && journal.grab_acquired());
+}
+
+#[test]
+fn preparation_budget_failure_preserves_only_the_original_observation_not_witness_history() {
+    let (mut protocol, script) = setup();
+    script.borrow_mut().witness.push_back(Ok(vec![
+        InputEvent::new(crate::input::EV_REL, 0, 1);
+        MAX_EVENTS - 1
+    ]));
+    script.borrow_mut().reader.push_back(Ok(frame(7)));
+    let error = protocol.prepare().unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    let (_, journal) = recovered(error);
+    assert_eq!(journal.original(), frame(7));
+    assert_eq!(journal.witness_events(), 0);
+    assert_eq!(journal.matched_prefix(), 0);
+    assert!(!journal.witness_frozen() && !journal.grab_acquired());
+    assert!(!script.borrow().grabbed);
+}
+
+#[test]
+fn failure_after_a_successful_uncommitted_classification_preserves_exact_original_order() {
+    let (mut protocol, script) = grabbed();
+    let prefix = frame(8);
+    let mut read = prefix.clone();
+    read.extend(frame(9));
+    script.borrow_mut().witness.push_back(Ok(prefix.clone()));
+    script.borrow_mut().reader.push_back(Ok(read.clone()));
+    protocol.classify().unwrap();
+    let (_, journal) = recovered(protocol.classify().unwrap_err());
+    assert_eq!(journal.original(), read);
+    assert_eq!(journal.matched_prefix(), prefix.len());
+    assert!(journal.witness_frozen() && journal.grab_acquired());
+    assert!(protocol.commit().is_err());
+}
+
+#[test]
+fn successful_observations_are_not_duplicated_by_a_later_failed_attempt() {
+    let (mut protocol, script) = setup();
+    script.borrow_mut().reader.push_back(Ok(frame(10)));
+    assert_eq!(protocol.prepare().unwrap(), Preparation::Observe(frame(10)));
+    assert_eq!(protocol.prepare().unwrap(), Preparation::Armed);
+    script.borrow_mut().fail_grab = true;
+    let (_, journal) = recovered(protocol.grab().unwrap_err());
+    assert!(journal.original().is_empty());
+    assert_eq!(journal.matched_prefix(), 0);
+    assert!(!journal.witness_frozen() && !journal.grab_acquired());
+}
+
+#[test]
+fn original_io_cause_retains_errno_and_the_first_read_can_be_recovered_without_logging_raw_input() {
+    let (mut protocol, script) = grabbed();
+    let prefix = frame(11);
+    script.borrow_mut().witness.push_back(Ok(prefix.clone()));
+    script.borrow_mut().reader.extend([
+        Ok(prefix[..1].to_vec()),
+        Err(io::Error::from_raw_os_error(libc::ENODEV)),
+    ]);
+    let error = protocol.classify().unwrap_err();
+    let kind = error.kind();
+    let failed = error
+        .get_ref()
+        .unwrap()
+        .downcast_ref::<ReadFailure>()
+        .unwrap();
+    assert_eq!(failed.journal().original(), &prefix[..1]);
+    assert!(!format!("{:?}", failed.journal()).contains("InputEvent"));
+    let (cause, journal) = recovered(error);
+    assert_eq!(cause.kind(), kind);
+    assert_eq!(cause.raw_os_error(), Some(libc::ENODEV));
+    assert_eq!(journal.into_original(), prefix[..1]);
+}

@@ -36,6 +36,31 @@ convert them into success. An ungrab error is not proof of descriptor release:
 the caller must close the original and retain its existing teardown/acknowledgement
 requirements. The owner must also handle panic, cancellation and process death.
 
+## Read failures
+
+Errors from `prepare`, `grab`, `classify` and `commit` retain their error kind
+and carry a downcastable `linux::handoff::ReadFailure` payload. `journal()`
+exposes every original event consumed by that attempt, in read order. It also
+records the number of exactly matched prefix events, the witness event count,
+whether the synchronized witness was completely validated, and whether this
+attempt acquired a grab. `into_parts()` returns the original cause and journal;
+the cause retains its OS error information. No event or report is invented.
+
+The final batch is recorded before post-read budget, synchronization and prefix
+validation. A mismatch, mid-prefix read failure or exceeded budget cannot silently
+discard an already-read tail. Successful `Observe` and `Cut` results transfer
+their data normally; a later failed attempt does not duplicate prior observations.
+The normal event/read/work budgets still apply; a failed read's already-returned
+final batch is retained even when it is the batch that exceeded the budget.
+
+The journal is private process data, not an IPC payload or rollback permission.
+Display and Debug output include no raw events. `grab_acquired()` is historical,
+not proof of current ownership, successful ungrab or consumer state. Neither a
+matched prefix nor its journal can repair a consumer automatically. Unchecked
+data, `SYN_DROPPED`, incomplete prefixes, native consumer acknowledgement and
+complete rollback still need their explicit lifecycle handling. Production
+routing remains disabled.
+
 Preparation and classification each bound reads to 4,096 calls, aggregate events
 to 65,536 and loop work to 50 ms. Kernel syscall responsiveness is separate.
 Interrupted reads retry within those limits. Synchronization loss, missing or
@@ -69,6 +94,8 @@ the actual implementation on named synthetic sources:
 - A REL-only source emits one pre-grab frame, bounded concurrent motion across
   grab and one definitely post-grab marker. The complete ordered stream must be
   preserved across the observed prefix, retained suffix and untouched queue.
+  A second attempt then fails after actual classification; its error journal
+  plus the untouched reader queue must preserve the complete ordered stream.
 - A keyboard emits a held press only after grabbing. An empty witness must leave
   the press queued despite the state query, then preserve its release.
 
