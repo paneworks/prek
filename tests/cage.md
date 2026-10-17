@@ -22,7 +22,7 @@ oslo make test-cage-startup
 | `test-cage-lua-stock` | Same stock dependencies | Actual Lua compositor config, mode edits and the same effects |
 | `test-cage-wayland-fix` | Explicit test-only Aquamarine startup patch | Separate legacy-config mode/layer sessions and the same effects |
 | `test-cage-lua-wayland-fix` | Same explicit test-only patch | Separate Lua-config mode/layer sessions and the same effects |
-| `test-cage-touch` | Test-only Cage touch source | Two contacts, coordinates, motion, ordered frames and neutral releases |
+| `test-cage-touch` | Test-only Cage 0.2.1 touch source | Direct touch plus Lua pan consumption, unmatched-tap cadence, acknowledged rule disable and restored rendered contacts |
 | `test-cage-startup` | No compositor started | Readiness, config, rendered-state and library-provenance models |
 
 The original `test-cage` keeps its older pinned Hyprland 0.54.3 dependencies.
@@ -82,3 +82,51 @@ headless Cage. The caller must supply `WAYLAND_DISPLAY`; the runner does not
 guess another desktop socket. Parent interaction is still masked, and test
 focus, workspace and power operations target the private compositor only.
 Headless results do not establish this different backend's result.
+
+## Lua touch routing
+
+`oslo make test-cage-touch` also runs current immutable Prek application and
+controller executables. The ordinary routing scheduler's delivered frames are
+normalized into the private Cage touch driver; source events are not injected
+directly into the app to bypass routing.
+
+The test first delivers an unmatched single-finger tap under an enabled buffered
+two-finger rule. It compares exact scheduled press/release spacing, received
+Wayland timestamps and actual receipt cadence. A subsequent downward two-finger
+pan is claimed: none of its four source frames may reach the application, while
+the real supervised Lua helper receives begin/update/end ordinals 1/2/3.
+Its end hook submits a rule transaction. After the routing controller accepts
+revision 2 and the helper acknowledges it, a fresh source incarnation sends the
+same two-finger path. All four frames must reach the application with exact
+contact IDs, positions, motion and neutral releases.
+
+The routing and observation examples are separate protected sources:
+[`touch_routing.lua`](../examples/lua/touch_routing.lua) has runtime-rule
+permission but no normalized-input capability;
+[`touch_observations.lua`](../examples/lua/touch_observations.lua) receives
+normalized input and a device catalog but cannot edit rules or claim input.
+They run in separate supervised helper processes. The observer's frames and
+source resets cross the actual private worker channel. This preserves the
+existing observation-only input API; it does not add route-mode input access.
+
+Each tap and restored contact frame must be rendered through its submitted
+receipt watermark. `touch-restored-down.png`, `touch-restored-motion.png` and
+`touch-neutral.png` are captures from the owned compositor, not locally drawn
+reference images. `touch-runtime.jsonl`, `touch-input.jsonl`,
+`touch-routing-receipts.json` and `touch-routing-app-receipts.json` retain the
+native callbacks, source/scheduled frames and actual application receipts.
+
+The source, desktop context, consumer readiness and rule-transaction embedding
+are explicitly modeled. The test opens no evdev nodes, creates no kernel input
+devices and supplies no production broker grants. It does not establish kernel
+cutover, physical takeover, stock Hyprland/Morf, phone or G11 acceptance, and
+production routing remains disabled. The example source names match only this
+owned fixture; building or checking them never activates a host device.
+
+`oslo make test-touch-runtime` checks the packet bridge and source permissions
+without starting a compositor. For local controller development,
+`test-cage-touch-dev` accepts explicit absolute `--cage`, `--receiver`, `--grim`
+and `--dbus` paths. Cage must be the test-only driver build, not a host compositor.
+The recipe selects freshly built application/controller paths from Cargo's
+compiler-artifact JSON rather than an existing binary's modification time.
+Use the immutable `test-cage-touch` recipe for final package acceptance.

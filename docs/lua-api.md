@@ -553,6 +553,13 @@ The broker rechecks lock state and registration and checks the input permit agai
 at actual send time. A queued observation older than 250 ms invalidates the
 stream instead of being delivered under a refreshed context.
 
+The owned [Cage touch test](../tests/cage.md#lua-touch-routing) exercises
+[`touch_observations.lua`](../examples/lua/touch_observations.lua) in a real
+observation helper, independently of
+[`touch_routing.lua`](../examples/lua/touch_routing.lua)'s phase/rule helper.
+This separation preserves the mode and capability boundary; the rendered test
+uses modeled source/readiness and does not enable production routing.
+
 Callbacks receive `{fence, input}`. `input.kind` is `frame` or `reset`. Every
 payload includes `source`, monotonic `at={secs,nanos}` and `selectors`, the matched
 protected allowlist names. Frames contain `sequence`, `changes`, `contacts`,

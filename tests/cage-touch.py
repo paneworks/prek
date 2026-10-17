@@ -15,6 +15,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cage", required=True)
     parser.add_argument("--receiver", required=True)
+    parser.add_argument("--fixture", required=True)
+    parser.add_argument("--app", required=True)
+    parser.add_argument("--screencopy", required=True)
     parser.add_argument("--hardware-rendering", action="store_true",
                         help="use the selected GPU driver instead of forcing Mesa software rendering")
     parser.add_argument("--output", default="target/cage-touch")
@@ -108,9 +111,45 @@ def main():
                 ("touch_down",7),("touch_down",12),("touch_frame",None),
                 ("touch_motion",7),("touch_motion",12),("touch_frame",None),
                 ("touch_up",7),("touch_frame",None),("touch_up",12),("touch_frame",None)]
+            sockets = [path for path in runtime.glob("wayland-*") if path.is_socket()]
+            assert len(sockets) == 1
+            routed_start = len(rows())
+            fixture_env = dict(env, PREK_LOCAL_CAGE_TOUCH="1", PREK_CAGE_OUTPUT=str(output),
+                               PREK_LOCAL_CAGE_APP=args.app, PREK_CAGE_TOUCH_CONTROL_FD=str(parent.fileno()),
+                               PREK_CAGE_TOUCH_PID=str(cage.pid), PREK_CAGE_TOUCH_SOCKET=str(sockets[0]),
+                               PREK_CAGE_TOUCH_GRIM=args.screencopy)
+            fixture_env.pop("PREK_TEST_TOUCH_FD", None)
+            subprocess.run([args.fixture, "--exact", "local_cage_lua_touch_routing", "--ignored",
+                            "--nocapture", "--test-threads=1"], env=fixture_env,
+                           pass_fds=(parent.fileno(),), stdout=log, stderr=log, check=True, timeout=45)
+            routed = [row for row in rows()[routed_start:] if row["event"].startswith("touch_")]
+            assert [(row["event"], row.get("id")) for row in routed] == [
+                ("touch_down",0),("touch_frame",None),("touch_up",0),("touch_frame",None),
+                ("touch_down",0),("touch_down",1),("touch_frame",None),
+                ("touch_motion",0),("touch_motion",1),("touch_frame",None),
+                ("touch_motion",0),("touch_motion",1),("touch_frame",None),
+                ("touch_up",0),("touch_up",1),("touch_frame",None)]
+            trace = json.loads((output / "touch-routing-receipts.json").read_text())
+            assert trace["status"] == "passed" and trace["consumed_pan_forwarded"] == 0
+            interval = trace["tap_interval"]["secs"] * 1000 + trace["tap_interval"]["nanos"] / 1_000_000
+            assert abs((routed[2]["time_ms"] - routed[0]["time_ms"]) - interval) < 1.1
+            assert routed[2]["at_ns"] - routed[0]["at_ns"] >= max(0, interval - 8) * 1_000_000
+            restored_frames = [row for row in routed if row["event"] == "touch_frame"][2:]
+            for index, y in enumerate((0.25, 0.5, 0.7)):
+                for contact, x in zip(restored_frames[index]["contacts"], (0.25, 0.75)):
+                    assert abs(contact["x"] - restored_frames[index]["width"] * x) < 1
+                    assert abs(contact["y"] - restored_frames[index]["height"] * y) < 1
+            assert not restored_frames[-1]["contacts"]
+            assert any(row["event"] == "rendered" and row.get("drawn_sequence", 0) >= routed[-1]["sequence"] for row in rows())
+            for name in ("restored-down", "restored-motion", "neutral"):
+                assert (output / f"touch-{name}.png").stat().st_size > 0
+            (output / "touch-routing-app-receipts.json").write_text(json.dumps({
+                "status":"passed", "events":routed, "rendered_through":routed[-1]["sequence"],
+                "tap_interval_ms":interval, "source_and_readiness":"model", "kernel_input_opened":False}))
+            print("PASS: Lua pan consumption, cadence-preserving unmatched tap, acknowledged rule disable and restored two-contact rendering crossed the real routing/helper/Cage path.")
             # Malformed operations terminate this owned fixture without adding
             # contacts or acknowledging unrecognized input.
-            parent.sendall(struct.pack("=IIIidd",1,99,timestamp,0,0.0,0.0))
+            parent.sendall(struct.pack("=IIIidd",1,99,0xffffffff,0,0.0,0.0))
             try: response=parent.recv(4)
             except ConnectionResetError: response=b""
             assert not response

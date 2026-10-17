@@ -359,6 +359,36 @@ make.recipe{ name = "test-cage-wayland-fix", desc = "explicit test-only patched 
 make.recipe{ name = "test-cage-touch", desc = "local GPU Cage two-contact delivery and neutral releases",
              run = function() cage_test("cage-touch-test", {}) end }
 
+make.recipe{ name = "test-touch-runtime", desc = "touch packet bridge and source-bound Lua configuration models",
+             run = function() sh.cargo("test", "--locked", "--test", "cage_touch_runtime") end }
+
+make.recipe{ name = "test-cage-touch-dev", desc = "current debug touch controller with explicitly supplied fixture tools",
+             params = {{"--cage",desc="test-only Cage touch source executable"},
+                       {"--receiver",desc="Wayland receiver executable"},
+                       {"--grim",desc="grim executable"},
+                       {"--dbus",desc="dbus-run-session executable"}},
+             run = function(a)
+               for _, name in ipairs{"cage","receiver","grim","dbus"} do
+                 assert(type(a[name])=="string" and a[name]:sub(1,1)=="/", "supply an absolute --"..name.." path")
+               end
+               local built = oslo.run{"bash","-c",[[set -euo pipefail
+app=$(cargo build --locked --bin prek --message-format=json | jq -ers '
+  [.[] | select(.reason=="compiler-artifact" and .target.name=="prek" and (.profile.test|not) and .executable!=null) | .executable] | unique |
+  if length==1 then .[0] else error("expected exactly one current application executable") end')
+fixture=$(cargo test --locked --test cage_touch_runtime --no-run --message-format=json | jq -ers '
+  [.[] | select(.reason=="compiler-artifact" and .target.name=="cage_touch_runtime" and .profile.test and .executable!=null) | .executable] | unique |
+  if length==1 then .[0] else error("expected exactly one current touch test executable") end')
+printf '%s\n%s\n' "$app" "$fixture"]],capture=true}
+               if not built.ok then io.stderr:write(built.err or "") end
+               assert(built.ok,"touch application/controller failed to build")
+               local app,fixture=(built.out or ""):match("^%s*([^\r\n]+)\r?\n([^\r\n]+)%s*$")
+               assert(app and fixture,"missing current Cargo application/test executable")
+               assert(oslo.run{a.dbus,"--config-file="..project_root().."/tests/support/dbus-session.conf","--",
+                 "bash","-c",'export PREK_TEST_SESSION_BUS="$DBUS_SESSION_BUS_ADDRESS"; exec "$@"',"--",
+                 "python3","tests/cage-touch.py","--hardware-rendering","--cage",a.cage,"--receiver",a.receiver,
+                 "--screencopy",a.grim,"--fixture",fixture,"--app",app}.ok,"local debug touch fixture failed")
+             end }
+
 make.recipe{ name = "test-cage-lua-wayland-fix", desc = "typed window/power effects in an owned Lua-config compositor",
              run = function()
                cage_test("cage-test-wayland-fix", { "--hyprland-config", "lua", "--modes", "--input", "--power", "--windows" })

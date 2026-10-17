@@ -59,7 +59,7 @@
           '';
         in {
           native-root-probe = nativeProbe;
-          cage-touch-test = import ./tests/cage-touch.nix { inherit pkgs; };
+          cage-touch-test = import ./tests/cage-touch.nix { inherit pkgs; package = self.packages.${system}.default; };
           cage-test = import ./tests/cage-host.nix {
             inherit pkgs;
             package = self.packages.${system}.default;

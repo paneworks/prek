@@ -503,6 +503,9 @@ by that harness; it never opens or grabs a production event node.
 `tests/supervisor.rs` runs fourteen process gates for healthy/stalled workers,
 termination escalation, health-channel failure, worker identity and parent death.
 It uses a separate executable so fixtures run on their process's original thread.
+`oslo make test-cage-touch` adds [rendered Lua touch routing](tests/cage.md#lua-touch-routing),
+including buffered fallback cadence, claimed-pan suppression and acknowledged
+rule edits. Its source/readiness authority is modeled; it is not kernel takeover.
 `tests/recovery.rs` and the other privileged kernel fixtures remain manual gates
 for a prepared isolated Linux environment. They are excluded from ordinary
 Cargo and local compositor runs; they must not inject into the host session.

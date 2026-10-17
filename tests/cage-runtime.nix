@@ -1,13 +1,13 @@
-{ package }:
+{ package, testName ? "cage_runtime" }:
 package.overrideAttrs (_: {
-  pname = "prek-local-cage-tests";
+  pname = "prek-local-${testName}-tests";
   outputs = [ "out" ];
-  cargoBuildFlags = [ "--test" "cage_runtime" ];
+  cargoBuildFlags = [ "--test" testName ];
   doCheck = false;
   installPhase = ''
     mkdir -p "$out/bin"
     count=0
-    for candidate in target/*/release/deps/cage_runtime-* target/release/deps/cage_runtime-*; do
+    for candidate in target/*/release/deps/${testName}-* target/release/deps/${testName}-*; do
       if [ -f "$candidate" ] && [ -x "$candidate" ]; then
         install -m 755 "$candidate" "$out/bin/prek-local-cage-tests"
         count=$((count + 1))
