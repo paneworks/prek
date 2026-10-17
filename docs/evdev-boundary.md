@@ -1,7 +1,7 @@
 # Evdev fanout-prefix witness
 
-`linux::handoff::Handoff` classifies the evdev-client stream around a grab. It is
-not wired into the production reader, and does not create a transport `Ready`,
+`linux::handoff::Handoff` classifies the evdev-client stream around a grab. It
+does not create a transport `Ready`,
 context permit, neutral-state token or release acknowledgement. Production
 routing remains disabled.
 
@@ -78,3 +78,36 @@ opens physical nodes or proves consumer/console/phone acceptance. Run the
 [fixed privileged script](root-routing.md) yourself; the agent only observes its
 logs. No positive kernel result is implied by building the runner or listing
 its cases.
+
+## Sole-reader ingress
+
+The Linux reader loop accepts `ReaderDisposition::Observe(events)` and
+`ReaderDisposition::Cutover(cut)` from an explicitly opting-in trusted sink.
+Both feed the **original** source assembler; sequence numbers are not reset.
+Observed-prefix frames reach `InputSink::push` first. Only after their successful
+delivery does `reader_cutover(source, through, at)` announce the boundary before
+the first retained/post-prefix frame. `at` is the already-delivered input clock,
+not wall time, the next unread frame's time or the enclosing poll watermark.
+If no complete tail exists, the loop announces a ready boundary before polling.
+
+A retained partial frame waits for its real `SYN_REPORT`. No contact/key starts,
+timestamps or synthetic reports are invented. A future-dated prefix remains in
+the ordinary bounded pending queue until the input watermark reaches it; a
+future frame supplies a real poll deadline instead of a zero-timeout busy loop.
+Repeated empty drains do not re-sort or copy an unchanged future queue.
+
+The pending queue bounds both complete frames and raw events to 65,536 across
+all sources and hook/kernel ingress. Per-frame input is limited to 4,096 events;
+ordinary reads also have bounded event/read counts. Synchronization loss retires
+the source immediately, even without a following report. Clock regression and
+input preceding the delivered watermark cannot dispatch. Pending failed-source
+frames are removed, and cancellation is delivered at a safe input-clock point
+before healthy-source frames, without advancing timers through unread input.
+Output shutdown still precedes actual original-fd closure and release acknowledgement.
+
+`reader_cutover` defaults to refusal; it is not a readiness or policy grant.
+The private routing `Stream` does not yet opt into this interface, and its live
+admission/neutral/rollback/consumer/console obligations remain open. A user-run
+synthetic loop case checks prefix/callback/tail ordering, one downstream output
+and output-before-original-close teardown. Library tests exercise the same
+assembler, queue, dispatcher and cancellation helpers without opening devices.

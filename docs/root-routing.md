@@ -28,9 +28,10 @@ case emits pre-grab motion only on a libinput-ignored REL-only source with no
 key/switch capability. No test writes a key while its node is ungrabbed. No
 physical input nodes are opened.
 
-Thirteen routing gates cover keyboard/mouse/touchpad forwarding, keyboard LED feedback,
+Fourteen routing gates cover keyboard/mouse/touchpad forwarding, keyboard LED feedback,
 configured touch consumption/fallback and cadence, reader error/panic teardown,
-and four evdev boundary experiments. Desktop context in configured routing tests
+four evdev boundary experiments and sole-reader prefix/cutover/tail ordering.
+Desktop context in configured routing tests
 is explicitly modeled. The tests do not establish stock-compositor retirement,
 physical takeover, live broker admission or phone acceptance.
 
@@ -63,7 +64,11 @@ The [fanout-prefix witness](evdev-boundary.md) cases also retain concurrent
 post-grab motion and a held post-grab key through a separate state-query client.
 They challenge the source-derived prefix classifier on the actual kernel; they
 do not test console input-handler cutover or complete consumer/neutral/error
-handoff. The production reader still does not use this component.
+handoff. The private routing worker still does not opt into the cutover callback.
+The additional sole-reader case uses the real Linux loop on named REL-only
+sources, with an explicit model sink rather than live production admission. It
+requires one observed prefix, one boundary at its delivered input clock, one
+downstream tail and virtual-output teardown before the original grab releases.
 
 The root helper captures test output on errors, interruption and its 90-second
 timeout, kills its owned process group and removes only the original rule inode.
@@ -76,15 +81,15 @@ Logs belong to your regular user under `target/root-routing/run-*`; `latest`
 points to that attempt. `console.log` records build, wrapper and cleanup output;
 `kernel.log` retains root probe stdout. `status.json` records running/passed/failed
 and the final exit code. `receipt.json` is written only after checking one complete
-version-2 root receipt, the exact thirteen routing and eight recovery inventories,
-all twenty-one tests actually executed and passed, cleanup flags and the explicit
+version-2 root receipt, the exact fourteen routing and eight recovery inventories,
+all twenty-two tests actually executed and passed, cleanup flags and the explicit
 scope limits. The recovery summary must match its eight per-case results.
 Skips and zero-test runs
 cannot pass. Tell the agent when the script finishes so it can inspect these files.
 
 `oslo make test-root-routing` runs the unprivileged parser, actual owned-process
 and temporary-directory safety tests plus explicitly modeled privileged
-orchestration. It does not execute the twenty-one kernel cases or establish root
+orchestration. It does not execute the twenty-two kernel cases or establish root
 acceptance. The Nix `root-routing-receipts` check also lints the launchers.
 
 The separate `tests/run-root-handoff.sh` remains the native Morf/root/logind

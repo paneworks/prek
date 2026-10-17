@@ -10,6 +10,158 @@ use prek::{
 };
 use std::{io, panic::AssertUnwindSafe, path::PathBuf, time::Duration};
 
+struct CutoverSink {
+    source: Virtual,
+    output: Option<Virtual>,
+    target: Receiver,
+    probe: RawDevice,
+    device: Device,
+    requested: bool,
+    active: bool,
+    done: bool,
+    prefix: Vec<Frame>,
+    post: Vec<Frame>,
+    boundary: Option<(u64, Duration)>,
+    shutdown_held: bool,
+    released: bool,
+}
+impl InputSink for CutoverSink {
+    fn reader(
+        &mut self,
+        raw: &mut RawDevice,
+        _device: &Device,
+        buffer: ReaderBuffer,
+        _health: Option<&Heartbeat>,
+    ) -> io::Result<ReaderDisposition> {
+        if self.requested || !buffer.is_drained() {
+            return Ok(ReaderDisposition::Keep);
+        }
+        let mut handoff = linux::handoff::Handoff::new(raw)?;
+        match handoff.prepare()? {
+            linux::handoff::Preparation::Observe(events) => Ok(ReaderDisposition::Observe(events)),
+            linux::handoff::Preparation::Armed => {
+                send(&mut self.source, 1, &[(prek::input::EV_REL, 0, 11)]);
+                handoff.grab()?;
+                send(&mut self.source, 2, &[(prek::input::EV_REL, 0, 22)]);
+                handoff.classify()?;
+                self.requested = true;
+                Ok(ReaderDisposition::Cutover(handoff.commit()?))
+            }
+        }
+    }
+    fn reader_cutover(
+        &mut self,
+        source: &prek::input::Source,
+        through: u64,
+        at: Duration,
+    ) -> io::Result<()> {
+        assert!(!self.active);
+        assert_eq!(self.prefix.len(), 1);
+        assert_eq!(&self.prefix[0].source, source);
+        assert_eq!(through, self.prefix[0].sequence);
+        assert_eq!(at, self.prefix[0].at);
+        self.boundary = Some((through, at));
+        self.active = true;
+        Ok(())
+    }
+    fn push(&mut self, record: Record) -> io::Result<()> {
+        let Record::Frame { frame } = record else {
+            return Ok(());
+        };
+        if !self.active {
+            self.prefix.push(frame);
+            return Ok(());
+        }
+        let mut output = frame.clone();
+        output.source = self.device.source.clone();
+        let target = self.output.as_mut().unwrap();
+        target.enqueue(&output)?;
+        assert_eq!(target.flush()?, Flush::Complete);
+        let received = self.target.next(Duration::from_secs(1)).unwrap();
+        assert_eq!(received.events, frame.events);
+        assert!(self.target.next(Duration::from_millis(20)).is_none());
+        self.post.push(frame);
+        self.done = true;
+        Ok(())
+    }
+    fn deadline(&self) -> Option<Duration> {
+        None
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+    fn finished(&self) -> bool {
+        self.done
+    }
+    fn shutdown(&mut self) {
+        self.shutdown_held = match self.probe.grab() {
+            Err(error) => error.raw_os_error() == Some(nix::libc::EBUSY),
+            Ok(()) => {
+                let _ = self.probe.ungrab();
+                false
+            }
+        };
+        drop(self.output.take());
+    }
+    fn reader_released(&mut self, _: &prek::input::Source) -> io::Result<()> {
+        assert!(self.output.is_none());
+        self.probe.grab()?;
+        self.probe.ungrab()?;
+        self.released = true;
+        Ok(())
+    }
+}
+
+#[test]
+#[ignore = "requires authorized isolated uinput environment and packaged pre-add udev rule"]
+fn t58_reader_cutover_preserves_prefix_cursor_and_downstream_tail() {
+    let registry = authorized();
+    let motion = || {
+        let mut device = fixture(false);
+        device.name = format!("Prek test cutover {}", device.source.device);
+        device.capabilities = std::collections::BTreeMap::from([
+            (EV_SYN, vec![0]),
+            (prek::input::EV_REL, vec![0, 1]),
+        ]);
+        device
+    };
+    let original = motion();
+    let device = motion();
+    let source =
+        Virtual::create(registry.prepare_isolated(descriptor(&original)).unwrap()).unwrap();
+    let mut probe = Receiver::open(&source, &original.source);
+    assert!(probe.raw.supported_keys().is_none());
+    probe.raw.ungrab().unwrap();
+    let path = source.event_nodes().unwrap().into_iter().next().unwrap();
+    let output = Virtual::create(registry.prepare_isolated(descriptor(&device)).unwrap()).unwrap();
+    let target = Receiver::open(&output, &device.source);
+    let mut sink = CutoverSink {
+        source,
+        output: Some(output),
+        target,
+        probe: probe.raw,
+        device,
+        requested: false,
+        active: false,
+        done: false,
+        prefix: vec![],
+        post: vec![],
+        boundary: None,
+        shutdown_held: false,
+        released: false,
+    };
+    linux::observe(&[path], Some(Duration::from_secs(2)), &mut sink).unwrap();
+    assert!(sink.done && sink.active && sink.shutdown_held && sink.released);
+    assert_eq!(sink.prefix.len(), 1);
+    assert_eq!(sink.post.len(), 1);
+    assert_eq!(sink.prefix[0].sequence, 1);
+    assert_eq!(sink.post[0].sequence, 2);
+    assert_eq!(sink.prefix[0].source, sink.post[0].source);
+    assert_eq!(sink.prefix[0].events[0].value, 11);
+    assert_eq!(sink.post[0].events[0].value, 22);
+    assert_eq!(sink.boundary, Some((1, sink.prefix[0].at)));
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Exit {
     ReaderError,

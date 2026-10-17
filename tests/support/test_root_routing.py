@@ -70,6 +70,15 @@ class KernelReceipt(unittest.TestCase):
         with self.assertRaises(ValueError):
             root.test_inventory(inventory)
 
+    def test_inventory_without_the_real_reader_cutover_case_is_not_acceptance(self):
+        name = "lifecycle::t58_reader_cutover_preserves_prefix_cursor_and_downstream_tail"
+        self.assertIn(name, root.EXPECTED)
+        old = self.value()
+        old.update(tests=sorted(root.ALL_EXPECTED - {name}), passed=len(root.ALL_EXPECTED) - 1,
+                   routing_passed=len(root.EXPECTED) - 1)
+        with self.assertRaises(ValueError):
+            root.receipt(self.line(old))
+
     def test_receipt_rejects_missing_foreign_or_uncorrelated_fields(self):
         for field in self.value():
             value = self.value()
@@ -358,7 +367,7 @@ class RootRunModel(unittest.TestCase):
     def test_model_success_correlates_both_executables_and_removes_controls(self):
         with self.model() as (args, path, registry, rules, commands, output):
             root.run(args)
-            self.assertEqual(root.receipt(output.getvalue())["passed"], 21)
+            self.assertEqual(root.receipt(output.getvalue())["passed"], 22)
             self.assertEqual({entry.name for entry in path.iterdir()}, {"devices", "rules"})
             self.assertEqual(list(rules.iterdir()), [])
             self.assertEqual((registry / "foreign-record").read_text(), "preserved")

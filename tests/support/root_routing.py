@@ -20,6 +20,7 @@ EXPECTED = {
     "evdev_boundary::witness_prefix_retains_concurrent_motion_after_the_grab",
     "evdev_boundary::witness_without_prefix_preserves_a_postgrab_held_key",
     "lifecycle::t57_reader_errors_removal_finish_and_unwind_retire_output_before_releasing_input",
+    "lifecycle::t58_reader_cutover_preserves_prefix_cursor_and_downstream_tail",
     "t46_isolated_keyboard_receives_passthrough_once_and_drop_removes_nodes",
     "t46_isolated_mouse_preserves_motion_buttons_and_both_wheel_resolutions",
     "t48_isolated_touchpad_preserves_slots_tool_flags_and_button_clicks",

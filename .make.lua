@@ -190,6 +190,7 @@ make.alias("t", "test")
 make.recipe{ name = "test-handoff-boundary", desc = "bounded evdev fanout-prefix and ownership models",
              run = function()
                sh.cargo("test", "--locked", "--lib", "linux::handoff::")
+               sh.cargo("test", "--locked", "--lib", "linux::ingress::")
              end }
 
 make.recipe{ name = "test-routed-replay", desc = "offline downstream ownership, writes and recovery",

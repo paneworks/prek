@@ -1,9 +1,7 @@
 //! Linux discovery and the sole worker's device-reading loop.
 use crate::{
     Gesture,
-    input::{
-        self, Assembly, Axis, Contact, ContactId, Device, Frame, FrameAssembler, RawEvent, Source,
-    },
+    input::{self, Axis, Contact, ContactId, Device, Frame, FrameAssembler, Source},
     replay::{self, Observation, Record, Replay},
 };
 use evdev::{InputEvent, KeyCode, raw_stream::RawDevice};
@@ -21,10 +19,14 @@ use std::{
         unix::fs::{MetadataExt, OpenOptionsExt},
     },
     path::{Path, PathBuf},
-    time::{Duration, UNIX_EPOCH},
+    time::Duration,
 };
 
 pub mod handoff;
+mod ingress;
+#[cfg(test)]
+use crate::input::{Assembly, RawEvent};
+use ingress::{Cursor, Cursors, Pending};
 
 nix::ioctl_write_ptr!(set_clock_id, b'E', 0xa0, libc::c_int);
 nix::ioctl_read_buf!(get_mt_slots, b'E', 0x0a, libc::c_int);
@@ -363,7 +365,19 @@ pub(crate) fn initial_contacts(raw: &RawDevice, device: &Device) -> io::Result<V
 struct Reader {
     raw: RawDevice,
     device: Device,
-    assembler: FrameAssembler,
+    cursor: Cursor,
+}
+impl Cursors for Vec<Reader> {
+    fn cursor(&mut self, source: &Source) -> Option<&mut Cursor> {
+        self.iter_mut()
+            .find(|reader| &reader.device.source == source)
+            .map(|reader| &mut reader.cursor)
+    }
+    fn sources(&self) -> Vec<Source> {
+        self.iter()
+            .map(|reader| reader.device.source.clone())
+            .collect()
+    }
 }
 impl Reader {
     fn new(path: &Path, generation: u64) -> io::Result<(Self, Record)> {
@@ -384,58 +398,21 @@ impl Reader {
             keys,
             contacts,
         };
-        let assembler = FrameAssembler::new(device.source.clone());
+        let cursor = Cursor::new(device.source.clone());
         Ok((
             Self {
                 raw,
                 device,
-                assembler,
+                cursor,
             },
             record,
         ))
     }
 
     fn drain(&mut self) -> io::Result<Vec<Frame>> {
-        let mut frames = Vec::new();
-        let mut events_read = 0;
-        loop {
-            let events: Vec<_> = match self.raw.fetch_events() {
-                Ok(events) => events.collect(),
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(error) => return Err(error),
-            };
-            if events.is_empty() {
-                break;
-            }
-            events_read += events.len();
-            if events_read > 65_536 {
-                return Err(io::Error::other(
-                    "device backlog exceeds monitor's bounded drain limit",
-                ));
-            }
-            for event in events {
-                let at = event
-                    .timestamp()
-                    .duration_since(UNIX_EPOCH)
-                    .map_err(|_| io::Error::other("invalid monotonic input timestamp"))?;
-                let event = RawEvent {
-                    kind: event.event_type().0,
-                    code: event.code(),
-                    value: event.value(),
-                };
-                match self.assembler.push(event, at) {
-                    Assembly::Frame(frame) => frames.push(frame),
-                    Assembly::Lost => {
-                        return Err(io::Error::other(
-                            "input synchronization lost; this source requires reconciliation before recognition can resume",
-                        ));
-                    }
-                    Assembly::Pending => {}
-                }
-            }
-        }
-        Ok(frames)
+        ingress::drain(&mut self.cursor, || {
+            self.raw.fetch_events().map(Iterator::collect)
+        })
     }
 }
 
@@ -468,6 +445,7 @@ pub trait InputSink {
     /// ownership here; the original descriptor never crosses IPC. `buffer`
     /// describes frames already read by this loop. A transition into ownership
     /// must wait until it is drained; this does not establish a kernel boundary.
+    /// Return all consumed original events through Observe or Cutover.
     fn reader(
         &mut self,
         _raw: &mut RawDevice,
@@ -476,6 +454,14 @@ pub trait InputSink {
         _health: Option<&crate::supervisor::Heartbeat>,
     ) -> io::Result<ReaderDisposition> {
         Ok(ReaderDisposition::Keep)
+    }
+    /// Announce a delivered original prefix before accepting post-cutover frames.
+    /// `at` is the delivered input clock; this grants no transport readiness.
+    fn reader_cutover(&mut self, _source: &Source, _through: u64, _at: Duration) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "sink does not support reader cutovers",
+        ))
     }
     /// Retire virtual output while the loop still owns every original fd.
     /// Cleanup must be bounded and must also tolerate a failed transport.
@@ -533,12 +519,16 @@ fn buffered_sources(pending: &[Frame]) -> BTreeMap<&Source, usize> {
     counts
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum ReaderDisposition {
     Keep,
     /// Drop this reader after reporting removal, then rediscover its next
     /// source generation. Partial frames never cross the replacement boundary.
     Reopen,
+    /// Original events read by the hook, preceding the reader's kernel queue.
+    Observe(Vec<InputEvent>),
+    /// Classified input on the same source cursor, without a readiness grant.
+    Cutover(handoff::Cut),
 }
 
 struct ReaderOwner<'a, S: InputSink> {
@@ -727,7 +717,7 @@ fn observe_loop(
     let stop_at = duration
         .map(|duration| monotonic().map(|start| start.saturating_add(duration)))
         .transpose()?;
-    let mut pending = Vec::<Frame>::new();
+    let mut pending = Pending::default();
     let mut generations: BTreeMap<u64, u64> = readers
         .iter()
         .map(|reader| (reader.device.source.device, 1))
@@ -765,29 +755,36 @@ fn observe_loop(
         }
         sink.flush()?;
         let mut reopen = Vec::new();
-        let buffered = buffered_sources(&pending);
+        let buffered = buffered_sources(&pending.frames);
+        let mut staged = Pending::default();
         for (index, reader) in readers.iter_mut().enumerate() {
-            let buffer = ReaderBuffer::inspect(&reader.device.source, &reader.assembler, &buffered);
-            if sink.reader(&mut reader.raw, &reader.device, buffer, health.as_deref())?
-                == ReaderDisposition::Reopen
-            {
-                reopen.push(index);
+            let mut buffer =
+                ReaderBuffer::inspect(&reader.device.source, &reader.cursor.assembler, &buffered);
+            buffer.incomplete |= reader.cursor.cut_pending();
+            match sink.reader(&mut reader.raw, &reader.device, buffer, health.as_deref())? {
+                ReaderDisposition::Keep => {}
+                ReaderDisposition::Reopen => reopen.push(index),
+                ReaderDisposition::Observe(events) => {
+                    staged.extend(reader.cursor.ingest(events)?)?
+                }
+                ReaderDisposition::Cutover(cut) => {
+                    staged.extend(reader.cursor.cut(cut, buffer.is_drained())?)?
+                }
             }
+            pending.check_join(&staged)?;
         }
         drop(buffered);
+        pending.extend(staged.frames)?;
         for index in reopen.into_iter().rev() {
             let source = readers[index].device.source.clone();
-            pending.retain(|frame| frame.source != source);
-            sink.push(Record::Remove {
-                source: source.clone(),
-                at: now,
-            })?;
+            ingress::retire_source(&mut pending, readers, sink, &source, input_at)?;
             release_reader(readers.remove(index), &source, sink)?;
             scan_at = now;
         }
         if stop_at.is_some_and(|stop| now >= stop) {
             break;
         }
+        ingress::announce_ready(readers, sink, input_at)?;
         let health_deadline = health
             .as_ref()
             .map(|health| health.deadline())
@@ -797,15 +794,13 @@ fn observe_loop(
             .into_iter()
             .chain(stop_at)
             .chain(health_deadline)
+            .chain(pending.deadline())
             .chain(sink.device_policy().map(|_| scan_at))
             .min();
-        let timeout = if !pending.is_empty() {
-            PollTimeout::ZERO
-        } else {
-            deadline.map_or(PollTimeout::NONE, |deadline| {
-                poll_timeout(deadline.saturating_sub(now))
-            })
-        };
+        let poll_at = monotonic()?;
+        let timeout = deadline.map_or(PollTimeout::NONE, |deadline| {
+            poll_timeout(deadline.saturating_sub(poll_at))
+        });
         let flags = {
             let mut fds: Vec<_> = readers
                 .iter()
@@ -827,7 +822,6 @@ fn observe_loop(
         // Sample before draining all sources. Later frames stay pending so
         // no source can advance timers beyond another source's unread input.
         let watermark = monotonic()?;
-        input_at = watermark;
         let mut failed = Vec::new();
         for (index, reader) in readers.iter_mut().enumerate() {
             let error = if flags[index]
@@ -837,8 +831,15 @@ fn observe_loop(
             } else {
                 match reader.drain() {
                     Ok(frames) => {
-                        pending.extend(frames);
-                        None
+                        if frames.iter().any(|frame| frame.at < input_at) {
+                            reader.cursor.retire();
+                            Some(io::Error::other(
+                                "input source precedes the delivered watermark",
+                            ))
+                        } else {
+                            pending.extend(frames)?;
+                            None
+                        }
                     }
                     Err(error) => Some(error),
                 }
@@ -848,31 +849,18 @@ fn observe_loop(
                 failed.push(index);
             }
         }
-        if pending.len() > 65_536 {
-            return Err(io::Error::other("monitor pending-frame limit exceeded"));
-        }
-        pending.sort_by(|a, b| (a.at, &a.source, a.sequence).cmp(&(b.at, &b.source, b.sequence)));
-        let future = pending.partition_point(|frame| frame.at <= watermark);
-        for frame in pending.drain(..future) {
-            let record = Record::Frame { frame };
-            sink.push(record)?;
-            if sink.finished() {
-                sink.flush()?;
-                return Ok(());
-            }
-        }
         for index in failed.into_iter().rev() {
             let source = readers[index].device.source.clone();
-            pending.retain(|frame| frame.source != source);
-            let record = Record::Remove {
-                source: source.clone(),
-                at: watermark,
-            };
-            sink.push(record)?;
+            ingress::retire_source(&mut pending, readers, sink, &source, input_at)?;
             release_reader(readers.remove(index), &source, sink)?;
+        }
+        if ingress::dispatch(&mut pending, readers, sink, watermark, &mut input_at)? {
+            sink.flush()?;
+            return Ok(());
         }
         let tick = Record::Tick { at: watermark };
         sink.push(tick)?;
+        input_at = watermark;
         sink.flush()?;
         if readers.is_empty() && sink.device_policy().is_none() {
             return Err(io::Error::other("no observed device remains available"));
@@ -938,7 +926,7 @@ fn refresh_readers(
     config: &crate::config::Config,
     readers: &mut Vec<Reader>,
     generations: &mut BTreeMap<u64, u64>,
-    pending: &mut Vec<Frame>,
+    pending: &mut Pending,
     sink: &mut impl InputSink,
     now: Duration,
 ) -> io::Result<()> {
@@ -969,11 +957,7 @@ fn refresh_readers(
             })
         {
             let source = readers[index].device.source.clone();
-            pending.retain(|frame| frame.source != source);
-            sink.push(Record::Remove {
-                source: source.clone(),
-                at: now,
-            })?;
+            ingress::retire_source(pending, readers, sink, &source, now)?;
             release_reader(readers.remove(index), &source, sink)?;
         }
     }
