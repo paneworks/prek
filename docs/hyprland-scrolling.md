@@ -55,6 +55,46 @@ Run the numerical, typed-dispatch and adapter models with `oslo make test-hyprla
 They use fake monotonic time and do not open a compositor, touch devices or grab
 input. Model success does not establish native or physical acceptance.
 
+## Native layout metadata
+
+`ContextSampler::sample_layouts(client, generation)` queries the verified
+Hyprland **0.56.2 Lua** process. Other versions/providers refuse without trying
+REPL or dispatch syntax alternatives. It returns a generation/revision/timestamp
+and bounded native workspace records: output/monitor identity, active/special
+state, tiled algorithm, mapped window lifetime IDs and goal rectangles,
+floating/grouped/fullscreen flags, and scrolling column indices, normalized
+widths, ordered member lifetimes and each member's row.
+
+The collector sends one fixed `repl` expression, not caller-supplied Lua. It
+reads native getters and builds local JSON; it registers no globals, callbacks,
+IPC commands, plugins or configuration. Unlike ordinary `eval`, the official
+[REPL implementation](https://github.com/hyprwm/Hyprland/blob/efb50993780079460b0cbed1363e2166a2de1d9f/src/config/lua/ConfigManager.cpp)
+returns a successful scalar string as IPC output. No intentional errors are used
+as a data channel. Root does not evaluate user programs.
+
+Lock observations bracket collection and latch inhibition, even if the returned
+document is malformed. The actual config provider is checked before and after.
+All requests share one 200 ms deadline and retained socket/peer/process checks.
+Only successful collection advances the sampler revision. The caller still
+needs its verified logind binding and freshness checks; this API grants nothing.
+
+Collection/decoding are bounded to 64 workspaces and 512 mapped windows/column
+members. Strict JSON rejects unknown/trailing fields, malformed identities,
+duplicate addresses/lifetimes, inconsistent columns/rows, invalid geometry and
+ambiguous active workspaces. Full graph membership is checked, not just counts.
+
+**This is not the native camera offset, effective workspace-rule direction,
+work area, or rendered geometry.** It does not enable G11 or claim side-strip
+input. Those fields still need an authoritative contract and broker/executor
+integration. Do not invent missing bounds from the number of visible windows.
+
+`oslo make test-hyprland` also runs closed-query Luna/JSON and socket models.
+`oslo make test-cage-lua-wayland-fix` exercises the actual read-only query on
+three owned windows, changes only the owned test layout down/up, checks column
+membership/goal direction/lifetimes, then restores dwindle. Its
+`hyprland-layouts.json` is metadata acceptance, **not** continuous G11 rendering
+or unmodified stock/native/physical routing acceptance.
+
 ## Remaining integration gates
 
 Before enabling G11:
@@ -63,7 +103,8 @@ Before enabling G11:
    column/window lifetime evidence. Preserve reserved areas, keyboard insets and
    per-workspace overrides. Do not infer bounds from window count or only the
    visible windows. Native Lua getters are not automatically query replies:
-   `eval` returns `ok`, not a serialized expression result.
+   ordinary `eval` returns `ok`. The fixed REPL collector above obtains native
+   columns, not the missing effective camera/work-area fields.
 2. Bind that evidence through broker/context to preclaim eligibility for the
    actual rendered empty strip. Wrong/unknown layouts and unsupported backends
    must refuse before ownership, not consume then discover failure.

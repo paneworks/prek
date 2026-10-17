@@ -374,6 +374,7 @@ make.recipe{ name = "test-hyprland", desc = "bound Hyprland queries, window and 
              run = function()
                sh.cargo("test", "--locked", "--lib", "hyprland::dispatch::tests")
                sh.cargo("test", "--locked", "--lib", "hyprland::scrolling::tests")
+               sh.cargo("test", "--locked", "--lib", "hyprland::layouts::tests")
                sh.cargo("test", "--locked", "--test", "hyprland")
              end }
 

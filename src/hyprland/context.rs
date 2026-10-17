@@ -22,6 +22,31 @@ pub struct ContextSampler {
     inhibited: bool,
 }
 impl ContextSampler {
+    /// Fixed native Lua layout query with lock inhibition and one shared budget.
+    /// This metadata does not establish rendered regions or routing authority.
+    pub fn sample_layouts(
+        &mut self,
+        client: &Client,
+        generation: u64,
+    ) -> io::Result<super::layouts::Snapshot> {
+        if generation == 0 {
+            return Err(invalid("native layouts require a session generation"));
+        }
+        let captured_at = crate::ipc::monotonic()?;
+        let workspaces =
+            super::layouts::sample(client, Instant::now() + REQUEST_TIME, &mut self.inhibited)?;
+        let revision = self
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| invalid("context revision exhausted"))?;
+        self.revision = revision;
+        Ok(super::layouts::Snapshot {
+            generation,
+            revision,
+            captured_at,
+            workspaces,
+        })
+    }
     pub(crate) fn sample_layers(
         &mut self,
         client: &Client,

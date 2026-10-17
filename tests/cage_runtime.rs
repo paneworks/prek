@@ -710,6 +710,9 @@ fn window_acceptance(
     let Consumer::Hyprland { instance, .. } = checking.consumer() else {
         panic!()
     };
+    if std::env::var("PREK_CAGE_CONFIG_PROVIDER").as_deref() == Ok("lua") {
+        layout_acceptance(checking, &instance, output);
+    }
     focus_owned_window(&target_id, &instance);
     let initial = sampler.sample(checking, 1, SessionKind::User).unwrap();
     let initial_window = initial
@@ -981,6 +984,112 @@ return p.config.new{mode='route',policy={allowed_devices={'keyboard'},allow_hypr
     fs::write(
         output.join("hyprland-receipts.json"),
         serde_json::to_vec(&receipts).unwrap(),
+    )
+    .unwrap();
+}
+
+fn layout_acceptance(checking: &Client, instance: &str, output: &Path) {
+    let mut sampler = ContextSampler::default();
+    let original = sampler.sample_layouts(checking, 1).unwrap();
+    let workspace = original
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.active && !workspace.special)
+        .unwrap();
+    assert_eq!(workspace.layout, "dwindle");
+    assert!(workspace.windows.len() >= 3);
+    let id = workspace.id;
+    let identities: BTreeSet<_> = workspace
+        .windows
+        .iter()
+        .map(|window| window.id.clone())
+        .collect();
+    let mut receipts = vec![original];
+    for (layout, direction) in [
+        ("scrolling", "down"),
+        ("scrolling", "up"),
+        ("dwindle", "right"),
+    ] {
+        let command = format!(
+            "hl.config({{general={{layout={layout:?}}},scrolling={{direction={direction:?}}}}})"
+        );
+        let result = std::process::Command::new(std::env::var_os("PREK_CAGE_HYPRCTL").unwrap())
+            .args(["eval", &command])
+            .env("HYPRLAND_INSTANCE_SIGNATURE", instance)
+            .output()
+            .unwrap();
+        assert!(result.status.success());
+        assert_eq!(String::from_utf8(result.stdout).unwrap().trim(), "ok");
+        let until = monotonic().unwrap() + Duration::from_secs(3);
+        let snapshot = loop {
+            let snapshot = sampler.sample_layouts(checking, 1).unwrap();
+            let workspace = snapshot
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.id == id)
+                .unwrap();
+            if workspace.layout == layout {
+                assert_eq!(
+                    workspace
+                        .windows
+                        .iter()
+                        .map(|window| window.id.clone())
+                        .collect::<BTreeSet<_>>(),
+                    identities
+                );
+                if layout == "scrolling" {
+                    assert_eq!(workspace.columns.len(), workspace.windows.len());
+                    let first = workspace
+                        .windows
+                        .iter()
+                        .find(|window| window.id == workspace.columns[0].members[0])
+                        .unwrap();
+                    let second = workspace
+                        .windows
+                        .iter()
+                        .find(|window| window.id == workspace.columns[1].members[0])
+                        .unwrap();
+                    let delta = second.rect[1] - first.rect[1];
+                    let settled = if direction == "down" {
+                        delta > 1.
+                    } else {
+                        delta < -1.
+                    };
+                    if !settled {
+                        assert!(
+                            monotonic().unwrap() < until,
+                            "native scrolling direction did not settle"
+                        );
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                }
+                break snapshot;
+            }
+            assert!(
+                monotonic().unwrap() < until,
+                "owned native layout did not settle"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        receipts.push(snapshot);
+    }
+    let columns = |snapshot: &prek::hyprland::layouts::Snapshot| {
+        snapshot
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == id)
+            .unwrap()
+            .columns
+            .clone()
+    };
+    assert_eq!(columns(&receipts[1]), columns(&receipts[2]));
+    fs::write(
+        output.join("hyprland-layouts.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "status":"passed","workspace":id,"snapshots":receipts
+        }))
+        .unwrap(),
     )
     .unwrap();
 }

@@ -1,6 +1,8 @@
 #![cfg(target_os = "linux")]
 
 use prek::hyprland::Client;
+#[path = "support/hyprland_layouts.rs"]
+mod layouts;
 #[path = "support/power_tests.rs"]
 mod power;
 #[path = "support/hyprland_actions.rs"]

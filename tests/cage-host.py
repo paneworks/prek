@@ -304,6 +304,12 @@ def main():
                         assert windows[1]["workspace_after"] == windows[1]["workspace_before"] - 1
                         assert windows[2]["target_closed"] and windows[2]["guard_alive"]
                         print("PASS: granted Lua plans moved the owned starting window right/left with workspace follow, then closed it while another window was focused; guard remained alive.")
+                        if args.hyprland_config == "lua":
+                            layouts = json.loads((output / "hyprland-layouts.json").read_text())
+                            assert layouts["status"] == "passed" and len(layouts["snapshots"]) == 4
+                            assert all(snapshot["generation"] == 1 for snapshot in layouts["snapshots"])
+                            assert [snapshot["revision"] for snapshot in layouts["snapshots"]] == sorted({snapshot["revision"] for snapshot in layouts["snapshots"]})
+                            print("PASS: fixed read-only native layout queries observed owned down/up scrolling columns and unchanged window lifetimes, then restored dwindle; not G11 gesture acceptance.")
                     dispatches = json.loads((output / "dispatches.json").read_text())
                     a = [event for event in dispatches if event["rule"] == "local-a"]
                     b = [event for event in dispatches if event["rule"] == "local-b"]
