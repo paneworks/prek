@@ -13,6 +13,157 @@ fn document() -> String {
     .to_string()
 }
 
+fn context_reply(request: &[u8]) -> Option<String> {
+    Some(match request {
+        b"j/monitors" => serde_json::json!([{"id":0,"name":"panel","disabled":false,
+            "width":1000,"height":800,"scale":1,"x":0,"y":0,"transform":0,
+            "activeWorkspace":{"id":1},"dpmsStatus":true}])
+        .to_string(),
+        b"j/clients" => serde_json::json!([{"address":"0x1234","stableId":"abc","mapped":true,
+            "monitor":0,"workspace":{"id":1},"at":[0,20],"size":[500,700]}])
+        .to_string(),
+        b"j/layers" | b"j/activewindow" => "{}".into(),
+        _ => return None,
+    })
+}
+
+#[test]
+fn combined_layout_sampling_matches_and_conservatively_stamps_the_owning_snapshot() {
+    for mismatch in [false, true] {
+        let server = Server::with_version(
+            move |request| {
+                if let Some(reply) = context_reply(request) {
+                    return reply;
+                }
+                match request {
+                    b"j/locked" => "{\"locked\":false}".into(),
+                    b"j/status" => "{\"configProvider\":\"lua\"}".into(),
+                    _ => {
+                        assert!(request.starts_with(b"/repl "));
+                        let mut value: serde_json::Value =
+                            serde_json::from_str(&document()).unwrap();
+                        if mismatch {
+                            value["workspaces"][0]["windows"][0]["rect"][0] = serde_json::json!(1);
+                        }
+                        value.to_string()
+                    }
+                }
+            },
+            Duration::ZERO,
+            "0.56.2",
+        );
+        let (context, layouts) = ContextSampler::default()
+            .sample_with_layouts(&server.client(), 1, prek::context::SessionKind::User)
+            .unwrap();
+        assert_eq!(context.windows.len(), 1);
+        assert_eq!(layouts.is_none(), mismatch);
+        if let Some(layouts) = layouts {
+            layouts.validate_context(&context).unwrap();
+            assert_eq!(layouts.captured_at, context.captured_at);
+            assert_eq!(layouts.revision, context.revision);
+        }
+    }
+}
+
+#[test]
+fn optional_layout_timeout_does_not_freshen_or_remove_ordinary_context() {
+    let server = Server::with_version(
+        move |request| {
+            if let Some(reply) = context_reply(request) {
+                return reply;
+            }
+            match request {
+                b"j/locked" => "{\"locked\":false}".into(),
+                b"j/status" => "{\"configProvider\":\"lua\"}".into(),
+                _ => {
+                    assert!(request.starts_with(b"/repl "));
+                    thread::sleep(Duration::from_millis(90));
+                    document()
+                }
+            }
+        },
+        Duration::ZERO,
+        "0.56.2",
+    );
+    let client = server.client();
+    let before = prek::ipc::monotonic().unwrap();
+    let (context, layouts) = ContextSampler::default()
+        .sample_with_layouts(&client, 1, prek::context::SessionKind::User)
+        .unwrap();
+    let after = prek::ipc::monotonic().unwrap();
+    assert!(layouts.is_none());
+    assert_eq!(context.windows.len(), 1);
+    assert!(context.captured_at >= before && context.captured_at < after);
+    assert!(after - context.captured_at >= Duration::from_millis(40));
+}
+
+#[test]
+fn combined_layout_lock_witness_invalidates_the_whole_desktop_context() {
+    let locked = Arc::new(AtomicBool::new(false));
+    let state = Arc::clone(&locked);
+    let server = Server::with_version(
+        move |request| {
+            if let Some(reply) = context_reply(request) {
+                return reply;
+            }
+            match request {
+                b"j/locked" => format!("{{\"locked\":{}}}", state.load(Ordering::Relaxed)),
+                b"j/status" => "{\"configProvider\":\"lua\"}".into(),
+                _ => {
+                    assert!(request.starts_with(b"/repl "));
+                    state.store(true, Ordering::Relaxed);
+                    document()
+                }
+            }
+        },
+        Duration::ZERO,
+        "0.56.2",
+    );
+    let client = server.client();
+    let mut sampler = ContextSampler::default();
+    assert!(
+        sampler
+            .sample_with_layouts(&client, 1, prek::context::SessionKind::User)
+            .is_err()
+    );
+    assert!(sampler.inhibited());
+    locked.store(false, Ordering::Relaxed);
+    assert!(
+        sampler
+            .sample(&client, 1, prek::context::SessionKind::User)
+            .is_err()
+    );
+}
+
+#[test]
+fn combined_layout_sampling_preserves_other_backends_and_never_queries_greeter_metadata() {
+    for (version, kind) in [
+        ("0.54.3", prek::context::SessionKind::User),
+        ("0.56.2", prek::context::SessionKind::Greeter),
+        ("0.56.2", prek::context::SessionKind::User),
+    ] {
+        let server = Server::with_version(
+            move |request| {
+                if let Some(reply) = context_reply(request) {
+                    return reply;
+                }
+                match request {
+                    b"j/locked" => "{\"locked\":false}".into(),
+                    b"j/status" => "{\"configProvider\":\"hyprlang\"}".into(),
+                    _ => panic!("optional metadata performed unsupported IPC"),
+                }
+            },
+            Duration::ZERO,
+            version,
+        );
+        let (context, layouts) = ContextSampler::default()
+            .sample_with_layouts(&server.client(), 1, kind)
+            .unwrap();
+        assert_eq!(context.windows.len(), 1);
+        assert!(layouts.is_none());
+    }
+}
+
 #[test]
 fn native_layout_sampling_uses_only_the_closed_query_and_brackets_provider_and_lock() {
     let requests = Arc::new(Mutex::new(Vec::new()));

@@ -35,6 +35,32 @@ pub struct Subscription {
 pub struct ProvidedContext {
     pub binding: crate::context::Binding,
     pub snapshot: crate::context::Snapshot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layouts: Option<crate::hyprland::layouts::Snapshot>,
+}
+impl ProvidedContext {
+    pub(crate) fn validate_layouts(&self) -> io::Result<()> {
+        if let Some(layouts) = &self.layouts {
+            if self.binding.kind != crate::context::SessionKind::User
+                || self.binding.uid == 0
+                || self.binding.compositor_pid == 0
+                || self.binding.compositor_start == 0
+            {
+                return Err(protocol::invalid(
+                    "native layouts require a user desktop binding",
+                ));
+            }
+            layouts.validate_context(&self.snapshot)?;
+        }
+        Ok(())
+    }
+    pub(crate) fn recognition_copy(&self) -> Self {
+        Self {
+            binding: self.binding.clone(),
+            snapshot: self.snapshot.clone(),
+            layouts: None,
+        }
+    }
 }
 impl Subscription {
     pub(crate) fn same_registration(&self, other: &Self) -> bool {
@@ -355,6 +381,7 @@ impl Registry {
                 }
             }
             if let Some(context) = &subscription.context {
+                context.validate_layouts()?;
                 if context.binding.seat != subscription.seat
                     || context.snapshot.generation != subscription.fence.session
                 {
@@ -1320,6 +1347,7 @@ mod tests {
     }
     fn with_context(mut subscription: Subscription, revision: u64, at: u64) -> Subscription {
         subscription.context = Some(Box::new(ProvidedContext {
+            layouts: None,
             binding: crate::context::Binding {
                 seat: subscription.seat.clone(),
                 session: "verified-session".into(),
@@ -1340,6 +1368,45 @@ mod tests {
             },
         }));
         subscription
+    }
+
+    #[test]
+    fn native_layout_metadata_cannot_bypass_private_context_validation() {
+        let view = crate::context_transfer::tests::native_view(ms(0), 1);
+        let mut valid = subscription("seat0", 1);
+        valid.context = view.context;
+        let mut invalid = valid.clone();
+        invalid
+            .context
+            .as_mut()
+            .unwrap()
+            .layouts
+            .as_mut()
+            .unwrap()
+            .revision += 1;
+        let mut registry = Registry::new(config()).unwrap();
+        assert!(
+            registry
+                .update(
+                    Subscriptions {
+                        revision: 1,
+                        seats: vec![invalid]
+                    },
+                    ms(0)
+                )
+                .is_err()
+        );
+        assert!(registry.observers.is_empty());
+        registry
+            .update(
+                Subscriptions {
+                    revision: 1,
+                    seats: vec![valid],
+                },
+                ms(0),
+            )
+            .unwrap();
+        assert_eq!(registry.observers.len(), 1);
     }
     fn registry(config: Config) -> Registry {
         let mut registry = Registry::new(config).unwrap();

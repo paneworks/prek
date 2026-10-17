@@ -359,6 +359,37 @@
 ---@field compositor_start prek.Identity
 ---@field kind 'user'|'greeter'
 
+---@class (exact) prek.NativeLayoutPosition
+---@field index integer Zero-based native column index.
+---@field row integer Zero-based member index in that column.
+---@class (exact) prek.NativeLayoutWindow
+---@field id string Exact hexadecimal address:stable lifetime.
+---@field rect number[] Native animation-goal x,y,width,height; not rendered bounds.
+---@field hidden boolean
+---@field floating boolean
+---@field grouped boolean
+---@field fullscreen integer
+---@field column? prek.NativeLayoutPosition
+---@class (exact) prek.NativeLayoutColumn
+---@field index integer Zero-based native column index.
+---@field width number Native primary-axis fraction, not pixels.
+---@field members string[] Ordered exact window lifetimes.
+---@class (exact) prek.NativeLayoutWorkspace
+---@field id integer
+---@field output? string
+---@field monitor? integer
+---@field active boolean
+---@field special boolean
+---@field layout string
+---@field windows prek.NativeLayoutWindow[]
+---@field columns prek.NativeLayoutColumn[]
+---@class (exact) prek.NativeLayouts
+---@field fence prek.Fence
+---@field generation prek.Identity
+---@field revision prek.Identity
+---@field captured_at prek.MonotonicTime
+---@field workspaces prek.NativeLayoutWorkspace[]
+
 ---@alias prek.Space 'normalized'|'logical'|'millimetres'|'relative'
 ---@alias prek.CancelReason 'event_loss'|'backward_time'|'invalid_frame'|'source_changed'|'disconnected'|'mapping_changed'
 ---@class (exact) prek.TouchTaps
@@ -992,6 +1023,9 @@ function SchedulerAPI.sleep(duration) error("Prek editor definition") end
 function ContextAPI.snapshot() error("Prek editor definition") end
 ---@return prek.Binding?
 function ContextAPI.binding() error("Prek editor definition") end
+---Fresh copy-only native metadata matched to this desktop sample. No scope or execution authority.
+---@return prek.NativeLayouts?
+function ContextAPI.layouts() error("Prek editor definition") end
 ---Unknown after the current view expires.
 ---@return prek.State
 function ContextAPI.state() error("Prek editor definition") end

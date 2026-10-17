@@ -113,6 +113,7 @@ impl View {
                 ));
             }
             context.snapshot.validate().map_err(io::Error::other)?;
+            context.validate_layouts()?;
         }
         Ok(())
     }
@@ -256,6 +257,142 @@ impl Assembly {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    pub(crate) fn native_view(at: Duration, count: usize) -> View {
+        use crate::hyprland::layouts::{Column, Position, Snapshot as Layouts, Window, Workspace};
+        let mut view = view(at);
+        let context = view.context.as_mut().unwrap();
+        let original = context.snapshot.windows[0].clone();
+        context.snapshot.windows = (1..=count)
+            .map(|id| {
+                let mut window = original.clone();
+                window.id = format!("0x{id:x}:{id:x}");
+                window
+            })
+            .collect();
+        let windows: Vec<_> = context
+            .snapshot
+            .windows
+            .iter()
+            .enumerate()
+            .map(|(index, window)| Window {
+                id: window.id.clone(),
+                rect: [
+                    window.rect.origin.x,
+                    window.rect.origin.y,
+                    window.rect.size.x,
+                    window.rect.size.y,
+                ],
+                hidden: false,
+                floating: false,
+                grouped: false,
+                fullscreen: 0,
+                column: Some(Position { index, row: 0 }),
+            })
+            .collect();
+        let columns = windows
+            .iter()
+            .enumerate()
+            .map(|(index, window)| Column {
+                index,
+                width: 0.5,
+                members: vec![window.id.clone()],
+            })
+            .collect();
+        context.layouts = Some(Layouts {
+            generation: context.snapshot.generation,
+            revision: context.snapshot.revision,
+            captured_at: context.snapshot.captured_at,
+            workspaces: vec![Workspace {
+                id: 3,
+                output: Some("fixture-output".into()),
+                monitor: Some(0),
+                active: true,
+                special: false,
+                layout: "scrolling".into(),
+                windows,
+                columns,
+            }],
+        });
+        view
+    }
+
+    #[test]
+    fn native_layout_graph_is_bound_to_the_exact_desktop_sample() {
+        let original = native_view(Duration::from_secs(1), 2);
+        original.validate().unwrap();
+        for case in 0..13 {
+            let mut changed = original.clone();
+            let context = changed.context.as_mut().unwrap();
+            let layouts = context.layouts.as_mut().unwrap();
+            match case {
+                0 => layouts.generation += 1,
+                1 => layouts.revision += 1,
+                2 => layouts.captured_at += Duration::from_nanos(1),
+                3 => context.binding.kind = crate::context::SessionKind::Greeter,
+                4 => context.snapshot.secure_overlay = true,
+                5 => layouts.workspaces[0].output = Some("other".into()),
+                6 => layouts.workspaces[0].id += 1,
+                7 => layouts.workspaces[0].windows[0].rect[0] += 1.,
+                8 => {
+                    context.snapshot.windows.pop().unwrap();
+                }
+                9 => layouts.workspaces[0].active = false,
+                10 => layouts.workspaces.clear(),
+                11 => context.snapshot.windows[0].mapped = false,
+                _ => context.binding.uid = 0,
+            }
+            assert!(changed.validate().is_err(), "case {case}");
+        }
+    }
+
+    #[test]
+    fn native_layout_context_uses_full_chunked_transfer_without_private_packet_pressure() {
+        let original = native_view(Duration::from_secs(1), 160);
+        let encoded = original.encode().unwrap();
+        assert!(encoded.len() > protocol::MAX_PACKET);
+        let projected = original.context.as_ref().unwrap().recognition_copy();
+        assert!(projected.layouts.is_none());
+        assert_eq!(
+            projected.snapshot,
+            original.context.as_ref().unwrap().snapshot
+        );
+        assert_eq!(
+            projected.binding,
+            original.context.as_ref().unwrap().binding
+        );
+        assert!(original.context.as_ref().unwrap().layouts.is_some());
+        let mut assembly = Assembly::new(original.fence, Duration::from_secs(1)).unwrap();
+        let mut result = None;
+        for (index, chunk) in encoded.chunks(CHUNK_BYTES).enumerate() {
+            let wire = protocol::encode(&protocol::Packet {
+                version: protocol::VERSION,
+                sequence: index as u64 + 1,
+                at: Duration::from_secs(1),
+                message: protocol::Reply::ContextData {
+                    fence: original.fence,
+                    offset: index * CHUNK_BYTES,
+                    bytes: encoded.len(),
+                    data: chunk.to_vec(),
+                },
+            })
+            .unwrap();
+            let packet: protocol::Packet<protocol::Reply> = serde_json::from_slice(&wire).unwrap();
+            packet.message.validate().unwrap();
+            let protocol::Reply::ContextData {
+                fence,
+                offset,
+                bytes,
+                data,
+            } = packet.message
+            else {
+                panic!()
+            };
+            result = assembly
+                .push(fence, offset, bytes, &data, Duration::from_secs(1))
+                .unwrap();
+        }
+        assert_eq!(result.unwrap(), original);
+    }
     #[test]
     fn rendered_native_bounds_require_the_same_live_output_and_do_not_create_scopes() {
         let at = Duration::from_secs(1);
@@ -352,6 +489,7 @@ pub(crate) mod tests {
             state: State::Desktop,
             error: None,
             context: Some(Box::new(ProvidedContext {
+                layouts: None,
                 binding: Binding {
                     seat: "seat0".into(),
                     session: "fixture".into(),

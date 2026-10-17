@@ -273,6 +273,11 @@ pub fn api() -> serde_json::Value {
             "Return an owned copy of the verified session/compositor binding for a fresh snapshot; compositor_start is a decimal string; conveys no authority.",
         ),
         (
+            "layouts",
+            "NativeLayouts | nil",
+            "Copy native layout/column metadata matched to the fresh owning desktop snapshot and fence; nil when unavailable, inhibited or expired; no camera bounds, rendered scope or action authority.",
+        ),
+        (
             "state",
             "State",
             "Return the broker's fresh session state, or unknown after the view expires.",
@@ -473,6 +478,17 @@ pub fn api() -> serde_json::Value {
         "independent":"explicit global rules and explicit screen-off scopes need not infer keyboard state",
         "loss":"invalidates the frozen output target","stock_compositor":"unknown",
         "native_annotations":"inspection only until complete verified mapping and coverage"
+    });
+    manifest["native_layout_queries"] = serde_json::json!({
+        "capability":"context","backend":"Hyprland 0.56.2 Lua","freshness_ms":250,
+        "combined_ipc_budget_ms":200,"optional_ipc_budget_ms":50,"maximum_workspaces":64,"maximum_mapped_windows":512,
+        "identity":"same owning desktop sample, generation, revision and conservative timestamp; current broker fence",
+        "integers":"generation/revision/fence identities are canonical decimal strings; window lifetime identities are address:stable hexadecimal strings",
+        "columns":"zero-based native indices/rows; one-based Lua arrays; width is a native primary-axis fraction",
+        "coordinates":"integer native animation-goal rectangles [x,y,width,height], not rendered hit tests",
+        "unavailable":"nil for unsupported, unavailable, inconsistent, non-desktop, stale or inhibited context; a verified empty inventory is an empty workspace array",
+        "authority":"inspection only; no camera/work-area/effective-rule bounds or input ownership/grants",
+        "effects":false
     });
     manifest
 }
@@ -915,7 +931,7 @@ fn instantiate(
                     morf.set(ctx, field, self::morf::getter(&ctx, host.clone(), field))?;
                 }
                 let context: Table = module.get(ctx, "context")?;
-                for field in ["snapshot", "binding", "state", "fence", "error"] {
+                for field in ["snapshot", "binding", "state", "fence", "error", "layouts"] {
                     context.set(ctx, field, self::context::getter(&ctx, host.clone(), field))?;
                 }
                 let devices: Table = module.get(ctx, "devices")?;

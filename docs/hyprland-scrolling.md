@@ -88,6 +88,18 @@ work area, or rendered geometry.** It does not enable G11 or claim side-strip
 input. Those fields still need an authoritative contract and broker/executor
 integration. Do not invent missing bounds from the number of visible windows.
 
+The broker's combined sampler now attaches only graphs that match the same
+desktop generation/revision, conservative original capture time, complete
+mapped-window identities/goals and output/workspace association. Optional native
+reads get 50 ms inside the existing total 200 ms budget; failure drops only the
+inspection graph unless lock inhibition invalidates all desktop context. The
+chunked user-context path exposes fresh copy-only `context.layouts()` data with
+lossless identities; see [the Lua reference](lua-api.md#native-layout-inspection).
+Graphs are deliberately not private-worker preclaim proof: their new inspection
+field is omitted from the private recognition projection, while its complete
+core geometry stays unchanged. Native action proof/transport remains a separate
+required integration gate before any layout-dependent ownership is enabled.
+
 `oslo make test-hyprland` also runs closed-query Luna/JSON and socket models.
 `oslo make test-cage-lua-wayland-fix` exercises the actual read-only query on
 three owned windows, changes only the owned test layout down/up, checks column

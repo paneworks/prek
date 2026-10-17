@@ -1106,7 +1106,11 @@ impl Broker {
             .map(|bound| Subscription {
                 seat: bound.seat.clone(),
                 fence: bound.fence,
-                context: bound.context.value.clone(),
+                context: bound
+                    .context
+                    .value
+                    .as_ref()
+                    .map(|context| Box::new(context.recognition_copy())),
                 capabilities: bound
                     .capabilities
                     .iter()
@@ -2315,8 +2319,14 @@ impl Broker {
             bound
                 .context
                 .sampler
-                .sample(&bound.client, bound.fence.session, binding.kind)
-                .map(Some)
+                .sample_with_layouts(&bound.client, bound.fence.session, binding.kind)
+                .map(|(snapshot, layouts)| {
+                    Some(ProvidedContext {
+                        binding: binding.clone(),
+                        snapshot,
+                        layouts,
+                    })
+                })
         } else {
             bound
                 .context
@@ -2342,9 +2352,8 @@ impl Broker {
                 Ok(snapshot) => {
                     bound.context.state = snapshot
                         .as_ref()
-                        .map_or(State::Unknown, |snapshot| snapshot.state);
-                    bound.context.value =
-                        snapshot.map(|snapshot| Box::new(ProvidedContext { binding, snapshot }));
+                        .map_or(State::Unknown, |provided| provided.snapshot.state);
+                    bound.context.value = snapshot.map(Box::new);
                     bound.context.usable = true;
                     bound.context.error = None;
                 }
@@ -2800,6 +2809,7 @@ mod tests {
         assert!(subscriptions_fit(std::slice::from_ref(&subscription)));
         let mut oversized = subscription;
         oversized.context = Some(Box::new(ProvidedContext {
+            layouts: None,
             binding: crate::context::Binding {
                 seat: "seat0".into(),
                 session: "verified".into(),
@@ -2821,6 +2831,41 @@ mod tests {
         }));
         oversized.context.as_mut().unwrap().binding.session = "x".repeat(protocol::MAX_PACKET);
         assert!(!subscriptions_fit(&[oversized]));
+    }
+
+    #[test]
+    fn native_layout_inspection_cannot_exhaust_the_private_recognition_packet() {
+        let mut exercised = false;
+        for count in (32..=256).step_by(16) {
+            let view = crate::context_transfer::tests::native_view(Duration::ZERO, count);
+            let mut subscription = Subscription {
+                seat: "seat0".into(),
+                fence: view.fence,
+                context: view.context.clone(),
+                capabilities: BTreeSet::from([Capability::Context]),
+                consumer: None,
+            };
+            if subscriptions_fit(std::slice::from_ref(&subscription)) {
+                continue;
+            }
+            subscription.context = view
+                .context
+                .as_ref()
+                .map(|context| Box::new(context.recognition_copy()));
+            if subscriptions_fit(std::slice::from_ref(&subscription)) {
+                assert!(view.context.as_ref().unwrap().layouts.is_some());
+                assert_eq!(
+                    subscription.context.as_ref().unwrap().snapshot,
+                    view.context.as_ref().unwrap().snapshot
+                );
+                exercised = true;
+                break;
+            }
+        }
+        assert!(
+            exercised,
+            "fixture never exercised optional inspection packet pressure"
+        );
     }
     fn progress(fence: Fence, ordinal: u64, stage: Stage) -> Reply {
         let phase = match stage {

@@ -166,6 +166,7 @@ impl<E: Coordinator> Seat<E> {
             state,
             context: (state == self.snapshot.state).then(|| {
                 Box::new(ProvidedContext {
+                    layouts: None,
                     binding: self.binding.clone(),
                     snapshot: self.snapshot.clone(),
                 })

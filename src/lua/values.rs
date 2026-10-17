@@ -290,6 +290,22 @@ pub(super) fn snapshot<'gc>(
 }
 
 #[cfg(target_os = "linux")]
+pub(super) fn layouts<'gc>(
+    ctx: Context<'gc>,
+    layouts: &crate::hyprland::layouts::Snapshot,
+    fence: crate::protocol::Fence,
+) -> Result<Value<'gc>, luna::Error<'gc>> {
+    let value = luna_util::serde::to_value(ctx, layouts).map_err(io::Error::other)?;
+    let Value::Table(table) = value else {
+        unreachable!("native layouts serialize as a table")
+    };
+    table.set(ctx, "generation", identity(ctx, layouts.generation))?;
+    table.set(ctx, "revision", identity(ctx, layouts.revision))?;
+    table.set(ctx, "fence", context_fence(ctx, &fence)?)?;
+    Ok(value)
+}
+
+#[cfg(target_os = "linux")]
 pub(super) fn binding<'gc>(
     ctx: Context<'gc>,
     binding: &crate::context::Binding,

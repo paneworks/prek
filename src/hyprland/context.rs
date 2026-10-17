@@ -22,6 +22,37 @@ pub struct ContextSampler {
     inhibited: bool,
 }
 impl ContextSampler {
+    /// Collect ordinary geometry and optional matching native layouts under one budget.
+    pub fn sample_with_layouts(
+        &mut self,
+        client: &Client,
+        generation: u64,
+        kind: SessionKind,
+    ) -> io::Result<(Snapshot, Option<super::layouts::Snapshot>)> {
+        let until = Instant::now() + REQUEST_TIME;
+        let snapshot = self.sample_until(client, generation, kind, until)?;
+        if kind != SessionKind::User || snapshot.state != State::Desktop || snapshot.secure_overlay
+        {
+            return Ok((snapshot, None));
+        }
+        let layout_until = until.min(Instant::now() + Duration::from_millis(50));
+        let workspaces = match super::layouts::sample(client, layout_until, &mut self.inhibited) {
+            Ok(workspaces) => workspaces,
+            Err(error) if self.inhibited => return Err(error),
+            Err(_) => return Ok((snapshot, None)),
+        };
+        let layouts = super::layouts::Snapshot {
+            generation: snapshot.generation,
+            revision: snapshot.revision,
+            captured_at: snapshot.captured_at,
+            workspaces,
+        };
+        let layouts = layouts
+            .validate_context(&snapshot)
+            .is_ok()
+            .then_some(layouts);
+        Ok((snapshot, layouts))
+    }
     /// Fixed native Lua layout query with lock inhibition and one shared budget.
     /// This metadata does not establish rendered regions or routing authority.
     pub fn sample_layouts(

@@ -309,6 +309,10 @@ def main():
                             assert layouts["status"] == "passed" and len(layouts["snapshots"]) == 4
                             assert all(snapshot["generation"] == 1 for snapshot in layouts["snapshots"])
                             assert [snapshot["revision"] for snapshot in layouts["snapshots"]] == sorted({snapshot["revision"] for snapshot in layouts["snapshots"]})
+                            copied = [row["fields"] for row in map(json.loads,(output / "bound-layouts.jsonl").read_text().splitlines())
+                                      if row["message"] == "bound-native-layout"]
+                            assert len(copied) >= 4 and all(row["windows"] >= 3 for row in copied)
+                            assert any(row["layout"] == "scrolling" and row["columns"] >= 3 for row in copied)
                             print("PASS: fixed read-only native layout queries observed owned down/up scrolling columns and unchanged window lifetimes, then restored dwindle; not G11 gesture acceptance.")
                     dispatches = json.loads((output / "dispatches.json").read_text())
                     a = [event for event in dispatches if event["rule"] == "local-a"]
@@ -323,6 +327,13 @@ def main():
                     contexts = [row["fields"] for row in logs if row["message"] == "local-context"]
                     assert len(contexts) >= 9 and all(row["outputs"] > 0 and row["uid"] == os.geteuid() for row in contexts)
                     assert len({row["revision"] for row in contexts}) == len(contexts)
+                    native_layouts = [row["fields"] for row in logs if row["message"] == "local-native-layouts"]
+                    if args.hyprland_config == "lua":
+                        assert native_layouts and all(row["windows"] > 0 for row in native_layouts)
+                        assert all(row["revision"] in {context["revision"] for context in contexts} for row in native_layouts)
+                        print("PASS: matched native layouts crossed parent/helper context transfer into copy-only Lua queries without granting ownership.")
+                    else:
+                        assert not native_layouts
                     changes = [row["fields"] for row in logs if row["message"] == "local-rules-changed"]
                     assert changes == [{"accepted":True,"revision":"2","state":"accepted"}]
                     layers = [row["fields"] for row in logs if row["message"] == "local-layer-state"]

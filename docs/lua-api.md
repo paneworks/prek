@@ -738,6 +738,7 @@ not change broker state, a later query, or an action grant.
 | --- | --- |
 | `context.snapshot()` | Complete fresh `Snapshot`, or `nil` when absent/expired. |
 | `context.binding()` | Verified `Binding` for that snapshot, or `nil`. |
+| `context.layouts()` | Matching native layout graph on a fresh owning desktop, or `nil`; inspection only. |
 | `context.state()` | Fresh broker state, or `"unknown"` when the view expires. |
 | `context.fence()` | Fresh `{broker, configuration, session}` fence, or `nil`. |
 | `context.error()` | Fresh broker diagnostic of at most 512 bytes, or `nil`. |
@@ -750,6 +751,48 @@ less than 250 ms old when queried. Receiving an old snapshot does not extend
 its lifetime. All times use the system monotonic clock and appear as
 `{secs, nanos}`. Lua-held copies are historical data after this freshness
 window; use a new query before making a decision.
+
+### Native layout inspection
+
+`context.layouts()` is runtime-only and requires the owning registration's
+`context` capability, not permission to execute window actions. It copies
+broker-collected Hyprland 0.56.2 Lua metadata matched against that same complete
+desktop snapshot. Unsupported backends, absent/inconsistent metadata, greeters,
+secure overlays, stale context and inhibition return `nil`. Ordinary geometry
+remains available when only optional layout collection fails. An observed lock
+invalidates the whole desktop context and remains latched until the verified
+unlock transition.
+
+The returned `NativeLayouts` contains:
+
+- `fence`, `generation`, `revision`, `captured_at`: the owning broker fence and
+  exact desktop sample identity. Generation/revision/fence identities are
+  canonical decimal strings; `captured_at` is `{secs, nanos}` and is conservatively
+  the original geometry capture time, not completion of later metadata reads.
+- `workspaces`: at most 64 records with `id`, optional `output`/`monitor`, native
+  `active`/`special` flags, tiled algorithm `layout`, `windows` and `columns`.
+- `windows`: at most 512 globally. Each has exact hexadecimal `id`
+  (`address:stable`), goal `rect = {x, y, width, height}`, `hidden`, `floating`,
+  `grouped`, native `fullscreen` mode, and optional `column = {index, row}`.
+- `columns`: ordered scrolling records with native `index`, normalized primary
+  `width` fraction and ordered `members` containing exact window lifetime IDs.
+  Native column indices/member rows start at **zero**; Lua arrays start at one.
+
+Copies can be changed locally; subsequent queries still return the original
+host data. Receiving, copying or retaining a view never renews its 250 ms lease.
+Native collection gets at most 50 ms inside the existing combined 200 ms context
+budget. Mapped windows, goals, outputs, workspaces, graph membership and sample
+identities must match; incomplete or mismatched graphs are not published.
+Large views use the existing bounded chunked context transfer without truncating
+window/member lists. This inspection-only graph is excluded from private
+recognition packets, preserving their existing complete core context and size
+budget; it is not yet worker preclaim evidence.
+
+These are **animation goals, not rendered hit tests**. No effective camera
+offset/work area, arbitrary workspace-rule resolution, empty-strip scope, input
+ownership or execution grant is implied. G11 remains disabled until its separate
+authority/execution/rendering gates pass. See
+[continuous viewport integration](hyprland-scrolling.md).
 
 | Type | Fields |
 | --- | --- |

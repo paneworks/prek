@@ -92,6 +92,7 @@ impl Fixture {
             state: snapshot.state,
             error: None,
             context: Some(Box::new(ProvidedContext {
+                layouts: None,
                 binding: Binding {
                     seat: "seat0".into(),
                     session: "model".into(),

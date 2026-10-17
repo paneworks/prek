@@ -78,9 +78,9 @@
     "constructor": "recognizers.define",
     "context": "fresh owning desktop without secure overlay",
     "custom_sequences": "source-bound nested plans; native coordinator required",
-    "declaration_registry": "Config.recognizers; canonical source-approved definitions persist without rules; runtime additions need no template and cannot add or alter definitions",
     "data_bytes": 4096,
     "data_depth": 8,
+    "declaration_registry": "Config.recognizers; canonical source-approved definitions persist without rules; runtime additions need no template and cannot add or alter definitions",
     "device_catalog": "independent declaration-scoped metadata without held state or ordinary input callbacks; ordinary resets when --input is also enabled",
     "identities": "canonical decimal strings",
     "inputs": [
@@ -211,13 +211,13 @@
     "unavailable": "nil for absent/stale/inhibited context, missing name or retired reference; known empty arrays remain empty"
   },
   "hyprland_adapter": {
-    "additional_versions": ["0.56.2"],
-    "config_provider": "hyprlang or lua; frozen at installation and rechecked via j/status before each 0.56.2 mutation",
-    "lua_dispatch": "closed typed factories check frozen stable_id or explicit monitor name; no raw dispatch API, nil target or syntax fallback",
     "actions": [
       "close",
       "move_left_and_follow",
       "move_right_and_follow"
+    ],
+    "additional_versions": [
+      "0.56.2"
     ],
     "agent_flags": [
       "hyprland"
@@ -231,6 +231,7 @@
     ],
     "capability": "hyprland_actions",
     "completion": "accepted dispatch plus observed target disappearance or exact workspace/output/focus",
+    "config_provider": "hyprlang or lua; frozen at installation and rechecked via j/status before each 0.56.2 mutation",
     "deadline": "remaining broker grant and 200ms total IPC budget",
     "desktop_operations_per_plan": 1,
     "direct_phases": [
@@ -243,6 +244,7 @@
       "scroll_stack"
     ],
     "host_api": "actions::Executor::set_hyprland_adapter(HyprlandAdapter)",
+    "lua_dispatch": "closed typed factories check frozen stable_id or explicit monitor name; no raw dispatch API, nil target or syntax fallback",
     "named_handler_flags": [
       "lua",
       "hyprland"
@@ -426,19 +428,34 @@
     },
     "unavailable": "nil without a fresh owning desktop; empty array when no fresh native frame is available"
   },
+  "native_layout_queries": {
+    "authority": "inspection only; no camera/work-area/effective-rule bounds or input ownership/grants",
+    "backend": "Hyprland 0.56.2 Lua",
+    "capability": "context",
+    "columns": "zero-based native indices/rows; one-based Lua arrays; width is a native primary-axis fraction",
+    "combined_ipc_budget_ms": 200,
+    "coordinates": "integer native animation-goal rectangles [x,y,width,height], not rendered hit tests",
+    "effects": false,
+    "freshness_ms": 250,
+    "identity": "same owning desktop sample, generation, revision and conservative timestamp; current broker fence",
+    "integers": "generation/revision/fence identities are canonical decimal strings; window lifetime identities are address:stable hexadecimal strings",
+    "maximum_mapped_windows": 512,
+    "maximum_workspaces": 64,
+    "optional_ipc_budget_ms": 50,
+    "unavailable": "nil for unsupported, unavailable, inconsistent, non-desktop, stale or inhibited context; a verified empty inventory is an empty workspace array"
+  },
   "offline_replay": {
+    "configuration": "validated copy; no live rule or policy change",
     "custom": {
+      "clock": "recorded time only; real execution budgets remain",
+      "live_authority": false,
+      "maximum_context_seats": 16,
+      "maximum_shared_vms": 4,
+      "nested_custom_replay": false,
       "phase": "runtime",
       "source": "fresh approved source VM per recorded seat; no live callback state",
-      "clock": "recorded time only; real execution budgets remain",
-      "maximum_shared_vms": 4,
-      "maximum_context_seats": 16,
-      "work_budget_ms": 250,
-      "nested_custom_replay": false,
-      "live_authority": false
+      "work_budget_ms": 250
     },
-    "recorded_context": "configured replay only: record=context with at, binding and snapshot; generic and live engines reject it",
-    "configuration": "validated copy; no live rule or policy change",
     "effects": false,
     "expectations": "finish(true) requires matching final expected, expected_rules or routing=expected; unchecked replay never claims a passing test",
     "failure": "malformed records, engine errors and resource/expectation failures retire that replay; ordinary uncaught callback errors retire the VM",
@@ -459,17 +476,18 @@
       "rules",
       "routing"
     ],
-    "routing": {
-      "version": 1,
-      "readiness": "recorded descriptor/consumer/feedback and neutral source; no live grant",
-      "delivery": "explicit poll/write tickets; exact raw scheduled frames; independent input/wall clocks",
-      "finish": "every admitted transport explicitly retired or recovered",
-      "effects": false
-    },
     "phases": [
       "configuration",
       "runtime"
-    ]
+    ],
+    "recorded_context": "configured replay only: record=context with at, binding and snapshot; generic and live engines reject it",
+    "routing": {
+      "delivery": "explicit poll/write tickets; exact raw scheduled frames; independent input/wall clocks",
+      "effects": false,
+      "finish": "every admitted transport explicitly retired or recovered",
+      "readiness": "recorded descriptor/consumer/feedback and neutral source; no live grant",
+      "version": 1
+    }
   },
   "phase": "configuration_and_session_actions",
   "rule_hooks": {
@@ -1025,6 +1043,12 @@
       "name": "context.binding",
       "phase": "runtime",
       "signature": "context.binding() -> Binding | nil"
+    },
+    {
+      "description": "Copy native layout/column metadata matched to the fresh owning desktop snapshot and fence; nil when unavailable, inhibited or expired; no camera bounds, rendered scope or action authority.",
+      "name": "context.layouts",
+      "phase": "runtime",
+      "signature": "context.layouts() -> NativeLayouts | nil"
     },
     {
       "description": "Return the broker's fresh session state, or unknown after the view expires.",

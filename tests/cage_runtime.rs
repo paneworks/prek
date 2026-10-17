@@ -90,9 +90,16 @@ fn context(
     // snapshot succeeds; never extend the production request/freshness limit
     // or reuse the prior sample. Invalid/security failures remain immediate.
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
-    let snapshot = loop {
-        match sampler.sample(client, 1, SessionKind::User) {
-            Ok(snapshot) => break snapshot,
+    let (snapshot, layouts) = loop {
+        match sampler.sample_with_layouts(client, 1, SessionKind::User) {
+            Ok((_, None)) if std::env::var("PREK_CAGE_CONFIG_PROVIDER").as_deref() == Ok("lua") => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "owned native context remained unavailable"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Ok(context) => break context,
             Err(error)
                 if error.kind() == std::io::ErrorKind::TimedOut
                     && std::time::Instant::now() < deadline =>
@@ -119,6 +126,7 @@ fn context(
             sampled_at: now,
             state: snapshot.state,
             context: Some(Box::new(ProvidedContext {
+                layouts,
                 binding: binding.clone(),
                 snapshot: snapshot.clone(),
             })),
@@ -178,6 +186,7 @@ impl InputObserver {
                             ]),
                             consumer: None,
                             context: Some(Box::new(ProvidedContext {
+                                layouts: None,
                                 binding: binding.clone(),
                                 snapshot,
                             })),
@@ -329,6 +338,15 @@ p.events.on('context_changed',function(event)
     assert(local_point and local_point.x==0 and local_point.y==0)
   end
   assert(#p.regions.list()==#snapshot.regions)
+  local native=p.context.layouts()
+  if native then
+    assert(native.revision==snapshot.revision and native.generation==snapshot.generation)
+    assert(native.fence.session==event.fence.session and #native.workspaces>0)
+    local id=native.workspaces[1].windows[1].id
+    native.workspaces[1].windows[1].id='forged'
+    assert(p.context.layouts().workspaces[1].windows[1].id==id)
+    p.log.info('local-native-layouts',{revision=snapshot.revision,windows=#native.workspaces[1].windows})
+  end
   p.log.info('local-context',{revision=snapshot.revision,outputs=#snapshot.outputs,uid=binding.uid})
 end)
 p.events.on('matched',function(event)
@@ -711,7 +729,7 @@ fn window_acceptance(
         panic!()
     };
     if std::env::var("PREK_CAGE_CONFIG_PROVIDER").as_deref() == Ok("lua") {
-        layout_acceptance(checking, &instance, output);
+        layout_acceptance(checking, binding, fence, app, &instance, output);
     }
     focus_owned_window(&target_id, &instance);
     let initial = sampler.sample(checking, 1, SessionKind::User).unwrap();
@@ -764,6 +782,7 @@ return p.config.new{mode='route',policy={allowed_devices={'keyboard'},allow_hypr
         state: snapshot.state,
         error: None,
         context: Some(Box::new(ProvidedContext {
+            layouts: None,
             binding: binding.clone(),
             snapshot,
         })),
@@ -988,9 +1007,74 @@ return p.config.new{mode='route',policy={allowed_devices={'keyboard'},allow_hypr
     .unwrap();
 }
 
-fn layout_acceptance(checking: &Client, instance: &str, output: &Path) {
+fn layout_acceptance(
+    checking: &Client,
+    binding: &Binding,
+    fence: Fence,
+    app: &Path,
+    instance: &str,
+    output: &Path,
+) {
     let mut sampler = ContextSampler::default();
-    let original = sampler.sample_layouts(checking, 1).unwrap();
+    let definition=Definition::compile(r#"
+local p=require('prek')
+p.events.on('context_changed',function(event)
+ local native=p.context.layouts();local core=p.context.snapshot()
+ assert(native and core and native.revision==core.revision and native.fence.session==event.fence.session)
+ assert(not p.capabilities.has('hyprland_actions'))
+ local ws=native.workspaces[1];local windows={}
+ for _,window in ipairs(ws.windows) do windows[window.id]=window end
+ for index,column in ipairs(ws.columns) do
+  assert(column.index==index-1)
+  for row,id in ipairs(column.members) do
+   assert(windows[id] and windows[id].column.index==column.index and windows[id].column.row==row-1)
+  end
+ end
+ if ws.columns[1] then
+  local id=ws.columns[1].members[1];ws.columns[1].members[1]='forged'
+  assert(p.context.layouts().workspaces[1].columns[1].members[1]==id)
+ end
+ p.log.info('bound-native-layout',{revision=native.revision,layout=ws.layout,columns=#ws.columns,windows=#ws.windows})
+end)
+return {version=1}
+"#,"owned-bound-layout.lua").unwrap();
+    let mut session = Session::spawn(app, fence, "seat0", definition).unwrap();
+    let mut logs = fs::File::create(output.join("bound-layouts.jsonl")).unwrap();
+    settle(&mut session, &mut logs);
+    let mut sample = |sampler: &mut ContextSampler| {
+        let until = monotonic().unwrap() + Duration::from_secs(3);
+        let (snapshot, layouts) = loop {
+            let (snapshot, layouts) = sampler
+                .sample_with_layouts(checking, 1, SessionKind::User)
+                .unwrap();
+            if let Some(layouts) = layouts {
+                break (snapshot, layouts);
+            }
+            assert!(
+                monotonic().unwrap() < until,
+                "owned matching native layout remained unavailable"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        session
+            .update_context(View {
+                fence,
+                sampled_at: monotonic().unwrap(),
+                state: snapshot.state,
+                context: Some(Box::new(ProvidedContext {
+                    binding: binding.clone(),
+                    snapshot,
+                    layouts: Some(layouts.clone()),
+                })),
+                error: None,
+                morf: vec![],
+                morf_rendered: vec![],
+            })
+            .unwrap();
+        settle(&mut session, &mut logs);
+        layouts
+    };
+    let original = sample(&mut sampler);
     let workspace = original
         .workspaces
         .iter()
@@ -1022,7 +1106,7 @@ fn layout_acceptance(checking: &Client, instance: &str, output: &Path) {
         assert_eq!(String::from_utf8(result.stdout).unwrap().trim(), "ok");
         let until = monotonic().unwrap() + Duration::from_secs(3);
         let snapshot = loop {
-            let snapshot = sampler.sample_layouts(checking, 1).unwrap();
+            let snapshot = sample(&mut sampler);
             let workspace = snapshot
                 .workspaces
                 .iter()
@@ -1084,6 +1168,8 @@ fn layout_acceptance(checking: &Client, instance: &str, output: &Path) {
             .clone()
     };
     assert_eq!(columns(&receipts[1]), columns(&receipts[2]));
+    session.stop().unwrap();
+    settle(&mut session, &mut logs);
     fs::write(
         output.join("hyprland-layouts.json"),
         serde_json::to_vec(&serde_json::json!({
@@ -1163,6 +1249,7 @@ devices={keyboard={keys={'KEY_A','KEY_B'}}},rules={
         state: snapshot.state,
         error: None,
         context: Some(Box::new(ProvidedContext {
+            layouts: None,
             binding: binding.clone(),
             snapshot,
         })),

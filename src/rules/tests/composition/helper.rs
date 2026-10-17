@@ -108,6 +108,7 @@ return p.config.new{policy={allow_input_events=true,allowed_devices={'keyboard'}
             sampled_at: ms(started),
             state: State::Desktop,
             context: Some(Box::new(crate::worker::ProvidedContext {
+                layouts: None,
                 binding,
                 snapshot: current,
             })),

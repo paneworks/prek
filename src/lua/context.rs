@@ -58,6 +58,17 @@ pub(super) fn getter<'gc>(
                 })
             });
         let mut value = match field {
+            "layouts" => desktop(&host)
+                .and_then(|view| {
+                    view.context
+                        .as_ref()?
+                        .layouts
+                        .as_ref()
+                        .map(|layouts| (view, layouts))
+                })
+                .map(|(view, layouts)| values::layouts(ctx, layouts, view.fence))
+                .transpose()?
+                .unwrap_or(Value::Nil),
             "snapshot" => provided
                 .map(|context| values::snapshot(ctx, &context.snapshot))
                 .transpose()?
@@ -89,7 +100,7 @@ pub(super) fn getter<'gc>(
             } else {
                 Value::Nil
             };
-        } else if matches!(field, "snapshot" | "binding")
+        } else if matches!(field, "snapshot" | "binding" | "layouts")
             && provided.is_none_or(|context| !fresh(context.snapshot.captured_at))
         {
             value = Value::Nil;
@@ -131,7 +142,7 @@ mod tests {
 
     #[test]
     fn context_queries_are_runtime_only() {
-        for field in ["snapshot", "binding", "state", "fence", "error"] {
+        for field in ["snapshot", "binding", "state", "fence", "error", "layouts"] {
             let source =
                 format!("local p=require('prek'); p.context.{field}(); return {{version=1}}");
             assert!(
@@ -141,6 +152,65 @@ mod tests {
                     .contains("runtime evaluation")
             );
         }
+    }
+
+    #[test]
+    fn native_layout_queries_preserve_identity_copies_and_expire_with_the_original_sample() {
+        let definition = Definition::compile(r#"
+local p=require('prek')
+p.events.on('context_changed',function(event)
+ if event.unavailable then assert(p.context.layouts()==nil);return end
+ local layout=p.context.layouts()
+ assert(layout and layout.generation=='18446744073709551615' and layout.revision=='18446744073709551614')
+ assert(layout.fence.session==layout.generation and layout.fence.broker[1]=='18446744073709551615')
+ assert(layout.revision==p.context.snapshot().revision and #layout.workspaces==1)
+ local ws=layout.workspaces[1]
+ assert(ws.id==3 and ws.output=='fixture-output' and #ws.windows==2 and #ws.columns==2)
+ assert(ws.windows[1].id=='0x1:1' and ws.windows[1].column.index==0 and ws.windows[1].column.row==0)
+ assert(ws.columns[1].index==0 and ws.columns[1].members[1]=='0x1:1' and ws.columns[1].width==0.5)
+ layout.fence.session='forged';ws.windows[1].id='forged';ws.columns[1].members[1]='forged'
+ assert(p.context.layouts().workspaces[1].windows[1].id=='0x1:1')
+ assert(p.context.layouts().workspaces[1].columns[1].members[1]=='0x1:1')
+ assert(not p.capabilities.has('hyprland_actions'))
+ p.log.info('native-copy')
+end)
+return {version=1}
+"#, "native-layout-view.lua").unwrap();
+        let mut view = crate::context_transfer::tests::native_view(Duration::ZERO, 2);
+        view.fence.broker = crate::protocol::Epoch([u64::MAX, 1 << 63]);
+        view.fence.session = u64::MAX;
+        let context = view.context.as_mut().unwrap();
+        context.snapshot.generation = u64::MAX;
+        context.snapshot.revision = u64::MAX - 1;
+        let layouts = context.layouts.as_mut().unwrap();
+        layouts.generation = u64::MAX;
+        layouts.revision = u64::MAX - 1;
+        let mut runtime = definition.instantiate().unwrap();
+        runtime.set_context(view.clone(), Duration::ZERO).unwrap();
+        assert_eq!(
+            runtime
+                .dispatch(EventKind::ContextChanged, &serde_json::json!({}))
+                .unwrap()[0]
+                .message,
+            "native-copy"
+        );
+        runtime.set_clock(Duration::from_millis(250)).unwrap();
+        runtime
+            .dispatch(
+                EventKind::ContextChanged,
+                &serde_json::json!({"unavailable":true}),
+            )
+            .unwrap();
+        view.context.as_mut().unwrap().layouts = None;
+        runtime
+            .set_context(view, Duration::from_millis(251))
+            .unwrap();
+        runtime
+            .dispatch(
+                EventKind::ContextChanged,
+                &serde_json::json!({"unavailable":true}),
+            )
+            .unwrap();
     }
 
     #[test]

@@ -381,6 +381,24 @@ make.recipe{ name = "test-hyprland", desc = "bound Hyprland queries, window and 
 make.recipe{ name = "check", desc = "type-check every target",
              run = function() sh.cargo("check", "--locked", "--all-targets") end }
 
+make.recipe{ name = "api-json", desc = "refresh the shipped Lua API manifest",
+             run = function()
+               sh.bash("-c", [[set -euo pipefail
+tmp=$(mktemp docs/.lua-api.XXXXXX)
+trap 'rm -f "$tmp"' EXIT
+cargo run --locked -- api --json | jq . > "$tmp"
+mv "$tmp" docs/lua-api.json]])
+             end }
+
+make.recipe{ name = "test-context-layouts", desc = "bound native context transfer, Lua copies and sampling",
+             run = function()
+               sh.cargo("test", "--locked", "--lib", "context_transfer::tests::native_layout")
+               sh.cargo("test", "--locked", "--lib", "lua::context::tests::native_layout")
+               sh.cargo("test", "--locked", "--lib", "service::tests::native_layout")
+               sh.cargo("test", "--locked", "--lib", "worker::tests::native_layout")
+               sh.cargo("test", "--locked", "--test", "hyprland", "layouts::")
+             end }
+
 make.recipe{
   name = "test-distribution",
   desc = "unprivileged Nix bundle validation and refusal tests",
