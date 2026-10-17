@@ -3,6 +3,7 @@
 #[cfg(target_os = "linux")]
 pub mod native;
 pub mod output;
+pub mod worker;
 use crate::{
     config::Layer,
     input::{KeyState, Source},
@@ -441,6 +442,11 @@ impl Keys {
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum Owner {
     Physical(SourceKey),
+    Remap {
+        key: SourceKey,
+        generation: u64,
+        id: u64,
+    },
     Synthetic {
         seat: String,
         generation: u64,
@@ -450,8 +456,14 @@ pub enum Owner {
 impl Owner {
     fn seat(&self) -> &str {
         match self {
-            Self::Physical(key) => &key.source.seat,
+            Self::Physical(key) | Self::Remap { key, .. } => &key.source.seat,
             Self::Synthetic { seat, .. } => seat,
+        }
+    }
+    fn remap_key(&self) -> Option<&SourceKey> {
+        match self {
+            Self::Physical(key) | Self::Remap { key, .. } => Some(key),
+            Self::Synthetic { .. } => None,
         }
     }
 }
@@ -532,7 +544,7 @@ impl LogicalKeys {
         let owners: Vec<_> = self
             .owners
             .keys()
-            .filter(|owner| matches!(owner, Owner::Physical(key) if key.source == *source))
+            .filter(|owner| owner.remap_key().is_some_and(|key| key.source == *source))
             .cloned()
             .collect();
         owners
@@ -541,7 +553,24 @@ impl LogicalKeys {
             .collect()
     }
     pub fn cancel_generation(&mut self, seat: &str, generation: u64) -> Vec<Transition> {
-        let owners: Vec<_> = self.owners.keys().filter(|owner| matches!(owner, Owner::Synthetic { seat: owned_seat, generation: owned_generation, .. } if owned_seat == seat && *owned_generation == generation)).cloned().collect();
+        let owners: Vec<_> = self
+            .owners
+            .keys()
+            .filter(|owner| match owner {
+                Owner::Synthetic {
+                    seat: owned_seat,
+                    generation: owned_generation,
+                    ..
+                } => owned_seat == seat && *owned_generation == generation,
+                Owner::Remap {
+                    key,
+                    generation: owned_generation,
+                    ..
+                } => key.source.seat == seat && *owned_generation == generation,
+                Owner::Physical(_) => false,
+            })
+            .cloned()
+            .collect();
         owners
             .iter()
             .flat_map(|owner| self.release_owner(owner))
@@ -912,6 +941,55 @@ mod tests {
         assert!(keys.down("seat0", 42));
         assert_eq!(keys.release_owner(&owner(1)).len(), 1);
         assert!(keys.release_owner(&synthetic).is_empty());
+    }
+    #[test]
+    fn remap_instance_retirement_is_generation_and_source_scoped() {
+        let mut keys = LogicalKeys::default();
+        for (generation, id) in [(1, 1), (1, 2), (2, 3)] {
+            keys.update(
+                Owner::Remap {
+                    key: SourceKey {
+                        source: source(0),
+                        code: 30,
+                    },
+                    generation,
+                    id,
+                },
+                42,
+                true,
+            )
+            .unwrap();
+        }
+        keys.update(owner(3), 42, true).unwrap();
+        let mut other_seat = source(0);
+        other_seat.seat = "seat1".into();
+        keys.update(
+            Owner::Remap {
+                key: SourceKey {
+                    source: other_seat,
+                    code: 30,
+                },
+                generation: 1,
+                id: 4,
+            },
+            42,
+            true,
+        )
+        .unwrap();
+        assert!(keys.cancel_generation("seat0", 1).is_empty());
+        assert!(keys.release_owner(&owner(3)).is_empty());
+        assert!(keys.down("seat0", 42));
+        assert_eq!(
+            keys.cancel_source(&source(0)),
+            vec![Transition {
+                seat: "seat0".into(),
+                code: 42,
+                down: false
+            }]
+        );
+        assert!(!keys.down("seat0", 42));
+        assert!(keys.down("seat1", 42));
+        assert!(keys.cancel_source(&source(0)).is_empty());
     }
     #[test]
     fn t17_backward_time_cancels_key_conditions_and_timers() {

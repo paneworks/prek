@@ -45,14 +45,21 @@ struct Won {
 struct Dispatch {
     outcome: RouteOutcome,
     configuration: u64,
+    rule_revision: u64,
     chain: Option<Arc<Vec<ClaimedChain>>>,
     reorder_scope: Option<crate::protocol::ReorderScope>,
+    key_epoch: u64,
+    inputs: BTreeMap<Source, u64>,
 }
 
 pub struct ScopedDispatch {
     pub event: Event,
     pub reorder_scope: Option<crate::protocol::ReorderScope>,
+    key_work: Option<Box<KeyWork>>,
 }
+
+mod keys;
+pub use keys::KeyWork;
 
 pub struct Routing {
     native_claims: BTreeMap<u64, native::Claim>,
@@ -67,6 +74,7 @@ pub struct Routing {
     capabilities: BTreeSet<Capability>,
     capability_generation: u64,
     capability_expires: Duration,
+    key_epoch: u64,
     won: BTreeMap<u64, Won>,
     dispatches: VecDeque<Dispatch>,
     events: Vec<Event>,
@@ -177,6 +185,7 @@ impl Routing {
             capabilities: BTreeSet::new(),
             capability_generation: 0,
             capability_expires: Duration::ZERO,
+            key_epoch: 1,
             won: BTreeMap::new(),
             dispatches: VecDeque::new(),
             events: Vec::new(),
@@ -199,16 +208,33 @@ impl Routing {
         capabilities: BTreeSet<Capability>,
         at: Duration,
     ) {
+        if self.capability_generation != generation
+            || self.capabilities.contains(&Capability::SyntheticInput)
+                != capabilities.contains(&Capability::SyntheticInput)
+            || at >= self.capability_expires && self.capability_generation != 0
+        {
+            self.advance_key_epoch();
+        }
         self.capability_generation = generation;
         self.capabilities = capabilities;
         self.capability_expires = at + crate::context::PROVIDER_LEASE;
         self.retire_native(at);
     }
     pub(crate) fn restrict_actions(&mut self, capabilities: &BTreeSet<Capability>) {
+        if self.capabilities.contains(&Capability::SyntheticInput)
+            && !capabilities.contains(&Capability::SyntheticInput)
+        {
+            self.advance_key_epoch();
+        }
         self.capabilities
             .retain(|capability| capabilities.contains(capability));
         if !self.capabilities.contains(&Capability::HyprlandActions) {
             self.clear_native();
+        }
+    }
+    fn advance_key_epoch(&mut self) {
+        if self.key_epoch != 0 {
+            self.key_epoch = self.key_epoch.checked_add(1).unwrap_or(0);
         }
     }
     pub fn attach(
@@ -304,6 +330,11 @@ impl Routing {
     }
     fn available(&self, intent: &RouteIntent, at: Duration) -> bool {
         self.capability_generation == self.authority_generation
+            && (self.key_epoch != 0
+                || !matches!(
+                    intent.rule.action,
+                    crate::config::Action::Keys { .. } | crate::config::Action::Remap { .. }
+                ))
             && (!native::required(&intent.rule.action) || self.native_scope(intent).is_some())
             && (!intent.rule.action.requires_hyprland()
                 || self.engine.config().policy.allow_hyprland_actions
@@ -652,11 +683,26 @@ impl Routing {
                     won.emitted = true;
                 }
                 let reorder_scope = self.native_scope(&outcome.intent);
+                let inputs = outcome
+                    .intent
+                    .sources()
+                    .iter()
+                    .chain(std::iter::once(outcome.intent.source()))
+                    .map(|source| {
+                        (
+                            source.clone(),
+                            self.engine.source_input_sequence(source).unwrap_or(0),
+                        )
+                    })
+                    .collect();
                 self.dispatches.push_back(Dispatch {
                     outcome,
                     configuration: self.engine.generation(),
+                    rule_revision: self.engine.rule_revision(),
                     chain,
                     reorder_scope,
+                    inputs,
+                    key_epoch: self.key_epoch,
                 });
             } else if matches!(
                 outcome.intent.rule.trigger,
@@ -1023,9 +1069,23 @@ impl Routing {
                     |chain| self.chain_receipt_valid(chain),
                 )
             {
+                let event = dispatch.outcome.event.clone();
+                let reorder_scope = dispatch.reorder_scope.clone();
+                let key_work = self
+                    .engine
+                    .recognition_fence()
+                    .filter(|_| {
+                        matches!(
+                            dispatch.outcome.intent.rule.action,
+                            crate::config::Action::Keys { .. }
+                                | crate::config::Action::Remap { .. }
+                        )
+                    })
+                    .map(|fence| Box::new(KeyWork { fence, dispatch }));
                 result.push(ScopedDispatch {
-                    event: dispatch.outcome.event,
-                    reorder_scope: dispatch.reorder_scope,
+                    event,
+                    reorder_scope,
+                    key_work,
                 });
             } else if matches!(
                 dispatch.outcome.intent.rule.trigger,

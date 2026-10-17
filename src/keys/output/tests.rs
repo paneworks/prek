@@ -143,6 +143,83 @@ fn events(values: &[(u16, i32)]) -> Vec<RawEvent> {
         .collect()
 }
 
+fn remap(id: u64, generation: u64, device: u64) -> Claim {
+    let key = SourceKey {
+        source: source(device),
+        code: 30,
+    };
+    Claim {
+        owner: Owner::Remap {
+            key,
+            generation,
+            id,
+        },
+        origin: Some(source(device)),
+        configuration: generation,
+        serial: id,
+    }
+}
+
+#[test]
+fn remap_instances_share_target_counts_without_aliasing_same_source_owners() {
+    let (mut output, state) = model();
+    let one = remap(1, 1, 0);
+    let two = remap(2, 1, 0);
+    output.hold(one.clone(), &[42], Duration::ZERO).unwrap();
+    drain(&mut output);
+    output.hold(two.clone(), &[42], Duration::ZERO).unwrap();
+    drain(&mut output);
+    output.release(&one, Duration::ZERO).unwrap();
+    drain(&mut output);
+    assert!(output.down(42));
+    output.repeat(&two, Duration::ZERO).unwrap();
+    drain(&mut output);
+    output.cancel(&one, Duration::ZERO).unwrap();
+    drain(&mut output);
+    assert!(output.down(42));
+    output.release(&two, Duration::ZERO).unwrap();
+    drain(&mut output);
+    assert_eq!(
+        state.borrow().events,
+        [events(&[(42, 1)]), events(&[(42, 2)]), events(&[(42, 0)])].concat()
+    );
+}
+
+#[test]
+fn remap_instances_require_exact_origin_generation_serial_and_one_target() {
+    for variant in 0..5 {
+        let (mut output, state) = model();
+        let mut claim = remap(1, 1, 0);
+        match variant {
+            0 => claim.origin = Some(source(2)),
+            1 => claim.origin = None,
+            2 => claim.configuration = 2,
+            3 => claim.serial = 2,
+            _ => {}
+        }
+        let keys = if variant == 4 { vec![42, 30] } else { vec![42] };
+        assert!(output.hold(claim, &keys, Duration::ZERO).is_err());
+        assert!(state.borrow().frames.is_empty());
+    }
+    let (mut output, _) = model();
+    assert!(output.tap(remap(1, 1, 0), &[30], Duration::ZERO).is_err());
+}
+
+#[test]
+fn generation_retirement_releases_only_its_matching_remap_instances() {
+    let (mut output, _) = model();
+    output.hold(remap(1, 1, 1), &[42], Duration::ZERO).unwrap();
+    drain(&mut output);
+    output.hold(remap(1, 2, 1), &[42], Duration::ZERO).unwrap();
+    drain(&mut output);
+    output.retire_generation(1, Duration::ZERO).unwrap();
+    drain(&mut output);
+    assert!(output.down(42));
+    output.retire_source(&source(1), Duration::ZERO).unwrap();
+    drain(&mut output);
+    assert!(!output.down(42));
+}
+
 #[test]
 fn t46_partial_frames_commit_once_only_after_the_whole_frame() {
     let (mut output, state) = model();

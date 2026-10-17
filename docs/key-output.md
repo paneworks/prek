@@ -48,17 +48,19 @@ run it. `oslo make test-generated-keyboard` executes only device-free models.
 
 ## Claims
 
-- `Claim.owner`: `Owner::Physical(SourceKey)` for a remap, or
+- `Claim.owner`: `Owner::Remap { key, generation, id }` for an independent
+  configured remap instance, legacy `Owner::Physical(SourceKey)` for a single
+  caller-managed physical owner, or
   `Owner::Synthetic { seat, generation, id }` for generated input.
 - `Claim.origin`: the exact source for a physical remap; the originating source
   for a generated gesture; `None` for provider-only software-keyboard input.
 - `Claim.configuration`: the nonzero configuration generation. A synthetic
-  owner's `generation` must match it.
+  or instance-remap owner's `generation` must match it.
 - `Claim.serial`: a nonzero, strictly increasing **output submission serial**
   shared by remaps and generated actions within each configuration. A synthetic
-  owner's `id` must equal it. A new physical press gets a new serial, even on the
-  same source/key/configuration. Delayed release/repeat/cancel operations cannot
-  affect a later press.
+  or instance-remap owner's `id` must equal it. A new physical press gets a new
+  serial, even on the same source/key/configuration. Delayed release/repeat/cancel
+  operations cannot affect a later press.
 - The caller allocates serials in output submission order, not from recognition
   gesture IDs or raw frame sequences. It retains each accepted claim for
   deduplication and lifecycle cleanup. Do not reorder pending normal operations
@@ -68,6 +70,83 @@ run it. `oslo make test-generated-keyboard` executes only device-free models.
 
 Claims do not carry broker/session authority. A production caller must validate
 the complete current execution fence and source binding before submitting work.
+
+## Route-scoped scheduler
+
+`keys::worker::Seat<S>` schedules configured key work on one output incarnation.
+It is a library actor, **not yet connected to the production native worker or
+broker**. Creating it does not grant `SyntheticInput`, prove native readiness,
+or permit a physical grab. The caller supplies an idle output and its exact
+coordinator `Fence`; rejected construction returns the original output.
+
+`Routing::with_recognition` can retain opaque `routing::KeyWork` inside a
+`ScopedDispatch`. `into_key_work()` consumes the original dispatch; editing its
+public event or reorder scope prevents conversion. Work is neither cloneable nor
+deserializable. It retains the actual route/chain, rule, source incarnations,
+configuration, runtime rule revision, coordinator and synthetic-grant epoch
+instead of reconstructing
+authority from a public match event. A coordinator-free observer cannot mint it.
+
+| Operation | Behavior |
+| --- | --- |
+| `enqueue(work, at)` | Queue one canonical action. A remap begin returns an opaque `Remap` handle. A normal end queues a release behind its pending press, preserving fast taps. |
+| `poll(routing, at)` | Revalidate live work before writing or flushing; cancel stale scopes, advance one pending frame, and process at most eight immediately completed queue operations. |
+| `repeat(handles, frame, index, at)` | Accept the exact value-2 event supplied by the trusted input coordinator. Deduplicate its source/sequence/event position and emit once per distinct mapped target, with no new owner or value-1 press. |
+| `cancel(fence, event, at)` | Cancel the exact recognized gesture in this coordinator. Discard unwritten tails and compensate only written prefixes; preserve sibling owners. |
+| `retire_source(source, at)` | Cancel work whose retained scope depends on this source, then tombstone its incarnation. Preserve unrelated sources. |
+| `pause(routing, at)` | Revoke this coordinator's synthetic-grant epoch and cancel accepted work. A different coordinator is rejected before mutation. |
+| `resume(routing, at)` | Require drained local output and fresh matching authority. This does not replace native consumer/neutral checks by the caller. |
+| `retire(at)` / `drain(at)` | Permanently reject new work and drain release-only cleanup without retaining a removed Routing. Cleanup has a 250 ms bound. |
+| `blocks_raw(source, sequence)` | Report local write barriers for this raw input position. It is not a consumer-delivery acknowledgement. |
+| `deadline()` / `poll_fd()` | Supply queue/write/cleanup wakeups and an optional Linux sink write fd. Also poll Routing/context/consumer deadlines and lifecycle notifications. |
+
+Normal completion and cancellation are deliberately separate: a down followed
+quickly by an up must still emit the pair, whereas lost authority must not
+finish an unwritten chord. Submission serials and the output clock survive an
+idle output being wrapped in a new actor. Timely unchanged grant renewals keep
+held work valid; revoked, expired or exhausted epochs never resurrect old work.
+Scheduling failures are terminal. Explicit retirement may still drain releases
+through a healthy sink after a scheduling timeout, but the failed actor is not
+reusable. A failed sink retains its exact uncertain frame and cannot prove
+neutrality.
+
+The forwarding loop must interleave raw and generated writes, not drain every
+generated action before forwarding ordinary input. For consuming work, prior raw
+sequences must be acknowledged first and the action blocks its own and later
+cutpoints. Observing work also waits for its own raw frame and blocks later ones.
+An in-flight write retains the barrier until full local completion. This
+preserves separate-frame, same-source down / ordinary typing / up order under
+local backpressure. It does **not** establish within-frame or cross-source
+ordering, stock-compositor cross-fd ordering, or selective consumption.
+Whole-device raw gesture groups still cannot selectively remap a held key while
+preserving every unrelated key. Per-key projection and the native consumer
+boundary remain required before production capability negotiation is enabled.
+
+Before polling, the owning loop must forward Routing's cancellation events to
+`cancel` and its source-recovery transitions to `retire_source`. A retained
+source record is not proof that a retired raw route remains usable. Runtime
+rule edits invalidate old key work even when a later edit restores the same
+rule text within the original approved configuration fence.
+
+The actor bounds queued operations at 64, retained remap bindings at 4096,
+serialized event/repeat charges at 512 KiB, and queue/write age at one second.
+The byte counter is not a complete heap/RSS measurement of retained route and
+permit structures. Broader resource-policy acceptance remains open. Callers must
+retire/recover on acceptance errors instead of silently dropping required input
+releases, and must never pass untrusted JSON frames as source-repeat evidence.
+
+`oslo make test-key-worker` runs device-free scope, ordering, ownership,
+cancellation, timeout and bounds regressions. `oslo make test-key-worker-cage`
+drives the actual scheduler through owned protocol keyboards and a rendered app
+with both Hyprland configuration dialects. Its authority/readiness fixtures are
+explicitly modeled and its rules observe raw input; neither test grants native
+takeover or establishes selective-consuming remapping.
+
+For fixture development, `test-key-worker-cage-dev --runner=/nix/store/.../bin/prek-cage-host-test`
+requires an explicitly supplied, already built immutable compositor runner. It
+builds and selects the current Cargo test executable, prints its SHA-256, and
+runs both configuration dialects without rebuilding the unrelated release
+application. This is development-binary evidence, not packaged-release evidence.
 
 ## Operations
 

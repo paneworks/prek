@@ -426,6 +426,12 @@ make.recipe{ name="test-key-output",desc="transactional remap and chord ownershi
                sh.cargo("test","--locked","--lib","kernel::tests::cancelled_key_batch")
              end }
 
+make.recipe{ name="test-key-worker",desc="scoped key scheduling, repeats and raw-prefix ordering; no devices",
+             run=function()
+               sh.cargo("test","--locked","--lib","keys::worker::tests")
+               sh.cargo("test","--locked","--lib","routing::keys::tests")
+             end }
+
 make.recipe{ name="test-generated-keyboard",desc="generated keyboard role, publication and readiness models; no devices",
              run=function()
                sh.cargo("test","--locked","--lib","keys::native::tests")
@@ -436,6 +442,34 @@ make.recipe{ name="test-key-output-cage",desc="actual key output driver and app 
              run=function()
                cage_test("cage-test-wayland-fix",{"--key-output","--hyprland-config","lua"})
                cage_test("cage-test-wayland-fix",{"--key-output"})
+             end }
+
+make.recipe{ name="test-key-worker-cage",desc="scoped scheduler and raw/generated ordering on owned protocol keyboards",
+             run=function()
+               cage_test("cage-test-wayland-fix",{"--key-output","--key-worker","--hyprland-config","lua"})
+               cage_test("cage-test-wayland-fix",{"--key-output","--key-worker"})
+             end }
+
+make.recipe{ name="test-key-worker-cage-dev",desc="current Cargo scheduler fixture with an explicit immutable compositor runner",
+             params={{"--runner",desc="absolute Nix store prek-cage-host-test executable"}},
+             run=function(a)
+               assert(type(a.runner)=="string" and a.runner:match("^/nix/store/[^/]+/bin/prek%-cage%-host%-test$"),
+                      "supply the immutable --runner executable explicitly")
+               local built=oslo.run{"bash","-c",[[set -euo pipefail
+cargo test --locked --test key_output_cage --no-run --message-format=json | jq -ers '
+  [.[] | select(.reason=="compiler-artifact" and .target.name=="key_output_cage" and .profile.test and .executable!=null) | .executable] | unique |
+  if length==1 then .[0] else error("expected one current scheduler test executable") end'
+]],capture=true}
+               if not built.ok then io.stderr:write(built.err or "") end
+               assert(built.ok,"scheduler test failed to build")
+               local fixture=(built.out or ""):match("^%s*([^\r\n]+)%s*$")
+               assert(fixture and fixture:sub(1,1)=="/","missing current Cargo test executable")
+               print("DEV: current Cargo fixture; explicitly pinned compositor runner: "..a.runner)
+               assert(oslo.run{"sha256sum",fixture}.ok,"could not identify scheduler fixture")
+               for _,provider in ipairs{"lua","hyprlang"} do
+                 assert(oslo.run{a.runner,"--hardware-rendering","--key-output","--key-worker",
+                   "--key-output-fixture",fixture,"--hyprland-config",provider}.ok,"local debug scheduler fixture failed")
+               end
              end }
 
 make.recipe{ name = "test-cage-wayland-fix", desc = "explicit test-only patched nested compositor receipts",

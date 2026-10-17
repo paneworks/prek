@@ -119,7 +119,7 @@ impl<S: Sink> Output<S> {
         if keys.is_empty()
             || keys.len() > MAX_KEYS
             || keys.iter().collect::<BTreeSet<_>>().len() != keys.len()
-            || matches!(claim.owner, Owner::Physical(_)) && keys.len() != 1
+            || claim.owner.remap_key().is_some() && keys.len() != 1
             || keys.iter().any(|&key| {
                 !(1..768).contains(&key) || !self.sink.as_ref().unwrap().supports_key(key)
             })
@@ -179,7 +179,7 @@ impl<S: Sink> Output<S> {
     pub fn repeat(&mut self, claim: &Claim, at: Duration) -> io::Result<Progress> {
         self.ready(at)?;
         self.validate_binding(claim)?;
-        if !matches!(claim.owner, Owner::Physical(_)) {
+        if claim.owner.remap_key().is_none() {
             return Err(invalid("repeat requires a same-seat remap owner"));
         }
         self.at = at;
@@ -305,6 +305,57 @@ impl<S: Sink> Output<S> {
         self.logical.down(&self.source.seat, code)
     }
 
+    pub fn source(&self) -> &Source {
+        &self.source
+    }
+
+    pub fn supports_key(&self, code: u16) -> bool {
+        (1..768).contains(&code)
+            && self
+                .sink
+                .as_ref()
+                .is_some_and(|sink| sink.supports_key(code))
+    }
+
+    pub(crate) fn idle(&self) -> bool {
+        self.settled() && self.held.is_empty() && self.logical.counts.is_empty()
+    }
+
+    pub(crate) fn serial(&self, configuration: u64) -> u64 {
+        self.receipts.get(&configuration).copied().unwrap_or(0)
+    }
+
+    pub(crate) fn watermark(&self) -> Duration {
+        self.at
+    }
+
+    pub(crate) fn source_retired(&self, source: &Source) -> bool {
+        self.retired_sources
+            .get(&source.device)
+            .is_some_and(|generation| source.generation <= *generation)
+    }
+
+    pub(crate) fn configuration_live(&self, configuration: u64) -> bool {
+        configuration > self.retired_generation
+    }
+
+    pub(crate) fn contains_claim(&self, claim: &Claim) -> bool {
+        self.held
+            .get(&claim.owner)
+            .is_some_and(|held| held.claim == *claim)
+            || self.pending.as_ref().is_some_and(
+                |pending| matches!(&pending.mutation, Mutation::Add(held) if held.claim == *claim),
+            )
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn poll_fd(&self) -> Option<std::os::fd::BorrowedFd<'_>>
+    where
+        S: std::os::fd::AsFd,
+    {
+        self.sink.as_ref().map(std::os::fd::AsFd::as_fd)
+    }
+
     pub fn settled(&self) -> bool {
         !self.failed && self.pending.is_none()
     }
@@ -367,18 +418,18 @@ impl<S: Sink> Output<S> {
                 return Err(invalid("key origin belongs to another seat"));
             }
         }
-        match &claim.owner {
-            Owner::Physical(key) => {
-                validate_source(&key.source)?;
-                if !(1..768).contains(&key.code) || claim.origin.as_ref() != Some(&key.source) {
-                    return Err(invalid("remap owner requires its exact physical origin"));
-                }
+        if let Some(key) = claim.owner.remap_key() {
+            validate_source(&key.source)?;
+            if !(1..768).contains(&key.code) || claim.origin.as_ref() != Some(&key.source) {
+                return Err(invalid("remap owner requires its exact physical origin"));
             }
-            Owner::Synthetic { generation, id, .. }
+        }
+        match &claim.owner {
+            Owner::Synthetic { generation, id, .. } | Owner::Remap { generation, id, .. }
                 if *generation != claim.configuration || *id != claim.serial =>
             {
                 return Err(invalid(
-                    "synthetic key owner must match its configuration and serial",
+                    "key binding owner must match its configuration and serial",
                 ));
             }
             _ => {}

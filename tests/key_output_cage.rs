@@ -17,6 +17,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "key_output_cage/worker.rs"]
+mod worker;
+
 struct Keyboard {
     child: Child,
     source: Source,
@@ -216,9 +219,13 @@ fn drain(output: &mut Output<Keyboard>) {
     panic!("owned key output never drained");
 }
 fn phase(output: &Path, index: usize, text: &str, keys: &[u16]) {
+    phase_service(output, index, text, keys, || {});
+}
+fn phase_service(output: &Path, index: usize, text: &str, keys: &[u16], mut service: impl FnMut()) {
     let after = monotonic().unwrap().as_nanos();
     let until = Instant::now() + Duration::from_secs(3);
     let receipt = loop {
+        service();
         let mut bytes = String::new();
         fs::File::open(output.join("receipts.jsonl"))
             .unwrap()
@@ -260,6 +267,7 @@ fn phase(output: &Path, index: usize, text: &str, keys: &[u16]) {
     fs::write(output.join(format!("key-output-ready-{index}")), b"ready").unwrap();
     let until = Instant::now() + Duration::from_secs(8);
     while !output.join(format!("key-output-captured-{index}")).exists() {
+        service();
         assert!(
             Instant::now() < until,
             "key-output capture was not acknowledged"

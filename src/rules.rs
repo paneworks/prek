@@ -649,6 +649,20 @@ impl Engine {
         let permit = intent.candidate.permit.as_ref().ok_or(Rejection::Unbound)?;
         self.authority.validate(permit, input(state, at))
     }
+
+    pub(crate) fn source_current(&self, source: &Source) -> bool {
+        self.devices
+            .get(&source.device)
+            .is_some_and(|state| state.device.source == *source)
+    }
+
+    pub(crate) fn source_input_sequence(&self, source: &Source) -> Option<u64> {
+        self.devices
+            .get(&source.device)
+            .filter(|state| state.device.source == *source)?
+            .last_input
+            .map(|(sequence, _)| sequence)
+    }
     pub(crate) fn fork_observer(
         &self,
         config: Config,

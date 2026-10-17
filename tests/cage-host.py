@@ -51,6 +51,8 @@ def main():
     parser.add_argument("--key-output", action="store_true",
                         help="exercise the actual key output driver against owned protocol keyboards")
     parser.add_argument("--key-output-fixture", type=Path)
+    parser.add_argument("--key-worker", action="store_true",
+                        help="exercise scoped scheduling with modeled authority and protocol sinks")
     parser.add_argument("--keyboard-quiesce-check", type=Path,
                         default=Path(__file__).parent / "support/keyboard_quiesce.py")
     parser.add_argument("--hardware-rendering", action="store_true",
@@ -83,6 +85,8 @@ def main():
         parser.error("--keyboard-ownership is a separate owned-session characterization")
     if args.key_output and any((args.layers,args.modes,args.input,args.power,args.windows,args.morf,args.keyboard_quiesce,args.keyboard_ownership)):
         parser.error("--key-output is a separate owned-session test")
+    if args.key_worker and not args.key_output:
+        parser.error("--key-worker requires --key-output")
     if args.morf_shell and not args.morf:
         parser.error("--morf-shell requires --morf with the actual ELF")
     if (args.morf_root_probe or args.morf_root_probe_socket) and not args.morf_shell:

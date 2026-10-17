@@ -805,6 +805,15 @@ impl Router {
         self.advance(at)?;
         self.due_after_input(at)
     }
+
+    pub(crate) fn prefix_delivered(&self, sequence: u64, inclusive: bool) -> bool {
+        let before =
+            |frame: &Frame| frame.sequence < sequence || inclusive && frame.sequence == sequence;
+        !self.queue.iter().any(|entry| before(&entry.frame))
+            && !self.group.as_ref().is_some_and(|group| {
+                group.ownership == Ownership::Pending && group.pending.iter().any(before)
+            })
+    }
     pub(crate) fn due_after_input(&mut self, at: Duration) -> Result<Option<&Scheduled>, Fault> {
         self.delivery_clock(at)?;
         Ok(self.queue.front().filter(|entry| entry.due <= at))
