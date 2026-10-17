@@ -21,6 +21,7 @@ use std::{
     time::Duration,
 };
 
+mod discovery;
 pub mod feedback;
 pub mod handoff;
 mod ingress;
@@ -96,6 +97,14 @@ impl StateProbe {
 use crate::diagnostics::Entry;
 
 pub fn inventory() -> io::Result<Vec<Entry>> {
+    Ok(discover()?.into_iter().map(|value| value.entry).collect())
+}
+
+struct Discovered {
+    entry: Entry,
+    publication: Option<discovery::Publication>,
+}
+fn discover() -> io::Result<Vec<Discovered>> {
     let mut paths = Vec::new();
     match fs::read_dir("/dev/input") {
         Ok(entries) => {
@@ -117,18 +126,24 @@ pub fn inventory() -> io::Result<Vec<Entry>> {
     let entries: Vec<_> = paths
         .into_iter()
         .map(
-            |path| match open(&path).and_then(|device| describe(&path, &device, 1)) {
-                Ok(device) => Entry {
-                    path,
-                    available: true,
-                    device: Some(device),
-                    error: None,
+            |path| match open(&path).and_then(|raw| describe_snapshot(&path, &raw, 1)) {
+                Ok((device, publication)) => Discovered {
+                    entry: Entry {
+                        path,
+                        available: true,
+                        device: Some(device),
+                        error: None,
+                    },
+                    publication: Some(publication),
                 },
-                Err(error) => Entry {
-                    path,
-                    available: false,
-                    device: None,
-                    error: Some(error.to_string()),
+                Err(error) => Discovered {
+                    entry: Entry {
+                        path,
+                        available: false,
+                        device: None,
+                        error: Some(error.to_string()),
+                    },
+                    publication: None,
                 },
             },
         )
@@ -173,29 +188,29 @@ pub fn list(output: &mut impl Write, json: bool) -> io::Result<()> {
     Ok(())
 }
 
-/// Read processed udev properties, without a subprocess or libudev dependency.
-fn properties(path: &Path) -> BTreeMap<String, String> {
-    let Ok(metadata) = fs::metadata(path) else {
-        return BTreeMap::new();
-    };
-    let number = metadata.rdev();
-    let database = format!(
-        "/run/udev/data/c{}:{}",
-        libc::major(number),
-        libc::minor(number)
-    );
-    fs::read_to_string(database)
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|line| {
-            let (key, value) = line.strip_prefix("E:")?.split_once('=')?;
-            Some((key.to_owned(), value.to_owned()))
-        })
-        .collect()
-}
-
 pub fn describe(path: &Path, raw: &RawDevice, generation: u64) -> io::Result<Device> {
-    let props = properties(path);
+    describe_snapshot(path, raw, generation).map(|(device, _)| device)
+}
+fn describe_snapshot(
+    path: &Path,
+    raw: &RawDevice,
+    generation: u64,
+) -> io::Result<(Device, discovery::Publication)> {
+    let publication = discovery::Publication::read(raw.as_fd())?;
+    let device = describe_properties(path, raw, generation, &publication.properties)?;
+    if !publication.current(raw.as_fd(), path) {
+        return Err(io::Error::other(
+            "input discovery changed before metadata admission",
+        ));
+    }
+    Ok((device, publication))
+}
+fn describe_properties(
+    path: &Path,
+    raw: &RawDevice,
+    generation: u64,
+    props: &BTreeMap<String, String>,
+) -> io::Result<Device> {
     let name = raw.name().unwrap_or("unnamed").to_owned();
     let physical = raw.physical_path().unwrap_or_default().to_owned();
     let unique = raw.unique_name().unwrap_or_default().to_owned();
@@ -370,6 +385,7 @@ struct Reader {
     raw: RawDevice,
     device: Device,
     cursor: Cursor,
+    publication: discovery::Publication,
 }
 impl Cursors for Vec<Reader> {
     fn cursor(&mut self, source: &Source) -> Option<&mut Cursor> {
@@ -391,13 +407,18 @@ impl Reader {
         // SAFETY: the owned descriptor and initialized c_int pointer match
         // EVIOCSCLOCKID; this changes only our own reader's clock.
         unsafe { set_clock_id(raw.as_raw_fd(), &clock) }.map_err(io::Error::from)?;
-        let device = describe(path, &raw, generation)?;
+        let (device, publication) = describe_snapshot(path, &raw, generation)?;
         let keys = if raw.supported_keys().is_some() {
             raw.get_key_state()?.iter().map(|key| key.0).collect()
         } else {
             BTreeSet::new()
         };
         let contacts = initial_contacts(&raw, &device)?;
+        if !publication.current(raw.as_fd(), path) {
+            return Err(io::Error::other(
+                "input discovery changed during state queries",
+            ));
+        }
         let record = Record::Device {
             device: device.clone(),
             keys,
@@ -409,15 +430,29 @@ impl Reader {
                 raw,
                 device,
                 cursor,
+                publication,
             },
             record,
         ))
     }
 
     fn drain(&mut self) -> io::Result<Vec<Frame>> {
-        ingress::drain(&mut self.cursor, || {
+        if !self.current() {
+            self.cursor.retire();
+            return Err(io::Error::other("input node or udev publication changed"));
+        }
+        let frames = ingress::drain(&mut self.cursor, || {
             self.raw.fetch_events().map(Iterator::collect)
-        })
+        })?;
+        if !self.current() {
+            self.cursor.retire();
+            return Err(io::Error::other("input discovery changed while reading"));
+        }
+        Ok(frames)
+    }
+    fn current(&self) -> bool {
+        self.publication
+            .current(self.raw.as_fd(), Path::new(&self.device.path))
     }
 }
 
@@ -768,6 +803,10 @@ fn observe_loop(
         let buffered = buffered_sources(&pending.frames);
         let mut staged = Pending::default();
         for (index, reader) in readers.iter_mut().enumerate() {
+            if !reader.current() {
+                reopen.push(index);
+                continue;
+            }
             let mut buffer =
                 ReaderBuffer::inspect(&reader.device.source, &reader.cursor.assembler, &buffered);
             buffer.incomplete |= reader.cursor.cut_pending();
@@ -890,52 +929,6 @@ fn selected(config: &crate::config::Config, device: &Device) -> bool {
         })
 }
 
-fn initialized_udev(path: &Path) -> bool {
-    let Ok(stat) = fs::metadata(path) else {
-        return false;
-    };
-    let number = stat.rdev();
-    let database = format!(
-        "/run/udev/data/c{}:{}",
-        libc::major(number),
-        libc::minor(number)
-    );
-    let Ok(file) = File::open(database) else {
-        return false;
-    };
-    let Ok(stat) = file.metadata() else {
-        return false;
-    };
-    if !stat.is_file() || stat.uid() != 0 || stat.mode() & 0o022 != 0 {
-        return false;
-    }
-    let mut text = String::new();
-    if io::Read::read_to_string(&mut io::Read::take(file, 65_537), &mut text).is_err()
-        || text.len() > 65_536
-    {
-        return false;
-    }
-    // systemd's completed database publication records usec_initialized as I:.
-    // https://github.com/systemd/systemd/blob/v259.3/src/libsystemd/sd-device/device-private.c
-    text.lines().any(|line| {
-        line.strip_prefix("I:")
-            .and_then(|value| value.parse::<u64>().ok())
-            .is_some_and(|value| value > 0)
-    })
-}
-
-fn same_node(reader: &Reader) -> bool {
-    let Ok(path) = fs::metadata(&reader.device.path) else {
-        return false;
-    };
-    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-    // SAFETY: retained event descriptor and correctly sized initialized output.
-    (unsafe { libc::fstat(reader.raw.as_raw_fd(), &mut stat) }) == 0
-        && stat.st_ino == path.ino()
-        && stat.st_dev == path.dev()
-        && stat.st_rdev == path.rdev()
-}
-
 fn refresh_readers(
     config: &crate::config::Config,
     readers: &mut Vec<Reader>,
@@ -944,14 +937,18 @@ fn refresh_readers(
     sink: &mut impl InputSink,
     now: Duration,
 ) -> io::Result<()> {
-    let entries = inventory()?;
+    let entries = discover()?;
     let mut identities = BTreeMap::new();
     let mut ambiguous = BTreeSet::new();
-    for entry in &entries {
+    for candidate in &entries {
+        let entry = &candidate.entry;
         if let Some(device) = &entry.device
             && selected(config, device)
-            && initialized_udev(&entry.path)
-            && identities.insert(device.source.device, device).is_some()
+            && candidate
+                .publication
+                .as_ref()
+                .is_some_and(|value| value.initialized)
+            && identities.insert(device.source.device, candidate).is_some()
         {
             ambiguous.insert(device.source.device);
         }
@@ -960,27 +957,28 @@ fn refresh_readers(
         let device = &readers[index].device;
         if !selected(config, device)
             || ambiguous.contains(&device.source.device)
-            || !same_node(&readers[index])
-            || identities.get(&device.source.device).is_none_or(|current| {
-                current.path != device.path
-                    || current.source.seat != device.source.seat
-                    || current.identity != device.identity
-                    || current.capabilities != device.capabilities
-                    || current.axes != device.axes
-                    || current.properties != device.properties
-            })
+            || !readers[index].current()
+            || identities
+                .get(&device.source.device)
+                .is_none_or(|candidate| {
+                    !discovery::same_description(candidate.entry.device.as_ref().unwrap(), device)
+                        || candidate.publication.as_ref() != Some(&readers[index].publication)
+                })
         {
             let source = readers[index].device.source.clone();
             ingress::retire_source(pending, readers, sink, &source, now)?;
             release_reader(readers.remove(index), &source, sink)?;
         }
     }
-    for entry in entries {
-        let Some(device) = entry.device else {
+    for candidate in entries {
+        let Some(device) = candidate.entry.device else {
+            continue;
+        };
+        let Some(publication) = candidate.publication else {
             continue;
         };
         if !selected(config, &device)
-            || !initialized_udev(&entry.path)
+            || !publication.initialized
             || ambiguous.contains(&device.source.device)
             || readers
                 .iter()
@@ -997,15 +995,18 @@ fn refresh_readers(
             .unwrap_or_default()
             .checked_add(1)
             .ok_or_else(|| io::Error::other("input device generation exhausted"))?;
-        let Ok((reader, record)) = Reader::new(&entry.path, generation) else {
+        let Ok((reader, record)) = Reader::new(&candidate.entry.path, generation) else {
             continue;
         };
-        // Discovery/open races cannot replace a selected identity with an
-        // unselected source. Both the opened metadata and seat must agree.
-        if reader.device.identity != device.identity
-            || reader.device.source.device != device.source.device
+        if !reader
+            .publication
+            .admits(&publication, &reader.device, &device)
             || !selected(config, &reader.device)
         {
+            continue;
+        }
+        let state = absolute_state(&reader.raw, &reader.device)?;
+        if !reader.current() {
             continue;
         }
         monotonic()?;
@@ -1014,7 +1015,7 @@ fn refresh_readers(
         monotonic()?;
         sink.push(Record::Absolute {
             source: reader.device.source.clone(),
-            state: absolute_state(&reader.raw, &reader.device)?,
+            state,
         })?;
         eprintln!(
             "Observing {} ({:?}); input still reaches applications.",

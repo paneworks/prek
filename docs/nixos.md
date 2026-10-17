@@ -178,6 +178,10 @@ PID/executable verification and permission to drop compiler credentials. The
 module installs Prek's udev metadata rule but does not enable uinput, grant users
 input-group membership, or activate routing. `runtimeDirectory` changes the
 single directory name under `/run` and the launcher's socket together.
+Managed device discovery binds metadata to the opened event descriptor and
+requires a stable initialized udev publication. See the
+[source re-entry contract](evdev-boundary.md#discovery-and-source-re-entry) for
+replacement handling and remaining hardware/consumer gates.
 
 ## Check, stop and recover
 

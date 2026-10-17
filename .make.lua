@@ -193,6 +193,9 @@ make.recipe{ name = "test-handoff-boundary", desc = "bounded evdev fanout-prefix
                sh.cargo("test", "--locked", "--lib", "linux::ingress::")
              end }
 
+make.recipe{ name="test-hotplug-discovery",desc="descriptor-bound metadata admission and private filesystem replacement models",
+             run=function() sh.cargo("test","--locked","--lib","linux::discovery::tests::") end }
+
 make.recipe{ name = "test-suspend-epoch", desc = "suspend-sensitive process clocks and native IO/reaping gates",
              run = function() sh.cargo("test", "--locked", "--lib", "process_clock::tests::") end }
 

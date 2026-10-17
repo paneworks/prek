@@ -138,3 +138,49 @@ admission/neutral/rollback/consumer/console obligations remain open. A user-run
 synthetic loop case checks prefix/callback/tail ordering, one downstream output
 and output-before-original-close teardown. Library tests exercise the same
 assembler, queue, dispatcher and cancellation helpers without opening devices.
+
+## Discovery and source re-entry
+
+Discovery reads udev metadata using the opened descriptor's `fstat` device
+number. It does not derive another device's properties by resolving the event
+pathname again. One publication supplies both initialization and properties.
+The reader binds its device/inode/character-device number and the database
+file's inode, length and modification/change times. The public inventory JSON
+shape is unchanged; inaccessible or invalid entries remain explicit failures.
+
+The database must be a root-owned regular file without group/world write
+access. Reads are nonblocking, refuse leaf symlinks and accept at most 64 KiB. Parsing
+bounds properties to 1,024, property keys and seats to 256 bytes, rejects
+duplicate initialization/property records, invalid UTF-8 and incomplete final
+lines. Unknown record kinds remain compatible with database extensions.
+An absent database permits explicit diagnostic `watch` use with the default
+seat, but does not establish managed-device initialization.
+
+Managed admission requires an initialized publication and the same complete
+device description at discovery and open: seat, identity, name, path, physical
+and unique identifiers, vendor/product, properties, capabilities, axes and
+virtual-device status. Only the newly assigned source generation may differ.
+Node and publication checks run before reader hooks, around draining and after
+startup state queries. Replaced, removed or republished metadata retires the old
+source, removes its pending frames and cancels its recognizers. Rediscovery
+assigns a fresh generation and queries held state without inventing new presses
+or contact starts. Unaffected sources keep their own lifetimes.
+
+Systemd publishes `I:` initialization and `E:` properties together using a
+temporary-file rename; see its
+[database writer](https://github.com/systemd/systemd/blob/v259.3/src/libsystemd/sd-device/device-private.c).
+That is a metadata publication boundary, not an atomic input/consumer boundary.
+An initialized file at a reused event minor does not itself prove that udev
+completed the new kernel incarnation; authoritative add/remove reconciliation
+remains required. These checks do not serialize udev updates with kernel event
+generation,
+retract actions already sent, prove neutral consumer re-entry or establish
+physical hotplug/suspend acceptance. Polling and filesystem-check overhead still
+need the full hardware/resource gates. Production routing remains disabled.
+
+`oslo make test-hotplug-discovery` exercises owned private files and database
+replacements plus the actual source cursor, pending queue and recognition
+engine. It tests full-description mismatches, missing initialization, stale
+publication/node rejection, failed trust/bounds checks, cancellation of an old
+hold, unaffected-source progress and held-state suppression before a genuinely
+new press. It does not create or open kernel input devices.
