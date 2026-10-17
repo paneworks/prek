@@ -644,7 +644,7 @@ fn supported_backend(descriptor: &Descriptor) -> io::Result<()> {
     if descriptor.repeat.is_some() {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "repeat passthrough parity is unverified; do not create/grab this device",
+            "uinput software repeat cannot transparently mirror source repeats and settings",
         ));
     }
     if descriptor.axes.values().any(|axis| axis.fuzz != 0) {
@@ -1089,6 +1089,7 @@ impl Drop for Virtual {
 #[cfg(test)]
 mod tests {
     mod publication;
+    mod repeat;
     use super::*;
     use crate::{input::Device, transport::KernelIdentity};
     use std::{
@@ -1487,21 +1488,23 @@ mod tests {
             axis.fuzz = 0;
         }
         device.capabilities.insert(20, vec![0, 1]);
-        let repeat = Descriptor::mirror(
-            &device,
-            id,
-            Some(crate::transport::Repeat {
-                delay_ms: 250,
-                period_ms: 33,
-            }),
-            &BTreeMap::new(),
-            BTreeMap::new(),
-        )
-        .unwrap();
-        assert_eq!(
-            supported_backend(&repeat).unwrap_err().kind(),
-            io::ErrorKind::Unsupported
-        );
+        for (delay_ms, period_ms) in [(250, 33), (0, 0), (0, 33), (250, 0), (60_000, 60_000)] {
+            let repeat = Descriptor::mirror(
+                &device,
+                id,
+                Some(crate::transport::Repeat {
+                    delay_ms,
+                    period_ms,
+                }),
+                &BTreeMap::new(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+            assert_eq!(
+                supported_backend(&repeat).unwrap_err().kind(),
+                io::ErrorKind::Unsupported
+            );
+        }
         assert!(supported_backend(&descriptor()).is_ok());
     }
 }

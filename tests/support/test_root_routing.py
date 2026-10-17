@@ -29,11 +29,20 @@ def recovery_output(names=None, **changes):
     return cases + root.RECOVERY_RESULT + json.dumps(value) + "\n"
 
 
+def repeat_output(**changes):
+    value = dict(version=1, initial=[250, 33], disabled_forwarded=1, disabled_observed=1,
+                 enabled_forwarded=1, enabled_observed=4, consumer_feedback_codes=[0, 1],
+                 keys_neutral=True, physical_devices_opened=0, repeat_passthrough_tested=False)
+    value.update(changes)
+    return root.REPEAT_RESULT + json.dumps(value) + "\ntest result: ok. 1 passed; 0 failed; 0 ignored;\n"
+
+
 class KernelReceipt(unittest.TestCase):
     def value(self):
-        return dict(version=2, status="passed", uid=0, kernel=os.uname().release,
+        return dict(version=3, status="passed", uid=0, kernel=os.uname().release,
                     tests=sorted(root.ALL_EXPECTED), passed=len(root.ALL_EXPECTED),
                     routing_passed=len(root.EXPECTED), recovery_passed=8, physical_devices_opened=0,
+                    repeat_characterization_passed=1, repeat_passthrough_tested=False,
                     model_desktop_context=True, production_route_admission_tested=False,
                     compositor_consumer_retirement_tested=False, rule_removed=True, registry_clean=True,
                     unrelated_registry_preserved=True, recovery_controls_removed=True)
@@ -90,6 +99,47 @@ class KernelReceipt(unittest.TestCase):
                         dict(tests=sorted(root.EXPECTED))]:
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 root.receipt(self.line(dict(self.value(), **changes)))
+
+    def test_old_receipt_without_repeat_characterization_is_not_acceptance(self):
+        value = self.value()
+        value.update(version=2, tests=sorted(root.EXPECTED | root.RECOVERY_EXPECTED), passed=22)
+        del value["repeat_characterization_passed"]
+        del value["repeat_passthrough_tested"]
+        with self.assertRaises(ValueError):
+            root.receipt(self.line(value))
+
+    def test_repeat_inventory_requires_the_one_exact_ignored_case(self):
+        inventory = root.REPEAT_CASE + ": test\n"
+        root.repeat_inventory(inventory)
+        for value in ["", inventory * 2, inventory + "foreign: test\n", "skipped\n", "foreign: test\n"]:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                root.repeat_inventory(value)
+
+    def test_repeat_result_requires_real_extra_repeats_and_complete_typed_evidence(self):
+        valid = repeat_output()
+        self.assertEqual(root.repeat_result(valid)["enabled_observed"], 4)
+        for value in ["", valid * 2, valid.split("test result:")[0],
+                      valid.replace("1 passed", "0 passed"), valid.replace("0 ignored", "1 ignored"),
+                      valid.replace(root.REPEAT_RESULT, "FOREIGN="),
+                      repeat_output(enabled_observed=1), repeat_output(enabled_observed=True),
+                      repeat_output(enabled_observed=256), repeat_output(enabled_observed="4"),
+                      repeat_output(initial=[True, 33]), repeat_output(initial=[0, 0]),
+                      repeat_output(consumer_feedback_codes=[False, True]),
+                      repeat_output(consumer_feedback_codes=[0]), repeat_output(extra=True)]:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                root.repeat_result(value)
+        original = json.loads(valid.splitlines()[0][len(root.REPEAT_RESULT):])
+        for field in original:
+            missing = dict(original)
+            del missing[field]
+            with self.subTest(missing=field), self.assertRaises(ValueError):
+                root.repeat_result(root.REPEAT_RESULT + json.dumps(missing) + "\ntest result: ok. 1 passed; 0 failed; 0 ignored;\n")
+            for replacement in [None, "foreign", True, 999]:
+                if type(replacement) is type(original[field]) and replacement == original[field]:
+                    continue
+                changed = dict(original, **{field: replacement})
+                with self.subTest(field=field, replacement=replacement), self.assertRaises(ValueError):
+                    root.repeat_result(root.REPEAT_RESULT + json.dumps(changed) + "\ntest result: ok. 1 passed; 0 failed; 0 ignored;\n")
 
     def test_recovery_inventory_is_exact_and_cannot_be_a_skip(self):
         valid = recovery_inventory()
@@ -338,6 +388,9 @@ class RootRunModel(unittest.TestCase):
                     return subprocess.CompletedProcess(argv, 0, "\n".join(name + ": test" for name in sorted(root.EXPECTED)))
                 if argv[0] == "/nix/store/model/recovery":
                     return subprocess.CompletedProcess(argv, 0, recovery_inventory())
+                if argv[0] == "/nix/store/model/native":
+                    self.assertEqual(argv[1:], [root.REPEAT_CASE, "--exact", "--list", "--ignored"])
+                    return subprocess.CompletedProcess(argv, 0, root.REPEAT_CASE + ": test\n")
                 self.assertEqual(argv, ["/nix/store/model/udevadm", "control", "--reload-rules"])
                 self.assertEqual(kwargs["env"], {})
                 return subprocess.CompletedProcess(argv, 0)
@@ -346,6 +399,9 @@ class RootRunModel(unittest.TestCase):
                 self.assertEqual(len(list(rules.iterdir())), 1)
                 if effect is not None:
                     effect(argv[0], path, registry, rules)
+                if argv[0] == "/nix/store/model/native":
+                    self.assertEqual(argv[1:], [root.REPEAT_CASE, "--exact", "--ignored", "--nocapture", "--test-threads=1"])
+                    return repeat_output()
                 if argv[0] == "/nix/store/model/recovery":
                     control = path / Path(env["PREK_RECOVERY_DIRECTORY"]).name
                     info = control.stat()
@@ -360,21 +416,21 @@ class RootRunModel(unittest.TestCase):
             commands = stack.enter_context(mock.patch.object(root.subprocess, "run", side_effect=command))
             stack.enter_context(mock.patch.object(root, "execute", side_effect=execute))
             output = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
-            args = argparse.Namespace(tests="/nix/store/model/routing", recovery="/nix/store/model/recovery",
+            args = argparse.Namespace(tests="/nix/store/model/routing", recovery="/nix/store/model/recovery", native="/nix/store/model/native",
                                       importer="/nix/store/model/importer", udevadm="/nix/store/model/udevadm")
             yield args, path, registry, rules, commands, output
 
-    def test_model_success_correlates_both_executables_and_removes_controls(self):
+    def test_model_success_correlates_all_executables_and_removes_controls(self):
         with self.model() as (args, path, registry, rules, commands, output):
             root.run(args)
-            self.assertEqual(root.receipt(output.getvalue())["passed"], 22)
+            self.assertEqual(root.receipt(output.getvalue())["passed"], 23)
             self.assertEqual({entry.name for entry in path.iterdir()}, {"devices", "rules"})
             self.assertEqual(list(rules.iterdir()), [])
             self.assertEqual((registry / "foreign-record").read_text(), "preserved")
-            self.assertEqual(commands.call_count, 4)
+            self.assertEqual(commands.call_count, 5)
 
-    def test_model_both_executable_failures_remove_only_original_rule(self):
-        for failure in ["routing", "recovery"]:
+    def test_model_all_executable_failures_remove_only_original_rule(self):
+        for failure in ["routing", "recovery", "native"]:
             def fail(executable, *_):
                 if executable.endswith("/" + failure):
                     raise RuntimeError("modeled executable failure")
@@ -383,8 +439,18 @@ class RootRunModel(unittest.TestCase):
                     root.run(args)
                 self.assertEqual(list(rules.iterdir()), [])
                 self.assertEqual((registry / "foreign-record").read_text(), "preserved")
-                self.assertEqual(commands.call_count, 4)
+                self.assertEqual(commands.call_count, 5)
                 self.assertNotIn(root.PREFIX, output.getvalue())
+
+    def test_model_malformed_repeat_evidence_removes_the_rule_without_acceptance(self):
+        with self.model() as (args, _, registry, rules, commands, output):
+            with mock.patch.object(root, "repeat_result", side_effect=ValueError("invalid repeat evidence")):
+                with self.assertRaisesRegex(ValueError, "invalid repeat evidence"):
+                    root.run(args)
+            self.assertEqual(list(rules.iterdir()), [])
+            self.assertEqual((registry / "foreign-record").read_text(), "preserved")
+            self.assertEqual(commands.call_count, 5)
+            self.assertNotIn(root.PREFIX, output.getvalue())
 
     def test_model_registry_changes_are_retained_and_cannot_pass(self):
         def change(executable, _, registry, rules):

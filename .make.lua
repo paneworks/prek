@@ -365,6 +365,12 @@ make.recipe{ name = "test-root-routing", desc = "unprivileged kernel-runner rece
                sh.shellcheck("tests/run-root-routing.sh")
              end }
 
+make.recipe{ name="build-root-routing",desc="build the user-launched kernel runner without running it",
+             run=function()
+               sh.mkdir("-p","target/root-routing")
+               assert(oslo.run{"nix","--option","eval-cache","false","--extra-experimental-features","nix-command flakes","--max-jobs","1","--cores","2","build","--no-write-lock-file","--out-link",project_root().."/target/root-routing/probe",".#root-routing-test"}.ok,"root routing probe build failed")
+             end }
+
 local function cage_test(fixture, flags)
   local command = { "nix", "--option", "eval-cache", "false", "--extra-experimental-features",
     "nix-command flakes", "--max-jobs", "1", "--cores", "2", "run", "--no-write-lock-file",

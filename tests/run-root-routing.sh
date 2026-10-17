@@ -6,7 +6,8 @@ if [[ ${1:-} == --help ]]; then
   cat <<'HELP'
 Usage: ./tests/run-root-routing.sh
 Launch as your regular user, without sudo. The built runner prompts when ready.
-Runs fourteen routing and eight recovery gates on named synthetic test devices.
+Runs fourteen routing, eight recovery and one repeat-characterization gate.
+The repeat probe checks duplicate timer behavior, not repeat passthrough support.
 No physical input devices are opened and no production routing is enabled.
 Temporarily installs a test-only runtime udev rule, reloads rules without a trigger,
 then removes its own rule. /dev/uinput must already exist; no module is loaded.

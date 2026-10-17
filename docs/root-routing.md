@@ -7,7 +7,7 @@ From a terminal in this checkout, run as your normal user:
 ```
 
 The script first builds an immutable Nix runner, then prompts for sudo. Only
-its fixed probe is elevated. Both test executables, the importer and udev tool are
+its fixed probe is elevated. All three test executables, the importer and udev tool are
 pinned store paths; neither a caller-selected command nor user output path is
 passed to root. `/dev/uinput` must already exist. The probe does not load modules
 or enable production routing.
@@ -28,13 +28,21 @@ case emits pre-grab motion only on a libinput-ignored REL-only source with no
 key/switch capability. No test writes a key while its node is ungrabbed. No
 physical input nodes are opened.
 
-Every receiver also requires the production processed-metadata gate before
+Routing and recovery receivers also require the production processed-metadata gate before
 grabbing or injecting: completed initialization, a nonce-bound `PREK_PUBLICATION`
 receipt and coherent protected metadata must match the actual owned device.
 The full physical marker changes on each creation, while the private registry
 retains one exclusive slot per source. This uses version-2 pre-add records;
 legacy records are preserved and refused, not migrated or removed automatically.
 See [virtual publication identities](evdev-boundary.md#virtual-publication-identities).
+
+One additional test-only [repeat characterization](feedback.md#repeat-admission-remains-closed)
+constructs an intentionally unsupported `EV_REP` keyboard. Its constructor is
+compiled only into the native library test binary, not the application. It uses
+the same nonce-bound private publication and protected completion parser, checks
+its fixed keyboard identity/capabilities and grabs its own node before injecting.
+It observes duplicate software repeats and reverse setting requests; it does not
+implement or establish repeat passthrough. The production repeat gate stays closed.
 
 Fourteen routing gates cover keyboard/mouse/touchpad forwarding, keyboard LED feedback,
 including the actual bounded source-write bridge, intact partial hardware frames,
@@ -91,16 +99,20 @@ Logs belong to your regular user under `target/root-routing/run-*`; `latest`
 points to that attempt. `console.log` records build, wrapper and cleanup output;
 `kernel.log` retains root probe stdout. `status.json` records running/passed/failed
 and the final exit code. `receipt.json` is written only after checking one complete
-version-2 root receipt, the exact fourteen routing and eight recovery inventories,
-all twenty-two tests actually executed and passed, cleanup flags and the explicit
-scope limits. The recovery summary must match its eight per-case results.
+version-3 root receipt, the exact fourteen routing, eight recovery and one repeat
+characterization inventories, all twenty-three tests actually executed and passed,
+cleanup flags and the explicit scope limits. The recovery summary must match its
+eight per-case results. The repeat case must supply its complete typed observation
+record and exactly one passing test result; the receipt explicitly retains
+`repeat_passthrough_tested=false`. Older version-2 receipts are not current acceptance.
 Skips and zero-test runs
 cannot pass. Tell the agent when the script finishes so it can inspect these files.
 
 `oslo make test-root-routing` runs the unprivileged parser, actual owned-process
 and temporary-directory safety tests plus explicitly modeled privileged
-orchestration. It does not execute the twenty-two kernel cases or establish root
+orchestration. It does not execute the twenty-three kernel cases or establish root
 acceptance. The Nix `root-routing-receipts` check also lints the launchers.
+`oslo make build-root-routing` builds the immutable runner without launching it.
 
 The separate `tests/run-root-handoff.sh` remains the native Morf/root/logind
 probe. Ordinary builds and Cage runs execute neither root script automatically.

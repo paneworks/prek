@@ -133,6 +133,8 @@
                   for probe in library_preflight session_preflight; do
                     "$candidate" --list --ignored | ${pkgs.ripgrep}/bin/rg -Fx "session::native_probe::$probe: test"
                   done
+                  "$candidate" --list --ignored | ${pkgs.ripgrep}/bin/rg -Fx \
+                    'kernel::tests::repeat::isolated_uinput_repeat_timer_and_consumer_settings_are_not_transparent: test'
                   install -m 755 "$candidate" "$nativeTests/libexec/prek-native-tests"
                   count=$((count + 1))
                 fi

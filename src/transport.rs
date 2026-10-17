@@ -311,6 +311,10 @@ impl Descriptor {
             return Err("device has no supported input capabilities");
         };
         if original.capabilities.contains_key(&20) != repeat.is_some()
+            || original
+                .capabilities
+                .get(&20)
+                .is_some_and(|codes| codes.as_slice() != [0, 1])
             || repeat.is_some_and(|value| value.period_ms > 60_000 || value.delay_ms > 60_000)
         {
             return Err("repeat capabilities require verified repeat settings");
@@ -896,5 +900,58 @@ pub(crate) mod tests {
         assert!(!ready.valid_at(Duration::from_millis(251)));
         device.axes.get_mut(&ABS_MT_POSITION_X).unwrap().maximum += 1;
         assert!(!ready.matches(&device));
+    }
+
+    #[test]
+    fn repeat_capabilities_require_both_implicit_settings() {
+        let mut device = touch();
+        for codes in [vec![0], vec![1]] {
+            device.capabilities.insert(20, codes);
+            for repeat in [
+                Repeat {
+                    delay_ms: 0,
+                    period_ms: 0,
+                },
+                Repeat {
+                    delay_ms: 250,
+                    period_ms: 33,
+                },
+            ] {
+                assert!(
+                    Descriptor::mirror(
+                        &device,
+                        descriptor().identity,
+                        Some(repeat),
+                        &BTreeMap::new(),
+                        BTreeMap::new()
+                    )
+                    .is_err()
+                );
+            }
+        }
+        device.capabilities.insert(20, vec![0, 1]);
+        for (delay_ms, period_ms, allowed) in [
+            (0, 0, true),
+            (0, 33, true),
+            (250, 0, true),
+            (60_000, 60_000, true),
+            (60_001, 33, false),
+            (250, 60_001, false),
+        ] {
+            assert_eq!(
+                Descriptor::mirror(
+                    &device,
+                    descriptor().identity,
+                    Some(Repeat {
+                        delay_ms,
+                        period_ms
+                    }),
+                    &BTreeMap::new(),
+                    BTreeMap::new()
+                )
+                .is_ok(),
+                allowed
+            );
+        }
     }
 }

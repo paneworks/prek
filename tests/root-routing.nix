@@ -7,6 +7,7 @@ let
       ${pkgs.python3}/bin/python3 ${./support/root_routing.py} \
       --tests ${package.nativeTests}/libexec/prek-routing-tests \
       --recovery ${package.nativeTests}/libexec/prek-recovery-tests \
+      --native ${package.nativeTests}/libexec/prek-native-tests \
       --importer ${package}/bin/prek --udevadm ${pkgs.systemd}/bin/udevadm
   '';
 in pkgs.writeShellScriptBin "prek-root-routing-test" ''

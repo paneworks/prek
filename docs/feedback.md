@@ -69,10 +69,43 @@ is not a positive kernel result. The agent does not launch it. It opens only
 its named, pre-add libinput-ignored synthetic fixtures; it neither opens a
 physical keyboard nor proves stock compositor, console or phone behavior.
 
-Repeat-capable devices remain refused. Enabling `EV_REP` on a uinput clone can
-introduce kernel software autorepeat in addition to forwarded physical repeats.
-Repeat configuration, timing and exactly-once repeat delivery require their own
-complete backend and kernel/consumer acceptance, not an LED bridge token.
+## Repeat admission remains closed
+
+This is a backend incompatibility, not just a missing LED-bridge branch. In Linux
+v6.18, `uinput_create_device` registers a device without preset repeat values.
+Neither uinput setup structure supplies those values; writes before creation
+are legacy setup, not input events. `input_register_device` initializes software
+repeat when both values are initially zero. Changing `REP_DELAY` or `REP_PERIOD`
+after registration does not remove that timer function.
+
+With nonzero values, forwarded key presses arm the virtual timer. Forwarding
+the source's `EV_KEY` value 2 events can then add a second repeat stream. Dropping
+those source events substitutes virtual timing for source timing. Removing
+`EV_REP` changes capabilities. Setting delay or period to zero changes visible
+settings, and a consumer's `EVIOCSREP` can enable the timer again. None of these
+is an accepted transparent implementation. Zero-valued source settings are also
+refused: their consumer can subsequently select nonzero values.
+The descriptor requires the complete implicit `REP_DELAY`/`REP_PERIOD` pair;
+`EV_REP` is not a partial code bitmap readable through `EVIOCGBIT(EV_REP)`.
+
+The user-launched root runner includes one **negative characterization** case,
+`kernel::tests::repeat::isolated_uinput_repeat_timer_and_consumer_settings_are_not_transparent`.
+Its raw-uinput constructor exists only in `cfg(test)`; no production flag or
+constructor bypass is added. It creates only a named synthetic keyboard with a
+fresh pre-add publication and libinput-ignore metadata, verifies its actual
+identity and protected completed publication, then grabs it before key injection.
+It checks registration defaults, one explicitly emitted repeat with the timer
+disabled, consumer setting updates and reverse producer requests, extra actual
+timer repeats after re-enabling, and final neutral key state. Live settings use
+`EVIOCGREP`, not evdev's cached `get_auto_repeat` opening snapshot.
+
+Building or listing this ignored case is not executing it. A successful result
+would characterize this incompatibility on the logged kernel, **not** prove
+repeat passthrough, a physical source, compositor cadence or production routing.
+The version-3 aggregate root receipt keeps `repeat_passthrough_tested=false` and
+rejects missing, skipped or uncorrelated characterization results. Preserving
+source repeat delivery, visible settings and reverse changes still needs a
+complete backend and kernel/consumer acceptance before this admission gate opens.
 
 The implementation follows upstream Linux v6.18
 [input event disposition](https://github.com/torvalds/linux/blob/v6.18/drivers/input/input.c),
