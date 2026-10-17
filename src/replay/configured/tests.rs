@@ -1,4 +1,5 @@
 use super::*;
+mod composition;
 use crate::{
     config::{Delivery, Millis, Trigger},
     context::SessionKind,
@@ -447,7 +448,7 @@ fn custom_replay_requires_exact_source_declarations_and_nonempty_checked_input()
 }
 
 #[test]
-fn native_composed_custom_replay_uses_actual_bound_closures_without_public_admission() {
+fn composed_custom_replay_uses_actual_bound_closures_with_a_fenced_coordinator() {
     let definition = definition(
         r#"
 if ticket.cause=='cancel' then return nil end
@@ -464,7 +465,7 @@ calls=calls+1;return {phase='discrete',data={calls=calls}}
     };
     for delivery in [Delivery::Observe, Delivery::Buffer, Delivery::Reserve] {
         config.rules[0].delivery = delivery;
-        assert!(config.validate().is_err());
+        config.validate().unwrap();
         let mut replay = Configured::new(config.clone(), Some(definition.clone())).unwrap();
         start(&mut replay, 1);
         for (sequence, value) in [(1, 1), (2, 0), (3, 1)] {

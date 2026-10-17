@@ -41,11 +41,15 @@ local function recognize(ticket)
  assert(info and info.device.name=='Prek test bridge model')
  return {phase='discrete',data={step=ticket.recognizer,from='actual-composed-worker'}}
 end
-p.recognizers.define('first',{selectors={'keyboard'},inputs={'key'},reply_within='250ms'},recognize)
-p.recognizers.define('last',{selectors={'keyboard'},inputs={'key'},reply_within='250ms'},recognize)
-return p.config.new{policy={allow_input_events=true,allowed_devices={'keyboard'}},devices={keyboard={identity='bridge-model'}}}
+local first=p.recognizers.define('first',{selectors={'keyboard'},inputs={'key'},reply_within='250ms'},recognize)
+local last=p.recognizers.define('last',{selectors={'keyboard'},inputs={'key'},reply_within='250ms'},recognize)
+return p.config.new{mode='route',policy={allow_input_events=true,allow_runtime_rules=true,allowed_devices={'keyboard'}},
+ timing={join_window='1ms',decision_window='300ms'},devices={keyboard={identity='bridge-model'}},
+ rules={{id='chain',devices={'keyboard'},contexts={'desktop'},scope='everywhere',delivery='reserve',
+ trigger=p.triggers.sequence{steps={first,last},timeout='1s'},action=p.actions.event{name='bridge-match'}}}}
 "#;
-    let native = config(Delivery::Reserve);
+    let definition = LuaDefinition::compile(source, "composed-worker-helper.lua").unwrap();
+    let native = definition.validate().unwrap();
     let mut subscription = owner();
     subscription.context.as_mut().unwrap().binding.uid = fs::metadata("/proc/self").unwrap().uid();
     let mut fixture = Fixture::new(native.clone(), subscription);
@@ -68,16 +72,12 @@ return p.config.new{policy={allow_input_events=true,allowed_devices={'keyboard'}
             fixture.subscribe(fixture.owner.clone(), generation);
             current = fresh_source(&mut fixture, current.source.generation + 1);
         }
-        let definition = LuaDefinition::compile(source, "composed-worker-helper.lua").unwrap();
-        assert_eq!(
-            definition.validate().unwrap().recognizer_definitions(),
-            native.recognizer_definitions()
-        );
+        assert_eq!(definition.validate().unwrap(), fixture.stream.config);
         let mut session = Session::spawn(
             Path::new(&executable),
             fixture.owner.fence,
             "seat0",
-            definition,
+            definition.clone(),
         )
         .unwrap();
         assert!(settle(&mut session).is_empty());

@@ -251,7 +251,7 @@ impl Stream {
         for rule in &mut baseline.rules {
             rule.enabled = false;
         }
-        let mut baseline = Engine::baseline(baseline)?;
+        let mut baseline = Engine::new(baseline)?;
         baseline.push(Record::Header { version: 1 })?;
         let mut messages = Outbox::default();
         messages.push(Message::Configuration {
@@ -810,7 +810,7 @@ impl InputSink for Stream {
                     }
                 }
                 command => {
-                    if let Some(installation) = self.assembly.accept_coordinated(command, now)? {
+                    if let Some(installation) = self.assembly.accept(command, now)? {
                         let result = installation.config.and_then(|config| {
                             if config.mode != Mode::Route
                                 || self.generation.checked_add(1) != Some(installation.generation)

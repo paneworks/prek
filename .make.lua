@@ -221,6 +221,14 @@ make.recipe{ name = "test-composition", desc = "native sequence routing and recu
                sh.cargo("test", "--locked", "--lib", "router::tests::chain::")
              end }
 
+make.recipe{ name = "test-composed-source", desc = "public source, broker catalogs and composed replay admission",
+             deps = { "test-composed-worker", "test-custom-replay" },
+             run = function()
+               sh.cargo("test", "--locked", "--lib", "lua::recognizers::constructor_tests::source_constructor_compiles_nested_")
+               sh.cargo("test", "--locked", "--lib", "service::source::tests::")
+               sh.cargo("test", "--locked", "--lib", "service::recognizers::tests::composed_source_")
+             end }
+
 make.recipe{
   name = "test-routing-helper",
   desc = "test sole-worker callbacks with the real unprivileged Lua helper",

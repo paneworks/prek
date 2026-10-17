@@ -11,9 +11,9 @@ physical routing acceptance remain unverified; source, native coordinator and
 real helper tests use explicit admission/context models.
 
 The sole routing worker also reconstructs complete native composed plans across
-private subscriptions, rule edits and configuration reloads. Its separate
-coordinated validator is not a public Lua/TOML option. Public composed source
-admission remains gated. Deterministic custom replay runs actual isolated
+private subscriptions, rule edits and configuration reloads. Lua/TOML structural
+validation accepts nested custom declarations; enabled callback execution still
+requires a fenced coordinator and exact original source bindings. Deterministic custom replay runs actual isolated
 callbacks with recorded context through the CLI and Lua API; see
 [offline replay](lua-api.md#offline-replay) and
 [compiled native plans](routing-chains.md#compiled-plans-in-the-sole-worker).
@@ -121,9 +121,9 @@ seat, declaration scope and the original 250 ms freshness limit. Packets and
 queues are bounded; excessive metadata retires the affected observation stream,
 not the input reader. Catalog queries become unavailable when the custom
 capability view expires, even if desktop context remains fresh. There is no host
-inventory scan or atomic full-device inventory guarantee. Custom sequence steps,
-additional consuming group lifetimes and live sole-worker routing acceptance
-remain unfinished. Production routing stays gated.
+inventory scan or atomic full-device inventory guarantee. Source-declared custom
+sequences retain the same scoped metadata contract. Live privileged sole-worker
+routing acceptance remains unfinished. Production routing stays gated.
 
 ## Private sole-worker bridge
 
@@ -321,16 +321,17 @@ native handoff scripts do not establish live custom-recognizer admission.
 The internal declarative `custom` trigger embeds a recognizer declaration, a
 1–10,000 ms recognition timeout and an optional 5–250 ms wake interval. Named
 declarations must agree across rules and remain within the protected device/input
-policy. Custom sequence steps currently fail validation: coordinated step and
-multi-group lifetimes remain required work. Continuous consuming candidates must
+policy. Custom declarations may appear in bounded nested sequence steps.
+Continuous consuming candidates must
 start on a physical key/contact group; other declared changes may update that
 group. Continuous consumption without such a group also remains unsupported.
 
 Declaration discovery and source approval walk every nested trigger, preserving
 canonical registration and exact callback matching across composition boundaries.
-Baseline preflight and context requirements use the same walk. This does not
-enable custom sequence execution: independent child coordinators would duplicate
-ticket identities/budgets and expose callbacks for steps that are not yet active.
+Baseline preflight and context requirements use the same walk. Parsing a custom
+graph does not execute callbacks. Only the fenced root coordinator lends its
+gate to the currently active step; there are no independent child ticket spaces
+or future-step callback execution.
 
 The private composition coordinator now lends the root's single native gate to
 active custom steps, sharing candidate IDs, request/cancellation budgets and
@@ -366,9 +367,17 @@ counting earlier motion. Admission does not advance the drained input clock.
 A custom step completed after the group is fully neutral may instead wait for
 a genuinely fresh group. Final custom proposals retain their original expiry
 when translated to a parent outcome.
-Public custom-sequence validation remains closed: full sole-worker/source
-integration and offline custom replay are still required. These fixtures do not constitute that
-API, privileged, device or rendered acceptance.
+Public Lua/TOML parsing, portable source snapshots, broker source preparation,
+runtime transactions and private worker reconstruction share one structural
+validator. There is no serialized validation-mode selector. The original source
+catalog is frozen for edits, including remove/restore; a source reload replaces
+it only after complete bounded validation. TOML alone cannot recreate closures.
+The [composed example](../examples/lua/composed_recognizers.lua) runs two approved
+custom steps with one outer outcome. Direct sequences have 2–16 children, at most
+64 leaves and eight nesting levels. Nested groups retain their own anchored
+timeouts; evidence lists leaves in step order. Ordinary unfenced engines still
+reject enabled callbacks before input access. These are source/native/private
+worker and offline checks, not privileged, device or rendered acceptance.
 The [native raw-group chain API](routing-chains.md) provides bounded multi-group
 buffer/reserve, FIFO fallback and opaque ownership proofs. Built-in native
 sequences use these through `routing::Routing`, with actual per-source step
@@ -443,7 +452,8 @@ The real supervised-helper test also connects the actual private observer worker
 socket to Luna: physical-frame model → pending → stationary timer → typed native match
 → correlated cleanup acknowledgement. It explicitly models provider authority
 and performs no device I/O. Broker ledger and protocol tests model admission;
-they do not verify a live privileged broker/logind registration. Routing-worker
-callbacks, full sequence/group composition, offline
-custom replay and end-to-end reload/recovery still need implementation or live
-acceptance. Production routing and Morf action admission remain gated.
+they do not verify a live privileged broker/logind registration. Full source
+graphs now run through the sole worker helper across configuration generations,
+and offline replay exercises real held-touch and cross-source composition.
+End-to-end production reload/recovery and physical acceptance remain open.
+Production routing and Morf action admission remain gated.

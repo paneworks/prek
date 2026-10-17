@@ -520,9 +520,10 @@ All IDs/generations/revisions are exact decimal strings.
 
 See [the full constructor, ticket and cleanup contract](recognizers.md) and
 [hold example](../examples/lua/custom_recognizer.lua). The real helper and
-native-worker tests use explicit context/admission models. The sole routing-worker
-bridge is implemented; actual privileged acceptance, full custom sequence/group
-composition and offline custom replay remain required.
+native-worker tests use explicit context/admission models. Source-declared nested
+custom sequences compile into one native coordinator and run through worker
+reconstruction and deterministic offline replay. Actual privileged, raw downstream
+and physical acceptance remain required; production routing stays disabled.
 
 Constructors also retain canonical declarations in `Config.recognizers`,
 independent of the current rules. Runtime transactions can use a retained trigger
@@ -1003,6 +1004,15 @@ correct `kind`. A conflicting `kind` is an error.
 | `triggers.shape` | `name`, optional `fingers`, optional mouse `button` |
 | `triggers.sequence` | `steps` containing trigger declarations, `timeout` |
 
+Sequences accept registered custom triggers and nested sequences: 2–16 direct
+children, at most 64 leaf recognizers and eight nesting levels. Each nested
+timeout stays anchored to its own admission. One native coordinator issues only
+the active step's tickets and returns flattened leaf evidence under the outer
+result identity. Source approval, context/frozen targets, ownership and cleanup
+remain native checks. Runtime edits may compose already approved declarations,
+not register or change callbacks. See
+[composed_recognizers.lua](../examples/lua/composed_recognizers.lua).
+
 Keys use Linux names/aliases or `code:N`; touch counts, source scope and timing
 conditions retain their existing validated meaning. Pan is the continuous swipe
 representation in the Rust model. Constructors never create a physical owner.
@@ -1287,8 +1297,9 @@ snapshot. Each recorded seat gets fresh isolated source closures; replay never
 reuses or changes live callback state. Configuration-time custom replay and
 custom replay inside an offline callback are rejected. Native proposals, phase
 ordering, source incarnations, frozen targets, timeouts and cancellations use
-the ordinary Rust coordinator. Public nested-custom source admission remains
-closed; private native plan tests are not public composition acceptance.
+the ordinary Rust coordinator. Source-declared nested steps use the same
+validator, exact source catalog and native coordinator as worker reconstruction.
+Parsing a graph grants no input ownership, context or executable callback fence.
 
 - `replay:push(record_json)` accepts one native recording JSON object, beginning
   with `{"record":"header","version":1}`. Use the existing recording format for

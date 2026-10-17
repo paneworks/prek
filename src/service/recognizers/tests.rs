@@ -63,6 +63,55 @@ fn ledger() -> Ledger {
 }
 
 #[test]
+fn composed_source_delivery_requires_every_exact_binding_and_the_current_rule_revision() {
+    let source = crate::lua::Definition::compile(
+        include_str!("../../../examples/lua/composed_recognizers.lua"),
+        "composed.lua",
+    )
+    .unwrap();
+    let config = source.validate().unwrap();
+    assert!(bindings_available(Some(&config), &source.recognizers));
+    assert!(!bindings_available(Some(&config), &source.recognizers[..1]));
+    for name in ["first", "last"] {
+        let mut ticket = ticket(1, 1);
+        ticket.rule = "composed".into();
+        ticket.recognizer = name.into();
+        validate_delivery(
+            &config,
+            &source.recognizers,
+            fence(),
+            "seat0",
+            1,
+            &ticket,
+            ms(101),
+        )
+        .unwrap();
+        assert!(
+            validate_delivery(
+                &config,
+                &source.recognizers,
+                fence(),
+                "seat0",
+                2,
+                &ticket,
+                ms(101)
+            )
+            .is_err()
+        );
+        let mut changed = source.recognizers.clone();
+        changed
+            .iter_mut()
+            .find(|b| b.definition.name == name)
+            .unwrap()
+            .definition
+            .continuous = true;
+        assert!(
+            validate_delivery(&config, &changed, fence(), "seat0", 1, &ticket, ms(101)).is_err()
+        );
+    }
+}
+
+#[test]
 fn readiness_needs_native_ack_and_retirement_cannot_reactivate_the_same_vm_fence() {
     let mut ledger = Ledger::default();
     assert!(ledger.issue(ticket(1, 1)).is_err());

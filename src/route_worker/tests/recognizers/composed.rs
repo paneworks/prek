@@ -58,10 +58,7 @@ fn config(delivery: Delivery) -> Config {
         steps: vec![custom("first"), custom("last")],
         timeout: Millis(1000),
     };
-    assert!(config.validate().is_err());
-    config
-        .validate_for(crate::config::Validation::Coordinated)
-        .unwrap();
+    config.validate().unwrap();
     config
 }
 fn tickets(messages: &[Message]) -> Vec<Ticket> {

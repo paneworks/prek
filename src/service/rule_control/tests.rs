@@ -44,9 +44,7 @@ fn composed_profile() -> Config {
         steps,
         timeout: Millis(1000),
     };
-    config
-        .validate_for(crate::config::Validation::Coordinated)
-        .unwrap();
+    config.validate().unwrap();
     config
 }
 
@@ -144,7 +142,7 @@ fn composed_native_broker_edits_retain_source_admission_after_remove_and_restore
 }
 
 #[test]
-fn a_public_flat_broker_baseline_cannot_upgrade_itself_to_composed_admission() {
+fn a_public_flat_broker_baseline_can_compose_its_frozen_approved_declarations() {
     let mut config = composed_profile();
     let chain = config.rules[0].clone();
     let crate::config::Trigger::Sequence { steps, .. } = &chain.trigger else {
@@ -153,7 +151,7 @@ fn a_public_flat_broker_baseline_cannot_upgrade_itself_to_composed_admission() {
     config.rules[0].trigger = steps[0].clone();
     config.validate().unwrap();
     let mut rules = Rules::new(Some(Arc::new(config)));
-    let error = rules
+    rules
         .prepare(
             RuleProposal {
                 id: 1,
@@ -168,13 +166,9 @@ fn a_public_flat_broker_baseline_cannot_upgrade_itself_to_composed_admission() {
             &[],
             Duration::ZERO,
         )
-        .unwrap_err();
-    assert!(
-        error.to_string().contains("coordinated step lifetimes"),
-        "{error}"
-    );
+        .unwrap();
     assert_eq!(rules.revision(), 1);
-    assert!(!rules.busy());
+    assert!(rules.busy());
 }
 
 #[test]

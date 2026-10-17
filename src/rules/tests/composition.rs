@@ -1,4 +1,4 @@
-//! Private coordinator models; public nested-custom admission stays disabled.
+//! Native coordinator ownership, retained-touch and lifecycle models.
 #[cfg(target_os = "linux")]
 mod helper;
 mod motion;
@@ -60,7 +60,6 @@ fn model_steps(first: Trigger, last: Trigger, chains: usize, empty_contexts: boo
         configuration: 1,
         session: 1,
     };
-    let mut engine = Engine::with_recognition(config.clone(), fence).unwrap();
     for index in 0..chains {
         let mut rule = config.rules[0].clone();
         rule.id = format!("chain-{index}");
@@ -71,10 +70,9 @@ fn model_steps(first: Trigger, last: Trigger, chains: usize, empty_contexts: boo
             steps: vec![first.clone(), last.clone()],
             timeout: Millis(1000),
         };
-        engine
-            .sequences
-            .push(Sequence::new(rule, &config, Some(fence)).unwrap());
+        config.rules.push(rule);
     }
+    let mut engine = Engine::with_recognition(config, fence).unwrap();
     engine.push(Record::Header { version: 1 }).unwrap();
     let mut keyboard = device(1);
     let touch = first.contains_touch() || last.contains_touch();

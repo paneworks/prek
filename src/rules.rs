@@ -403,7 +403,6 @@ impl Worker {
 }
 
 pub struct Engine {
-    validation: crate::config::Validation,
     custom: Option<custom::State>,
     coordinated_step: bool,
     custom_owned: BTreeSet<u64>,
@@ -437,22 +436,7 @@ impl Engine {
         Self::build(config, Some(fence))
     }
     fn build(config: Config, fence: Option<crate::protocol::Fence>) -> io::Result<Self> {
-        let validation = if fence.is_some() {
-            crate::config::Validation::Coordinated
-        } else {
-            crate::config::Validation::Public
-        };
-        Self::compile(config, fence, validation)
-    }
-    pub(crate) fn baseline(config: Config) -> io::Result<Self> {
-        Self::compile(config, None, crate::config::Validation::Coordinated)
-    }
-    fn compile(
-        config: Config,
-        fence: Option<crate::protocol::Fence>,
-        validation: crate::config::Validation,
-    ) -> io::Result<Self> {
-        config.validate_for(validation).map_err(invalid)?;
+        config.validate().map_err(invalid)?;
         let custom = custom::State::new(&config, fence)?;
         let mut workers = config
             .rules
@@ -481,7 +465,6 @@ impl Engine {
             .map(|rule| Sequence::new(rule.clone(), &config, fence))
             .collect::<io::Result<Vec<_>>>()?;
         Ok(Self {
-            validation,
             custom,
             coordinated_step: false,
             custom_owned: BTreeSet::new(),
@@ -1087,7 +1070,7 @@ impl Engine {
             next.recognition_ready(custom.ready(), at)?;
             next
         } else {
-            Self::compile(config, None, self.validation)?
+            Self::new(config)?
         };
         next.push(Record::Header {
             version: crate::replay::FORMAT_VERSION,
@@ -1163,7 +1146,7 @@ impl Engine {
         transaction: &crate::rule_transactions::Transaction,
     ) -> io::Result<Config> {
         transaction
-            .prepare_for(&self.config, self.rule_revision, self.validation)
+            .prepare(&self.config, self.rule_revision)
             .map_err(invalid)
     }
     fn commit_replacement(&mut self, mut next: Self, at: Duration, reason: &str) {

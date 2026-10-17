@@ -156,21 +156,6 @@ impl Assembly {
         self.pending.as_ref().map(|pending| pending.expires)
     }
     pub fn accept(&mut self, command: Command, now: Duration) -> io::Result<Option<Installation>> {
-        self.accept_for(command, now, crate::config::Validation::Public)
-    }
-    pub(crate) fn accept_coordinated(
-        &mut self,
-        command: Command,
-        now: Duration,
-    ) -> io::Result<Option<Installation>> {
-        self.accept_for(command, now, crate::config::Validation::Coordinated)
-    }
-    fn accept_for(
-        &mut self,
-        command: Command,
-        now: Duration,
-        validation: crate::config::Validation,
-    ) -> io::Result<Option<Installation>> {
         if self.deadline().is_some_and(|deadline| now >= deadline) {
             return Err(protocol::invalid("configuration snapshot transfer expired"));
         }
@@ -219,9 +204,7 @@ impl Assembly {
                 }
                 let config = String::from_utf8(pending.data)
                     .map_err(io::Error::other)
-                    .and_then(|text| {
-                        Config::parse_for(&text, validation).map_err(io::Error::other)
-                    });
+                    .and_then(|text| Config::parse(&text).map_err(io::Error::other));
                 return Ok(Some(Installation { generation, config }));
             }
             _ => {

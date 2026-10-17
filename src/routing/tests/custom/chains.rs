@@ -1,4 +1,4 @@
-//! Private composed Routing models; public configuration admission stays closed.
+//! Native composed Routing ownership and cancellation models.
 use super::*;
 #[cfg(target_os = "linux")]
 mod helper;
@@ -40,10 +40,6 @@ fn fixture(steps: Vec<Trigger>, delivery: Delivery, touch: bool) -> (Routing, De
         steps,
         timeout: Millis(1000),
     };
-    let mut public = config.clone();
-    public.rules = vec![rule.clone()];
-    let error = public.validate().unwrap_err().to_string();
-    assert!(error.contains("custom recognizers in sequences"), "{error}");
     config.rules = vec![rule];
     let mut routing = Routing::with_recognition(config, fence()).unwrap();
     context(&mut routing, 0);

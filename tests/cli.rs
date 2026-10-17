@@ -19,6 +19,148 @@ use std::{
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[test]
+fn composed_source_cli_replay_checks_the_public_example_and_stays_unfenced_in_run() {
+    use prek::{
+        context::{Binding, SessionKind, Snapshot, State},
+        rules::{Event, Evidence, Stage},
+    };
+    let directory = Directory::new();
+    let config = directory.0.join("composed.lua");
+    let path = directory.0.join("composed.jsonl");
+    fs::write(
+        &config,
+        include_str!("../examples/lua/composed_recognizers.lua"),
+    )
+    .unwrap();
+    let checked = run(&["check", "--config", config.to_str().unwrap()]);
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    let source = Source {
+        device: 7,
+        generation: 1,
+        seat: "seat0".into(),
+    };
+    let expected = Event::Matched {
+        version: 1,
+        rule: "composed".into(),
+        id: 2,
+        ordinal: 1,
+        source: source.clone(),
+        at: Duration::from_millis(30),
+        config_generation: 1,
+        session_generation: 1,
+        stage: Stage::Discrete,
+        action: Action::Event {
+            name: "composed".into(),
+        },
+        evidence: Evidence::Sequence {
+            steps: ["first", "last"]
+                .into_iter()
+                .map(|name| Evidence::Custom {
+                    recognizer: name.into(),
+                    data: serde_json::json!({"step":name}),
+                })
+                .collect(),
+        },
+        window: None,
+        output: None,
+        workspace: None,
+    };
+    let Record::Device { mut device, .. } = serde_json::from_str::<Record>(
+        String::from_utf8(recording())
+            .unwrap()
+            .lines()
+            .nth(1)
+            .unwrap(),
+    )
+    .unwrap() else {
+        unreachable!()
+    };
+    device.capabilities.insert(EV_KEY, vec![30]);
+    let mut records = vec![
+        Record::Header { version: 1 },
+        Record::Context {
+            at: Duration::ZERO,
+            binding: Binding {
+                seat: "seat0".into(),
+                session: "recorded".into(),
+                uid: 1000,
+                compositor_pid: 42,
+                compositor_start: 1,
+                kind: SessionKind::User,
+            },
+            snapshot: Box::new(Snapshot {
+                generation: 1,
+                revision: 1,
+                captured_at: Duration::ZERO,
+                state: State::Desktop,
+                outputs: vec![],
+                windows: vec![],
+                regions: vec![],
+                secure_overlay: false,
+            }),
+        },
+        Record::Device {
+            device,
+            keys: BTreeSet::new(),
+            contacts: vec![],
+        },
+    ];
+    for (sequence, value) in [(1, 1), (2, 0), (3, 1)] {
+        records.push(Record::Frame {
+            frame: Frame {
+                source: source.clone(),
+                sequence,
+                at: Duration::from_millis(sequence * 10),
+                events: vec![
+                    RawEvent {
+                        kind: EV_KEY,
+                        code: 30,
+                        value,
+                    },
+                    RawEvent {
+                        kind: EV_SYN,
+                        code: SYN_REPORT,
+                        value: 0,
+                    },
+                ],
+            },
+        });
+    }
+    records.push(Record::ExpectedRules {
+        events: vec![expected.clone()],
+    });
+    let mut bytes = vec![];
+    for record in records {
+        write_record(&mut bytes, &record).unwrap();
+    }
+    fs::write(&path, bytes).unwrap();
+    for _ in 0..2 {
+        let output = run(&[
+            "replay",
+            path.to_str().unwrap(),
+            "--config",
+            config.to_str().unwrap(),
+            "--check",
+            "--json",
+        ]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let actual: Vec<Event> = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(actual.as_slice(), std::slice::from_ref(&expected));
+    }
+    let unfenced = run(&["run", "--config", config.to_str().unwrap()]);
+    assert!(!unfenced.status.success());
+    assert!(String::from_utf8_lossy(&unfenced.stderr).contains("trusted asynchronous"));
+}
+
+#[test]
 fn custom_cli_replay_checks_actual_source_callbacks_without_executing_command_outcomes() {
     use prek::{
         context::{Binding, SessionKind, Snapshot, State},

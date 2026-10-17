@@ -90,6 +90,18 @@ mod tests {
             activation: LayerActivation::Physical,
         };
         for (name, model) in [
+            (
+                "CustomEvidence",
+                serde_json::to_value(crate::rules::Evidence::Custom {
+                    recognizer: "editor".into(),
+                    data: serde_json::Value::Null,
+                })
+                .unwrap(),
+            ),
+            (
+                "SequenceEvidence",
+                serde_json::to_value(crate::rules::Evidence::Sequence { steps: vec![] }).unwrap(),
+            ),
             ("Config", serde_json::to_value(&config).unwrap()),
             (
                 "RecognizerDeclaration",

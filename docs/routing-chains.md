@@ -4,9 +4,9 @@ The Rust `router::Router` transport model can retain several physical groups
 under one consuming decision. `routing::Routing` uses it for consuming built-in
 native sequences and coordinated custom-step ownership. Full compiled plans
 now survive private worker subscriptions, rule edits and configuration reloads.
-Public source admission remains unfinished. Offline configured replay now runs
-isolated real callbacks without raw transport or live effect authority. Public custom
-sequence validation and production routing remain gated.
+Public source validation accepts composed custom declarations. Offline configured
+replay runs isolated real callbacks without raw transport or live effect authority.
+Production routing remains gated.
 
 The embedding must verify the active rule step, source incarnation, protected
 policy, frozen target and transport readiness before admitting a group. A token
@@ -127,10 +127,10 @@ configuration admission, kernel capture or rendered/physical acceptance.
 ## Compiled plans in the sole worker
 
 The private native backend carries a complete bounded `Config`, not a sequence
-injected into one seat after subscription. Coordinated structural validation is
-crate-private and never selected by a serialized flag. Public Lua/TOML parsing,
-ordinary unfenced engines and public rule transactions retain the nested-custom
-admission guard. No callback supplies a native scope or selects validation mode.
+injected into one seat after subscription. Public Lua/TOML parsing, source
+installation, native snapshots and rule transactions use one structural validator.
+There is no validation-mode flag. Ordinary unfenced engines still refuse enabled
+callbacks; no callback supplies a native scope or creates a coordinator.
 
 Preflight validates the original enabled graph, including exclusive conflicts,
 the 4096 compiled-recognizer bound and strict buffer join timing, before creating
@@ -140,16 +140,17 @@ reload leaves the prior graph, tickets and transport intact; a successful reload
 retires old ownership and requires a new configuration fence and transport.
 
 Native edits retain the original exact callback declaration catalog across
-remove/restore. Broker edit admission is fixed by the original protected native
-baseline: a public flat source cannot upgrade itself to composed admission.
+remove/restore. Broker edits may compose declarations retained by the original
+protected source, but cannot add or change callback definitions.
 Existing capability, action-handler and source-binding checks remain separate.
 
 `oslo make test-composed-worker` checks complete plans through actual private
 channels and Stream command/input ordering, using model readiness and context.
 `oslo make test-composed-worker-helper` also runs the actual supervised Lua child
 through two complete plan generations, canonical device metadata, reader-delayed
-receipts, typed outer results and correlated leaf cleanup. Source callback
-declarations are compared exactly with the native plan. This is not full public
-composed source compilation, broker-to-kernel delivery, rendered/physical
-acceptance. Separate offline replay tests use native observation coordinators,
+receipts, typed outer results and correlated leaf cleanup. It compiles the full
+public source graph and compares the entire worker config with its source model,
+not only a declaration catalog. Source preparation and CLI cases also exercise
+the public example and strict callback bindings. This is not broker-to-kernel
+delivery or rendered/physical acceptance. Separate offline replay tests use native observation coordinators,
 not this raw transport. Production route-mode admission stays disabled.

@@ -107,7 +107,7 @@ fn custom_replay_uses_fresh_approved_closures_instead_of_the_live_callback_state
     let mut pushes = String::new();
     for record in records {
         pushes.push_str(&format!(
-            "r:push([==[{}]==])\n",
+            "[==[{}]==],\n",
             serde_json::to_string(&record).unwrap()
         ));
     }
@@ -123,15 +123,14 @@ end)
 config=p.config.new{{policy={{allow_input_events=true,allowed_devices={{'keys'}}}},devices={{keys={{keys={{'KEY_A'}}}}}},
  rules={{{{id='offline',devices={{'keys'}},contexts={{'desktop'}},scope='everywhere',delivery='observe',trigger=trigger,action=p.actions.event{{name='offline'}}}}}}}}
 assert(not pcall(p.replay.new,config))
+local records={{{pushes}}};local r;local index
 p.events.on('ready',function()
- do
-  local r=p.replay.new(config)
-  {pushes}
-  local result=r:finish()
-  assert(result.mode=='rules' and #result.outcomes==1)
-  assert(result.outcomes[1].evidence.data.calls==1)
-  assert(result.outcomes[1].source.device=='18446744073709551615')
- end
+ if not r then r=p.replay.new(config);index=1;return end
+ if records[index] then r:push(records[index]);index=index+1;return end
+ local result=r:finish();r=nil
+ assert(result.mode=='rules' and #result.outcomes==1)
+ assert(result.outcomes[1].evidence.data.calls==1)
+ assert(result.outcomes[1].source.device=='18446744073709551615')
  assert(calls==0)
  p.log.info('isolated-replay-ok')
 end)
@@ -146,10 +145,16 @@ return config
             definition.instantiate().unwrap()
         };
         for _ in 0..2 {
-            let logs = runtime
-                .dispatch(EventKind::Ready, &serde_json::json!({}))
-                .unwrap();
-            assert!(matches!(&logs[..],[log]if log.message=="isolated-replay-ok"));
+            for wake in 0..6 {
+                let logs = runtime
+                    .dispatch(EventKind::Ready, &serde_json::json!({}))
+                    .unwrap();
+                if wake == 5 {
+                    assert!(matches!(&logs[..],[log]if log.message=="isolated-replay-ok"));
+                } else {
+                    assert!(logs.is_empty());
+                }
+            }
         }
     }
 }
@@ -163,9 +168,22 @@ fn shipped_custom_replay_example_executes_its_checked_fixture() {
     )
     .unwrap();
     let mut runtime = definition.instantiate().unwrap();
-    let logs = runtime
-        .dispatch(EventKind::Ready, &serde_json::json!({}))
-        .unwrap();
+    runtime.set_clock(Duration::ZERO).unwrap();
+    assert!(
+        runtime
+            .dispatch(EventKind::Ready, &serde_json::json!({}))
+            .unwrap()
+            .is_empty()
+    );
+    let mut logs = vec![];
+    for wake in 1..=6 {
+        logs.extend(
+            runtime
+                .tick(Duration::from_millis(wake), &serde_json::json!({}))
+                .unwrap(),
+        );
+    }
+    assert!(runtime.timer_deadline().unwrap().is_none());
     assert!(
         matches!(&logs[..],[log]if log.message=="custom-replay-checked"&&log.fields["outcomes"]==1)
     );

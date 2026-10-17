@@ -6,6 +6,36 @@ local trigger=p.recognizers.define('hold',{
  selectors={'keys'},inputs={'key'},reply_within='250ms',wake='20ms',
 },function(ticket) assert(ticket.cause=='frame' or ticket.cause=='timer' or ticket.cause=='cancel'); return nil end)
 "#;
+
+#[test]
+fn source_constructor_compiles_nested_callbacks_with_exact_snapshot_and_no_unfenced_execution() {
+    let source = include_str!("../../../examples/lua/composed_recognizers.lua").replace(
+        "steps = {first, last}",
+        "steps = {first, p.triggers.sequence {steps={last,last},timeout='500ms'}}",
+    );
+    let definition = Definition::compile(&source, "nested-source.lua").unwrap();
+    let config = definition.validate().unwrap();
+    assert_eq!(definition.recognizers.len(), 2);
+    assert_eq!(
+        config.rules[0]
+            .trigger
+            .recognizers()
+            .map(|d| d.name.as_str())
+            .collect::<Vec<_>>(),
+        ["first", "last", "last"]
+    );
+    assert_eq!(
+        Config::parse(&toml::to_string(&config).unwrap()).unwrap(),
+        config
+    );
+    assert!(crate::rules::Engine::new(config).is_err());
+    let portable: Definition =
+        serde_json::from_slice(&serde_json::to_vec(&definition).unwrap()).unwrap();
+    portable.instantiate().unwrap();
+    let mut missing = portable;
+    missing.recognizers.pop();
+    assert!(missing.validate().is_err());
+}
 fn source(body: &str) -> String {
     format!(
         r#"local p=require('prek'); {body}

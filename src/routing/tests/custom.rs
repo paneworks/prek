@@ -426,7 +426,7 @@ fn custom_trigger_requires_coordinator_and_explicit_bounded_policy() {
                             key: crate::config::Key(30),
                         },
                     ],
-                    timeout: Millis(100),
+                    timeout: Millis(0),
                 };
             }
             "duplicate" => {

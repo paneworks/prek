@@ -142,7 +142,7 @@
 ---@field button? prek.Key Mouse capture delimiter, default BTN_LEFT.
 ---@class (exact) prek.SequenceFields
 ---@field kind? 'sequence' Matching explicit kind is accepted; constructors supply it if absent.
----@field steps prek.Trigger[]
+---@field steps prek.Trigger[] Two to sixteen children; custom and nested steps share one native coordinator, at most 64 leaves/eight levels.
 ---@field timeout prek.Duration
 
 ---@class (exact) prek.RecognizerOptions
@@ -424,8 +424,12 @@
 ---@field shape prek.ShapeMatch
 ---@class (exact) prek.SequenceEvidence
 ---@field kind 'sequence'
----@field steps prek.Evidence[]
----@alias prek.Evidence prek.KeyEvidence|prek.TapsEvidence|prek.HoldEvidence|prek.ChordEvidence|prek.TouchEvidence|prek.WheelEvidence|prek.ShapeEvidence|prek.SequenceEvidence
+---@field steps prek.Evidence[] Flattened leaf evidence in step order.
+---@class (exact) prek.CustomEvidence
+---@field kind 'custom'
+---@field recognizer string Approved source declaration name.
+---@field data unknown Bounded JSON-compatible callback proposal data.
+---@alias prek.Evidence prek.KeyEvidence|prek.TapsEvidence|prek.HoldEvidence|prek.ChordEvidence|prek.TouchEvidence|prek.WheelEvidence|prek.ShapeEvidence|prek.SequenceEvidence|prek.CustomEvidence
 
 ---@class (exact) prek.MatchedEvent
 ---@field outcome 'matched'

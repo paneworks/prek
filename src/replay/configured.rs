@@ -1,7 +1,7 @@
 //! Recorded context and source-bound callbacks on an isolated virtual timeline.
 use super::{MAX_LINE_BYTES, MAX_RECORDING_BYTES, MAX_RECORDS, Record};
 use crate::{
-    config::{Config, Validation},
+    config::Config,
     context::{Authority, Binding, Snapshot, State},
     context_transfer::View,
     input::Source,
@@ -220,9 +220,7 @@ impl Configured {
         definition: Option<Arc<Definition>>,
         budget: Budget,
     ) -> io::Result<Self> {
-        config
-            .validate_for(Validation::Coordinated)
-            .map_err(invalid)?;
+        config.validate().map_err(invalid)?;
         let declarations = config.recognizer_definitions();
         if !declarations.is_empty() {
             // SAFETY: read-only effective credential query.
@@ -247,7 +245,7 @@ impl Configured {
                 ));
             }
         }
-        let baseline = Engine::baseline(crate::worker::preflight_profile(&config))?;
+        let baseline = Engine::new(crate::worker::preflight_profile(&config))?;
         Ok(Self {
             config,
             definition,
@@ -284,7 +282,7 @@ impl Configured {
         if self.expected.is_some() {
             return Err(invalid("expected rule outcomes must be the final record"));
         }
-        let bytes = crate::lua::bounded_replay_json(&record, MAX_LINE_BYTES)?.len();
+        let bytes = crate::lua::bounded_json(&record, MAX_LINE_BYTES)?.len();
         if self.records >= MAX_RECORDS || bytes > MAX_RECORDING_BYTES.saturating_sub(self.bytes) {
             return Err(invalid("configured replay recording limit exceeded"));
         }
@@ -464,7 +462,7 @@ impl Configured {
         if self.events.len() + events.len() > MAX_OUTCOMES {
             return Err(invalid("offline replay outcome limit exceeded"));
         }
-        self.outcome_bytes += crate::lua::bounded_replay_json(
+        self.outcome_bytes += crate::lua::bounded_json(
             &events,
             MAX_RECORDING_BYTES.saturating_sub(self.outcome_bytes),
         )?

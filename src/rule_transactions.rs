@@ -70,14 +70,6 @@ impl Transaction {
         serde_json::to_writer(Buffer(0), self).map_err(|error| ConfigError(error.to_string()))
     }
     pub fn prepare(&self, current: &Config, revision: u64) -> Result<Config, ConfigError> {
-        self.prepare_for(current, revision, crate::config::Validation::Public)
-    }
-    pub(crate) fn prepare_for(
-        &self,
-        current: &Config,
-        revision: u64,
-        validation: crate::config::Validation,
-    ) -> Result<Config, ConfigError> {
         self.validate()?;
         if self.revision != revision || revision == u64::MAX {
             return Err(ConfigError(
@@ -132,7 +124,7 @@ impl Transaction {
             }
         }
         // Includes ID/reference/unit/priority/conflict and policy validation.
-        next.validate_for(validation)?;
+        next.validate()?;
         Ok(next)
     }
 }

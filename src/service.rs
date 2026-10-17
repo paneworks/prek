@@ -18,6 +18,7 @@ use nix::{
 mod morf_handoff;
 mod recognizers;
 mod rule_control;
+mod source;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs, io,
@@ -957,31 +958,11 @@ impl Broker {
         &mut self,
         definition: Option<&crate::lua::Definition>,
     ) -> io::Result<()> {
-        let baseline = definition
-            .map(|definition| {
-                definition
-                    .validate()
-                    .map(std::sync::Arc::new)
-                    .map_err(io::Error::other)
-            })
-            .transpose()?;
-        let source = definition
-            .map(|definition| {
-                let bytes = serde_json::to_vec(definition).map_err(io::Error::other)?;
-                if bytes.len() > crate::lua::MAX_SNAPSHOT_BYTES {
-                    return Err(protocol::invalid(
-                        "approved Lua snapshot exceeds byte limit",
-                    ));
-                }
-                Ok(bytes)
-            })
-            .transpose()?;
-        self.rule_baseline = baseline;
-        self.lua_source = source;
-        self.rule_handlers =
-            definition.map_or_else(Vec::new, |definition| definition.handlers.clone());
-        self.recognizer_bindings =
-            definition.map_or_else(Vec::new, |definition| definition.recognizers.clone());
+        let source = source::Prepared::new(definition)?;
+        self.rule_baseline = source.baseline;
+        self.lua_source = source.bytes;
+        self.rule_handlers = source.handlers;
+        self.recognizer_bindings = source.recognizers;
         for connection in &mut self.connections {
             if let Some(bound) = connection.bound.as_mut() {
                 bound.rules = rule_control::Rules::new(self.rule_baseline.clone());
