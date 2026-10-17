@@ -64,6 +64,12 @@
             inherit pkgs;
             package = self.packages.${system}.default;
           };
+          cage-test-stock = import ./tests/cage-host.nix {
+            inherit pkgs;
+            inherit (compositorPkgs) cage hyprland;
+            stockAquamarine = compositorPkgs.aquamarine;
+            package = self.packages.${system}.default;
+          };
           aquamarine-wayland-test = import ./tests/aquamarine-wayland.nix {
             pkgs = compositorPkgs;
           };
@@ -194,6 +200,10 @@
         cage-test = {
           type = "app";
           program = "${self.packages.${system}.cage-test}/bin/prek-cage-host-test";
+        };
+        cage-test-stock = {
+          type = "app";
+          program = "${self.packages.${system}.cage-test-stock}/bin/prek-cage-host-test";
         };
         cage-test-wayland-fix = {
           type = "app";

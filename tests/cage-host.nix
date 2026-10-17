@@ -1,4 +1,5 @@
-{ pkgs, package, rootProbe ? null, cage ? pkgs.cage, hyprland ? pkgs.hyprland, aquamarine ? null }:
+{ pkgs, package, rootProbe ? null, cage ? pkgs.cage, hyprland ? pkgs.hyprland, aquamarine ? null, stockAquamarine ? null }:
+assert aquamarine == null || stockAquamarine == null;
 let
   receiver = import ./wayland-receiver.nix { inherit pkgs; };
   runtime = import ./cage-runtime.nix { inherit package; };
@@ -27,6 +28,10 @@ pkgs.writeShellScriptBin "prek-cage-host-test" ''
     export LD_LIBRARY_PATH="${aquamarine}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     export PREK_CAGE_AQUAMARINE=${aquamarine}
     echo 'TEST-ONLY Aquamarine Wayland startup patch; not unmodified stock acceptance.' >&2
+  ''}
+  ${pkgs.lib.optionalString (stockAquamarine != null) ''
+    export PREK_CAGE_STOCK_AQUAMARINE=${stockAquamarine}
+    echo 'Stock pinned Cage ${cage.version}, Hyprland ${hyprland.version}, Aquamarine ${stockAquamarine.version}; no Prek dependency override.' >&2
   ''}
   exec ${pkgs.dbus}/bin/dbus-run-session --config-file=${./support/dbus-session.conf} -- \
     ${pkgs.bash}/bin/bash -c 'export PREK_TEST_SESSION_BUS="$DBUS_SESSION_BUS_ADDRESS"; exec "$@"' -- \

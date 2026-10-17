@@ -90,6 +90,27 @@ class LibraryProvenance(unittest.TestCase):
         self.assertEqual(inner.aquamarine_libraries(self.mapping(library)),
                          dict(declared_test_override=None, loaded_libraries=[library]))
 
+    def test_declared_stock_capture_verifies_the_exact_package_without_an_override(self):
+        package = "/nix/store/stock-aquamarine"
+        library = f"{package}/lib/libaquamarine.so.0.15.1"
+        self.assertEqual(inner.aquamarine_libraries(self.mapping(library), stock=package),
+                         dict(declared_test_override=None, declared_stock=package,
+                              loaded_libraries=[library]))
+
+    def test_stock_claim_refuses_missing_patched_mixed_deleted_and_prefix_mappings(self):
+        package = "/nix/store/stock-aquamarine"
+        library = f"{package}/lib/libaquamarine.so.0.15.1"
+        patched = "/nix/store/test-aquamarine/lib/libaquamarine.so.0.15.1"
+        for maps in ("", self.mapping(patched), self.mapping(library) + self.mapping(patched),
+                     self.mapping(library + " (deleted)"),
+                     self.mapping(package + "-foreign/lib/libaquamarine.so.0.15.1")):
+            with self.subTest(maps=maps), self.assertRaises(RuntimeError):
+                inner.aquamarine_libraries(maps, stock=package)
+
+    def test_stock_and_patched_claims_cannot_be_combined(self):
+        with self.assertRaises(RuntimeError):
+            inner.aquamarine_libraries("", "/nix/store/patched", "/nix/store/stock")
+
     def test_exact_override_is_required_and_duplicate_mappings_are_coalesced(self):
         package = "/nix/store/test-aquamarine"
         library = f"{package}/lib/libaquamarine.so.10.1.0"

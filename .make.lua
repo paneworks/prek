@@ -344,6 +344,12 @@ end
 make.recipe{ name = "test-cage", desc = "local GPU Cage/Hyprland keyboard, Lua and window receipts",
              run = function() cage_test("cage-test", { "--layers", "--input", "--power", "--windows" }) end }
 
+make.recipe{ name = "test-cage-stock", desc = "modern pinned stock Cage/Hyprland without a dependency override",
+             run = function() cage_test("cage-test-stock", { "--layers", "--input", "--power", "--windows" }) end }
+
+make.recipe{ name = "test-cage-lua-stock", desc = "modern stock Cage/Hyprland with an actual Lua config",
+             run = function() cage_test("cage-test-stock", { "--hyprland-config", "lua", "--modes", "--input", "--power", "--windows" }) end }
+
 make.recipe{ name = "test-cage-wayland-fix", desc = "explicit test-only patched nested compositor receipts",
              run = function()
                cage_test("cage-test-wayland-fix", { "--modes", "--input", "--power", "--windows" })

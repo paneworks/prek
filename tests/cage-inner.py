@@ -16,14 +16,20 @@ def usable_outputs(monitors):
                                 for item in active)
 
 
-def aquamarine_libraries(maps, expected=None):
+def aquamarine_libraries(maps, expected=None, stock=None):
+    if expected and stock:
+        raise RuntimeError("stock and test-only Aquamarine claims are mutually exclusive")
     paths = [fields[5] for line in maps.splitlines()
              if len(fields := line.split(maxsplit=5)) == 6]
     libraries = sorted({path for path in paths if Path(path).name.startswith("libaquamarine.so")})
-    if expected and (not libraries or any(Path(path).parent != Path(expected) / "lib"
+    declared = expected or stock
+    if declared and (not libraries or any(Path(path).parent != Path(declared) / "lib"
                                          or path.endswith(" (deleted)") for path in libraries)):
-        raise RuntimeError("owned Hyprland did not load the declared test-only Aquamarine")
-    return dict(declared_test_override=expected, loaded_libraries=libraries)
+        raise RuntimeError("owned Hyprland did not load the declared Aquamarine package")
+    report = dict(declared_test_override=expected, loaded_libraries=libraries)
+    if stock:
+        report["declared_stock"] = stock
+    return report
 
 
 def configuration(provider):
@@ -91,6 +97,11 @@ def main():
             def instances():
                 return [path.parent.name for path in (runtime / "hypr").glob("*/.socket2.sock")]
             wait_for(lambda:len(instances())==1,hyprland)
+            maps = Path(f"/proc/{hyprland.pid}/maps").read_text()
+            (output / "hyprland-libraries.txt").write_text(maps)
+            libraries = aquamarine_libraries(maps, os.environ.get("PREK_CAGE_AQUAMARINE"),
+                                             os.environ.get("PREK_CAGE_STOCK_AQUAMARINE"))
+            (output / "aquamarine.json").write_text(json.dumps(libraries))
             control_env=dict(env,HYPRLAND_INSTANCE_SIGNATURE=instances()[0])
             hyprctl=str(Path(args.hyprland).parent / "hyprctl")
             def monitors():
@@ -99,6 +110,19 @@ def main():
                 if result.returncode:return None
                 return json.loads(result.stdout)
             wait_for(lambda:monitors() is not None,hyprland)
+            version = subprocess.run([hyprctl, "-j", "version"], env=control_env,
+                                     capture_output=True, text=True, check=True, timeout=3)
+            (output / "hyprland-version.json").write_text(version.stdout)
+            (output / "hyprland-process.json").write_text(json.dumps({
+                "pid":hyprland.pid, "executable":os.readlink(f"/proc/{hyprland.pid}/exe")}))
+            if json.loads(version.stdout).get("version") == "0.56.2":
+                status = subprocess.run([hyprctl, "-j", "status"], env=control_env,
+                                        capture_output=True, text=True, check=True, timeout=3)
+                (output / "hyprland-status.json").write_text(status.stdout)
+                if json.loads(status.stdout).get("configProvider") != args.hyprland_config:
+                    raise RuntimeError("owned compositor did not select the requested config provider")
+            elif args.hyprland_config == "lua":
+                raise RuntimeError("owned Lua-config fixture requires verified Hyprland 0.56.2")
             if not monitors():
                 backend="wayland" if os.environ.get("PREK_CAGE_VISIBLE")=="1" else "headless"
                 command=[hyprctl,"output","create",backend]
@@ -107,15 +131,6 @@ def main():
             # As in Mold, the nested compositor gets an explicit output rather
             # than relying on Hyprland's unreported fallback monitor (-1).
             wait_for(lambda:usable_outputs(monitors()),hyprland)
-            if args.hyprland_config == "lua":
-                status = subprocess.run([hyprctl, "-j", "status"], env=control_env,
-                                        capture_output=True, text=True, check=True, timeout=3)
-                (output / "hyprland-status.json").write_text(status.stdout)
-                if json.loads(status.stdout).get("configProvider") != "lua":
-                    raise RuntimeError("owned compositor did not select the requested Lua provider")
-            maps = Path(f"/proc/{hyprland.pid}/maps").read_text()
-            (output / "hyprland-libraries.txt").write_text(maps)
-            libraries = aquamarine_libraries(maps, os.environ.get("PREK_CAGE_AQUAMARINE"))
             report = output / "nested.json"
             temporary = output / "nested.json.new"
             temporary.write_text(json.dumps({"socket":str(nested), "hyprland_pid":hyprland.pid,
