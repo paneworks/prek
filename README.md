@@ -443,6 +443,7 @@ prek record --device /dev/input/by-id/YOUR-DEVICE --output input.jsonl --duratio
 prek replay input.jsonl --json
 prek replay fixture.jsonl --check
 prek replay rule-fixture.jsonl --config prek.toml --check --json
+prek replay routing-trace.jsonl --config config.lua --routing --check --json
 ```
 
 The JSONL format is versioned and bounded. It records device metadata, initial
@@ -455,9 +456,12 @@ reconciliation. It creates no contacts or presses. This preserves coordinates
 when the kernel omits unchanged values; existing recordings remain readable.
 Generic fixtures use `expected`; configured fixtures use `expected_rules`. The
 decoder limits each line to 4 MiB, total input to 64 MiB and records to 100,000.
-Configured replay additionally bounds its retained observation queue; live
-observation drains it continuously. Context-dependent replay tests currently use
-the library's trusted context API; serialized session-context fixtures are pending.
+Configured replay additionally bounds its retained outcomes and accepts serialized
+`context` simulation records. These do not authenticate a live provider. The
+separate [downstream routing trace](docs/routing-replay.md) format checks native
+raw output, write receipts, dispatch fencing and explicit transport retirement;
+recorded readiness does not prove kernel or physical acceptance. Lua exposes it
+through `replay.routing(config)`, while `replay.new(config)` stays recognition-only.
 
 `--check` requires explicit expectations. IDs, counts, phases, timestamps and raw
 input remain exact; touch geometry allows only 1e-9 relative floating-point

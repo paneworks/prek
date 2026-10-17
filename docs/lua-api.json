@@ -437,10 +437,10 @@
     "recorded_context": "configured replay only: record=context with at, binding and snapshot; generic and live engines reject it",
     "configuration": "validated copy; no live rule or policy change",
     "effects": false,
-    "expectations": "finish(true) requires matching final expected or expected_rules; unchecked replay never claims a passing test",
+    "expectations": "finish(true) requires matching final expected, expected_rules or routing=expected; unchecked replay never claims a passing test",
     "failure": "malformed records, engine errors and resource/expectation failures retire that replay; ordinary uncaught callback errors retire the VM",
     "identities": "outcome tables use canonical decimal strings for opaque identities and unsigned values above Lua's signed range; result.json preserves exact native CLI JSON",
-    "input": "one native versioned recording JSON object per push",
+    "input": "one native versioned recording JSON object per push; routing uses the separate routing-tagged trace schema",
     "io": false,
     "lifetime": "owning VM generation; close/finish/error releases engine; no external handles",
     "maximum_configuration_values": 65536,
@@ -453,8 +453,16 @@
     "maximum_sources": 16,
     "modes": [
       "observations",
-      "rules"
+      "rules",
+      "routing"
     ],
+    "routing": {
+      "version": 1,
+      "readiness": "recorded descriptor/consumer/feedback and neutral source; no live grant",
+      "delivery": "explicit poll/write tickets; exact raw scheduled frames; independent input/wall clocks",
+      "finish": "every admitted transport explicitly retired or recovered",
+      "effects": false
+    },
     "phases": [
       "configuration",
       "runtime"
@@ -738,6 +746,12 @@
       "name": "replay.new",
       "phase": "configuration_and_runtime",
       "signature": "replay.new(config = nil) -> Replay"
+    },
+    {
+      "description": "Simulate downstream routing with explicit recorded readiness, dual clocks and exact write receipts; require route mode and explicit transport retirement, never kernel I/O or effects.",
+      "name": "replay.routing",
+      "phase": "configuration_and_runtime",
+      "signature": "replay.routing(config) -> Replay"
     },
     {
       "description": "Apply one bounded recording JSON object; configured context is simulation data only, and malformed, stale or excessive input retires the replay.",

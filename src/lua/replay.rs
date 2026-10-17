@@ -21,15 +21,41 @@ enum Engine {
     Rules(Box<crate::rules::Engine>),
     #[cfg(target_os = "linux")]
     Configured(Box<crate::replay::configured::Configured>),
+    #[cfg(target_os = "linux")]
+    Routed(Box<crate::replay::routed::Routed>),
 }
 impl Engine {
-    fn push(&mut self, record: Record) -> io::Result<()> {
+    fn push(&mut self, text: &str) -> io::Result<Option<u64>> {
+        #[cfg(target_os = "linux")]
+        if let Self::Routed(replay) = self {
+            let record: crate::replay::routed::Record = serde_json::from_str(text)?;
+            let source = if let crate::replay::routed::Record::Input { input, .. } = &record {
+                if let Record::Device { device, .. } = input.as_ref() {
+                    Some(device.source.device)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            replay.push(record)?;
+            return Ok(source);
+        }
+        let record: Record = serde_json::from_str(text)?;
+        let source = if let Record::Device { device, .. } = &record {
+            Some(device.source.device)
+        } else {
+            None
+        };
         match self {
             Self::Observations(replay) => replay.push(record),
             Self::Rules(engine) => engine.push(record),
             #[cfg(target_os = "linux")]
             Self::Configured(engine) => engine.push(record),
-        }
+            #[cfg(target_os = "linux")]
+            Self::Routed(_) => unreachable!(),
+        }?;
+        Ok(source)
     }
     fn check(&self) -> io::Result<()> {
         match self {
@@ -37,6 +63,8 @@ impl Engine {
             Self::Rules(engine) => engine.check(),
             #[cfg(target_os = "linux")]
             Self::Configured(engine) => engine.check(),
+            #[cfg(target_os = "linux")]
+            Self::Routed(engine) => engine.check(),
         }
     }
     fn count(&self) -> usize {
@@ -45,6 +73,8 @@ impl Engine {
             Self::Rules(engine) => engine.events().len(),
             #[cfg(target_os = "linux")]
             Self::Configured(engine) => engine.events().len(),
+            #[cfg(target_os = "linux")]
+            Self::Routed(engine) => engine.outcomes().len(),
         }
     }
     fn encoded(&self, from: usize, limit: usize) -> io::Result<String> {
@@ -55,12 +85,18 @@ impl Engine {
             Self::Rules(engine) => runtime::bounded_json(&engine.events()[from..], limit),
             #[cfg(target_os = "linux")]
             Self::Configured(engine) => runtime::bounded_json(&engine.events()[from..], limit),
+            #[cfg(target_os = "linux")]
+            Self::Routed(engine) => runtime::bounded_json(&engine.outcomes()[from..], limit),
         }?;
         String::from_utf8(bytes).map_err(io::Error::other)
     }
     fn finish(&mut self) -> io::Result<()> {
         #[cfg(target_os = "linux")]
         if let Self::Configured(engine) = self {
+            engine.finish(false)?;
+        }
+        #[cfg(target_os = "linux")]
+        if let Self::Routed(engine) = self {
             engine.finish(false)?;
         }
         Ok(())
@@ -87,13 +123,21 @@ impl Session {
         config: Config,
         source: Option<std::sync::Arc<Definition>>,
         budget: crate::replay::configured::Budget,
+        routing: bool,
     ) -> io::Result<Self> {
         let mut session = Self::new(None)?;
         runtime::bounded_json(&config, MAX_CONFIG_BYTES)?;
-        session.engine = Some(Engine::Configured(Box::new(
-            crate::replay::configured::Configured::with_budget(config, source, budget)?,
-        )));
-        session.mode = "rules";
+        if routing {
+            session.engine = Some(Engine::Routed(Box::new(
+                crate::replay::routed::Routed::with_budget(config, source, budget)?,
+            )));
+            session.mode = "routing";
+        } else {
+            session.engine = Some(Engine::Configured(Box::new(
+                crate::replay::configured::Configured::with_budget(config, source, budget)?,
+            )));
+            session.mode = "rules";
+        }
         Ok(session)
     }
     fn new(config: Option<Config>) -> io::Result<Self> {
@@ -140,16 +184,15 @@ impl Session {
             {
                 return Err(io::Error::other("offline replay input limit exceeded"));
             }
-            let record: Record = serde_json::from_str(text)?;
-            if let Record::Device { device, .. } = &record {
-                self.sources.insert(device.source.device);
+            let previous = self.outcomes;
+            let source = self.open()?.push(text)?;
+            if let Some(source) = source {
+                self.sources.insert(source);
                 if self.sources.len() > MAX_SOURCES {
                     return Err(io::Error::other("offline replay source limit exceeded"));
                 }
             }
-            let previous = self.outcomes;
             let engine = self.open()?;
-            engine.push(record)?;
             let count = engine.count();
             if count > MAX_OUTCOMES {
                 return Err(io::Error::other("offline replay outcome limit exceeded"));
@@ -176,10 +219,10 @@ impl Session {
                 return Err(io::Error::other("empty offline replay"));
             }
             let engine = self.open()?;
+            engine.finish()?;
             if check {
                 engine.check()?;
             }
-            engine.finish()?;
             engine.encoded(0, MAX_BYTES)
         })();
         let json = self.fail(result)?;
@@ -210,6 +253,7 @@ fn identities(value: &mut serde_json::Value) {
                         | "ordinal"
                         | "config_generation"
                         | "session_generation"
+                        | "ticket"
                 ) && let Some(number) = value.as_u64()
                 {
                     *value = serde_json::Value::String(number.to_string());
@@ -265,9 +309,12 @@ pub(super) fn register<'gc>(
     host: Rc<RefCell<runtime::Host>>,
 ) -> Result<(), luna::Error<'gc>> {
     let sessions: Rc<RefCell<Vec<Weak<RefCell<Session>>>>> = Rc::default();
-    api.set(
+    for (name, routing) in [("new", false), ("routing", true)] {
+        let host = host.clone();
+        let sessions = sessions.clone();
+        api.set(
         *ctx,
-        "new",
+        name,
         Callback::from_fn(ctx, move |ctx, _, mut stack| {
             let value: Value = stack.consume(ctx)?;
             configuration_budget(ctx, value)?;
@@ -293,12 +340,13 @@ pub(super) fn register<'gc>(
                     if !config.recognizer_definitions().is_empty() && (host.configuring || host.offline) {
                         return Err(io::Error::other("custom replay requires an approved runtime source and cannot nest inside replay").into());
                     }
-                    Session::approved(config, host.source.clone(), host.replay_budget.clone())?
+                    Session::approved(config, host.source.clone(), host.replay_budget.clone(), routing)?
                 }
-                None => Session::new(None)?,
+                None if !routing => Session::new(None)?,
+                None => return Err(io::Error::other("routing replay requires explicit route configuration").into()),
             };
             #[cfg(not(target_os = "linux"))]
-            let session = { let _ = &host; Session::new(config)? };
+            let session = { let _ = &host; if routing { return Err(io::Error::other("routing replay requires Linux").into()); } Session::new(config)? };
             let session = Rc::new(RefCell::new(session));
             active.push(Rc::downgrade(&session));
             let handle = Table::new(&ctx);
@@ -354,6 +402,7 @@ pub(super) fn register<'gc>(
             Ok(CallbackReturn::Return)
         }),
     )?;
+    }
     Ok(())
 }
 

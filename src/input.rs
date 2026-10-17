@@ -375,6 +375,13 @@ impl Normalizer {
         &self.absolute
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn neutral(&self) -> bool {
+        self.synchronized
+            && self.keys.is_empty()
+            && self.slots.values().all(|slot| slot.id.is_none())
+    }
+
     pub fn process(&mut self, frame: Frame) -> FrameResult {
         if frame.source != self.source {
             return self.reject(CancelReason::SourceChanged);

@@ -65,7 +65,8 @@ impl Default for Limits {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Scheduled {
     pub ticket: u64,
     pub due: Duration,

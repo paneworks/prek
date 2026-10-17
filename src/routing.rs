@@ -1068,6 +1068,22 @@ impl Routing {
     pub(crate) fn input_states(&self, at: Duration) -> Vec<crate::input_events::Event> {
         self.engine.input_states(at)
     }
+    pub(crate) fn has_input_source(&self, source: &Source) -> bool {
+        self.engine
+            .reconciliation(source, self.engine.input_at())
+            .is_some()
+    }
+    pub(crate) fn recognition_candidate_live(&self, id: u64) -> bool {
+        self.engine.recognition_candidate_live(id)
+    }
+    pub(crate) fn input_reset(
+        &self,
+        source: &Source,
+        at: Duration,
+        reason: crate::input_events::ResetReason,
+    ) -> Option<crate::input_events::Event> {
+        self.engine.input_reset(source, at, reason)
+    }
     pub(crate) fn capture_input(&mut self, enabled: bool) {
         self.engine.capture_input(enabled);
     }

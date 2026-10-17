@@ -1315,7 +1315,7 @@ Parsing a graph grants no input ownership, context or executable callback fence.
   file access, live input injection, context setter or action dispatch.
 - `replay:finish(check = false) -> ReplayResult` returns `{mode,records,bytes,
   checked,outcomes,json}` and releases the engine. `mode` is `observations` or
-  `rules`. `outcomes` copies the native observation/event schema, using canonical
+  `rules` (`routing` for the downstream driver below). `outcomes` copies the native observation/event schema, using canonical
   decimal strings for opaque identities and unsigned integers above Lua's signed
   range. `json` preserves the native CLI-compatible JSON, including exact unsigned
   identity numbers. Edit returned tables freely; they have no live effect.
@@ -1345,6 +1345,24 @@ when a ticket reaches a callback and released on finish/close/failure. Each push
 and finish has a 250 ms aggregate host-work budget in addition to normal source
 and callback instruction/memory/wall limits. Long replay work still needs task
 wakes; this API does not make callback work asynchronous.
+
+### Downstream routing traces
+
+`replay.routing(config) -> Replay` uses the actual native raw router. It requires
+an explicit route-mode configuration and returns `mode = 'routing'`. Existing
+`replay.new(config)` remains recognition-only. The new handle accepts a separate
+strict `routing`-tagged JSON trace with explicit recorded context, exact neutral
+descriptor/consumer admission, action availability, independent input/wall
+clocks, poll/write acknowledgements and retirement. Source-bound custom callbacks
+use the same runtime restrictions, isolated VMs and shared quotas as configured
+replay. There are no new live capabilities or effects.
+
+`finish(true)` compares final complete downstream expectations: offered raw
+frames, exact write receipts, fenced dispatch proposals, diagnostics and recovery
+requests. Every admitted transport must be retired or recovered explicitly.
+Recorded readiness and recovery requests are simulation assertions, not proof of
+kernel release or real consumer acceptance. See [routing replay](routing-replay.md)
+for every record/outcome field, admission rule, deadline and failure contract.
 
 Context, normalized input and wakes advance only on recording timestamps, not
 elapsed host time. Refresh context before its 250 ms lifetime; after revocation,

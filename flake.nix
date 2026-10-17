@@ -160,6 +160,7 @@
               cp ${./docs/root-routing.md} "$out/share/doc/prek/root-routing.md"
               cp ${./docs/recognizers.md} "$out/share/doc/prek/recognizers.md"
               cp ${./docs/routing-chains.md} "$out/share/doc/prek/routing-chains.md"
+              cp ${./docs/routing-replay.md} "$out/share/doc/prek/routing-replay.md"
               for preset in minimal desktop phone; do
                 "$out/bin/prek" init --preset "$preset" \
                   --output "$out/share/prek/presets/$preset.lua"

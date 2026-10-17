@@ -19,6 +19,223 @@ use std::{
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[test]
+fn routed_replay_cli_checks_downstream_frames_without_opening_recorded_devices() {
+    use prek::{
+        context::{Binding, SessionKind, Snapshot, State},
+        replay::routed::{Outcome as RoutedOutcome, Record as RoutedRecord},
+        router::Scheduled,
+        transport::{Consumer, ConsumerEvidence, Descriptor, KernelIdentity},
+    };
+    let directory = Directory::new();
+    let path = directory.0.join("routing.jsonl");
+    let config = directory.0.join("routing.lua");
+    fs::write(&config, "local p=require('prek');return p.config.new{mode='route',policy={allowed_devices={'keys'}},devices={keys={keys={'KEY_A'}}}}").unwrap();
+    let source = Source {
+        device: 7,
+        generation: 1,
+        seat: "seat0".into(),
+    };
+    let device = Device {
+        source: source.clone(),
+        identity: "offline-keys".into(),
+        name: "Offline keys".into(),
+        path: "/no/such/device".into(),
+        physical: "offline".into(),
+        unique: String::new(),
+        vendor: 1,
+        product: 1,
+        properties: vec![],
+        capabilities: BTreeMap::from([(EV_KEY, vec![30])]),
+        axes: BTreeMap::new(),
+        virtual_device: false,
+    };
+    let descriptor = Descriptor::mirror(
+        &device,
+        KernelIdentity {
+            bus: 3,
+            vendor: 1,
+            product: 1,
+            version: 1,
+        },
+        None,
+        &BTreeMap::new(),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let consumer = ConsumerEvidence {
+        consumer: Consumer::IsolatedReceiver { pid: 1, start: 1 },
+        marker: descriptor.marker.clone(),
+        name: descriptor.name.clone(),
+        class: descriptor.class,
+        seat: "seat0".into(),
+        settings: BTreeMap::new(),
+        at: Duration::ZERO,
+    };
+    let input = |input, now| RoutedRecord::Input {
+        now: Duration::from_millis(now),
+        input: Box::new(input),
+    };
+    let mut records = vec![
+        RoutedRecord::Header { version: 1 },
+        input(
+            Record::Context {
+                at: Duration::ZERO,
+                binding: Binding {
+                    seat: "seat0".into(),
+                    session: "offline".into(),
+                    uid: 1000,
+                    compositor_pid: 42,
+                    compositor_start: 1,
+                    kind: SessionKind::User,
+                },
+                snapshot: Box::new(Snapshot {
+                    generation: 1,
+                    revision: 1,
+                    captured_at: Duration::ZERO,
+                    state: State::Desktop,
+                    outputs: vec![],
+                    windows: vec![],
+                    regions: vec![],
+                    secure_overlay: false,
+                }),
+            },
+            0,
+        ),
+        input(
+            Record::Device {
+                device,
+                keys: BTreeSet::new(),
+                contacts: vec![],
+            },
+            0,
+        ),
+        RoutedRecord::Attach {
+            at: Duration::ZERO,
+            descriptor: Box::new(descriptor),
+            consumer,
+            feedback: false,
+        },
+    ];
+    let mut expected = vec![];
+    for (ticket, at, value) in [(1, 10, 1), (2, 20, 0)] {
+        let at = Duration::from_millis(at);
+        let frame = Frame {
+            source: source.clone(),
+            sequence: ticket,
+            at,
+            events: vec![
+                RawEvent {
+                    kind: EV_KEY,
+                    code: 30,
+                    value,
+                },
+                RawEvent {
+                    kind: EV_SYN,
+                    code: SYN_REPORT,
+                    value: 0,
+                },
+            ],
+        };
+        records.extend([
+            RoutedRecord::Input {
+                now: at,
+                input: Box::new(Record::Frame {
+                    frame: frame.clone(),
+                }),
+            },
+            RoutedRecord::Poll { at },
+            RoutedRecord::Write {
+                at,
+                source: source.clone(),
+                ticket,
+            },
+        ]);
+        expected.extend([
+            RoutedOutcome::Offered {
+                at,
+                scheduled: Box::new(Scheduled {
+                    ticket,
+                    due: at,
+                    frame,
+                }),
+            },
+            RoutedOutcome::Delivered {
+                at,
+                source: source.clone(),
+                ticket,
+            },
+        ]);
+    }
+    records.push(RoutedRecord::Retire {
+        at: Duration::from_millis(20),
+        source: source.clone(),
+    });
+    expected.push(RoutedOutcome::Recovery {
+        at: Duration::from_millis(20),
+        source,
+        neutral_events: vec![],
+        destroy_virtual_and_release_grab: true,
+    });
+    records.push(RoutedRecord::Expected {
+        outcomes: expected.clone(),
+    });
+    let write_trace = |records: &[RoutedRecord]| {
+        fs::write(
+            &path,
+            records
+                .iter()
+                .map(|record| serde_json::to_string(record).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap()
+    };
+    write_trace(&records);
+    let args = [
+        "replay",
+        path.to_str().unwrap(),
+        "--config",
+        config.to_str().unwrap(),
+        "--routing",
+        "--check",
+        "--json",
+    ];
+    for _ in 0..2 {
+        let result = run(&args);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            serde_json::from_slice::<Vec<RoutedOutcome>>(&result.stdout).unwrap(),
+            expected
+        );
+    }
+    assert!(
+        !run(&["replay", path.to_str().unwrap(), "--routing"])
+            .status
+            .success()
+    );
+    assert!(
+        !run(&[
+            "replay",
+            path.to_str().unwrap(),
+            "--config",
+            config.to_str().unwrap(),
+            "--check"
+        ])
+        .status
+        .success()
+    );
+    if let RoutedRecord::Expected { outcomes } = records.last_mut().unwrap() {
+        outcomes.clear();
+    }
+    write_trace(&records);
+    assert!(!run(&args).status.success());
+}
+
+#[test]
 fn composed_source_cli_replay_checks_the_public_example_and_stays_unfenced_in_run() {
     use prek::{
         context::{Binding, SessionKind, Snapshot, State},

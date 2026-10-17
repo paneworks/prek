@@ -22,6 +22,8 @@ pub const MAX_RECORDING_BYTES: usize = 64 * 1024 * 1024;
 
 #[cfg(target_os = "linux")]
 pub mod configured;
+#[cfg(target_os = "linux")]
+pub mod routed;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "record", rename_all = "snake_case", deny_unknown_fields)]
@@ -115,6 +117,19 @@ impl Default for Replay {
 }
 
 impl Replay {
+    #[cfg(target_os = "linux")]
+    fn route_seed(&self, source: &Source) -> io::Result<(&Device, &crate::input::AbsoluteState)> {
+        self.devices
+            .get(&source.device)
+            .filter(|(device, normalizer)| device.source == *source && normalizer.neutral())
+            .map(|(device, normalizer)| (device, normalizer.absolute_state()))
+            .ok_or_else(|| {
+                invalid(
+                    "recorded routing admission requires a registered synchronized neutral source",
+                )
+            })
+    }
+
     pub(crate) fn absolute_state(&self, source: &Source) -> Option<&crate::input::AbsoluteState> {
         self.devices
             .get(&source.device)
@@ -543,7 +558,14 @@ pub fn read(input: &mut impl BufRead, check: bool) -> io::Result<Replay> {
 /// beyond this supplied reader and preserves exact line locations on errors.
 pub fn visit(
     input: &mut impl BufRead,
-    mut receive: impl FnMut(Record) -> io::Result<()>,
+    receive: impl FnMut(Record) -> io::Result<()>,
+) -> io::Result<()> {
+    visit_records(input, receive)
+}
+
+pub(crate) fn visit_records<T: serde::de::DeserializeOwned>(
+    input: &mut impl BufRead,
+    mut receive: impl FnMut(T) -> io::Result<()>,
 ) -> io::Result<()> {
     let mut count = 0;
     let mut total = 0usize;

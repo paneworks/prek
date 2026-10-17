@@ -1,5 +1,5 @@
 use super::*;
-mod composition;
+pub(crate) mod composition;
 use crate::{
     config::{Delivery, Millis, Trigger},
     context::SessionKind,

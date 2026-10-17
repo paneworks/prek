@@ -187,6 +187,13 @@ make.recipe{ name = "test", desc = "the suite",
              run = function() sh.cargo("test", "--locked", "--all-targets") end }
 make.alias("t", "test")
 
+make.recipe{ name = "test-routed-replay", desc = "offline downstream ownership, writes and recovery",
+             run = function()
+               sh.cargo("test", "--locked", "--lib", "replay::routed::")
+               sh.cargo("test", "--locked", "--test", "cli", "routed_replay")
+               sh.cargo("test", "--locked", "--lib", "lua::replay::tests::routed_")
+             end }
+
 make.recipe{ name = "test-custom-replay", desc = "deterministic source-bound custom offline replay",
              run = function()
                sh.cargo("test", "--locked", "--lib", "replay::configured::")

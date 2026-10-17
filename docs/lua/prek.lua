@@ -841,13 +841,13 @@ function PolicyAPI.current() error("Prek editor definition") end
 function StatusAPI.current() error("Prek editor definition") end
 
 ---@class (exact) prek.ReplayStatus
----@field mode 'observations'|'rules'
+---@field mode 'observations'|'rules'|'routing'
 ---@field state 'open'|'finished'|'failed'|'closed'
 ---@field records integer Successfully applied records.
 ---@field bytes integer Successfully applied input bytes.
 ---@field outcomes integer Retained outcome count before finish or close.
 ---@class (exact) prek.ReplayResult
----@field mode 'observations'|'rules'
+---@field mode 'observations'|'rules'|'routing'
 ---@field records integer
 ---@field bytes integer
 ---@field checked boolean True only after matching native expectations.
@@ -858,6 +858,10 @@ function StatusAPI.current() error("Prek editor definition") end
 ---@param config? prek.Config Omit for generic observations; supply for configured rule outcomes.
 ---@return prek.Replay
 function ReplayAPI.new(config) error("Prek editor definition") end
+---Simulate downstream routing with recorded readiness, raw frames and write acknowledgements.
+---@param config prek.Config Explicit route-mode configuration; no live ownership grant.
+---@return prek.Replay
+function ReplayAPI.routing(config) error("Prek editor definition") end
 ---@class prek.Replay
 local Replay = {}
 ---Apply one recording JSON object, at most 32 KiB; configured context is offline simulation only.

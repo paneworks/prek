@@ -244,6 +244,9 @@ enum Command {
         /// Evaluate configured rules instead of generic recognition.
         #[arg(long)]
         config: Option<PathBuf>,
+        /// Simulate downstream routing, readiness and write receipts.
+        #[arg(long, requires = "config")]
+        routing: bool,
         /// Check expected outcomes; geometry permits only floating-point roundoff.
         #[arg(long)]
         check: bool,
@@ -702,6 +705,35 @@ fn run(command: Command) -> io::Result<()> {
         Command::Replay {
             path,
             config: Some(config_path),
+            routing: true,
+            check,
+            json,
+        } => {
+            let compiled = compile_config(read_config(&config_path)?, &config_path)?;
+            let mut replay = prek::replay::routed::Routed::new(compiled.config, compiled.runtime)?;
+            replay.read(&mut BufReader::new(File::open(path)?))?;
+            replay.finish(check)?;
+            if json {
+                serde_json::to_writer(&mut output, replay.outcomes()).map_err(io::Error::other)?;
+                writeln!(output)?;
+            } else {
+                writeln!(
+                    output,
+                    "Replayed {} simulated downstream outcomes{}.",
+                    replay.outcomes().len(),
+                    if check {
+                        "; expected outcomes match"
+                    } else {
+                        ""
+                    }
+                )?;
+            }
+            Ok(())
+        }
+        Command::Replay {
+            path,
+            config: Some(config_path),
+            routing: false,
             check,
             json,
         } => {
@@ -735,6 +767,7 @@ fn run(command: Command) -> io::Result<()> {
             config: None,
             check,
             json,
+            ..
         } => {
             let replay = prek::replay::read(&mut BufReader::new(File::open(path)?), check)?;
             if json {

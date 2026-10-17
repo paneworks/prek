@@ -80,6 +80,7 @@ pub fn api() -> serde_json::Value {
         serde_json::json!({"name":"Task.status", "receiver":"Task", "signature":"task:status() -> TaskState", "description":"Inspect pending, running, sleeping, completed or cancelled state in the owning generation."}),
         serde_json::json!({"name":"actions.define", "signature":"actions.define(name, {requires = capabilities}, callback) -> Action", "description":"Register an approved generation-scoped named handler; resolve a bounded typed effect plan in the unprivileged session after a broker execution grant."}),
         serde_json::json!({"name":"replay.new", "signature":"replay.new(config = nil) -> Replay", "phase":"configuration_and_runtime", "description":"Create an offline observation or configured replay; custom callbacks require the approved runtime source and fresh isolated closures, never live effects."}),
+        serde_json::json!({"name":"replay.routing", "signature":"replay.routing(config) -> Replay", "phase":"configuration_and_runtime", "description":"Simulate downstream routing with explicit recorded readiness, dual clocks and exact write receipts; require route mode and explicit transport retirement, never kernel I/O or effects."}),
         serde_json::json!({"name":"Replay.push", "receiver":"Replay", "signature":"replay:push(record_json) -> nil", "description":"Apply one bounded recording JSON object; configured context is simulation data only, and malformed, stale or excessive input retires the replay."}),
         serde_json::json!({"name":"Replay.finish", "receiver":"Replay", "signature":"replay:finish(check = false) -> ReplayResult", "description":"Finish once, optionally require exact native expectations, and return copied outcomes plus lossless CLI-compatible JSON; release replay resources."}),
         serde_json::json!({"name":"Replay.status", "receiver":"Replay", "signature":"replay:status() -> ReplayStatus", "description":"Copy this generation-local replay's state, mode, record/byte counts and outcome count."}),
@@ -414,11 +415,12 @@ pub fn api() -> serde_json::Value {
     });
     manifest["offline_replay"] = serde_json::json!({
         "phases":["configuration","runtime"],"effects":false,"io":false,
-        "modes":["observations","rules"],"input":"one native versioned recording JSON object per push",
+        "modes":["observations","rules","routing"],"input":"one native versioned recording JSON object per push; routing uses the separate routing-tagged trace schema",
+        "routing":{"version":1,"readiness":"recorded descriptor/consumer/feedback and neutral source; no live grant","delivery":"explicit poll/write tickets; exact raw scheduled frames; independent input/wall clocks","finish":"every admitted transport explicitly retired or recovered","effects":false},
         "configuration":"validated copy; no live rule or policy change",
         "custom":{"phase":"runtime","source":"fresh approved source VM per recorded seat; no live callback state","clock":"recorded time only; real execution budgets remain","maximum_shared_vms":4,"maximum_context_seats":16,"work_budget_ms":250,"nested_custom_replay":false,"live_authority":false},
         "recorded_context":"configured replay only: record=context with at, binding and snapshot; generic and live engines reject it",
-        "expectations":"finish(true) requires matching final expected or expected_rules; unchecked replay never claims a passing test",
+        "expectations":"finish(true) requires matching final expected, expected_rules or routing=expected; unchecked replay never claims a passing test",
         "identities":"outcome tables use canonical decimal strings for opaque identities and unsigned values above Lua's signed range; result.json preserves exact native CLI JSON",
         "lifetime":"owning VM generation; close/finish/error releases engine; no external handles",
         "maximum_open":replay::MAX_HANDLES,"maximum_records":replay::MAX_RECORDS,

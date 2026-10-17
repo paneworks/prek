@@ -6,7 +6,7 @@ use crate::{
     input::*,
 };
 
-fn source(touch: bool) -> Definition {
+pub(crate) fn source(touch: bool) -> Definition {
     let kind = if touch { "touch" } else { "key" };
     let steps = if touch {
         "p.triggers.touch_hold{fingers=2,after='20ms'},p.triggers.sequence{steps={first,last},timeout='1s'}"
@@ -32,7 +32,7 @@ return p.config.new{{policy={{allow_input_events=true,allowed_devices={{'keys'}}
  rules={{{{id='chain',devices={{'keys'}},contexts={{'desktop'}},scope='everywhere',delivery='observe',trigger=p.triggers.sequence{{steps={{{steps}}},timeout='1s'}},action=p.actions.event{{name='chain'}}}}}}}}
 "#),"composed-replay.lua").unwrap()
 }
-fn touch_device() -> Device {
+pub(crate) fn touch_device() -> Device {
     let Record::Device { mut device, .. } = device("seat0", 1) else {
         unreachable!()
     };
@@ -66,7 +66,7 @@ fn touch_device() -> Device {
     .collect();
     device
 }
-fn output() -> Output {
+pub(crate) fn output() -> Output {
     Output {
         name: "replay-output".into(),
         pixel_width: 1000.0,
@@ -76,7 +76,7 @@ fn output() -> Output {
         transform: Transform::Normal,
     }
 }
-fn touch_context(at: u64, revision: u64) -> Record {
+pub(crate) fn touch_context(at: u64, revision: u64) -> Record {
     let Record::Context {
         at,
         binding,
@@ -99,7 +99,7 @@ fn touch_context(at: u64, revision: u64) -> Record {
         snapshot,
     }
 }
-fn raw(sequence: u64, at: u64, values: &[(u16, u16, i32)]) -> Record {
+pub(crate) fn raw(sequence: u64, at: u64, values: &[(u16, u16, i32)]) -> Record {
     let mut events: Vec<_> = values
         .iter()
         .map(|(kind, code, value)| RawEvent {

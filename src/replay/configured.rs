@@ -21,11 +21,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-const MAX_SEATS: usize = 16;
+pub(super) const MAX_SEATS: usize = 16;
 const MAX_VMS: usize = 4;
-const MAX_OUTCOMES: usize = 16_384;
+pub(super) const MAX_OUTCOMES: usize = 16_384;
 const MAX_CALLBACKS: usize = 4096;
-const MAX_WORK: Duration = Duration::from_millis(250);
+pub(super) const MAX_WORK: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Default)]
 pub(crate) struct Budget(Rc<Cell<usize>>);
@@ -48,16 +48,116 @@ struct Callbacks {
     runtime: Runtime,
     _lease: Lease,
 }
-struct Seat {
-    engine: Engine,
-    callbacks: Option<Callbacks>,
-    binding: Binding,
-    snapshot: Snapshot,
-    fence: Fence,
-    at: Duration,
-    expires: Instant,
+pub(super) trait Coordinator {
+    fn authority(&self) -> &Authority;
+    fn take_recognition_cancellations(&mut self) -> Vec<crate::recognition::Cancellation>;
+    fn recognition_ready(&mut self, ready: bool, at: Duration) -> io::Result<()>;
+    fn recognition_requests(
+        &mut self,
+        at: Duration,
+        now: Duration,
+    ) -> io::Result<Vec<crate::recognition::Ticket>>;
+    fn recognition_candidate_live(&self, id: u64) -> bool;
+    fn recognition_response(
+        &mut self,
+        proposal: crate::recognition::Proposal,
+        at: Duration,
+        now: Duration,
+    ) -> io::Result<()>;
+    fn input_states(&self, at: Duration) -> Vec<crate::input_events::Event>;
 }
-impl Seat {
+impl Coordinator for Engine {
+    fn authority(&self) -> &Authority {
+        self.authority()
+    }
+    fn take_recognition_cancellations(&mut self) -> Vec<crate::recognition::Cancellation> {
+        self.take_recognition_cancellations()
+    }
+    fn recognition_ready(&mut self, ready: bool, at: Duration) -> io::Result<()> {
+        self.recognition_ready(ready, at)
+    }
+    fn recognition_requests(
+        &mut self,
+        at: Duration,
+        _now: Duration,
+    ) -> io::Result<Vec<crate::recognition::Ticket>> {
+        self.recognition_requests(at)
+    }
+    fn recognition_candidate_live(&self, id: u64) -> bool {
+        self.recognition_candidate_live(id)
+    }
+    fn recognition_response(
+        &mut self,
+        proposal: crate::recognition::Proposal,
+        _at: Duration,
+        now: Duration,
+    ) -> io::Result<()> {
+        self.recognition_response(proposal, now)
+    }
+    fn input_states(&self, at: Duration) -> Vec<crate::input_events::Event> {
+        self.input_states(at)
+    }
+}
+impl Coordinator for crate::routing::Routing {
+    fn authority(&self) -> &Authority {
+        self.authority()
+    }
+    fn take_recognition_cancellations(&mut self) -> Vec<crate::recognition::Cancellation> {
+        self.take_recognition_cancellations()
+    }
+    fn recognition_ready(&mut self, ready: bool, at: Duration) -> io::Result<()> {
+        self.recognition_ready(ready, at)
+    }
+    fn recognition_requests(
+        &mut self,
+        at: Duration,
+        now: Duration,
+    ) -> io::Result<Vec<crate::recognition::Ticket>> {
+        self.recognition_requests_after_input(at, now)
+    }
+    fn recognition_candidate_live(&self, id: u64) -> bool {
+        self.recognition_candidate_live(id)
+    }
+    fn recognition_response(
+        &mut self,
+        proposal: crate::recognition::Proposal,
+        at: Duration,
+        now: Duration,
+    ) -> io::Result<()> {
+        self.recognition_response_after_input(proposal, at, now)
+    }
+    fn input_states(&self, at: Duration) -> Vec<crate::input_events::Event> {
+        self.input_states(at)
+    }
+}
+pub(super) struct Seat<E = Engine> {
+    pub(super) engine: E,
+    callbacks: Option<Callbacks>,
+    pub(super) binding: Binding,
+    pub(super) snapshot: Snapshot,
+    pub(super) fence: Fence,
+    at: Duration,
+    pub(super) expires: Instant,
+}
+impl<E: Coordinator> Seat<E> {
+    pub(super) fn new(
+        engine: E,
+        binding: Binding,
+        snapshot: Snapshot,
+        fence: Fence,
+        at: Duration,
+        expires: Instant,
+    ) -> Self {
+        Self {
+            engine,
+            callbacks: None,
+            binding,
+            snapshot,
+            fence,
+            at,
+            expires,
+        }
+    }
     fn view(&self, at: Duration) -> View {
         let state = self.engine.authority().state(at);
         View {
@@ -75,7 +175,7 @@ impl Seat {
             error: None,
         }
     }
-    fn clock(&mut self, at: Duration) -> io::Result<()> {
+    pub(super) fn clock(&mut self, at: Duration) -> io::Result<()> {
         let view = self.view(at);
         if let Some(callbacks) = &mut self.callbacks {
             callbacks.runtime.set_context(view, at).map_err(invalid)?;
@@ -113,7 +213,7 @@ impl Seat {
         }
         Ok(())
     }
-    fn retire(&mut self, at: Duration) -> io::Result<()> {
+    pub(super) fn retire(&mut self, at: Duration) -> io::Result<()> {
         self.engine.recognition_ready(false, at)?;
         self.cleanup()
     }
@@ -124,11 +224,21 @@ impl Seat {
         budget: &Budget,
         at: Duration,
     ) -> io::Result<()> {
-        self.clock(at)?;
+        self.settle_clocked(config, definition, budget, at, at)
+    }
+    pub(super) fn settle_clocked(
+        &mut self,
+        config: &Config,
+        definition: Option<&Definition>,
+        budget: &Budget,
+        at: Duration,
+        now: Duration,
+    ) -> io::Result<()> {
+        self.clock(now)?;
         for _ in 0..MAX_CALLBACKS {
             work(self.expires)?;
             self.cleanup()?;
-            let tickets = self.engine.recognition_requests(at)?;
+            let tickets = self.engine.recognition_requests(at, now)?;
             if tickets.is_empty() {
                 return self.cleanup();
             }
@@ -144,8 +254,8 @@ impl Seat {
                     runtime,
                     _lease: lease,
                 });
-                self.clock(at)?;
-                self.metadata(config, self.engine.input_states(at), at)?;
+                self.clock(now)?;
+                self.metadata(config, self.engine.input_states(now), now)?;
             }
             for ticket in tickets {
                 work(self.expires)?;
@@ -161,14 +271,14 @@ impl Seat {
                     .recognize(&ticket)
                     .map_err(invalid)?;
                 if let Some(proposal) = result.proposal {
-                    self.engine.recognition_response(proposal, at)?;
+                    self.engine.recognition_response(proposal, at, now)?;
                 }
                 self.cleanup()?;
             }
         }
         Err(invalid("offline callback transition limit exceeded"))
     }
-    fn metadata(
+    pub(super) fn metadata(
         &mut self,
         config: &Config,
         inputs: Vec<crate::input_events::Event>,
@@ -220,31 +330,7 @@ impl Configured {
         definition: Option<Arc<Definition>>,
         budget: Budget,
     ) -> io::Result<Self> {
-        config.validate().map_err(invalid)?;
-        let declarations = config.recognizer_definitions();
-        if !declarations.is_empty() {
-            // SAFETY: read-only effective credential query.
-            if unsafe { nix::libc::geteuid() } == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "offline Lua callbacks cannot run as root",
-                ));
-            }
-            let source = definition
-                .as_ref()
-                .ok_or_else(|| invalid("custom replay requires its original Lua source"))?;
-            source.validate().map_err(invalid)?;
-            if declarations.iter().any(|declaration| {
-                !source
-                    .recognizers
-                    .iter()
-                    .any(|binding| &binding.definition == declaration)
-            }) {
-                return Err(invalid(
-                    "offline recognizer differs from approved source declaration",
-                ));
-            }
-        }
+        approved(&config, definition.as_deref())?;
         let baseline = Engine::new(crate::worker::preflight_profile(&config))?;
         Ok(Self {
             config,
@@ -536,7 +622,7 @@ impl Configured {
         result
     }
 }
-fn source(record: &Record) -> Option<&Source> {
+pub(super) fn source(record: &Record) -> Option<&Source> {
     match record {
         Record::Device { device, .. } => Some(&device.source),
         Record::Frame { frame } => Some(&frame.source),
@@ -547,10 +633,37 @@ fn source(record: &Record) -> Option<&Source> {
         _ => None,
     }
 }
-fn invalid(error: impl std::fmt::Display) -> io::Error {
+pub(super) fn approved(config: &Config, definition: Option<&Definition>) -> io::Result<()> {
+    config.validate().map_err(invalid)?;
+    let declarations = config.recognizer_definitions();
+    if !declarations.is_empty() {
+        // SAFETY: read-only effective credential query.
+        if unsafe { nix::libc::geteuid() } == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "offline Lua callbacks cannot run as root",
+            ));
+        }
+        let source =
+            definition.ok_or_else(|| invalid("custom replay requires its original Lua source"))?;
+        source.validate().map_err(invalid)?;
+        if declarations.iter().any(|declaration| {
+            !source
+                .recognizers
+                .iter()
+                .any(|binding| &binding.definition == declaration)
+        }) {
+            return Err(invalid(
+                "offline recognizer differs from approved source declaration",
+            ));
+        }
+    }
+    Ok(())
+}
+pub(super) fn invalid(error: impl std::fmt::Display) -> io::Error {
     io::Error::other(error.to_string())
 }
-fn work(expires: Instant) -> io::Result<()> {
+pub(super) fn work(expires: Instant) -> io::Result<()> {
     if Instant::now() >= expires {
         Err(invalid("offline replay work time limit exceeded"))
     } else {

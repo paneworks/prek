@@ -5,6 +5,29 @@ use crate::{
 };
 use std::collections::BTreeMap;
 
+#[cfg(target_os = "linux")]
+#[test]
+fn routed_replay_checks_exact_downstream_frames_and_keeps_handles_isolated() {
+    let (config, records) = crate::replay::routed::tests::checked_trace();
+    let mut source = "local p=require('prek');assert(not pcall(function()p.replay.routing()end));local c=p.config.preset('minimal');c.mode='route';c.policy.allowed_devices={'keys'};c.devices={keys={keys={'KEY_A'}}};local r=p.replay.routing(c);assert(r:status().mode=='routing')\n".to_string();
+    for record in &records {
+        source.push_str(&format!(
+            "r:push([==[{}]==])\n",
+            serde_json::to_string(record).unwrap()
+        ));
+    }
+    let crate::replay::routed::Record::Expected { outcomes } = records.last().unwrap() else {
+        unreachable!()
+    };
+    source.push_str(&format!("local result=r:finish(true);assert(result.mode=='routing' and result.checked);assert(result.json==[==[{}]==]);assert(#result.outcomes==5);assert(result.outcomes[1].scheduled.ticket=='1');assert(result.outcomes[1].scheduled.frame.source.generation=='18446744073709551615');assert(r:status().state=='finished');r:close();return {{version=1}}", serde_json::to_string(outcomes).unwrap()));
+    Definition::compile(&source, "routed-replay.lua").unwrap();
+    let mut native = crate::replay::routed::Routed::new(config, None).unwrap();
+    for record in records {
+        native.push(record).unwrap();
+    }
+    native.finish(true).unwrap();
+}
+
 fn records() -> Vec<Record> {
     let source = Source {
         device: u64::MAX,
