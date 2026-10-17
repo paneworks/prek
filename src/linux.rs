@@ -22,6 +22,8 @@ use std::{
 };
 
 mod discovery;
+#[cfg(test)]
+mod inventory_tests;
 pub(crate) use discovery::Publication as DevicePublication;
 pub mod feedback;
 pub mod handoff;
@@ -106,8 +108,12 @@ struct Discovered {
     publication: Option<discovery::Publication>,
 }
 fn discover() -> io::Result<Vec<Discovered>> {
+    discover_in(Path::new("/dev/input"))
+}
+
+fn discover_in(directory: &Path) -> io::Result<Vec<Discovered>> {
     let mut paths = Vec::new();
-    match fs::read_dir("/dev/input") {
+    match fs::read_dir(directory) {
         Ok(entries) => {
             for entry in entries {
                 let entry = entry?;
@@ -153,9 +159,12 @@ fn discover() -> io::Result<Vec<Discovered>> {
 }
 
 pub fn list(output: &mut impl Write, json: bool) -> io::Result<()> {
-    let entries = inventory()?;
+    write_inventory(output, json, inventory()?)
+}
+
+fn write_inventory(output: &mut impl Write, json: bool, entries: Vec<Entry>) -> io::Result<()> {
     if json {
-        serde_json::to_writer(&mut *output, &entries).map_err(io::Error::other)?;
+        serde_json::to_writer(&mut *output, &entries).map_err(io::Error::from)?;
         writeln!(output)?;
     } else {
         if entries.is_empty() {
@@ -1045,7 +1054,7 @@ fn print_observation(
         return Ok(());
     }
     if options.json {
-        serde_json::to_writer(&mut *output, observation).map_err(io::Error::other)?;
+        serde_json::to_writer(&mut *output, observation).map_err(io::Error::from)?;
         return writeln!(output);
     }
     match observation {

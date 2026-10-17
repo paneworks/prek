@@ -538,7 +538,7 @@ pub(crate) fn similar_geometry(a: &serde_json::Value, b: &serde_json::Value) -> 
 }
 
 pub fn write_record(output: &mut impl Write, record: &Record) -> io::Result<()> {
-    serde_json::to_writer(&mut *output, record).map_err(io::Error::other)?;
+    serde_json::to_writer(&mut *output, record).map_err(io::Error::from)?;
     output.write_all(b"\n")
 }
 

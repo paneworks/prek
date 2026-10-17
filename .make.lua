@@ -217,6 +217,12 @@ make.recipe{ name="test-axis-fuzz",desc="bounded axis-filter counterexamples; no
 make.recipe{ name="test-native-geometry",desc="native slot/axis preflight and private publication refusal; no device access",
              run=function() sh.cargo("test","--locked","--lib","kernel::tests::geometry::") end }
 
+make.recipe{ name="test-cli-output",desc="structured CLI diagnostics and deterministic closed-output handling",
+             run=function() sh.cargo("test","--locked","--test","cli","t04_") end }
+
+make.recipe{ name="test-inventory",desc="real private-file inventory failures and JSON/text output; no device access",
+             run=function() sh.cargo("test","--locked","--lib","linux::inventory_tests::") end }
+
 make.recipe{ name = "test-suspend-epoch", desc = "suspend-sensitive process clocks and native IO/reaping gates",
              run = function() sh.cargo("test", "--locked", "--lib", "process_clock::tests::") end }
 

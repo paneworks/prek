@@ -1846,3 +1846,56 @@ fn t03_generated_config_is_private() {
         0o600
     );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn t04_already_closed_stdout_is_a_clean_exit_for_json_commands() {
+    use std::process::Stdio;
+    fn closed_output(args: &[&str]) -> Output {
+        let (reader, writer) = nix::unistd::pipe().unwrap();
+        drop(reader);
+        Command::new(env!("CARGO_BIN_EXE_prek"))
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::piped())
+            .env_remove("DISPLAY")
+            .env_remove("WAYLAND_DISPLAY")
+            .env_remove("HYPRLAND_INSTANCE_SIGNATURE")
+            .output()
+            .unwrap()
+    }
+    let dir = Directory::new();
+    let config = dir.0.join("config.toml");
+    fs::write(
+        &config,
+        toml::to_string_pretty(&Config::preset("minimal").unwrap()).unwrap(),
+    )
+    .unwrap();
+    let replay = dir.0.join("recording.jsonl");
+    fs::write(&replay, recording()).unwrap();
+    for args in [
+        vec!["api", "--json"],
+        vec!["api", "--lua"],
+        vec!["devices", "--json"],
+        vec!["doctor", "--config", config.to_str().unwrap(), "--json"],
+        vec!["check", "--config", config.to_str().unwrap(), "--json"],
+        vec!["replay", replay.to_str().unwrap(), "--json"],
+    ] {
+        let output = closed_output(&args);
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stderr.is_empty(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    fs::write(&config, "this is not a valid configuration").unwrap();
+    let invalid = closed_output(&["check", "--config", config.to_str().unwrap(), "--json"]);
+    assert!(!invalid.status.success());
+    assert!(!invalid.stderr.is_empty());
+}

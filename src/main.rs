@@ -302,7 +302,7 @@ fn run(command: Command) -> io::Result<()> {
             }
             let definition =
                 prek::lua::Definition::compile_sources(&sources).map_err(io::Error::other)?;
-            serde_json::to_writer(&mut output, &definition).map_err(io::Error::other)
+            serde_json::to_writer(&mut output, &definition).map_err(io::Error::from)
         }
         Command::Api { json, lua } => {
             if lua {
@@ -310,7 +310,7 @@ fn run(command: Command) -> io::Result<()> {
             }
             let api = prek::lua::api();
             if json {
-                serde_json::to_writer(&mut output, &api).map_err(io::Error::other)?;
+                serde_json::to_writer(&mut output, &api).map_err(io::Error::from)?;
                 writeln!(output)
             } else {
                 writeln!(
@@ -569,7 +569,7 @@ fn run(command: Command) -> io::Result<()> {
             let config = compile_config(read_config(&path)?, &path)?.config;
             let report = prek::diagnostics::Report::inspect(&config, &linux::inventory()?);
             if json {
-                serde_json::to_writer(&mut output, &report).map_err(io::Error::other)?;
+                serde_json::to_writer(&mut output, &report).map_err(io::Error::from)?;
                 writeln!(output)?;
             } else {
                 writeln!(
@@ -614,7 +614,7 @@ fn run(command: Command) -> io::Result<()> {
                 })?
                 .config;
             if json {
-                serde_json::to_writer(&mut output,&serde_json::json!({ "version":prek::config::SCHEMA_VERSION,"status":"valid","mode":config.mode,"rules":config.rules.len(),"selectors":config.devices.len() })).map_err(io::Error::other)?;
+                serde_json::to_writer(&mut output,&serde_json::json!({ "version":prek::config::SCHEMA_VERSION,"status":"valid","mode":config.mode,"rules":config.rules.len(),"selectors":config.devices.len() })).map_err(io::Error::from)?;
                 writeln!(output)?;
             } else {
                 writeln!(
@@ -754,7 +754,7 @@ fn run(command: Command) -> io::Result<()> {
             replay.read(&mut BufReader::new(File::open(path)?))?;
             replay.finish(check)?;
             if json {
-                serde_json::to_writer(&mut output, replay.outcomes()).map_err(io::Error::other)?;
+                serde_json::to_writer(&mut output, replay.outcomes()).map_err(io::Error::from)?;
                 writeln!(output)?;
             } else {
                 writeln!(
@@ -786,7 +786,7 @@ fn run(command: Command) -> io::Result<()> {
             engine.finish(check)?;
             let events = engine.events();
             if json {
-                serde_json::to_writer(&mut output, &events).map_err(io::Error::other)?;
+                serde_json::to_writer(&mut output, &events).map_err(io::Error::from)?;
                 writeln!(output)?;
             } else {
                 writeln!(
@@ -812,7 +812,7 @@ fn run(command: Command) -> io::Result<()> {
             let replay = prek::replay::read(&mut BufReader::new(File::open(path)?), check)?;
             if json {
                 serde_json::to_writer(&mut output, replay.observations())
-                    .map_err(io::Error::other)?;
+                    .map_err(io::Error::from)?;
                 writeln!(output)?;
             } else {
                 writeln!(
@@ -2622,7 +2622,7 @@ impl<W: Write> linux::InputSink for RuleSink<'_, W> {
         self.engine.push(record)?;
         for event in self.engine.take_events() {
             if self.json {
-                serde_json::to_writer(&mut *self.output, &event).map_err(io::Error::other)?;
+                serde_json::to_writer(&mut *self.output, &event).map_err(io::Error::from)?;
                 writeln!(self.output)?;
             } else {
                 writeln!(self.output, "{event:?}")?;
