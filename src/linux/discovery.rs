@@ -65,15 +65,19 @@ impl Stamp {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct Publication {
+pub(crate) struct Publication {
     node: Node,
     stamp: Option<Stamp>,
-    pub(super) initialized: bool,
-    pub(super) properties: BTreeMap<String, String>,
+    pub(crate) initialized: bool,
+    pub(crate) properties: BTreeMap<String, String>,
 }
 impl Publication {
-    pub(super) fn read(fd: BorrowedFd<'_>) -> io::Result<Self> {
+    pub(crate) fn read(fd: BorrowedFd<'_>) -> io::Result<Self> {
         Self::read_at(fd, Path::new(DATABASE), 0)
+    }
+    #[cfg(test)]
+    pub(crate) fn fixture(fd: BorrowedFd<'_>, root: &Path, owner: u32) -> io::Result<Self> {
+        Self::read_at(fd, root, owner)
     }
     fn read_at(fd: BorrowedFd<'_>, root: &Path, owner: u32) -> io::Result<Self> {
         let node = Node::read(fd)?;
@@ -111,7 +115,7 @@ impl Publication {
         }
         Ok(value)
     }
-    pub(super) fn current(&self, fd: BorrowedFd<'_>, path: &Path) -> bool {
+    pub(crate) fn current(&self, fd: BorrowedFd<'_>, path: &Path) -> bool {
         self.current_at(fd, Some(path), Path::new(DATABASE), 0)
             .unwrap_or(false)
     }

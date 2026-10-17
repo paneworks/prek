@@ -22,6 +22,7 @@ use std::{
 };
 
 mod discovery;
+pub(crate) use discovery::Publication as DevicePublication;
 pub mod feedback;
 pub mod handoff;
 mod ingress;

@@ -2,7 +2,8 @@
 //!
 //! A descriptor is prepared before device creation. Readiness requires evidence
 //! from the actual consumer, not merely the existence of an event node. Only a
-//! trusted broker may supply that evidence; these types are not IPC messages.
+//! trusted broker may supply that evidence. Serialized descriptors and receipts
+//! are copy-only observations, not descriptor access or ownership permission.
 
 use crate::input::{
     ABS_MT_POSITION_X, ABS_MT_POSITION_Y, ABS_MT_SLOT, ABS_MT_TRACKING_ID, Axis, Device, EV_ABS,
@@ -13,6 +14,43 @@ use std::{collections::BTreeMap, time::Duration};
 
 const DEADLINE: Duration = Duration::from_secs(5);
 const FRESHNESS: Duration = Duration::from_millis(250);
+
+pub(crate) struct Marker<'a> {
+    pub base: &'a str,
+    pub publication: Option<&'a str>,
+}
+impl<'a> Marker<'a> {
+    pub fn parse(marker: &'a str) -> Result<Self, &'static str> {
+        if marker.len() > 128 {
+            return Err("device marker exceeds bounds");
+        }
+        let parts = marker.split('/').collect::<Vec<_>>();
+        let (device, generation, publication) = match parts.as_slice() {
+            ["prek", device, generation] => (*device, *generation, None),
+            ["prek", "test", device, generation] => (*device, *generation, None),
+            ["prek", device, generation, publication] => (*device, *generation, Some(*publication)),
+            ["prek", "test", device, generation, publication] => {
+                (*device, *generation, Some(*publication))
+            }
+            _ => return Err("invalid Prek device marker"),
+        };
+        let hex = |value: &str, length| {
+            value.len() == length
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        };
+        if !hex(device, 16)
+            || !hex(generation, 16)
+            || publication
+                .is_some_and(|nonce| !hex(nonce, 32) || nonce.bytes().all(|byte| byte == b'0'))
+        {
+            return Err("device marker requires canonical nonempty hexadecimal identity");
+        }
+        let base = publication.map_or(marker, |nonce| &marker[..marker.len() - nonce.len() - 1]);
+        Ok(Self { base, publication })
+    }
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -112,12 +150,31 @@ impl Descriptor {
         }
         if !self.isolated {
             self.marker = self.marker.replacen("prek/", "prek/test/", 1);
+            if self.udev.contains_key("PREK_PUBLICATION") {
+                self.udev
+                    .insert("PREK_PUBLICATION".into(), self.marker.clone());
+            }
             self.udev.insert("PREK_TEST".into(), "1".into());
             self.udev
                 .insert("LIBINPUT_IGNORE_DEVICE".into(), "1".into());
             self.isolated = true;
         }
         Ok(())
+    }
+
+    pub(crate) fn bind_publication(
+        mut self,
+        epoch: crate::protocol::Epoch,
+    ) -> Result<Self, &'static str> {
+        self.validate()?;
+        if Marker::parse(&self.marker)?.publication.is_some() || epoch.0 == [0, 0] {
+            return Err("device publication identity cannot be reused");
+        }
+        self.marker = format!("{}/{:016x}{:016x}", self.marker, epoch.0[0], epoch.0[1]);
+        self.udev
+            .insert("PREK_PUBLICATION".into(), self.marker.clone());
+        self.validate()?;
+        Ok(self)
     }
     /// Revalidate a prepared descriptor at the kernel boundary. Public fields
     /// allow observations to be compared, but are not permission to alter the
@@ -132,6 +189,16 @@ impl Descriptor {
         )?;
         if self.isolated {
             expected.mark_isolated()?;
+        }
+        if self.marker != expected.marker {
+            let marker = Marker::parse(&self.marker)?;
+            if marker.base != expected.marker || marker.publication.is_none() {
+                return Err("device marker differs from its source identity");
+            }
+            expected.marker = self.marker.clone();
+            expected
+                .udev
+                .insert("PREK_PUBLICATION".into(), self.marker.clone());
         }
         if expected != *self {
             return Err("descriptor was changed after preparation");

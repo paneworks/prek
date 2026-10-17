@@ -28,6 +28,14 @@ case emits pre-grab motion only on a libinput-ignored REL-only source with no
 key/switch capability. No test writes a key while its node is ungrabbed. No
 physical input nodes are opened.
 
+Every receiver also requires the production processed-metadata gate before
+grabbing or injecting: completed initialization, a nonce-bound `PREK_PUBLICATION`
+receipt and coherent protected metadata must match the actual owned device.
+The full physical marker changes on each creation, while the private registry
+retains one exclusive slot per source. This uses version-2 pre-add records;
+legacy records are preserved and refused, not migrated or removed automatically.
+See [virtual publication identities](evdev-boundary.md#virtual-publication-identities).
+
 Fourteen routing gates cover keyboard/mouse/touchpad forwarding, keyboard LED feedback,
 including the actual bounded source-write bridge, intact partial hardware frames,
 queued key releases and recovery after a wrapped uinput feedback ring,

@@ -64,23 +64,8 @@ fn denied(message: impl Into<String>) -> io::Error {
 
 /// The marker is a fixed grammar, never a caller-supplied filesystem path.
 fn filename(marker: &str) -> io::Result<CString> {
-    let parts: Vec<_> = marker.split('/').collect();
-    let ids = match parts.as_slice() {
-        ["prek", device, generation] => [*device, *generation],
-        ["prek", "test", device, generation] => [*device, *generation],
-        _ => return Err(invalid("invalid Prek device marker")),
-    };
-    if ids.iter().any(|id| {
-        id.len() != 16
-            || !id
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-    }) {
-        return Err(invalid(
-            "device markers require canonical 16-digit hexadecimal IDs",
-        ));
-    }
-    CString::new(format!("{}.json", marker.replace('/', "-")))
+    let marker = crate::transport::Marker::parse(marker).map_err(invalid)?;
+    CString::new(format!("{}.json", marker.base.replace('/', "-")))
         .map_err(|_| invalid("invalid marker"))
 }
 
@@ -98,10 +83,18 @@ struct Metadata {
 impl Metadata {
     fn validate(&self, marker: &str) -> io::Result<()> {
         filename(marker)?;
-        if self.version != 1
+        if self.version != 2
+            || crate::transport::Marker::parse(marker)
+                .map_err(invalid)?
+                .publication
+                .is_none()
             || self.owner.is_some_and(|owner| !owner.valid())
             || self.marker != marker
             || self.properties.len() > 32
+            || self
+                .properties
+                .get("PREK_PUBLICATION")
+                .is_none_or(|value| value != marker)
             || self.isolated != marker.starts_with("prek/test/")
             || self
                 .properties
@@ -113,6 +106,7 @@ impl Metadata {
         for (key, value) in &self.properties {
             if !(permitted_property(key)
                 || key == "PREK_VIRTUAL"
+                || key == "PREK_PUBLICATION"
                 || self.isolated && matches!(key.as_str(), "PREK_TEST" | "LIBINPUT_IGNORE_DEVICE"))
                 || value.is_empty()
                 || value.len() > 1024
@@ -233,6 +227,14 @@ impl Directory {
     }
 
     fn read(&self, marker: &str) -> io::Result<Metadata> {
+        let (metadata, _) = self.read_record(marker)?;
+        metadata.validate(marker)?;
+        Ok(metadata)
+    }
+    fn read_base(&self, marker: &str) -> io::Result<Metadata> {
+        self.read_record(marker).map(|(metadata, _)| metadata)
+    }
+    fn read_record(&self, marker: &str) -> io::Result<(Metadata, u64)> {
         let file = self.open_file(&filename(marker)?, libc::O_RDONLY | libc::O_NONBLOCK)?;
         let stat = file.metadata()?;
         if !stat.is_file()
@@ -250,8 +252,11 @@ impl Directory {
             return Err(invalid("metadata exceeds size limit"));
         }
         let metadata: Metadata = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-        metadata.validate(marker)?;
-        Ok(metadata)
+        metadata.validate(&metadata.marker)?;
+        if filename(&metadata.marker)? != filename(marker)? {
+            return Err(invalid("metadata belongs to a different source slot"));
+        }
+        Ok((metadata, stat.ino()))
     }
 }
 
@@ -291,8 +296,11 @@ impl Registry {
         if descriptor.is_isolated() != isolated {
             return Err(denied("descriptor isolation does not match publication"));
         }
+        let descriptor = descriptor
+            .bind_publication(crate::protocol::Epoch::random()?)
+            .map_err(invalid)?;
         let metadata = Metadata {
-            version: 1,
+            version: 2,
             marker: descriptor.marker.clone(),
             isolated,
             properties: descriptor.udev.clone(),
@@ -441,7 +449,7 @@ impl Registry {
                 }
                 WorkerIdentity::from_tag(tag)
             } else if let Some(marker) = registry_marker(&name) {
-                self.directory.read(&marker)?.owner
+                self.directory.read_base(&marker)?.owner
             } else {
                 None
             };
@@ -507,6 +515,17 @@ pub struct Publication {
     inode: u64,
     descriptor: Descriptor,
     metadata: Metadata,
+}
+impl Publication {
+    fn verify(&self) -> io::Result<()> {
+        let (metadata, inode) = self.directory.read_record(&self.metadata.marker)?;
+        if inode != self.inode || metadata != self.metadata {
+            return Err(invalid(
+                "virtual publication was replaced after preparation",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Drop for Publication {
@@ -637,6 +656,42 @@ fn supported_backend(descriptor: &Descriptor) -> io::Result<()> {
     Ok(())
 }
 
+fn processed_publication(
+    publication: &crate::linux::DevicePublication,
+    descriptor: &Descriptor,
+) -> io::Result<bool> {
+    descriptor.validate().map_err(invalid)?;
+    if crate::transport::Marker::parse(&descriptor.marker)
+        .map_err(invalid)?
+        .publication
+        .is_none()
+    {
+        return Err(invalid(
+            "virtual metadata requires a bound publication identity",
+        ));
+    }
+    if !publication.initialized
+        || publication
+            .properties
+            .get("PREK_VIRTUAL")
+            .is_none_or(|value| value != "1")
+        || publication
+            .properties
+            .get("PREK_PUBLICATION")
+            .is_none_or(|value| value != &descriptor.marker)
+    {
+        return Ok(false);
+    }
+    for (key, value) in &descriptor.udev {
+        if publication.properties.get(key) != Some(value) {
+            return Err(invalid(
+                "processed virtual property differs from preparation",
+            ));
+        }
+    }
+    Ok(true)
+}
+
 /// Sole owner of its uinput descriptor and pre-add metadata publication.
 /// Dropping closes/destroys the virtual node; no cloned FD is exposed.
 #[derive(Debug)]
@@ -653,9 +708,7 @@ impl Virtual {
     pub fn create(publication: Publication) -> io::Result<Self> {
         supported_backend(&publication.descriptor)?;
         // Registry metadata must still exist before the device add event.
-        if publication.directory.read(&publication.metadata.marker)? != publication.metadata {
-            return Err(invalid("published device metadata changed before creation"));
-        }
+        publication.verify()?;
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -751,9 +804,13 @@ impl Virtual {
     /// Verify processed udev properties and the actual evdev ABI of this owned
     /// virtual node. Node existence alone is never consumer readiness.
     pub fn processed_metadata(&self) -> io::Result<bool> {
-        if self.publication.directory.read(self.marker())? != self.publication.metadata {
-            return Err(invalid("virtual metadata changed after preparation"));
+        if !self.created || self.stopped {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "virtual device is not live",
+            ));
         }
+        self.publication.verify()?;
         let nodes = self.event_nodes()?;
         if nodes.is_empty() {
             return Ok(false);
@@ -770,32 +827,15 @@ impl Virtual {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
             Err(error) => return Err(error),
         };
-        let number = file.metadata()?.rdev();
-        if number == 0 {
+        use std::os::unix::fs::FileTypeExt;
+        let node = file.metadata()?;
+        if !node.file_type().is_char_device() || node.rdev() == 0 {
             return Err(invalid("virtual event node is not a device"));
         }
-        let properties = match fs::read_to_string(format!(
-            "/run/udev/data/c{}:{}",
-            libc::major(number),
-            libc::minor(number)
-        )) {
-            Ok(properties) => properties,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => return Err(error),
-        };
-        if !properties.lines().any(|line| line == "E:PREK_VIRTUAL=1") {
-            return Ok(false);
-        }
+        let publication = crate::linux::DevicePublication::read(file.as_fd())?;
         let spec = self.descriptor();
-        for (key, value) in &spec.udev {
-            if !properties
-                .lines()
-                .any(|line| line == format!("E:{key}={value}"))
-            {
-                return Err(invalid(
-                    "processed virtual property differs from preparation",
-                ));
-            }
+        if !processed_publication(&publication, spec)? {
+            return Ok(false);
         }
         let raw = RawDevice::from_fd(file.into())?;
         let id = raw.input_id();
@@ -861,6 +901,10 @@ impl Virtual {
         if axes != spec.axes {
             return Err(invalid("created virtual axes differ"));
         }
+        if !publication.current(raw.as_fd(), &nodes[0]) || self.event_nodes()? != nodes {
+            return Ok(false);
+        }
+        self.publication.verify()?;
         Ok(true)
     }
 
@@ -1044,6 +1088,7 @@ impl Drop for Virtual {
 
 #[cfg(test)]
 mod tests {
+    mod publication;
     use super::*;
     use crate::{input::Device, transport::KernelIdentity};
     use std::{

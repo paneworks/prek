@@ -25,6 +25,45 @@ pub const MAX_PACKET_AGE: Duration = Duration::from_secs(1);
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct Epoch(pub [u64; 2]);
+impl Epoch {
+    pub(crate) fn random() -> io::Result<Self> {
+        let mut bytes = [0u8; 16];
+        let mut filled = 0;
+        for _ in 0..64 {
+            // SAFETY: initialized bounded output and the nonblocking kernel RNG.
+            let count = unsafe {
+                nix::libc::getrandom(
+                    bytes[filled..].as_mut_ptr().cast(),
+                    bytes.len() - filled,
+                    nix::libc::GRND_NONBLOCK,
+                )
+            };
+            if count < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error);
+            }
+            if count == 0 {
+                return Err(io::ErrorKind::UnexpectedEof.into());
+            }
+            filled += count as usize;
+            if filled == bytes.len() {
+                let value = Self([
+                    u64::from_ne_bytes(bytes[..8].try_into().unwrap()),
+                    u64::from_ne_bytes(bytes[8..].try_into().unwrap()),
+                ]);
+                return if value.0 == [0, 0] {
+                    Err(invalid("empty random identity"))
+                } else {
+                    Ok(value)
+                };
+            }
+        }
+        Err(invalid("random identity read budget exhausted"))
+    }
+}
 
 /// Every post-registration request is fenced against broker restarts,
 /// configuration replacement and session/ownership changes.

@@ -216,6 +216,9 @@ impl Receiver {
                         && properties
                             .lines()
                             .any(|line| line == "E:LIBINPUT_IGNORE_DEVICE=1")
+                        && virtual_device
+                            .processed_metadata()
+                            .expect("owned virtual metadata validation failed")
                     {
                         let mut raw = RawDevice::from_fd(file.into()).unwrap();
                         for (key, value) in &virtual_device.descriptor().udev {

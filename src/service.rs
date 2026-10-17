@@ -110,39 +110,6 @@ impl ContextFeed {
 }
 
 pub use crate::ipc::monotonic;
-fn epoch() -> io::Result<Epoch> {
-    let mut bytes = [0u8; 16];
-    let mut filled = 0;
-    while filled < bytes.len() {
-        // SAFETY: initialized bounded output and the kernel random source.
-        let count = unsafe {
-            libc::getrandom(
-                bytes[filled..].as_mut_ptr().cast(),
-                bytes.len() - filled,
-                libc::GRND_NONBLOCK,
-            )
-        };
-        if count < 0 {
-            let error = io::Error::last_os_error();
-            if error.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(error);
-        }
-        if count == 0 {
-            return Err(io::ErrorKind::UnexpectedEof.into());
-        }
-        filled += count as usize;
-    }
-    let value = Epoch([
-        u64::from_ne_bytes(bytes[..8].try_into().unwrap()),
-        u64::from_ne_bytes(bytes[8..].try_into().unwrap()),
-    ]);
-    if value.0 == [0, 0] {
-        return Err(protocol::invalid("empty random broker epoch"));
-    }
-    Ok(value)
-}
 
 pub struct Policy {
     pub runtime_root: PathBuf,
@@ -917,7 +884,7 @@ impl Broker {
             endpoint,
             logind: Logind::open(library)?,
             policy,
-            epoch: epoch()?,
+            epoch: Epoch::random()?,
             configuration: 1,
             session: 0,
             connections: Vec::new(),

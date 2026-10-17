@@ -173,10 +173,10 @@ That is a metadata publication boundary, not an atomic input/consumer boundary.
 An initialized file at a reused event minor does not itself prove that udev
 completed the new kernel incarnation; authoritative add/remove reconciliation
 remains required. These checks do not serialize udev updates with kernel event
-generation,
-retract actions already sent, prove neutral consumer re-entry or establish
-physical hotplug/suspend acceptance. Polling and filesystem-check overhead still
-need the full hardware/resource gates. Production routing remains disabled.
+generation, retract actions already sent, prove neutral consumer re-entry or
+establish physical hotplug/suspend acceptance. Polling and filesystem-check
+overhead still need the full hardware/resource gates. Production routing remains
+disabled.
 
 `oslo make test-hotplug-discovery` exercises owned private files and database
 replacements plus the actual source cursor, pending queue and recognition
@@ -184,3 +184,42 @@ engine. It tests full-description mismatches, missing initialization, stale
 publication/node rejection, failed trust/bounds checks, cancellation of an old
 hold, unaffected-source progress and held-state suppression before a genuinely
 new press. It does not create or open kernel input devices.
+
+## Virtual publication identities
+
+Each kernel registry preparation appends a fresh 128-bit kernel-random identity
+to the actual virtual device's physical marker. The matching protected pre-add
+record and processed `PREK_PUBLICATION` property contain that full marker.
+Recreating the same original source/generation does not reuse its publication
+identity. Canonical base markers still identify the exclusive registry slot;
+the stored record and import request must agree on the full publication marker.
+An old helper request therefore cannot import a newer record from the same slot.
+
+Published descriptors and consumer receipts carry the full marker. Validation
+of a serialized descriptor only checks its shape; callers cannot submit an
+already bound descriptor for kernel publication or choose its creation identity.
+Prior publication metadata or consumer receipts cannot complete a new gate.
+The public descriptor JSON fields are unchanged. The identity is not secret,
+an input permission, a consumer acknowledgement or a `Ready` token.
+
+The processed-metadata gate uses the same bounded, protected, descriptor-bound
+database parser as discovery. Missing initialization or an absent/stale
+publication receipt remains pending. Duplicates, malformed/untrusted data or
+matching-publication property mismatches fail. Actual virtual identity,
+properties, event codes and axes must also match. Node/database and private
+pre-add record identity are rechecked after ABI inspection. The private record
+must retain its original inode as well as its exact contents.
+
+Registry records now use version 2. Version-1 records are not imported, reused,
+silently upgraded or automatically removed by recovery. Inspect any retained
+legacy record and its original owner before attempting an upgrade; no migration
+or cleanup is performed by building this package. The importer and producer
+must come from the same package revision. This changes no physical-device rule
+and triggers no existing device.
+
+`oslo make test-virtual-publication` tests private registry/database files,
+recreation, late import requests, strict receipts, replacement/legacy records,
+consumer-evidence fencing and existing transport/discovery models. Actual
+kernel cases remain in the user-launched runner. Neither layer establishes
+stock-compositor/console drain, neutral handoff, physical source incarnation or
+complete rollback. Production routing remains disabled.
