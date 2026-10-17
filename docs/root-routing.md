@@ -44,6 +44,13 @@ its fixed keyboard identity/capabilities and grabs its own node before injecting
 It observes duplicate software repeats and reverse setting requests; it does not
 implement or establish repeat passthrough. The production repeat gate stays closed.
 
+A second test-only [fuzz characterization](evdev-boundary.md#nonzero-fuzz-is-not-an-invertible-transport)
+checks re-filtering, skipped slot state and a zero-fuzz control on isolated
+two-slot devices. The unsupported constructor exists only in the test binary;
+it cannot enable production fuzz routing. Every owned node must pass processed
+metadata/ABI verification and be grabbed before injection. This case requires
+an actual user-launched run; building its binary is not execution evidence.
+
 Fourteen routing gates cover keyboard/mouse/touchpad forwarding, keyboard LED feedback,
 including the actual bounded source-write bridge, intact partial hardware frames,
 queued key releases and recovery after a wrapped uinput feedback ring,
@@ -99,18 +106,20 @@ Logs belong to your regular user under `target/root-routing/run-*`; `latest`
 points to that attempt. `console.log` records build, wrapper and cleanup output;
 `kernel.log` retains root probe stdout. `status.json` records running/passed/failed
 and the final exit code. `receipt.json` is written only after checking one complete
-version-3 root receipt, the exact fourteen routing, eight recovery and one repeat
-characterization inventories, all twenty-three tests actually executed and passed,
+version-4 root receipt, the exact fourteen routing, eight recovery and two transport
+characterization inventories, all twenty-four tests actually executed and passed,
 cleanup flags and the explicit scope limits. The recovery summary must match its
 eight per-case results. The repeat case must supply its complete typed observation
 record and exactly one passing test result; the receipt explicitly retains
-`repeat_passthrough_tested=false`. Older version-2 receipts are not current acceptance.
+`repeat_passthrough_tested=false`. The fuzz case likewise requires its complete
+typed observation record and exactly one passing result, while retaining
+`fuzz_passthrough_tested=false`. Older version-2/3 receipts are not current acceptance.
 Skips and zero-test runs
 cannot pass. Tell the agent when the script finishes so it can inspect these files.
 
 `oslo make test-root-routing` runs the unprivileged parser, actual owned-process
 and temporary-directory safety tests plus explicitly modeled privileged
-orchestration. It does not execute the twenty-three kernel cases or establish root
+orchestration. It does not execute the twenty-four kernel cases or establish root
 acceptance. The Nix `root-routing-receipts` check also lints the launchers.
 `oslo make build-root-routing` builds the immutable runner without launching it.
 

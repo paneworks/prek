@@ -1091,6 +1091,7 @@ impl Drop for Virtual {
 
 #[cfg(test)]
 mod tests {
+    mod fuzz;
     mod publication;
     mod repeat;
     use super::*;

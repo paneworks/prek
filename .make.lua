@@ -211,6 +211,9 @@ make.recipe{ name="test-virtual-publication",desc="nonce-bound virtual lifetimes
 make.recipe{ name="test-native-preparation",desc="published native descriptor binding and refusal before unproven takeover",
              run=function() sh.cargo("test","--locked","--lib","route_worker::tests::preparation::") end }
 
+make.recipe{ name="test-axis-fuzz",desc="bounded axis-filter counterexamples; no device access",
+             run=function() sh.cargo("test","--locked","--lib","kernel::tests::fuzz::") end }
+
 make.recipe{ name = "test-suspend-epoch", desc = "suspend-sensitive process clocks and native IO/reaping gates",
              run = function() sh.cargo("test", "--locked", "--lib", "process_clock::tests::") end }
 

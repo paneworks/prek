@@ -92,6 +92,24 @@ LEDs; it does not reconstruct held keys. See the upstream
 [console handler](https://github.com/torvalds/linux/blob/v6.18/drivers/tty/vt/keyboard.c).
 Do not treat an ungrab as consumer-neutral resynchronization.
 
+## Nonzero fuzz is not an invertible transport
+
+Linux filters absolute events against the previous value, including each Type B
+slot. Forwarding an already filtered coordinate can filter it again. See the
+upstream [input core](https://github.com/torvalds/linux/blob/v6.18/drivers/input/input.c).
+
+With fuzz 16, raw 16 then 24 produces 8 then 16. Mirroring 8 from zero produces
+2. A slot left at zero after consumption cannot reach 16 in one write: input 31
+produces 15, while 32 produces 32. Clearing fuzz changes metadata; intermediate
+updates change the observable stream. Neither is transparent restoration.
+
+`oslo make test-axis-fuzz` checks bounded arithmetic counterexamples without
+devices. The [user-launched root runner](root-routing.md) includes an ignored
+native characterization expecting these values and checking an untouched slot,
+neutral contacts and a zero-fuzz control. It uses only owned isolated nodes;
+compilation and model results do not prove that native case executed. The
+production nonzero-fuzz refusal remains in place.
+
 ## Per-device disable is not a neutral handoff
 
 Hyprland v0.56.2 assigns the keyboard's `enabled` flag and ignores key/modifier

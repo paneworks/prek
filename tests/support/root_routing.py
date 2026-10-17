@@ -34,7 +34,9 @@ RECOVERY_EXPECTED = {f"recovery::{source}::{failure}" for source in ("keyboard",
                      for failure in ("orderly", "worker", "parent", "stall")}
 REPEAT_CASE = "kernel::tests::repeat::isolated_uinput_repeat_timer_and_consumer_settings_are_not_transparent"
 REPEAT_RESULT = "PREK_UINPUT_REPEAT_RESULT="
-ALL_EXPECTED = EXPECTED | RECOVERY_EXPECTED | {REPEAT_CASE}
+FUZZ_CASE = "kernel::tests::fuzz::isolated_uinput_fuzz_refiltering_and_slot_restore_are_not_transparent"
+FUZZ_RESULT = "PREK_UINPUT_FUZZ_RESULT="
+ALL_EXPECTED = EXPECTED | RECOVERY_EXPECTED | {REPEAT_CASE, FUZZ_CASE}
 RECOVERY_INVENTORY = "PREK_KERNEL_RECOVERY_INVENTORY_V1"
 RECOVERY_RESULT = "PREK_KERNEL_RECOVERY_RESULT="
 EXECUTION_TIMEOUT = 90
@@ -101,14 +103,42 @@ def repeat_result(stdout):
     return value
 
 
+def fuzz_inventory(stdout):
+    names = [line.removesuffix(": test") for line in stdout.splitlines() if line.endswith(": test")]
+    if names != [FUZZ_CASE]:
+        raise ValueError("fuzz characterization executable has a different inventory")
+
+
+def fuzz_result(stdout):
+    results = re.findall(r"^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored;", stdout, re.M)
+    values = [json.loads(line[len(FUZZ_RESULT):]) for line in stdout.splitlines() if line.startswith(FUZZ_RESULT)]
+    if results != [("1", "0", "0")] or len(values) != 1 or not isinstance(values[0], dict):
+        raise ValueError("fuzz characterization did not execute exactly once")
+    value = values[0]
+    expected = dict(version=1, fuzz=16, source_raw=[16, 24], source_observed=[8, 16],
+                    mirror_raw=8, mirror_observed=2, restore_raw=16, restore_observed=8,
+                    gap_raw=[31, 32], gap_observed=[15, 32], zero_fuzz_observed=16,
+                    inactive_slot_preserved=True, contacts_neutral=True,
+                    physical_devices_opened=0, fuzz_passthrough_tested=False)
+    if set(value) != set(expected):
+        raise ValueError("fuzz characterization has a different schema")
+    for key, wanted in expected.items():
+        actual = value[key]
+        if type(actual) is not type(wanted) or actual != wanted \
+                or isinstance(wanted, list) and any(type(item) is not int for item in actual):
+            raise ValueError(f"invalid fuzz characterization: {key}")
+    return value
+
+
 def receipt(stdout):
     values = [json.loads(line[len(PREFIX):]) for line in stdout.splitlines() if line.startswith(PREFIX)]
     if len(values) != 1 or not isinstance(values[0], dict):
         raise ValueError("expected exactly one complete isolated kernel receipt")
     value = values[0]
-    expected = dict(version=3, status="passed", uid=0, passed=len(ALL_EXPECTED),
+    expected = dict(version=4, status="passed", uid=0, passed=len(ALL_EXPECTED),
                     routing_passed=len(EXPECTED), recovery_passed=len(RECOVERY_EXPECTED),
                     repeat_characterization_passed=1, repeat_passthrough_tested=False,
+                    fuzz_characterization_passed=1, fuzz_passthrough_tested=False,
                     physical_devices_opened=0, model_desktop_context=True,
                     production_route_admission_tested=False, compositor_consumer_retirement_tested=False,
                     rule_removed=True, registry_clean=True, unrelated_registry_preserved=True, recovery_controls_removed=True)
@@ -258,6 +288,9 @@ def run(args):
     listed = subprocess.run([args.native, REPEAT_CASE, "--exact", "--list", "--ignored"], env=env,
                             capture_output=True, text=True, check=True, timeout=10)
     repeat_inventory(listed.stdout)
+    listed = subprocess.run([args.native, FUZZ_CASE, "--exact", "--list", "--ignored"], env=env,
+                            capture_output=True, text=True, check=True, timeout=10)
+    fuzz_inventory(listed.stdout)
     if not stat.S_ISCHR(os.stat("/dev/uinput").st_mode):
         raise RuntimeError("/dev/uinput is unavailable; the runner does not load kernel modules")
     with directories() as (parent, registry, rules):
@@ -283,6 +316,7 @@ def run(args):
             output = execute([args.tests, "--ignored", "--nocapture", "--test-threads=1"], env)
             test_result(output)
             repeat_result(execute([args.native, REPEAT_CASE, "--exact", "--ignored", "--nocapture", "--test-threads=1"], env))
+            fuzz_result(execute([args.native, FUZZ_CASE, "--exact", "--ignored", "--nocapture", "--test-threads=1"], env))
             with recovery_directory(parent) as (name, run_identity):
                 recovery_env = dict(env, PREK_RECOVERY_DIRECTORY=f"/run/prek/{name}",
                                     PREK_RECOVERY_IDENTITY=f"{run_identity[0]}:{run_identity[1]}")
@@ -294,9 +328,10 @@ def run(args):
             raise RuntimeError("isolated device metadata remains; preserving it for inspection")
         if registry_snapshot(registry) != original_registry:
             raise RuntimeError("unrelated registry state changed; preserving it for inspection")
-    print(PREFIX + json.dumps(dict(version=3, status="passed", uid=0, kernel=os.uname().release,
+    print(PREFIX + json.dumps(dict(version=4, status="passed", uid=0, kernel=os.uname().release,
           tests=sorted(ALL_EXPECTED), passed=len(ALL_EXPECTED), routing_passed=len(EXPECTED), recovery_passed=8, physical_devices_opened=0,
           repeat_characterization_passed=1, repeat_passthrough_tested=False,
+          fuzz_characterization_passed=1, fuzz_passthrough_tested=False,
           model_desktop_context=True, production_route_admission_tested=False,
           compositor_consumer_retirement_tested=False, rule_removed=True, registry_clean=True,
           unrelated_registry_preserved=True, recovery_controls_removed=True)), flush=True)
