@@ -414,6 +414,12 @@ make.recipe{ name="test-keyboard-quiesce",desc="real held-key disable characteri
                cage_test("cage-test-wayland-fix",{"--keyboard-quiesce","--hyprland-config","lua"})
              end }
 
+make.recipe{ name="test-keyboard-ownership",desc="independent keyboard modifier ownership in the owned local fixture",
+             run=function()
+               cage_test("cage-test-wayland-fix",{"--keyboard-ownership","--hyprland-config","lua"})
+               cage_test("cage-test-wayland-fix",{"--keyboard-ownership"})
+             end }
+
 make.recipe{ name = "test-cage-wayland-fix", desc = "explicit test-only patched nested compositor receipts",
              run = function()
                cage_test("cage-test-wayland-fix", { "--modes", "--input", "--power", "--windows" })

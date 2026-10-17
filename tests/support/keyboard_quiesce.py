@@ -1,4 +1,4 @@
-"""Negative keyboard-disable characterization in one explicitly owned compositor."""
+"""Keyboard disable and independent modifier ownership in an owned compositor."""
 import hashlib
 import json
 from pathlib import Path
@@ -67,6 +67,40 @@ def validate_result(value):
                 or not isinstance(picture.get("sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", picture["sha256"]):
             raise ValueError("invalid real keyboard phase capture")
     return value
+
+
+def capture_state(args, env, output, name, state, rows, wait_rendered, capture, command):
+    if not args.screencopy:
+        raise RuntimeError("keyboard characterization requires real captures")
+    current = rows()
+    through = max(row["sequence"] for row in current if row["sequence"] <= state["sequence"]
+                  and row["event"] not in ("sync", "rendered", "presented", "presentation_discarded"))
+    wait_rendered(through)
+    monitors = json.loads(command(["-j", "monitors"]))
+    if len(monitors) != 1 or monitors[0].get("scale") != 1 or monitors[0].get("transform") != 0 \
+            or monitors[0].get("x") != 0 or monitors[0].get("y") != 0:
+        raise RuntimeError("unexpected owned capture coordinate space")
+    width, height = monitors[0]["width"], monitors[0]["height"]
+    clients = [client for client in json.loads(command(["-j", "clients"]))
+               if client.get("class") == "prek-cage-receiver" and client.get("mapped")]
+    if len(clients) != 1:
+        raise RuntimeError("owned receiver is not uniquely mapped")
+    position = clients[0]["at"]
+    destination = output / f"receiver-{name}.png"
+    deadline = time.monotonic() + 3
+    for attempt in range(64):
+        capture(name)
+        result = subprocess.run([args.receiver, "--png-rgb", str(width), str(height), str(destination)],
+                                env=env, check=True, capture_output=True, timeout=3)
+        if check_pixels(result.stdout, width, height, position, bool(state["keys"])):
+            return dict(phase=name, path=str(destination), attempts=attempt + 1,
+                        through=through, sha256=hashlib.sha256(destination.read_bytes()).hexdigest())
+        bad = output / f"receiver-{name}-first-unmatched.png"
+        if not bad.exists():
+            shutil.copyfile(destination, bad)
+        if time.monotonic() >= deadline:
+            break
+    raise RuntimeError("capture never showed the receiver identity and held-state pixels")
 
 
 def run(args, env, output, socket, rows, wait_rendered, capture):
@@ -138,38 +172,8 @@ def run(args, env, output, socket, rows, wait_rendered, capture):
         raise RuntimeError("per-device configuration never reached the requested behavior")
 
     def picture(name, state):
-        if not args.screencopy:
-            raise RuntimeError("quiesce characterization requires real captures")
-        current = rows()
-        through = max(row["sequence"] for row in current if row["sequence"] <= state["sequence"]
-                      and row["event"] not in ("sync", "rendered", "presented", "presentation_discarded"))
-        wait_rendered(through)
-        monitors = json.loads(command(["-j", "monitors"]))
-        if len(monitors) != 1 or monitors[0].get("scale") != 1 or monitors[0].get("transform") != 0 \
-                or monitors[0].get("x") != 0 or monitors[0].get("y") != 0:
-            raise RuntimeError("unexpected owned capture coordinate space")
-        width, height = monitors[0]["width"], monitors[0]["height"]
-        clients = [client for client in json.loads(command(["-j", "clients"]))
-                   if client.get("class") == "prek-cage-receiver" and client.get("mapped")]
-        if len(clients) != 1:
-            raise RuntimeError("owned receiver is not uniquely mapped")
-        position = clients[0]["at"]
-        destination = output / f"receiver-quiesce-{name}.png"
-        deadline = time.monotonic() + 3
-        for attempt in range(64):
-            capture(f"quiesce-{name}")
-            result = subprocess.run([args.receiver, "--png-rgb", str(width), str(height), str(destination)],
-                                    env=env, check=True, capture_output=True, timeout=3)
-            if check_pixels(result.stdout, width, height, position, bool(state["keys"])):
-                pictures.append(dict(phase=name, path=str(destination), attempts=attempt + 1,
-                                     through=through, sha256=hashlib.sha256(destination.read_bytes()).hexdigest()))
-                return
-            bad = output / f"receiver-quiesce-{name}-first-unmatched.png"
-            if not bad.exists():
-                shutil.copyfile(destination, bad)
-            if time.monotonic() >= deadline:
-                break
-        raise RuntimeError("capture never showed the receiver identity and held-state pixels")
+        picture = capture_state(args, env, output, f"quiesce-{name}", state, rows, wait_rendered, capture, command)
+        pictures.append(dict(picture, phase=name))
 
     before = {device["address"] for device in inventory()}
     frame.write_text("")
@@ -238,3 +242,253 @@ def run(args, env, output, socket, rows, wait_rendered, capture):
     (output / "keyboard-quiesce-result.json").write_text(json.dumps(result, indent=2) + "\n")
     print("PASS: negative keyboard-disable characterization; stale held key and dropped release/press verified; no handoff permission.")
     return result
+
+
+def ownership_expectations():
+    phases = []
+    text = "bA"
+
+    def expect(phase, keyboard, emitted, delivered, keys, added="", operation="batch"):
+        nonlocal text
+        text += added
+        phases.append(dict(phase=phase, keyboard=keyboard, operation=operation, emitted=emitted,
+                           delivered=delivered, keys=keys, text=text,
+                           modifiers=dict(depressed=int(bool(keys)), latched=0, locked=0, group=0)))
+
+    tap = [[30, 1], [30, 0]]
+    expect("persistent-shift", 0, [[42, 1]], [[42, 1]], [42])
+    expect("persistent-first-a", 0, tap, tap, [42], "A")
+    expect("persistent-second-a", 0, tap, tap, [42], "A")
+    expect("persistent-duplicate-shift", 0, [[42, 1]], [], [42])
+    expect("persistent-release", 0, [[42, 0]], [[42, 0]], [])
+    expect("persistent-duplicate-release", 0, [[42, 0]], [], [])
+    for first, second, name in [(0, 1, "second-owner-first-release"), (1, 0, "first-owner-first-release")]:
+        expect(f"{name}-a-down", 0, [[42, 1]], [[42, 1]], [42])
+        expect(f"{name}-b-down", 1, [[42, 1]], [], [42])
+        expect(f"{name}-both-held-a", 1, tap, tap, [42], "A")
+        expect(f"{name}-second-up", second, [[42, 0]], [], [42])
+        expect(f"{name}-remaining-a", first, tap, tap, [42], "A")
+        expect(f"{name}-last-up", first, [[42, 0]], [[42, 0]], [])
+    expect("different-a-down", 0, [[42, 1]], [[42, 1]], [42])
+    expect("different-b-down", 1, [[54, 1]], [[54, 1]], [42, 54])
+    expect("different-b-up", 1, [[54, 0]], [[54, 0]], [42])
+    expect("different-remaining-a", 0, tap, tap, [42], "A")
+    expect("different-last-up", 0, [[42, 0]], [[42, 0]], [])
+    expect("unmodified-a-down", 0, [[42, 1]], [[42, 1]], [42])
+    expect("unmodified-first-a", 1, tap, tap, [42], "A")
+    expect("unmodified-second-a", 1, tap, tap, [42], "A")
+    expect("unmodified-owner-a", 0, tap, tap, [42], "A")
+    expect("unmodified-last-up", 0, [[42, 0]], [[42, 0]], [])
+    expect("retire-a-down", 0, [[42, 1]], [[42, 1]], [42])
+    expect("retire-b-down", 1, [[42, 1]], [], [42])
+    expect("retire-b", 1, [], [], [42], operation="retire")
+    expect("retire-remaining-a", 0, tap, tap, [42], "A")
+    expect("retire-last-up", 0, [[42, 0]], [[42, 0]], [])
+    expect("retire-a", 0, [], [], [], operation="retire")
+    return phases
+
+
+def validate_ownership_result(value):
+    expected = dict(version=1, status="passed", source="two_owned_wayland_virtual_keyboards",
+                    final_neutral=True, production_route_tested=False, kernel_input_tested=False,
+                    unmodified_stock_acceptance=False)
+    if not isinstance(value, dict):
+        raise ValueError("missing keyboard ownership result")
+    for key, wanted in expected.items():
+        if type(value.get(key)) is not type(wanted) or value[key] != wanted:
+            raise ValueError(f"invalid keyboard ownership result: {key}")
+    if value.get("config_provider") not in ("lua", "hyprlang"):
+        raise ValueError("missing configuration dialect")
+    devices = value.get("keyboards")
+    if not isinstance(devices, list) or len(devices) != 2 \
+            or any(not isinstance(device, dict) or not isinstance(device.get("address"), str)
+                   or not re.fullmatch(r"0x[0-9a-f]+", device["address"]) for device in devices) \
+            or devices[0]["address"] == devices[1]["address"]:
+        raise ValueError("missing distinct owned keyboard identities")
+    phases = value.get("phases")
+    wanted_phases = ownership_expectations()
+    if not isinstance(phases, list) or len(phases) != len(wanted_phases):
+        raise ValueError("missing keyboard ownership phases")
+    for phase, wanted in zip(phases, wanted_phases):
+        if json.dumps(phase, sort_keys=True) != json.dumps(wanted, sort_keys=True):
+            raise ValueError(f"keyboard ownership observation differs: {wanted['phase']}")
+    captures = value.get("captures")
+    names = ["persistent-held", "second-owner-first-release-one-owner", "first-owner-first-release-one-owner",
+             "independent-unmodified", "retired-one-owner", "neutral-after"]
+    if not isinstance(captures, list) or len(captures) != len(names):
+        raise ValueError("missing keyboard ownership captures")
+    previous = 0
+    for name, picture in zip(names, captures):
+        if not isinstance(picture, dict) or picture.get("phase") != f"ownership-{name}" \
+                or type(picture.get("attempts")) is not int or not 1 <= picture["attempts"] <= 64 \
+                or type(picture.get("through")) is not int or picture["through"] <= previous \
+                or not isinstance(picture.get("sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", picture["sha256"]):
+            raise ValueError("invalid keyboard ownership capture")
+        previous = picture["through"]
+    return value
+
+
+def run_ownership(args, env, output, socket, rows, wait_rendered, capture):
+    output = Path(output)
+    hyprctl = str(Path(args.hyprland).parent / "hyprctl")
+    keyboards = []
+    pictures = []
+    phases = []
+
+    def record(kind, **details):
+        with (output / "keyboard-ownership-trace.jsonl").open("a") as log:
+            log.write(json.dumps(dict(kind=kind, **details)) + "\n")
+
+    def command(arguments):
+        result = subprocess.run([hyprctl] + arguments, env=env, check=True,
+                                capture_output=True, text=True, timeout=3)
+        record("ipc", arguments=arguments, stdout=result.stdout, stderr=result.stderr)
+        return result.stdout
+
+    def inventory():
+        devices = json.loads(command(["-j", "devices"]))["keyboards"]
+        if not isinstance(devices, list) or len(devices) > 64:
+            raise RuntimeError("invalid owned keyboard inventory")
+        return devices
+
+    def barrier():
+        after = time.monotonic_ns()
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            value = snapshot_after(rows(), after)
+            if value is not None:
+                record("application_barrier", receipt=value)
+                return value
+            time.sleep(0.005)
+        raise RuntimeError("receiver did not complete a newly requested Wayland sync")
+
+    def spawn():
+        before = {device["address"] for device in inventory()}
+        index = len(keyboards)
+        frame = output / f"ownership-{index}-keys.txt"
+        frame.write_text("")
+        log = (output / f"keyboard-ownership-{index}.log").open("w")
+        process = subprocess.Popen([args.keyboard, str(socket), str(frame), "--persistent"], env=env,
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log, text=True)
+        value = dict(process=process, frame=frame, log=log, held=set(), retired=False)
+        keyboards.append(value)
+        if not select.select([process.stdout], [], [], 3)[0] or process.stdout.readline() != "ready\n":
+            raise RuntimeError("owned keyboard did not register")
+        added = [device for device in inventory() if device["address"] not in before]
+        if len(added) != 1:
+            raise RuntimeError("owned keyboard address is ambiguous")
+        value["device"] = added[0]
+        record("owned_keyboard", index=index, device=added[0])
+        return index
+
+    def send(index, events, phase):
+        keyboard = keyboards[index]
+        start = len(rows())
+        keyboard["frame"].write_text("".join(f"{code} {value}\n" for code, value in events))
+        process = keyboard["process"]
+        process.stdin.write("\n")
+        process.stdin.flush()
+        if not select.select([process.stdout], [], [], 3)[0] or process.stdout.readline() != "done\n":
+            raise RuntimeError("owned keyboard did not complete its producer roundtrip")
+        for code, value in events:
+            if value:
+                keyboard["held"].add(code)
+            else:
+                keyboard["held"].discard(code)
+        state = barrier()
+        delivered = [(row["code"], row["state"]) for row in rows()[start:]
+                     if row["event"] == "key" and row["sequence"] <= state["sequence"]]
+        value = dict(phase=phase, operation="batch", keyboard=index, emitted=events, delivered=delivered,
+                     keys=state["keys"], modifiers=state["modifiers"], text=state["text"])
+        phases.append(value)
+        record("batch", **value)
+        return state
+
+    def picture(name, state):
+        pictures.append(capture_state(args, env, output, f"ownership-{name}", state, rows,
+                                      wait_rendered, capture, command))
+
+    def retire(index, phase):
+        keyboard = keyboards[index]
+        start = len(rows())
+        process = keyboard["process"]
+        process.stdin.close()
+        if process.wait(timeout=3) != 0:
+            raise RuntimeError("owned keyboard did not retire cleanly")
+        keyboard["retired"] = True
+        state = barrier()
+        if keyboard["device"]["address"] in {device["address"] for device in inventory()}:
+            raise RuntimeError("retired keyboard remains registered")
+        delivered = [(row["code"], row["state"]) for row in rows()[start:]
+                     if row["event"] == "key" and row["sequence"] <= state["sequence"]]
+        phases.append(dict(phase=phase, operation="retire", keyboard=index, emitted=[], delivered=delivered,
+                           keys=state["keys"], modifiers=state["modifiers"], text=state["text"]))
+        record("retired", index=index, receipt=state)
+        return state
+
+    try:
+        a, b = spawn(), spawn()
+        send(a, [(42, 1)], "persistent-shift")
+        send(a, [(30, 1), (30, 0)], "persistent-first-a")
+        state = send(a, [(30, 1), (30, 0)], "persistent-second-a")
+        if state["text"] != "bAAA" or state["modifiers"]["depressed"] != 1:
+            raise RuntimeError("persistent producer lost its own modifier across batches")
+        picture("persistent-held", state)
+        send(a, [(42, 1)], "persistent-duplicate-shift")
+        send(a, [(42, 0)], "persistent-release")
+        send(a, [(42, 0)], "persistent-duplicate-release")
+        for first, second, name in [(a, b, "second-owner-first-release"), (b, a, "first-owner-first-release")]:
+            send(a, [(42, 1)], f"{name}-a-down")
+            send(b, [(42, 1)], f"{name}-b-down")
+            send(b, [(30, 1), (30, 0)], f"{name}-both-held-a")
+            state = send(second, [(42, 0)], f"{name}-second-up")
+            picture(f"{name}-one-owner", state)
+            send(first, [(30, 1), (30, 0)], f"{name}-remaining-a")
+            send(first, [(42, 0)], f"{name}-last-up")
+        send(a, [(42, 1)], "different-a-down")
+        send(b, [(54, 1)], "different-b-down")
+        send(b, [(54, 0)], "different-b-up")
+        send(a, [(30, 1), (30, 0)], "different-remaining-a")
+        send(a, [(42, 0)], "different-last-up")
+        send(a, [(42, 1)], "unmodified-a-down")
+        send(b, [(30, 1), (30, 0)], "unmodified-first-a")
+        state = send(b, [(30, 1), (30, 0)], "unmodified-second-a")
+        picture("independent-unmodified", state)
+        send(a, [(30, 1), (30, 0)], "unmodified-owner-a")
+        send(a, [(42, 0)], "unmodified-last-up")
+        send(a, [(42, 1)], "retire-a-down")
+        send(b, [(42, 1)], "retire-b-down")
+        state = retire(b, "retire-b")
+        picture("retired-one-owner", state)
+        send(a, [(30, 1), (30, 0)], "retire-remaining-a")
+        send(a, [(42, 0)], "retire-last-up")
+        state = retire(a, "retire-a")
+        if state["keys"] or state["contacts"] or any(state["modifiers"].values()):
+            raise RuntimeError("owned keyboard characterization did not finish neutral")
+        picture("neutral-after", state)
+        result = dict(version=1, status="passed", config_provider=args.hyprland_config,
+                      hyprland=json.loads(command(["-j", "version"])), source="two_owned_wayland_virtual_keyboards",
+                      keyboards=[keyboard["device"] for keyboard in keyboards], phases=phases, captures=pictures,
+                      final_neutral=True, production_route_tested=False, kernel_input_tested=False,
+                      unmodified_stock_acceptance=False, dependency_override=env.get("PREK_CAGE_AQUAMARINE"))
+        result = json.loads(json.dumps(result))
+        validate_ownership_result(result)
+        (output / "keyboard-ownership-result.json").write_text(json.dumps(result, indent=2) + "\n")
+        print("PASS: two owned protocol keyboards preserve held modifiers across overlap, both release orders and retirement; no native routing permission.")
+        return result
+    finally:
+        for index, keyboard in enumerate(keyboards):
+            process = keyboard["process"]
+            if process.poll() is None:
+                try:
+                    send(index, [(code, 0) for code in sorted(keyboard["held"])], "cleanup")
+                    retire(index, "cleanup-retire")
+                except Exception as error:
+                    record("cleanup_error", index=index, error=str(error))
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait(timeout=3)
+            for stream in (process.stdin, process.stdout):
+                if stream is not None and not stream.closed:
+                    stream.close()
+            keyboard["log"].close()

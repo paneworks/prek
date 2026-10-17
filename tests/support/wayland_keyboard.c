@@ -2,6 +2,7 @@
  * Cage socket; no evdev, uinput or ambient WAYLAND_DISPLAY connection. */
 #define _GNU_SOURCE
 #include <fcntl.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -69,8 +70,11 @@ int main(int argc, char **argv) {
         fd, (uint32_t)length);
     close(fd);
     if (wl_display_roundtrip(display) < 0) return 1;
-    puts("ready"); fflush(stdout);
     unsigned timestamp = 0;
+    struct xkb_state *state = xkb_state_new(keymap);
+    bool pressed[768] = {false};
+    if (!state) return 1;
+    puts("ready"); fflush(stdout);
     for (;;) {
     if (getchar() != '\n') {
         if (argc == 4 && feof(stdin)) break;
@@ -78,8 +82,7 @@ int main(int argc, char **argv) {
     }
     if (argc >= 3) {
         FILE *input = fopen(argv[2], "r");
-        struct xkb_state *state = xkb_state_new(keymap);
-        if (!input || !state) { perror("routed keys"); return 1; }
+        if (!input) { perror("routed keys"); return 1; }
         unsigned code, value, count = 0;
         int fields;
         while ((fields = fscanf(input, "%u %u", &code, &value)) == 2) {
@@ -87,8 +90,11 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "invalid routed key\n"); return 1;
             }
             zwp_virtual_keyboard_v1_key(keyboard, ++timestamp, code, value);
-            xkb_state_update_key(state, code + 8,
-                value ? XKB_KEY_DOWN : XKB_KEY_UP);
+            if (pressed[code] != (value != 0)) {
+                xkb_state_update_key(state, code + 8,
+                    value ? XKB_KEY_DOWN : XKB_KEY_UP);
+                pressed[code] = value != 0;
+            }
             zwp_virtual_keyboard_v1_modifiers(keyboard,
                 xkb_state_serialize_mods(state, XKB_STATE_MODS_DEPRESSED),
                 xkb_state_serialize_mods(state, XKB_STATE_MODS_LATCHED),
@@ -96,7 +102,7 @@ int main(int argc, char **argv) {
                 xkb_state_serialize_layout(state, XKB_STATE_LAYOUT_EFFECTIVE));
         }
         if (fields != EOF || ferror(input)) return 1;
-        fclose(input); xkb_state_unref(state);
+        fclose(input);
     } else {
     zwp_virtual_keyboard_v1_key(keyboard, 1, 48, WL_KEYBOARD_KEY_STATE_PRESSED);
     zwp_virtual_keyboard_v1_key(keyboard, 2, 48, WL_KEYBOARD_KEY_STATE_RELEASED);
@@ -116,6 +122,7 @@ int main(int argc, char **argv) {
     zwp_virtual_keyboard_v1_destroy(keyboard);
     int result = wl_display_roundtrip(display);
     wl_display_disconnect(display);
+    xkb_state_unref(state);
     free(text); xkb_keymap_unref(keymap); xkb_context_unref(context);
     return result < 0;
 }

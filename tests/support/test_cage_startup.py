@@ -1,4 +1,5 @@
 import importlib.util
+import copy
 from pathlib import Path
 import unittest
 
@@ -14,6 +15,68 @@ host_spec.loader.exec_module(host)
 quiesce_spec = importlib.util.spec_from_file_location("keyboard_quiesce", Path(__file__).parent / "keyboard_quiesce.py")
 quiesce = importlib.util.module_from_spec(quiesce_spec)
 quiesce_spec.loader.exec_module(quiesce)
+
+
+class KeyboardOwnership(unittest.TestCase):
+    def receipt(self):
+        names = ["persistent-held", "second-owner-first-release-one-owner", "first-owner-first-release-one-owner",
+                 "independent-unmodified", "retired-one-owner", "neutral-after"]
+        return dict(version=1, status="passed", source="two_owned_wayland_virtual_keyboards", config_provider="lua",
+                    final_neutral=True, production_route_tested=False, kernel_input_tested=False,
+                    unmodified_stock_acceptance=False, keyboards=[dict(address="0xa"), dict(address="0xb")],
+                    phases=quiesce.ownership_expectations(),
+                    captures=[dict(phase=f"ownership-{name}", attempts=1, through=10 + index, sha256="a" * 64)
+                              for index, name in enumerate(names)])
+
+    def test_complete_scoped_receipt_and_both_dialects(self):
+        for provider in ("lua", "hyprlang"):
+            value = self.receipt()
+            value["config_provider"] = provider
+            self.assertEqual(quiesce.validate_ownership_result(value), value)
+
+    def test_partial_receipts_and_authority_expansion_are_rejected(self):
+        receipt = self.receipt()
+        for missing in (None, {}, [], True):
+            with self.subTest(missing=missing), self.assertRaises(ValueError):
+                quiesce.validate_ownership_result(missing)
+        for key in receipt:
+            value = copy.deepcopy(receipt)
+            del value[key]
+            with self.subTest(missing=key), self.assertRaises(ValueError):
+                quiesce.validate_ownership_result(value)
+        for change in [dict(production_route_tested=True), dict(kernel_input_tested=True), dict(unmodified_stock_acceptance=True),
+                       dict(final_neutral=False), dict(version=True), dict(status="observed"), dict(config_provider="other"),
+                       dict(keyboards=[]), dict(keyboards=[dict(address="0xa")] * 2), dict(keyboards=[{}, {}]),
+                       dict(phases=[]), dict(phases=list(reversed(receipt["phases"]))), dict(captures=[])]:
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                quiesce.validate_ownership_result(dict(receipt, **change))
+
+    def test_each_phase_requires_exact_keys_text_modifiers_and_ordered_delivery(self):
+        receipt = self.receipt()
+        for index, phase in enumerate(receipt["phases"]):
+            changes = [dict(text=phase["text"] + "a"), dict(keys=[125]), dict(keyboard=True), dict(emitted=[]),
+                       dict(delivered=phase["delivered"] + [[125, 0]]), dict(operation="other"), dict(modifiers=dict(depressed=0))]
+            if phase["emitted"] == []:
+                changes[3] = dict(emitted=[[42, 0]])
+            for change in changes:
+                value = copy.deepcopy(receipt)
+                value["phases"][index].update(change)
+                with self.subTest(phase=phase["phase"], change=change), self.assertRaises(ValueError):
+                    quiesce.validate_ownership_result(value)
+
+    def test_capture_receipts_require_distinct_ordered_real_frames(self):
+        receipt = self.receipt()
+        for change in [dict(attempts=True), dict(attempts=0), dict(attempts=65), dict(through=True),
+                       dict(through=0), dict(sha256="invalid"), dict(phase="other")]:
+            value = copy.deepcopy(receipt)
+            value["captures"][0].update(change)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                quiesce.validate_ownership_result(value)
+        for index in range(1, len(receipt["captures"])):
+            value = copy.deepcopy(receipt)
+            value["captures"][index]["through"] = value["captures"][index - 1]["through"]
+            with self.subTest(index=index), self.assertRaises(ValueError):
+                quiesce.validate_ownership_result(value)
 
 
 class KeyboardQuiescence(unittest.TestCase):
