@@ -1,10 +1,12 @@
 """Keyboard disable and independent modifier ownership in an owned compositor."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import select
 import shutil
+import signal
 import subprocess
 import time
 
@@ -492,3 +494,62 @@ def run_ownership(args, env, output, socket, rows, wait_rendered, capture):
                 if stream is not None and not stream.closed:
                     stream.close()
             keyboard["log"].close()
+
+
+def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
+    if not args.key_output_fixture:
+        raise RuntimeError("key-output test requires its explicitly built Rust fixture")
+    output = Path(output)
+    hyprctl = str(Path(args.hyprland).parent / "hyprctl")
+    pictures = []
+    phases = []
+
+    def command(arguments):
+        return subprocess.run([hyprctl] + arguments, env=env, check=True,
+                              capture_output=True, text=True, timeout=3).stdout
+
+    expected = [("physical-held", "bA", [42]), ("overlapping-remap-chord", "bAA", [42]),
+                ("remaps-released-physical-held", "bAAA", [42]), ("physical-neutral", "bAAA", []),
+                ("cancelled-unwritten-chord", "bAAAa", []), ("retired-remap-one-owner", "bAAAa", [42]),
+                ("source-retired-neutral", "bAAAaA", [])]
+    fixture_env = dict(env, PREK_LOCAL_CAGE="1", PREK_CAGE_OUTPUT=str(output), PREK_CAGE_KEYBOARD=args.keyboard,
+                       PREK_CAGE_KEY_SOCKET=str(socket))
+    before = {device["address"] for device in json.loads(command(["-j", "devices"]))["keyboards"]}
+    with (output / "key-output-runtime.log").open("w") as log:
+        process = subprocess.Popen([str(args.key_output_fixture), "--ignored", "--exact", "local_cage_generated_key_output", "--nocapture"],
+                                   env=fixture_env, stdout=log, stderr=log, start_new_session=True)
+        try:
+            for index, (name, text, keys) in enumerate(expected):
+                deadline = time.monotonic() + 10
+                while not (output / f"key-output-ready-{index}").exists():
+                    if process.poll() is not None or time.monotonic() >= deadline:
+                        raise RuntimeError(f"key-output Rust fixture stopped before phase {index}; see {output / 'key-output-runtime.log'}")
+                    time.sleep(0.005)
+                state = json.loads((output / f"key-output-phase-{index}.json").read_text())
+                if state["text"] != text or state["keys"] != keys or state["contacts"] \
+                        or state["modifiers"] != dict(depressed=int(bool(keys)), latched=0, locked=0, group=0):
+                    raise RuntimeError(f"actual key output delivery differs at {name}")
+                phases.append(dict(name=name, receipt=state))
+                pictures.append(capture_state(args, env, output, f"key-output-{name}", state, rows, wait_rendered, capture, command))
+                (output / f"key-output-captured-{index}").write_text("captured")
+            if process.wait(timeout=5) != 0:
+                raise RuntimeError("key-output Rust fixture failed after its captures")
+        finally:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=3)
+    after = {device["address"] for device in json.loads(command(["-j", "devices"]))["keyboards"]}
+    if after != before:
+        raise RuntimeError("owned key-output producer did not retire")
+    result = json.loads((output / "key-output-runtime-result.json").read_text())
+    wanted = dict(status="passed", phases=7, source="two_owned_wayland_virtual_keyboards", production_route_tested=False,
+                  kernel_input_tested=False, unmodified_stock_acceptance=False, test_backpressure=True)
+    if json.dumps(result, sort_keys=True) != json.dumps(wanted, sort_keys=True):
+        raise RuntimeError("invalid key-output runtime receipt")
+    result.update(captures=pictures, observations=phases, config_provider=args.hyprland_config,
+                  dependency_override=env.get("PREK_CAGE_AQUAMARINE"))
+    (output / "key-output-result.json").write_text(json.dumps(result, indent=2) + "\n")
+    print("PASS: actual key-output driver preserved physical-side Shift, overlapping remaps, source cleanup and cancelled unwritten chord; seven rendered app phases.")
+    return result

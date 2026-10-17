@@ -1,5 +1,6 @@
 //! Seat-scoped key conditions, chords, layers and synthetic-key ownership.
-//! This state model performs no injection or command execution.
+//! Output execution uses an explicitly supplied frame sink in [`output`].
+pub mod output;
 use crate::{
     config::Layer,
     input::{KeyState, Source},

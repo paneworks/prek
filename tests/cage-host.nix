@@ -3,6 +3,7 @@ assert aquamarine == null || stockAquamarine == null;
 let
   receiver = import ./wayland-receiver.nix { inherit pkgs; };
   runtime = import ./cage-runtime.nix { inherit package; };
+  keyRuntime = import ./cage-runtime.nix { inherit package; testName = "key_output_cage"; };
   keyboard = pkgs.stdenv.mkDerivation {
     pname = "prek-wayland-keyboard";
     version = "1";
@@ -41,6 +42,7 @@ pkgs.writeShellScriptBin "prek-cage-host-test" ''
     --inner ${./cage-inner.py} --proxy ${./support/wlproxy.py} --morf-lock-check ${./support/morf-lock.py} \
     --morf-control-check ${./support/morf-controls.py} \
     --keyboard-quiesce-check ${./support/keyboard_quiesce.py} \
+    --key-output-fixture ${keyRuntime}/bin/prek-local-cage-tests \
     --screencopy ${pkgs.grim}/bin/grim \
     --receiver ${receiver}/bin/prek-wayland-receiver \
     --keyboard ${keyboard}/bin/prek-wayland-keyboard \

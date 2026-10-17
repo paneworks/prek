@@ -601,6 +601,14 @@ pub(crate) struct Batch {
 }
 
 impl Batch {
+    fn written_prefix(&self) -> io::Result<Vec<RawEvent>> {
+        if self.written == 0 {
+            Ok(Vec::new())
+        } else {
+            decode_events(&self.bytes[..self.written])
+        }
+    }
+
     pub(crate) fn events(events: &[RawEvent]) -> io::Result<Self> {
         Ok(Self {
             bytes: encode_events(events)?,
@@ -1069,6 +1077,19 @@ impl Virtual {
     /// Drain only supported reverse feedback. The forwarding loop must not
     /// echo it back into this descriptor. Physical feedback writes are a
     /// separate verified writable-source path, not raw input injection.
+    pub(crate) fn cancel_pending(&mut self) -> io::Result<Vec<RawEvent>> {
+        if self.stopped {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "virtual output stopped",
+            ));
+        }
+        let Some(pending) = self.pending.take() else {
+            return Ok(Vec::new());
+        };
+        pending.written_prefix()
+    }
+
     pub fn feedback(&mut self) -> io::Result<Vec<RawEvent>> {
         let mut bytes = vec![0u8; EVENT_SIZE * 32];
         match self.file.read(&mut bytes) {
@@ -1452,6 +1473,47 @@ mod tests {
         }
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
+        }
+    }
+
+    #[test]
+    fn cancelled_key_batch_reports_only_its_written_event_prefix() {
+        let events = [
+            RawEvent {
+                kind: 1,
+                code: 42,
+                value: 1,
+            },
+            RawEvent {
+                kind: 1,
+                code: 30,
+                value: 1,
+            },
+            RawEvent {
+                kind: 0,
+                code: 0,
+                value: 0,
+            },
+        ];
+        for count in 0..=events.len() {
+            let mut batch = Batch::events(&events).unwrap();
+            let mut writer = Writes {
+                steps: if count == 0 {
+                    VecDeque::from([Err(io::ErrorKind::WouldBlock.into())])
+                } else {
+                    VecDeque::from([
+                        Ok(count * EVENT_SIZE),
+                        Err(io::ErrorKind::WouldBlock.into()),
+                    ])
+                },
+                output: Vec::new(),
+            };
+            batch.flush(&mut writer).unwrap();
+            assert_eq!(batch.written_prefix().unwrap(), events[..count]);
+            assert_eq!(
+                writer.output,
+                encode_events(&events).unwrap()[..count * EVENT_SIZE]
+            );
         }
     }
 

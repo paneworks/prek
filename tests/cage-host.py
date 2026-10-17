@@ -48,6 +48,9 @@ def main():
                         help="characterize per-device disable without granting production handoff")
     parser.add_argument("--keyboard-ownership", action="store_true",
                         help="characterize independent keyboard modifier ownership")
+    parser.add_argument("--key-output", action="store_true",
+                        help="exercise the actual key output driver against owned protocol keyboards")
+    parser.add_argument("--key-output-fixture", type=Path)
     parser.add_argument("--keyboard-quiesce-check", type=Path,
                         default=Path(__file__).parent / "support/keyboard_quiesce.py")
     parser.add_argument("--hardware-rendering", action="store_true",
@@ -78,6 +81,8 @@ def main():
         parser.error("--keyboard-quiesce is a separate owned-session characterization")
     if args.keyboard_ownership and any((args.layers,args.modes,args.input,args.power,args.windows,args.morf,args.keyboard_quiesce)):
         parser.error("--keyboard-ownership is a separate owned-session characterization")
+    if args.key_output and any((args.layers,args.modes,args.input,args.power,args.windows,args.morf,args.keyboard_quiesce,args.keyboard_ownership)):
+        parser.error("--key-output is a separate owned-session test")
     if args.morf_shell and not args.morf:
         parser.error("--morf-shell requires --morf with the actual ELF")
     if (args.morf_root_probe or args.morf_root_probe_socket) and not args.morf_shell:
@@ -124,7 +129,7 @@ def main():
         command = [os.sys.executable, args.inner, "--hyprland", args.hyprland,
                    "--hyprland-config", args.hyprland_config,
                    "--receiver", args.receiver, "--proxy", args.proxy, "--output", str(output)]
-        if args.keyboard_quiesce or args.keyboard_ownership:
+        if args.keyboard_quiesce or args.keyboard_ownership or args.key_output:
             command.append("--receiver-sync-probe")
         # Mold's visible path connects nested Hyprland through the private proxy
         # directly to the host display; only the headless path needs outer Cage.
@@ -219,15 +224,17 @@ def main():
                                    check=True, timeout=5)
 
             capture("baseline")
-            if args.keyboard_quiesce or args.keyboard_ownership:
+            if args.keyboard_quiesce or args.keyboard_ownership or args.key_output:
                 spec = importlib.util.spec_from_file_location("keyboard_quiesce", args.keyboard_quiesce_check)
                 quiesce = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(quiesce)
-                if args.keyboard_ownership:
+                if args.key_output:
+                    quiesce.run_key_output(args, control_env, output, socket, rows, wait_rendered, capture)
+                elif args.keyboard_ownership:
                     quiesce.run_ownership(args, control_env, output, socket, rows, wait_rendered, capture)
                 else:
                     quiesce.validate_result(quiesce.run(args, control_env, output, socket, rows, wait_rendered, capture))
-            if args.prek_fixture and not (args.keyboard_quiesce or args.keyboard_ownership):
+            if args.prek_fixture and not (args.keyboard_quiesce or args.keyboard_ownership or args.key_output):
                 if not args.prek_app:
                     parser.error("--prek-fixture requires --prek-app")
                 fixture_env = dict(env, PREK_LOCAL_CAGE="1", PREK_CAGE_OUTPUT=str(output),

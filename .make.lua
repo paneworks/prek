@@ -420,6 +420,18 @@ make.recipe{ name="test-keyboard-ownership",desc="independent keyboard modifier 
                cage_test("cage-test-wayland-fix",{"--keyboard-ownership"})
              end }
 
+make.recipe{ name="test-key-output",desc="transactional remap and chord ownership, backpressure and retirement; no devices",
+             run=function()
+               sh.cargo("test","--locked","--lib","keys::output::tests")
+               sh.cargo("test","--locked","--lib","kernel::tests::cancelled_key_batch")
+             end }
+
+make.recipe{ name="test-key-output-cage",desc="actual key output driver and app rendering on owned protocol keyboards",
+             run=function()
+               cage_test("cage-test-wayland-fix",{"--key-output","--hyprland-config","lua"})
+               cage_test("cage-test-wayland-fix",{"--key-output"})
+             end }
+
 make.recipe{ name = "test-cage-wayland-fix", desc = "explicit test-only patched nested compositor receipts",
              run = function()
                cage_test("cage-test-wayland-fix", { "--modes", "--input", "--power", "--windows" })
