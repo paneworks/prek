@@ -62,6 +62,37 @@ validation tests; it neither builds nor imports anything.
 toolchain in a separate target directory. Untagged local exports record a
 dirty worktree explicitly; dirty snapshots cannot claim a release tag.
 
+`oslo make check-dist-nix` enumerates and builds **every** check exported for
+the current native system. CI uses the same `tests/run-nix-gate.sh`; there is no
+second hand-maintained check list. Empty, duplicate or malformed inventories
+fail before building. Checks that prepare privileged fixtures only build/lint
+them; the gate never launches the root scripts.
+
+### ARM64 cross-build, without execution
+
+`oslo make build-aarch64` uses the declared `cross-aarch64` development shell to
+build the current application for `aarch64-unknown-linux-musl`. It inspects the
+actual retained ELF with `readelf`, requiring 64-bit little-endian AArch64,
+the `/lib/ld-musl-aarch64.so.1` interpreter and dynamic musl libc linkage.
+Only system `libc.so` and `libgcc_s.so.1` dependencies are accepted; any
+`RPATH`/`RUNPATH` or unexpected dependency fails the build. The cross-shell
+disables automatic Nix runtime paths and clears inherited linker flags.
+It does not execute the result or use `ldd`, an emulator, VM or remote machine.
+
+`target/cross-aarch64/latest` points to that attempt's logs, source revision and
+dirty-state record, source-diff digest, complete ELF headers/dynamic table and
+`status.txt`. A successful attempt retains its own `prek` copy, `SHA256SUMS` and
+`receipt.txt`; failed or changed-source builds have no receipt. The receipt
+explicitly says `execution=not-attempted` and confirms the checked linkage.
+Rejected ELF headers and logs remain available without a successful receipt.
+
+This is a **dynamic musl cross-build**, not a portable standalone binary or the
+native GNU/Nix ARM64 bundle. The target needs the recorded loader, libraries and
+runtime integration; cross-compilation does not prove they are installed or
+compatible on a phone. Native ARM tests, protected systemd/PAM integration,
+real device acceptance and the native bundle's fresh-runner checks remain
+separate requirements. No installation, service activation or deployment occurs.
+
 For an offline import challenge without writing the host's store:
 
 ```sh

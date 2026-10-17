@@ -244,14 +244,22 @@
           package = self.packages.${system}.default;
         in {
           distribution = pkgs.runCommand "prek-distribution-check" {
-            nativeBuildInputs = [ pkgs.python3 ];
+            nativeBuildInputs = [ pkgs.python3 pkgs.bash pkgs.shellcheck ];
           } ''
             mkdir -p source/scripts source/tests/support
             cp ${./scripts/nix-dist.py} source/scripts/nix-dist.py
             cp ${./scripts/vendor-notices.py} source/scripts/vendor-notices.py
             cp ${./tests/support/test_nix_dist.py} source/tests/support/test_nix_dist.py
+            cp ${./tests/support/test_build_tools.py} source/tests/support/test_build_tools.py
+            cp ${./tests/run-nix-gate.sh} source/tests/run-nix-gate.sh
+            cp ${./tests/run-aarch64-build.sh} source/tests/run-aarch64-build.sh
             cd source
             python3 -m unittest discover -s tests/support -p test_nix_dist.py -v > "$out" 2>&1
+            python3 -m unittest discover -s tests/support -p test_build_tools.py -v >> "$out" 2>&1
+            for script in tests/run-nix-gate.sh tests/run-aarch64-build.sh; do
+              bash -n "$script"
+              shellcheck "$script"
+            done
           '';
           installed-cli = pkgs.runCommand "prek-installed-cli-check" {
             nativeBuildInputs = [ pkgs.python3 ];
@@ -394,11 +402,19 @@
             packages = [
               (pkgs.rust-bin.stable.latest.default.override { targets = [ crossTriple ]; })
               crossPkgs.stdenv.cc
+              pkgs.binutils pkgs.git
             ];
             CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER = crossCc;
             CC_aarch64_unknown_linux_musl = crossCc;
-            # Use the phone's loader so runtime systemd loading remains possible.
+            # Select the dynamic musl target loader.
             CARGO_BUILD_RUSTFLAGS = "-C target-feature=-crt-static -C link-arg=-Wl,--dynamic-linker=/lib/ld-musl-aarch64.so.1";
+            NIX_DONT_SET_RPATH = "1";
+            NIX_DONT_SET_RPATH_aarch64_unknown_linux_musl = "1";
+            shellHook = ''
+              unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS
+              export NIX_LDFLAGS= NIX_LDFLAGS_BEFORE= NIX_LDFLAGS_AFTER=
+              export NIX_LDFLAGS_aarch64_unknown_linux_musl= NIX_LDFLAGS_BEFORE_aarch64_unknown_linux_musl= NIX_LDFLAGS_AFTER_aarch64_unknown_linux_musl=
+            '';
             # Prek needs no pkg-config libraries; keep host paths out, as in Mold.
             PKG_CONFIG_LIBDIR = "";
             PKG_CONFIG_PATH = "";

@@ -40,12 +40,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$PREK_REVISION"
           test "$(nix eval --impure --raw --expr builtins.currentSystem)" = "$PREK_SYSTEM"
           nix build --no-write-lock-file --max-jobs 1 --cores 2 --out-link package .#default
-          checks=(nixos-module lua-editor installed-cli distribution native-routing-helper
-                  native-composition-helper native-chain-helper native-composed-worker-helper
-                  wayland-proxy root-session root-routing-receipts)
-          for check in "${checks[@]}"; do
-            nix build --no-write-lock-file --max-jobs 1 --cores 2 --no-link ".#checks.${PREK_SYSTEM}.${check}"
-          done
+          bash tests/run-nix-gate.sh
       - name: Export complete offline cache bundle
         run: |
           set -euo pipefail

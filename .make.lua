@@ -166,6 +166,11 @@ make.recipe{ name = "build", desc = "build the input tools",
              end }
 make.alias("b", "build")
 
+make.recipe{ name="build-aarch64",desc="cross-build and inspect dynamic ARM64 ELF without executing it",
+             run=function()
+               assert(oslo.run{"nix","--option","eval-cache","false","--extra-experimental-features","nix-command flakes","--max-jobs","1","--cores","2","develop","--no-write-lock-file",".#cross-aarch64","--command","bash","tests/run-aarch64-build.sh"}.ok,"ARM64 cross-build or ELF verification failed")
+             end }
+
 make.recipe{
   name = "run",
   desc = "list devices, or observe one with --device PATH",
@@ -508,10 +513,15 @@ make.recipe{
   desc = "unprivileged Nix bundle validation and refusal tests",
   run = function()
     sh.python3("-m", "unittest", "discover", "-s", "tests/support", "-p", "test_nix_dist.py", "-v")
+    sh.python3("-m", "unittest", "discover", "-s", "tests/support", "-p", "test_build_tools.py", "-v")
     sh.bash("-n", "tests/run-rust-gate.sh")
     sh.shellcheck("tests/run-rust-gate.sh")
     sh.bash("-n", "tests/run-dist-offline.sh")
     sh.shellcheck("tests/run-dist-offline.sh")
+    for _, path in ipairs{"tests/run-nix-gate.sh","tests/run-aarch64-build.sh"} do
+      sh.bash("-n",path)
+      sh.shellcheck(path)
+    end
     sh.actionlint()
   end,
 }
@@ -562,21 +572,9 @@ make.recipe{
 
 make.recipe{
   name = "check-dist-nix",
-  desc = "immutable installed module, editor, helper and distribution gates",
+  desc = "build every exported native flake check, including installed helper gates",
   run = function()
-    local system = oslo.run{ "nix", "--extra-experimental-features", "nix-command", "eval", "--impure",
-      "--raw", "--expr", "builtins.currentSystem", capture = true }
-    assert(system.ok, "native Nix system unavailable")
-    local arch = (system.out or ""):match("^%s*(.-)%s*$")
-    local command = { "nix", "--option", "eval-cache", "false", "--extra-experimental-features",
-      "nix-command flakes", "--max-jobs", "1", "--cores", "2", "build", "--no-write-lock-file",
-      "--out-link", project_root() .. "/target/distribution/check" }
-    for _, check in ipairs{ "nixos-module", "lua-editor", "installed-cli", "distribution",
-      "native-routing-helper", "native-composition-helper", "native-chain-helper",
-      "native-composed-worker-helper", "wayland-proxy", "cage-startup", "root-session", "root-routing-receipts", "root-sleep-watch" } do
-      command[#command + 1] = ".#checks." .. arch .. "." .. check
-    end
-    assert(oslo.run(command).ok, "immutable distribution checks failed")
+    assert(oslo.run{"bash","tests/run-nix-gate.sh",project_root().."/target/distribution/check"}.ok,"native flake checks failed")
   end,
 }
 
