@@ -248,9 +248,15 @@ fn ticket_confirmation_moves_its_charge_and_terminal_cleanup_releases_every_snap
         .unwrap()
         .pop()
         .unwrap();
-    assert_eq!(budget.used.load(Ordering::Acquire), nodes + 128);
+    assert_eq!(
+        budget.used.load(Ordering::Acquire),
+        nodes + crate::rules::custom::PROOF_BYTES
+    );
     reply(&mut engine, &first, Phase::Pending, 11);
-    assert_eq!(budget.used.load(Ordering::Acquire), nodes + 128);
+    assert_eq!(
+        budget.used.load(Ordering::Acquire),
+        nodes + crate::rules::custom::PROOF_BYTES
+    );
     frame(&mut engine, 1, 2, 20, &[(31, 1)]);
     let nodes = nodes + NODE_BYTES + 5;
     let second = engine
@@ -258,7 +264,10 @@ fn ticket_confirmation_moves_its_charge_and_terminal_cleanup_releases_every_snap
         .unwrap()
         .pop()
         .unwrap();
-    assert_eq!(budget.used.load(Ordering::Acquire), nodes + 256);
+    assert_eq!(
+        budget.used.load(Ordering::Acquire),
+        nodes + 2 * crate::rules::custom::PROOF_BYTES
+    );
     reply(&mut engine, &second, Phase::Discrete, 21);
     let outcomes = engine.take_route_outcomes();
     assert_eq!(outcomes.len(), 1);

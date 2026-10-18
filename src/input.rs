@@ -33,6 +33,16 @@ pub(crate) fn independent_key(code: u16) -> bool {
     code <= 0x2ff && is_button(code)
 }
 
+pub(crate) fn independent_event(events: &[RawEvent], index: usize) -> bool {
+    let event = events[index];
+    event.kind == EV_KEY && independent_key(event.code)
+        || event.kind == 4
+            && event.code == 4
+            && events
+                .get(index + 1)
+                .is_some_and(|next| next.kind == EV_KEY && independent_key(next.code))
+}
+
 /// Identity assigned from stable discovery properties, with a fresh generation
 /// on every connection. Seat is part of the identity, not caller action context.
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]

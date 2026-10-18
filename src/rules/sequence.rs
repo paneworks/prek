@@ -73,6 +73,7 @@ impl StepMatch {
 
 pub(super) struct Prefix {
     pub(in crate::rules) key_presses: presses::Set,
+    pub(in crate::rules) tails: tails::Set,
     sources: BTreeSet<Source>,
     source_inputs: BTreeMap<Source, u64>,
 }
@@ -80,17 +81,25 @@ impl Prefix {
     pub(super) fn new(candidate: &Candidate) -> Self {
         Self {
             key_presses: candidate.key_presses.empty_like(),
+            tails: candidate.tails.empty_like(),
             sources: BTreeSet::from([candidate.source.clone()]),
             source_inputs: BTreeMap::from([(candidate.source.clone(), candidate.started_input)]),
         }
     }
     fn merge(
         presses: &mut presses::Set,
+        tails: &mut tails::Set,
         sources: &mut BTreeSet<Source>,
         inputs: &mut BTreeMap<Source, u64>,
         candidate: &Candidate,
     ) -> Result<(), &'static str> {
-        presses.merge(&candidate.key_presses)?;
+        let mut proof = InputProof {
+            key_presses: presses.clone(),
+            tails: tails.clone(),
+        };
+        proof.include(&candidate.input_proof())?;
+        *presses = proof.key_presses;
+        *tails = proof.tails;
         sources.extend(candidate.sources.iter().cloned());
         for (source, &watermark) in &candidate.source_inputs {
             inputs
@@ -103,6 +112,7 @@ impl Prefix {
     fn include(&mut self, candidate: &Candidate) -> Result<(), &'static str> {
         Self::merge(
             &mut self.key_presses,
+            &mut self.tails,
             &mut self.sources,
             &mut self.source_inputs,
             candidate,
@@ -112,12 +122,14 @@ impl Prefix {
 impl PendingSequence {
     pub(super) fn reset_projection(&mut self) {
         self.key_presses = self.completed.key_presses.clone();
+        self.tails = self.completed.tails.clone();
         self.sources = self.completed.sources.clone();
         self.source_inputs = self.completed.source_inputs.clone();
     }
     pub(super) fn observe(&mut self, candidate: &Candidate) -> Result<(), &'static str> {
         Prefix::merge(
             &mut self.key_presses,
+            &mut self.tails,
             &mut self.sources,
             &mut self.source_inputs,
             candidate,

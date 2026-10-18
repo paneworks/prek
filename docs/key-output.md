@@ -543,6 +543,42 @@ ownership is explicitly refused until initial-state and recovery contracts are
 implemented; ordinary switch passthrough is preserved. Full semantic-domain,
 native MT/consumer and physical acceptance remain required.
 
+### Native non-key evidence
+
+Native candidates retain typed, immutable references to their original coherent
+report tails. Each reference binds the source generation and original SYN input
+position, the raw tail families, and the families actually observed through an
+approved declaration. A relative-only callback does not observe an accompanying
+wheel; one native wheel axis does not observe the other. Touch contact evidence
+does not cover unrelated absolute axes, and absolute MT samples alone do not
+prove a contact cohort. Unknown tail metadata remains uncovered.
+
+Queued offers and issued tickets each retain their own snapshots. A reply uses
+the exact ticket snapshot, not newer candidate input. Timer offers retain only
+confirmed physical evidence. Held-contact continuation offers create no new
+physical report. Composed native/custom steps retain completed-prefix evidence;
+disjoint observations of the same original report may union coverage only when
+source, original position and raw domains agree. Key-position conflicts remain
+invalid. Combining key and tail snapshots commits neither on failure.
+
+Report references share the existing 8 MiB persistent provenance budget with
+key presses. Their snapshots share nodes, iterative teardown avoids recursive
+chain destruction, and failed coverage unions refund temporary storage. Queue
+and ticket metadata charges include the additional collection. Ticket issuance
+and reply validation check each proof's original source and observed declaration.
+Partial observations remain eligible recognizer input, not authority over the
+unobserved remainder of a coherent tail. Switch ownership still needs its separate
+initial-state and transition contract.
+
+`oslo make test-tail-provenance` checks original-report/ticket isolation,
+composed coverage, partial observations and accounting without kernel devices.
+The supervised held-touch chain check also verifies that real helper replies
+preserve the native prefix report without inventing continuation input.
+These proofs are not journal consumption receipts or new broker authority.
+The legacy coarse raw path is not replaced, and native mixed key/tail settlement,
+semantic-domain decomposition and physical acceptance remain required before
+widening production admission.
+
 ## Private native worker binding
 
 The supervised input loop calls `InputSink::service_owned(health)` even with no

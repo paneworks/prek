@@ -8,11 +8,14 @@ use crate::{
     recognition::{Definition, InputKind, Phase, Proposal, Ticket},
 };
 
-fn ms(at: u64) -> Duration {
+pub(super) fn ms(at: u64) -> Duration {
     Duration::from_millis(at)
 }
 
-fn hybrid(inputs: &[InputKind], continuous: bool) -> Engine {
+pub(super) fn hybrid(inputs: &[InputKind], continuous: bool) -> Engine {
+    hybrid_budget(inputs, continuous, MAX_BYTES)
+}
+pub(super) fn hybrid_budget(inputs: &[InputKind], continuous: bool, limit: usize) -> Engine {
     let mut engine = configured(
         Trigger::Custom {
             recognizer: Definition {
@@ -25,7 +28,7 @@ fn hybrid(inputs: &[InputKind], continuous: bool) -> Engine {
             timeout: Millis(200),
             wake: Some(Millis(50)),
         },
-        MAX_BYTES,
+        limit,
     );
     let mut device = engine.devices[&1].device.clone();
     engine
@@ -36,7 +39,9 @@ fn hybrid(inputs: &[InputKind], continuous: bool) -> Engine {
         .unwrap();
     device.source.generation += 1;
     device.capabilities.insert(EV_KEY, vec![30, 31, 42, 0x14a]);
-    device.capabilities.insert(EV_REL, vec![0, 8]);
+    device
+        .capabilities
+        .insert(EV_REL, vec![0, 1, 2, 6, 8, 11, 12]);
     device.capabilities.insert(EV_SW, vec![0]);
     device.axes = [
         (0, 1000),
@@ -102,7 +107,7 @@ fn hybrid(inputs: &[InputKind], continuous: bool) -> Engine {
     engine
 }
 
-fn raw(engine: &mut Engine, sequence: u64, at: u64, events: &[(u16, u16, i32)]) {
+pub(super) fn raw(engine: &mut Engine, sequence: u64, at: u64, events: &[(u16, u16, i32)]) {
     engine
         .push(Record::Frame {
             frame: Frame {
@@ -143,7 +148,7 @@ fn down(engine: &mut Engine) {
     );
 }
 
-fn request(engine: &mut Engine, at: u64) -> Ticket {
+pub(super) fn request(engine: &mut Engine, at: u64) -> Ticket {
     let mut requests = engine.recognition_requests(ms(at)).unwrap();
     assert_eq!(requests.len(), 1, "{:?}", engine.take_events());
     requests.pop().unwrap()

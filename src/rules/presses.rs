@@ -15,6 +15,29 @@ pub(crate) struct Press {
     pub position: InputPosition,
     pub code: u16,
 }
+pub(super) trait Entry: Clone + Ord {
+    fn source(&self) -> &Source;
+    fn position(&self) -> InputPosition;
+    fn valid(&self) -> bool;
+    fn combine(&self, other: &Self) -> Result<Self, &'static str> {
+        if self == other {
+            Ok(self.clone())
+        } else {
+            Err("conflicting original input position")
+        }
+    }
+}
+impl Entry for Press {
+    fn source(&self) -> &Source {
+        &self.source
+    }
+    fn position(&self) -> InputPosition {
+        self.position
+    }
+    fn valid(&self) -> bool {
+        self.code <= 0x2ff
+    }
+}
 pub(super) struct Budget {
     used: AtomicUsize,
     limit: usize,
@@ -34,7 +57,7 @@ impl Budget {
                 used.checked_add(bytes).filter(|next| *next <= self.limit)
             })
             .map(|_| ())
-            .map_err(|_| "key press provenance budget exhausted")
+            .map_err(|_| "input provenance budget exhausted")
     }
     fn reserve(self: &Arc<Self>, bytes: usize) -> Result<Reservation, &'static str> {
         self.acquire(bytes)?;
@@ -55,29 +78,29 @@ impl Drop for Reservation {
 }
 
 #[derive(Clone)]
-pub(super) struct Set {
+pub(super) struct Set<T = Press> {
     budget: Arc<Budget>,
-    root: Option<Arc<Node>>,
+    root: Option<Arc<Node<T>>>,
     count: usize,
     latest: Option<InputPosition>,
 }
-enum Links {
+enum Links<T> {
     Press {
-        previous: Option<Arc<Node>>,
-        press: Press,
+        previous: Option<Arc<Node<T>>>,
+        press: T,
     },
     Union {
-        left: Arc<Node>,
-        right: Arc<Node>,
+        left: Arc<Node<T>>,
+        right: Arc<Node<T>>,
     },
 }
-struct Node {
+struct Node<T> {
     charge: usize,
     budget: Arc<Budget>,
-    links: Option<Links>,
+    links: Option<Links<T>>,
 }
-impl Node {
-    fn children(&mut self, pending: &mut Vec<Arc<Node>>) {
+impl<T> Node<T> {
+    fn children(&mut self, pending: &mut Vec<Arc<Node<T>>>) {
         match self.links.take() {
             Some(Links::Press {
                 previous: Some(previous),
@@ -91,7 +114,7 @@ impl Node {
         }
     }
 }
-impl Drop for Node {
+impl<T> Drop for Node<T> {
     fn drop(&mut self) {
         let mut pending = Vec::new();
         self.children(&mut pending);
@@ -103,13 +126,13 @@ impl Drop for Node {
         self.budget.used.fetch_sub(self.charge, Ordering::AcqRel);
     }
 }
-pub(super) struct Iter<'a> {
-    pending: Vec<&'a Node>,
-    seen: BTreeSet<*const Node>,
+pub(super) struct Iter<'a, T = Press> {
+    pending: Vec<&'a Node<T>>,
+    seen: BTreeSet<*const Node<T>>,
     yielded: BTreeSet<InputPosition>,
 }
-impl<'a> Iterator for Iter<'a> {
-    type Item = &'a Press;
+impl<'a, T: Entry> Iterator for Iter<'a, T> {
+    type Item = &'a T;
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(node) = self.pending.pop() {
             if !self.seen.insert(std::ptr::from_ref(node)) {
@@ -120,7 +143,7 @@ impl<'a> Iterator for Iter<'a> {
                     if let Some(previous) = previous {
                         self.pending.push(previous);
                     }
-                    if self.yielded.insert(press.position) {
+                    if self.yielded.insert(press.position()) {
                         return Some(press);
                     }
                 }
@@ -133,7 +156,7 @@ impl<'a> Iterator for Iter<'a> {
         None
     }
 }
-impl Set {
+impl<T: Entry> Set<T> {
     pub(super) fn reserve(&self, bytes: usize) -> Result<Reservation, &'static str> {
         self.budget.reserve(bytes)
     }
@@ -145,7 +168,7 @@ impl Set {
             latest: None,
         }
     }
-    pub(super) fn iter(&self) -> Iter<'_> {
+    pub(super) fn iter(&self) -> Iter<'_, T> {
         Iter {
             pending: self.root.as_deref().into_iter().collect(),
             seen: BTreeSet::new(),
@@ -155,27 +178,24 @@ impl Set {
     pub(super) fn empty_like(&self) -> Self {
         Self::empty(self.budget.clone())
     }
-    pub(super) fn contains(&self, source: &Source, code: u16, position: InputPosition) -> bool {
-        self.iter().any(|press| {
-            press.source == *source && press.code == code && press.position == position
-        })
+    pub(super) fn related<U: Entry>(&self) -> Set<U> {
+        Set::empty(self.budget.clone())
     }
-    pub(super) fn select(&self, mut presses: Vec<Press>) -> Result<Self, &'static str> {
+    fn contains_entry(&self, entry: &T) -> bool {
+        self.iter().any(|existing| existing == entry)
+    }
+    pub(super) fn select(&self, mut presses: Vec<T>) -> Result<Self, &'static str> {
         if presses.len() > MAX_PRESSES {
-            return Err("key press provenance member limit");
+            return Err("input provenance member limit");
         }
-        presses.sort_by_key(|press| press.position);
+        presses.sort_by_key(Entry::position);
         if presses
             .windows(2)
-            .any(|pair| pair[0].position == pair[1].position)
+            .any(|pair| pair[0].position() == pair[1].position())
         {
-            return Err("conflicting original key press position");
+            return Err("conflicting original input position");
         }
-        if self.count == presses.len()
-            && presses
-                .iter()
-                .all(|press| self.contains(&press.source, press.code, press.position))
-        {
+        if self.count == presses.len() && presses.iter().all(|press| self.contains_entry(press)) {
             return Ok(self.clone());
         }
         let mut selected = Self::empty(self.budget.clone());
@@ -184,30 +204,30 @@ impl Set {
         }
         Ok(selected)
     }
-    pub(super) fn insert(&mut self, press: Press) -> Result<(), &'static str> {
-        if press.position.frame == 0
-            || press.position.event >= 4096
-            || press.source.generation == 0
-            || press.source.seat.is_empty()
-            || press.code > 0x2ff
+    pub(super) fn insert(&mut self, press: T) -> Result<(), &'static str> {
+        let position = press.position();
+        if position.frame == 0
+            || position.event >= 4096
+            || press.source().generation == 0
+            || press.source().seat.is_empty()
+            || !press.valid()
         {
-            return Err("invalid original key press position");
+            return Err("invalid original input position");
         }
-        if self.latest.is_some_and(|last| press.position <= last) {
-            return if self.contains(&press.source, press.code, press.position) {
+        if self.latest.is_some_and(|last| position <= last) {
+            return if self.contains_entry(&press) {
                 Ok(())
             } else {
-                Err("key press provenance moved backwards")
+                Err("input provenance moved backwards")
             };
         }
         if self.count >= MAX_PRESSES {
-            return Err("key press provenance member limit");
+            return Err("input provenance member limit");
         }
         let charge = NODE_BYTES
-            .checked_add(press.source.seat.len())
-            .ok_or("key press provenance byte overflow")?;
+            .checked_add(press.source().seat.len())
+            .ok_or("input provenance byte overflow")?;
         self.budget.acquire(charge)?;
-        let position = press.position;
         self.root = Some(Arc::new(Node {
             charge,
             budget: self.budget.clone(),
@@ -222,7 +242,7 @@ impl Set {
     }
     pub(super) fn merge(&mut self, other: &Self) -> Result<(), &'static str> {
         if !Arc::ptr_eq(&self.budget, &other.budget) {
-            return Err("foreign key press provenance budget");
+            return Err("foreign input provenance budget");
         }
         let Some(right) = &other.root else {
             return Ok(());
@@ -234,24 +254,35 @@ impl Set {
         if Arc::ptr_eq(left, right) {
             return Ok(());
         }
+        let mut replacements = Vec::new();
+        let mut self_covers = true;
+        let mut other_covers = true;
         let count = {
-            let entries: BTreeSet<_> = self.iter().chain(other.iter()).collect();
-            if entries.len() > MAX_PRESSES {
-                return Err("key press provenance member limit");
+            let mut entries: BTreeMap<_, _> =
+                self.iter().map(|entry| (entry.position(), entry)).collect();
+            for entry in other.iter() {
+                if let Some(previous) = entries.insert(entry.position(), entry) {
+                    if previous != entry {
+                        let combined = previous.combine(entry)?;
+                        self_covers &= combined == *previous;
+                        other_covers &= combined == *entry;
+                        if combined != *entry {
+                            replacements.push(combined);
+                        }
+                    }
+                } else {
+                    self_covers = false;
+                }
             }
-            let mut positions = BTreeSet::new();
-            if entries
-                .iter()
-                .any(|press| !positions.insert(press.position))
-            {
-                return Err("conflicting original key press position");
+            if entries.len() > MAX_PRESSES {
+                return Err("input provenance member limit");
             }
             entries.len()
         };
-        if count == self.count {
+        if count == self.count && self_covers {
             return Ok(());
         }
-        if count == other.count {
+        if count == other.count && other_covers {
             *self = other.clone();
             return Ok(());
         }
@@ -260,14 +291,37 @@ impl Set {
             left: left.clone(),
             right: right.clone(),
         };
-        self.root = Some(Arc::new(Node {
+        let mut root = Arc::new(Node {
             charge: NODE_BYTES,
             budget: self.budget.clone(),
             links: Some(links),
-        }));
+        });
+        for entry in replacements {
+            let charge = NODE_BYTES
+                .checked_add(entry.source().seat.len())
+                .ok_or("input provenance byte overflow")?;
+            self.budget.acquire(charge)?;
+            root = Arc::new(Node {
+                charge,
+                budget: self.budget.clone(),
+                links: Some(Links::Press {
+                    previous: Some(root),
+                    press: entry,
+                }),
+            });
+        }
+        self.root = Some(root);
         self.count = count;
         self.latest = self.latest.max(other.latest);
         Ok(())
+    }
+}
+
+impl Set<Press> {
+    pub(super) fn contains(&self, source: &Source, code: u16, position: InputPosition) -> bool {
+        self.iter().any(|press| {
+            press.source == *source && press.code == code && press.position == position
+        })
     }
 }
 

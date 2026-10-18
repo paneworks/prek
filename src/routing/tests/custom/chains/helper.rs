@@ -145,6 +145,12 @@ return p.config.new{policy={allow_input_events=true,allowed_devices={'touch'}},d
         ],
     );
     let parent = owner(&routing);
+    let original_reports: Vec<_> = routing.engine.route_intents()[0]
+        .tail_reports()
+        .cloned()
+        .collect();
+    assert_eq!(original_reports.len(), 1);
+    assert!(original_reports[0].complete());
     std::thread::sleep(Duration::from_millis(21));
     let mut leaves = BTreeSet::new();
     for expected in ["first", "last"] {
@@ -152,6 +158,11 @@ return p.config.new{policy={allow_input_events=true,allowed_devices={'touch'}},d
         assert_eq!(ticket.recognizer, expected);
         assert_ne!(ticket.candidate, parent);
         assert!(leaves.insert(ticket.candidate));
+        let (leaf, _) = routing
+            .engine
+            .recognition_scope(ticket.candidate, monotonic().unwrap())
+            .unwrap();
+        assert!(leaf.tail_reports().next().is_none());
         assert_eq!(routing.custom_chains[&ticket.candidate].owner, parent);
         assert_eq!(
             ticket.deadline,
@@ -183,6 +194,16 @@ return p.config.new{policy={allow_input_events=true,allowed_devices={'touch'}},d
             std::slice::from_ref(cleanup)
         );
     }
+    assert_eq!(routing.dispatches.len(), 1);
+    assert_eq!(
+        routing.dispatches[0]
+            .outcome
+            .intent
+            .tail_reports()
+            .cloned()
+            .collect::<Vec<_>>(),
+        original_reports
+    );
     let events = routing.take_dispatches(monotonic().unwrap());
     assert!(
         matches!(&events[..], [Event::Matched { id, evidence: Evidence::Sequence { steps }, .. }]

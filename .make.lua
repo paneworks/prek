@@ -539,6 +539,16 @@ make.recipe{ name="test-key-projection",desc="per-press raw-key ownership and co
                sh.cargo("test","--locked","--lib","router::keyboard::tests")
              end }
 
+make.recipe{ name="test-tail-provenance",desc="native original-report snapshots, ticket isolation and shared provenance accounting; no devices",
+             deps={"test-input-domains"},
+             run=function()
+               for _,filter in ipairs({"rules::presses::tests::tails", "rules::custom::tests", "routing::tests::custom"}) do
+                 local tested=oslo.run{"cargo","test","--locked","--lib",filter,capture=true}
+                 io.stdout:write(tested.out or ""); io.stderr:write(tested.err or "")
+                 assert(tested.ok and (tested.out or ""):match("running [1-9]%d* tests?"),"tail provenance gate failed or selected no tests: "..filter)
+               end
+             end }
+
 make.recipe{ name="test-tail-journal",desc="coherent non-key scopes, atomic key/tail settlement and bounded absolute repair; no devices",
              run=function()
                local tested=oslo.run{"cargo","test","--locked","--lib","router::keyboard::tests::pending::tails",capture=true}
@@ -885,6 +895,6 @@ make.alias("c", "compile")
 make.recipe{
   name = "verify",
   desc = "the whole local gate",
-  deps = { "fmt-check", "check-all", "test-all", "test-lua-native-values", "test-lua-lifetimes", "test-lua-tasks", "test-key-provenance", "test-key-admission", "test-key-participants", "test-key-journal", "test-custom-key-arbitration", "test-software-worker", "test-routing-helper", "test-composition-helper", "test-chain-helper", "test-composed-worker-helper", "test-root-session", "test-root-routing", "test-native-managed-model", "test-cage-startup", "test-distribution", "clippy", "rustdoc" },
+  deps = { "fmt-check", "check-all", "test-all", "test-lua-native-values", "test-lua-lifetimes", "test-lua-tasks", "test-key-provenance", "test-key-admission", "test-key-participants", "test-key-journal", "test-tail-provenance", "test-custom-key-arbitration", "test-software-worker", "test-routing-helper", "test-composition-helper", "test-chain-helper", "test-composed-worker-helper", "test-root-session", "test-root-routing", "test-native-managed-model", "test-cage-startup", "test-distribution", "clippy", "rustdoc" },
 }
 make.alias("v", "verify")

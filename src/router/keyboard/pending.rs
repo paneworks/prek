@@ -116,13 +116,7 @@ impl Input {
             .map_or(self.frame.events.len(), Vec::len)
     }
     fn key_event(frame: &Frame, index: usize) -> bool {
-        let event = frame.events[index];
-        event.kind == EV_KEY && crate::input::independent_key(event.code)
-            || event.kind == EV_MSC
-                && event.code == MSC_SCAN
-                && frame.events.get(index + 1).is_some_and(|next| {
-                    next.kind == EV_KEY && crate::input::independent_key(next.code)
-                })
+        crate::input::independent_event(&frame.events, index)
     }
     fn tail(&mut self, ready: Duration, reports: &mut Vec<ReadyReport>) {
         let end = self.frame.events.len() - 1;

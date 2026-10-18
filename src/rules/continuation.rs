@@ -34,6 +34,7 @@ pub(super) fn candidate(
     candidate.key_end = None;
     candidate.key_tap_end = None;
     candidate.key_presses = presses::Set::empty(state.press_budget.clone());
+    candidate.tails = tails::Set::empty(state.press_budget.clone());
     candidate.ordinal = 0;
     candidate.progress = false;
     candidate.started = at;

@@ -22,6 +22,7 @@ mod custom;
 mod edges;
 mod presses;
 mod sequence;
+mod tails;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -129,6 +130,7 @@ struct DeviceState {
 #[derive(Clone)]
 struct Candidate {
     key_presses: presses::Set,
+    tails: tails::Set,
     tap_presses: Option<presses::Set>,
     key_start: Option<InputPosition>,
     key_end: Option<InputPosition>,
@@ -152,6 +154,12 @@ struct Candidate {
     position: Option<crate::input::InputPosition>,
 }
 impl Candidate {
+    fn input_proof(&self) -> InputProof {
+        InputProof {
+            key_presses: self.key_presses.clone(),
+            tails: self.tails.clone(),
+        }
+    }
     fn key_edge(&mut self, position: InputPosition, state: KeyState) {
         if state == KeyState::Repeat {
             return;
@@ -160,6 +168,31 @@ impl Candidate {
             self.key_start.get_or_insert(position);
         }
         self.key_end = Some(position);
+    }
+}
+#[derive(Clone)]
+struct InputProof {
+    key_presses: presses::Set,
+    tails: tails::Set,
+}
+impl InputProof {
+    fn valid_for(&self, source: &Source, definition: &crate::recognition::Definition) -> bool {
+        self.key_presses.iter().all(|press| {
+            press.source == *source
+                && definition
+                    .inputs
+                    .contains(&crate::recognition::InputKind::Key)
+        }) && self
+            .tails
+            .iter()
+            .all(|report| report.source == *source && report.declared_by(&definition.inputs))
+    }
+    fn include(&mut self, other: &Self) -> Result<(), &'static str> {
+        let mut combined = self.clone();
+        combined.key_presses.merge(&other.key_presses)?;
+        combined.tails.merge(&other.tails)?;
+        *self = combined;
+        Ok(())
     }
 }
 #[derive(Clone)]
@@ -179,6 +212,9 @@ pub(crate) fn key_only_custom(trigger: &Trigger) -> bool {
         if recognizer.inputs.len() == 1 && recognizer.inputs.contains(&crate::recognition::InputKind::Key))
 }
 impl RouteIntent {
+    pub(crate) fn tail_reports(&self) -> impl Iterator<Item = &tails::Report> {
+        self.candidate.tails.iter()
+    }
     pub(crate) fn has_key_press(
         &self,
         source: &Source,
@@ -1612,6 +1648,12 @@ impl Engine {
                                 sums.remove(source);
                                 continue;
                             }
+                            if !tails::native(worker, state, &frame, &mut self.events) {
+                                break;
+                            }
+                            let Recognizer::Wheel(sums) = &mut worker.recognizer else {
+                                unreachable!()
+                            };
                             let sum = sums.entry(source.clone()).or_default();
                             *sum += amount;
                             if sum.abs() >= minimum {
@@ -1695,6 +1737,9 @@ impl Engine {
                                 .insert(source.clone(), state.input_watermark);
                         }
                         candidate.expires = None;
+                    }
+                    if !tails::native(worker, state, &frame, &mut self.events) {
+                        continue;
                     }
                     let Recognizer::Touch(touches) = &mut worker.recognizer else {
                         unreachable!()
@@ -1844,6 +1889,7 @@ struct SequenceGroup {
 struct PendingSequence {
     deferred: Vec<(usize, StepMatch)>,
     key_presses: presses::Set,
+    tails: tails::Set,
     completed: sequence::Prefix,
     step_candidates: BTreeMap<Source, u64>,
     id: u64,
@@ -1874,6 +1920,7 @@ impl PendingSequence {
         candidate.sources = self.sources.clone();
         candidate.source_inputs = self.source_inputs.clone();
         candidate.key_presses = self.key_presses.clone();
+        candidate.tails = self.tails.clone();
         RouteIntent {
             rule: rule.clone(),
             candidate,
@@ -2088,6 +2135,7 @@ impl Sequence {
             PendingSequence {
                 deferred: Vec::new(),
                 key_presses: candidate.key_presses.clone(),
+                tails: candidate.tails.clone(),
                 completed: sequence::Prefix::new(&candidate),
                 step_candidates: BTreeMap::new(),
                 id: *next_id,
@@ -2288,7 +2336,7 @@ impl Sequence {
             .iter()
             .filter_map(|(seat, pending)| {
                 let changed = matches!(record, Some(Record::Mapping {source,..}|Record::Reconcile {source,..}) if pending.sources.contains(source));
-                let reason = if invalid_presses.contains(seat) {Some("sequence key press provenance exhausted".into())}
+                let reason = if invalid_presses.contains(seat) {Some("sequence input provenance exhausted".into())}
                 else if changed_targets.contains(seat) {Some("sequence target changed".into())}
                 else if changed {Some("sequence input mapping/state changed".into())}
                 else if pending.first.session_generation != context.authority.generation() {
@@ -2439,7 +2487,7 @@ impl Sequence {
                 self.cancel(
                     &seat,
                     context.at,
-                    "sequence key press provenance exhausted",
+                    "sequence input provenance exhausted",
                     events,
                 );
                 reset.insert(seat);
@@ -2489,6 +2537,7 @@ impl Sequence {
                     candidate.sources = pending.sources.clone();
                     candidate.source_inputs = pending.source_inputs.clone();
                     candidate.key_presses = pending.key_presses.clone();
+                    candidate.tails = pending.tails.clone();
                     self.outcomes.push(RouteOutcome {
                         expires: pending
                             .groups
@@ -2602,7 +2651,7 @@ impl Sequence {
                     .step_candidates
                     .insert(candidate.source.clone(), candidate.id);
                 if pending.observe(candidate).is_err() {
-                    invalid.push((seat.clone(), "sequence key press provenance exhausted"));
+                    invalid.push((seat.clone(), "sequence input provenance exhausted"));
                     continue;
                 }
                 for (index, _) in self
@@ -3046,6 +3095,9 @@ fn shape_frame(
             }
         }
     }
+    if !tails::native(worker, state, frame, events) {
+        return Ok(());
+    }
     let Recognizer::Shape { captures, matcher } = &mut worker.recognizer else {
         unreachable!()
     };
@@ -3266,10 +3318,13 @@ fn start_candidate(
                 return;
             };
             *next_id = id;
+            let key_presses = presses::Set::empty(state.press_budget.clone());
+            let tails = key_presses.related();
             worker.candidates.insert(
                 source.clone(),
                 Candidate {
-                    key_presses: presses::Set::empty(state.press_budget.clone()),
+                    key_presses,
+                    tails,
                     tap_presses: None,
                     key_start: None,
                     key_end: None,

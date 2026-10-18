@@ -20,6 +20,7 @@ impl Claim {
     pub(in crate::routing) fn valid(&self, routing: &Routing, intent: &RouteIntent) -> bool {
         let owned: BTreeSet<_> = self.evidence.iter().collect();
         self.id == intent.id()
+            && intent.tail_reports().next().is_none()
             && intent
                 .sources()
                 .iter()

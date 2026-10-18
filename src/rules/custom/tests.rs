@@ -30,7 +30,7 @@ fn input(code: u16) -> Input {
         ended_contacts: vec![],
     }
 }
-fn keys(event: usize) -> presses::Set {
+fn keys(event: usize) -> InputProof {
     let mut keys = presses::Set::empty(Arc::new(presses::Budget::default()));
     keys.insert(presses::Press {
         source: crate::keys::worker::tests::source(1),
@@ -38,14 +38,18 @@ fn keys(event: usize) -> presses::Set {
         code: 30,
     })
     .unwrap();
-    keys
+    InputProof {
+        tails: keys.related(),
+        key_presses: keys,
+    }
 }
 fn assert_bytes(state: &State) {
     let mut total = 0;
     for offer in &state.offers {
         let bytes = match &offer.input {
             OfferedInput::Frame(input) | OfferedInput::KeyFrame(input) => {
-                recognition::encoded_size(input, recognition::MAX_FRAME_BYTES - 1024).unwrap() + 128
+                recognition::encoded_size(input, recognition::MAX_FRAME_BYTES - 1024).unwrap()
+                    + PROOF_BYTES
             }
             _ => panic!("expected frame offer"),
         };
@@ -78,7 +82,17 @@ fn interleaved_key_atoms_charge_metadata_once_and_keep_the_latest_original_proof
         };
         assert_eq!(changes.len(), 32);
         assert_eq!(offer.at, Duration::from_millis(10));
-        assert_eq!(offer.key_presses.iter().next().unwrap().position.event, 31);
+        assert_eq!(
+            offer
+                .proof
+                .key_presses
+                .iter()
+                .next()
+                .unwrap()
+                .position
+                .event,
+            31
+        );
     }
 }
 
@@ -132,6 +146,7 @@ fn coalescing_never_crosses_an_original_frame_identity_or_a_full_frame_offer() {
     assert_bytes(&state);
     assert_eq!(
         state.offers[0]
+            .proof
             .key_presses
             .iter()
             .next()
@@ -178,6 +193,7 @@ fn a_full_offer_queue_can_merge_an_existing_frame_but_cannot_add_another_candida
     assert_eq!(state.bytes, before);
     assert_eq!(
         state.offers[0]
+            .proof
             .key_presses
             .iter()
             .next()
@@ -217,6 +233,7 @@ fn merged_frame_byte_exhaustion_does_not_change_its_input_or_proof() {
     assert_eq!(changes.len(), accepted);
     assert_eq!(
         state.offers[0]
+            .proof
             .key_presses
             .iter()
             .next()
@@ -284,7 +301,7 @@ fn aggregate_byte_exhaustion_is_atomic_for_both_new_frames_and_merged_atoms() {
     assert!(accepted > 1);
     let last = state.offers.back().unwrap();
     assert_eq!(
-        last.key_presses.iter().next().unwrap().position.event,
+        last.proof.key_presses.iter().next().unwrap().position.event,
         accepted - 1
     );
     assert!(last.bytes < recognition::MAX_FRAME_BYTES - 1024);
@@ -292,7 +309,7 @@ fn aggregate_byte_exhaustion_is_atomic_for_both_new_frames_and_merged_atoms() {
         unreachable!()
     };
     let additional = recognition::encoded_size(changes, recognition::MAX_FRAME_BYTES).unwrap() - 1;
-    assert!(last.bytes + additional <= recognition::MAX_FRAME_BYTES - 1024 + 128);
+    assert!(last.bytes + additional <= recognition::MAX_FRAME_BYTES - 1024 + PROOF_BYTES);
     assert!(state.bytes + additional > recognition::MAX_BYTES);
     assert_bytes(&state);
 }

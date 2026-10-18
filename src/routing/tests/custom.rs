@@ -118,6 +118,78 @@ fn clocked_replies_leave_unread_input_timers_at_the_drained_watermark() {
 }
 
 #[test]
+fn a_custom_ticket_preserves_partial_evidence_without_reclassifying_undeclared_companions() {
+    for wheel in [false, true] {
+        let mut config = profile(Delivery::Buffer, false, false);
+        let Trigger::Custom { recognizer, .. } = &mut config.rules[0].trigger else {
+            unreachable!()
+        };
+        recognizer.inputs.insert(InputKind::Relative);
+        if wheel {
+            recognizer.inputs.insert(InputKind::Wheel);
+        }
+        let mut device = keyboard();
+        device.capabilities.insert(crate::input::EV_REL, vec![0, 8]);
+        let mut routing = Routing::with_recognition(config, fence()).unwrap();
+        context(&mut routing, 0);
+        routing
+            .attach(device.clone(), &ready(&device), None, ms(0))
+            .unwrap();
+        let raw = Frame {
+            source: device.source.clone(),
+            at: ms(10),
+            sequence: 1,
+            events: vec![
+                RawEvent {
+                    kind: EV_KEY,
+                    code: 30,
+                    value: 1,
+                },
+                RawEvent {
+                    kind: crate::input::EV_REL,
+                    code: 0,
+                    value: 4,
+                },
+                RawEvent {
+                    kind: crate::input::EV_REL,
+                    code: 8,
+                    value: 1,
+                },
+                RawEvent {
+                    kind: EV_SYN,
+                    code: SYN_REPORT,
+                    value: 0,
+                },
+            ],
+        };
+        routing.push(Record::Frame { frame: raw.clone() }).unwrap();
+        let tickets = routing.recognition_requests(ms(11)).unwrap();
+        assert_eq!(tickets.len(), 1);
+        let (leaf, _) = routing
+            .engine
+            .recognition_scope(tickets[0].candidate, ms(11))
+            .unwrap();
+        let report = leaf.tail_reports().next().unwrap();
+        assert_eq!(report.complete(), wheel);
+        assert!(report.observes(InputKind::Relative));
+        assert_eq!(report.observes(InputKind::Wheel), wheel);
+        let crate::input_events::Event::Frame { changes, .. } = &tickets[0].input else {
+            unreachable!()
+        };
+        assert_eq!(
+            changes
+                .iter()
+                .any(|change| matches!(change, crate::input::Change::Wheel { .. })),
+            wheel
+        );
+        routing.recognition_ready(false, ms(12)).unwrap();
+        assert!(routing.take_dispatches(ms(12)).is_empty());
+        assert_eq!(drain(&mut routing, 12), vec![raw]);
+        assert!(routing.take_recoveries().is_empty());
+    }
+}
+
+#[test]
 fn output_acknowledgements_do_not_advance_physical_input_through_unread_frames() {
     let mut routing = custom(profile(Delivery::Observe, false, false), false);
     press(&mut routing, 1, 1, true);

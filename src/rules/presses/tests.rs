@@ -5,6 +5,7 @@ mod custom;
 mod domains;
 mod participants;
 mod sequences;
+mod tails;
 
 fn press(frame: u64, event: usize, code: u16) -> Press {
     Press {
