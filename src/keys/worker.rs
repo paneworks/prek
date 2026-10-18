@@ -881,6 +881,11 @@ impl<S: Sink> Seat<S> {
             || self.bindings.values().any(|binding| binding.cancelled))
             && self.blocks_raw_span(source, span)
     }
+
+    #[cfg(feature = "native-test-harness")]
+    pub(crate) fn fixture_settled(&self) -> bool {
+        self.pending.is_empty() && self.flight.is_none() && self.draining.is_none()
+    }
     pub fn blocks_raw_span(&self, source: &Source, span: InputSpan) -> bool {
         if self.draining.is_some() || self.bindings.values().any(|binding| binding.cancelled) {
             return true;

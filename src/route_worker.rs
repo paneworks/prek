@@ -29,6 +29,9 @@ use std::{
 
 mod key_control;
 mod keys;
+#[cfg(feature = "native-test-harness")]
+#[doc(hidden)]
+pub mod native_fixture;
 mod recognizers;
 
 struct Seat {

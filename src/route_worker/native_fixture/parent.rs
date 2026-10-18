@@ -1,0 +1,490 @@
+use super::*;
+
+struct Parent {
+    supervisor: Supervisor,
+    channel: Channel,
+    fixture: Channel,
+    consumer: Consumer,
+    fence: Fence,
+    revision: u64,
+    synthetic: bool,
+    renewed: Instant,
+    endpoints: BTreeMap<Source, Endpoint>,
+    receivers: BTreeMap<Source, kernel::Receiver>,
+    released: BTreeSet<Source>,
+    finishing: bool,
+    reaped: bool,
+}
+impl Parent {
+    fn renew(&mut self) -> io::Result<()> {
+        self.revision += 1;
+        let subscription = subscription(self.fence, &self.consumer, self.revision, self.synthetic)?;
+        control::send(
+            &mut self.channel,
+            &Command::Subscriptions {
+                update: Subscriptions {
+                    revision: self.revision,
+                    seats: vec![subscription],
+                },
+            },
+        )?;
+        let endpoints: Vec<_> = self.endpoints.values().cloned().collect();
+        for endpoint in endpoints {
+            self.transport(&endpoint)?;
+        }
+        self.renewed = Instant::now();
+        Ok(())
+    }
+    fn transport(&mut self, endpoint: &Endpoint) -> io::Result<()> {
+        let descriptor = &endpoint.descriptor;
+        control::send(
+            &mut self.channel,
+            &Command::Transport {
+                fence: self.fence,
+                source: descriptor.source.clone(),
+                marker: descriptor.marker.clone(),
+                evidence: ConsumerEvidence {
+                    consumer: self.consumer.clone(),
+                    marker: descriptor.marker.clone(),
+                    name: descriptor.name.clone(),
+                    class: descriptor.class,
+                    seat: descriptor.source.seat.clone(),
+                    settings: descriptor.consumer_settings.clone(),
+                    at: monotonic()?,
+                },
+                admission: None,
+            },
+        )
+    }
+    fn tick(&mut self) -> io::Result<()> {
+        if self.supervisor.check()?.is_some() && !self.finishing {
+            return Err(invalid("managed worker exited before its fixture finished"));
+        }
+        loop {
+            let packet = match self.channel.receive::<Message>() {
+                Ok(Some(packet)) => packet,
+                Ok(None) => break,
+                Err(error) if self.finishing && crate::ipc::is_transport_loss(&error) => break,
+                Err(error) => return Err(error),
+            };
+            match packet.message {
+                Message::Configuration {
+                    generation: 1,
+                    error: None,
+                } => {}
+                Message::Transport { descriptor, .. } => {
+                    if let Some(endpoint) = self.endpoints.get(&descriptor.source).cloned() {
+                        if endpoint.descriptor != *descriptor {
+                            return Err(invalid(
+                                "managed transport offer changed its exact publication",
+                            ));
+                        }
+                        self.transport(&endpoint)?;
+                    } else if !self.endpoints.is_empty() {
+                        return Err(invalid("managed transport offer has an unknown source"));
+                    }
+                }
+                Message::Released {
+                    worker,
+                    fence,
+                    source,
+                } => {
+                    if worker != self.supervisor.worker_identity()
+                        || fence != self.fence
+                        || !self.released.insert(source)
+                    {
+                        return Err(invalid("managed release is stale or duplicated"));
+                    }
+                }
+                Message::Outcome {
+                    report: Report::Dispatch { event, .. },
+                } if matches!(
+                    *event,
+                    crate::rules::Event::Matched {
+                        action: Action::Remap { .. },
+                        ..
+                    }
+                ) =>
+                {
+                    return Err(invalid(
+                        "managed key work leaked into external action dispatch",
+                    ));
+                }
+                Message::Outcome { .. } => {}
+                _ => return Err(invalid("unexpected managed worker control response")),
+            }
+        }
+        if !self.finishing && self.renewed.elapsed() >= Duration::from_millis(30) {
+            self.renew()?;
+        }
+        Ok(())
+    }
+    fn notice(&mut self) -> io::Result<Notice> {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            self.tick()?;
+            if let Some(packet) = self.fixture.receive::<Notice>()? {
+                return Ok(packet.message);
+            }
+            if Instant::now() >= deadline {
+                return Err(invalid("managed worker notice timed out"));
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+    fn step(&mut self, id: u64, frames: usize) -> io::Result<()> {
+        control::send(&mut self.fixture, &Request::Step { id, frames })?;
+        if !matches!(self.notice()?, Notice::Stepped { id: acknowledged } if acknowledged == id) {
+            return Err(invalid("managed step acknowledgement differs"));
+        }
+        Ok(())
+    }
+    fn collect(
+        &mut self,
+        expected: &BTreeMap<Source, Vec<(u16, i32)>>,
+    ) -> io::Result<BTreeMap<Source, Vec<Frame>>> {
+        let deadline = Instant::now() + Duration::from_millis(250);
+        let mut frames: BTreeMap<Source, Vec<Frame>> = self
+            .receivers
+            .keys()
+            .map(|source| (source.clone(), vec![]))
+            .collect();
+        let mut quiet = Instant::now();
+        loop {
+            self.tick()?;
+            for (source, receiver) in &mut self.receivers {
+                if let Some(frame) = receiver.next(Duration::from_millis(1)) {
+                    if frame.events.last()
+                        != Some(&RawEvent {
+                            kind: EV_SYN,
+                            code: SYN_REPORT,
+                            value: 0,
+                        })
+                        || frame.events[..frame.events.len() - 1]
+                            .iter()
+                            .any(|event| event.kind != EV_KEY)
+                    {
+                        return Err(invalid(
+                            "managed kernel output is not a complete key report",
+                        ));
+                    }
+                    frames.get_mut(source).unwrap().push(frame);
+                    quiet = Instant::now();
+                }
+            }
+            let actual: BTreeMap<_, _> = frames
+                .iter()
+                .map(|(source, frames)| (source.clone(), edges(frames)))
+                .collect();
+            if actual.iter().any(|(source, events)| {
+                !expected
+                    .get(source)
+                    .is_some_and(|wanted| wanted.starts_with(events))
+            }) {
+                return Err(invalid(format!(
+                    "managed native output differs: {actual:?}"
+                )));
+            }
+            if &actual == expected && quiet.elapsed() >= Duration::from_millis(10) {
+                return Ok(frames);
+            }
+            if Instant::now() >= deadline {
+                return Err(invalid(format!(
+                    "managed native output timed out: {actual:?}, expected {expected:?}"
+                )));
+            }
+        }
+    }
+}
+impl Drop for Parent {
+    fn drop(&mut self) {
+        if !self.reaped {
+            let _ = self.supervisor.request_stop();
+            match self
+                .supervisor
+                .wait()
+                .and_then(|report| Registry::system()?.recover_worker(&report))
+            {
+                Ok(_) => {}
+                Err(error) => eprintln!("managed fixture worker cleanup failed: {error}"),
+            }
+        }
+    }
+}
+
+fn edges(frames: &[Frame]) -> Vec<(u16, i32)> {
+    frames
+        .iter()
+        .flat_map(|frame| &frame.events)
+        .filter(|event| event.kind == EV_KEY)
+        .map(|event| (event.code, event.value))
+        .collect()
+}
+fn log_phase(
+    name: &str,
+    frames: &BTreeMap<Source, Vec<Frame>>,
+    sources: &[Source],
+    generated: &Source,
+) {
+    let times = |source: &Source| {
+        frames[source]
+            .iter()
+            .map(|frame| frame.at.as_nanos())
+            .collect::<Vec<_>>()
+    };
+    println!(
+        "{PHASE}{}",
+        serde_json::json!({"phase":name,"raw0":edges(&frames[&sources[0]]),"raw1":edges(&frames[&sources[1]]),"generated":edges(&frames[generated]),"raw0_times_ns":times(&sources[0]),"raw1_times_ns":times(&sources[1]),"generated_times_ns":times(generated)})
+    );
+}
+
+fn owned_metadata(endpoint: &Endpoint, worker: WorkerIdentity) -> io::Result<()> {
+    let marker = crate::transport::Marker::parse(&endpoint.descriptor.marker).map_err(invalid)?;
+    let file =
+        Path::new("/run/prek/devices").join(format!("{}.json", marker.base.replace('/', "-")));
+    let metadata: serde_json::Value = serde_json::from_slice(&fs::read(file)?)?;
+    if serde_json::from_value::<WorkerIdentity>(metadata["owner"].clone())? != worker {
+        return Err(invalid(
+            "managed output metadata is not bound to its actual worker",
+        ));
+    }
+    Ok(())
+}
+fn input_endpoint(device: &Virtual) -> io::Result<Endpoint> {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        if device.processed_metadata()? {
+            let nodes = device.event_nodes()?;
+            if nodes.len() == 1 {
+                return Ok(Endpoint {
+                    path: nodes[0].clone(),
+                    descriptor: device.descriptor().clone(),
+                });
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(invalid("managed fixture producer metadata timed out"));
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+pub(super) fn run() -> io::Result<()> {
+    let registry = kernel::authorized();
+    let mut devices = vec![kernel::fixture(false), kernel::fixture(false)];
+    for device in &mut devices {
+        device.capabilities.insert(EV_KEY, vec![30, 31]);
+    }
+    let mut producers: Vec<_> = devices
+        .iter()
+        .map(|device| {
+            let mut producer = device.clone();
+            producer.source.device = producer
+                .source
+                .device
+                .checked_add(1 << 32)
+                .ok_or_else(|| invalid("managed producer identity exhausted"))?;
+            Virtual::create(registry.prepare_isolated(kernel::descriptor(&producer))?)
+        })
+        .collect::<io::Result<_>>()?;
+    let inputs = producers
+        .iter()
+        .map(input_endpoint)
+        .collect::<io::Result<Vec<_>>>()?;
+    let producer_nodes: Vec<_> = inputs
+        .iter()
+        .map(|endpoint| endpoint.path.clone())
+        .collect();
+    worker::validate_setup(&devices, &inputs)?;
+    let consumer = kernel::receiver_identity();
+    let fence = Fence {
+        broker: Epoch::random()?,
+        configuration: 1,
+        session: 1,
+    };
+    let (supervisor, channel, fixture) = control::spawn()?;
+    let mut parent = Parent {
+        supervisor,
+        channel,
+        fixture,
+        consumer: consumer.clone(),
+        fence,
+        revision: 0,
+        synthetic: true,
+        renewed: Instant::now(),
+        endpoints: BTreeMap::new(),
+        receivers: BTreeMap::new(),
+        released: BTreeSet::new(),
+        finishing: false,
+        reaped: false,
+    };
+    control::send(
+        &mut parent.fixture,
+        &Request::Setup {
+            devices: devices.clone(),
+            inputs,
+            consumer,
+            fence,
+        },
+    )?;
+    parent.renew()?;
+    let Notice::Prepared { worker, outputs } = parent.notice()? else {
+        return Err(invalid("managed worker did not prepare outputs"));
+    };
+    if worker != parent.supervisor.worker_identity() || outputs.len() != 3 {
+        return Err(invalid("managed output count or worker binding differs"));
+    }
+    let mut generated = None;
+    let mut removed_nodes = Vec::new();
+    for endpoint in outputs {
+        endpoint.validate()?;
+        owned_metadata(&endpoint, worker)?;
+        if endpoint.descriptor.is_generated_keyboard() {
+            if generated
+                .replace(endpoint.descriptor.source.clone())
+                .is_some()
+            {
+                return Err(invalid("managed fixture has multiple generated keyboards"));
+            }
+        } else if !devices
+            .iter()
+            .any(|device| device.source == endpoint.descriptor.source)
+        {
+            return Err(invalid("managed raw output is not an enrolled source"));
+        }
+        let receiver = endpoint.receiver()?;
+        let source = endpoint.descriptor.source.clone();
+        removed_nodes.push(endpoint.path.clone());
+        if parent.receivers.insert(source.clone(), receiver).is_some()
+            || parent.endpoints.insert(source, endpoint).is_some()
+        {
+            return Err(invalid("managed output source is duplicated"));
+        }
+    }
+    let generated = generated.ok_or_else(|| invalid("managed generated keyboard missing"))?;
+    parent.renew()?;
+    control::send(&mut parent.fixture, &Request::Arm {})?;
+    if !matches!(parent.notice()?, Notice::Armed {}) {
+        return Err(invalid("managed worker did not arm"));
+    }
+    let sources: Vec<_> = devices.iter().map(|device| device.source.clone()).collect();
+    let expected = |raw0: Vec<(u16, i32)>, raw1: Vec<(u16, i32)>, keys: Vec<(u16, i32)>| {
+        BTreeMap::from([
+            (sources[0].clone(), raw0),
+            (sources[1].clone(), raw1),
+            (generated.clone(), keys),
+        ])
+    };
+    kernel::send(
+        &mut producers[0],
+        1,
+        &[
+            (EV_KEY, 30, 1),
+            (EV_KEY, 30, 2),
+            (EV_KEY, 31, 1),
+            (EV_KEY, 30, 0),
+            (EV_KEY, 31, 0),
+        ],
+    );
+    parent.step(1, 1)?;
+    let mixed = parent.collect(&expected(
+        vec![(31, 1), (31, 0)],
+        vec![],
+        vec![(42, 1), (42, 2), (42, 0)],
+    ))?;
+    let keys = &mixed[&generated];
+    let raw = &mixed[&sources[0]];
+    if keys.len() != 3
+        || raw.len() != 2
+        || !(keys[0].at <= keys[1].at
+            && keys[1].at < raw[0].at
+            && raw[0].at < keys[2].at
+            && keys[2].at < raw[1].at)
+    {
+        return Err(invalid("managed native within-report write order differs"));
+    }
+    log_phase("mixed", &mixed, &sources, &generated);
+    kernel::send(&mut producers[0], 2, &[(EV_KEY, 30, 1)]);
+    kernel::send(&mut producers[1], 1, &[(EV_KEY, 31, 1), (EV_KEY, 31, 0)]);
+    parent.step(2, 2)?;
+    let cross = parent.collect(&expected(vec![], vec![(31, 1), (31, 0)], vec![(42, 1)]))?;
+    if cross[&generated][0].at >= cross[&sources[1]][0].at
+        || parent.receivers[&generated].keys() != [42]
+    {
+        return Err(invalid(
+            "managed native modifier did not precede the second source",
+        ));
+    }
+    log_phase("cross_source", &cross, &sources, &generated);
+    parent.synthetic = false;
+    parent.renew()?;
+    kernel::send(
+        &mut producers[0],
+        3,
+        &[
+            (EV_KEY, 30, 2),
+            (EV_KEY, 30, 0),
+            (EV_KEY, 31, 1),
+            (EV_KEY, 31, 0),
+        ],
+    );
+    parent.step(3, 1)?;
+    let cancelled = parent.collect(&expected(vec![(31, 1), (31, 0)], vec![], vec![(42, 0)]))?;
+    if cancelled[&generated][0].at >= cancelled[&sources[0]][0].at {
+        return Err(invalid(
+            "managed generated cleanup did not precede ordinary reentry",
+        ));
+    }
+    log_phase("revocation", &cancelled, &sources, &generated);
+    if parent
+        .receivers
+        .values()
+        .any(|receiver| !receiver.keys().is_empty())
+    {
+        return Err(invalid("managed native receivers did not return neutral"));
+    }
+    parent.finishing = true;
+    control::send(&mut parent.fixture, &Request::Finish {})?;
+    if !matches!(parent.notice()?, Notice::Closed {}) {
+        return Err(invalid("managed worker did not close"));
+    }
+    parent.tick()?;
+    let report = parent.supervisor.wait()?;
+    if !report.belongs_to(&parent.supervisor)
+        || !report.status().success()
+        || report.forced()
+        || report.heartbeats() == 0
+    {
+        return Err(invalid(
+            "managed worker did not exit successfully under supervision",
+        ));
+    }
+    let recovered = registry.recover_worker(&report)?;
+    parent.reaped = true;
+    if recovered != 0 || parent.released != sources.iter().cloned().collect() {
+        return Err(invalid(
+            "managed worker did not retire every output before source release",
+        ));
+    }
+    let deadline = Instant::now() + WAIT;
+    while removed_nodes.iter().any(|path| path.exists()) {
+        if Instant::now() >= deadline {
+            return Err(invalid("managed owned output nodes remain"));
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    drop(parent);
+    drop(producers);
+    let deadline = Instant::now() + WAIT;
+    while producer_nodes.iter().any(|path| path.exists()) {
+        if Instant::now() >= deadline {
+            return Err(invalid("managed owned producer nodes remain"));
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    println!(
+        "{RESULT}{}",
+        serde_json::json!({"version":1,"status":"passed","uid":0,"physical_devices_opened":0,"worker_binding_tested":true,"private_control_authenticated":true,"raw_outputs":2,"generated_outputs":1,"source_readers_grabbed":2,"native_projection_tested":true,"native_repeat_tested":true,"native_cancellation_tested":true,"kernel_write_order_tested":true,"native_partial_write_tested":false,"broker_grant_tested":false,"context_authority_modeled":true,"production_input_loop_tested":false,"production_route_admission_tested":false,"compositor_delivery_tested":false,"keys_neutral":true,"worker_reaped":true,"owned_devices_removed":true})
+    );
+    Ok(())
+}

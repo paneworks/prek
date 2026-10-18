@@ -110,6 +110,28 @@ impl Prepared {
         &self.descriptor
     }
 
+    #[cfg(feature = "native-test-harness")]
+    pub(crate) fn isolated_for_worker(
+        registry: &Registry,
+        health: &Heartbeat,
+        source: Source,
+        consumer: Consumer,
+    ) -> io::Result<Self> {
+        let descriptor =
+            Descriptor::generated_keyboard(source, BTreeMap::new()).map_err(invalid)?;
+        let publication = registry.prepare_generated_isolated_for_worker(descriptor, health)?;
+        Self::create(publication, consumer, crate::ipc::monotonic()?)
+    }
+
+    #[cfg(feature = "native-test-harness")]
+    pub(crate) fn fixture_nodes(&self) -> io::Result<Option<Vec<std::path::PathBuf>>> {
+        let device = self.device.as_ref().ok_or_else(stopped)?;
+        if !device.processed_metadata()? {
+            return Ok(None);
+        }
+        device.event_nodes().map(Some)
+    }
+
     pub fn deadline(&self) -> Duration {
         self.admission.deadline
     }

@@ -432,6 +432,15 @@ impl Registry {
         self.publish(descriptor.for_isolated().map_err(denied)?, true, None)
     }
 
+    pub fn prepare_generated_isolated_for_worker(
+        &self,
+        descriptor: Descriptor,
+        health: &Heartbeat,
+    ) -> io::Result<Publication> {
+        require_purpose(&descriptor, true)?;
+        self.prepare_bound(descriptor.for_isolated().map_err(denied)?, health, true)
+    }
+
     fn prepare_bound(
         &self,
         descriptor: Descriptor,

@@ -10,7 +10,7 @@
 //! [`transport`] and [`router`] model virtual-device preflight and bounded raw
 //! forwarding; kernel takeover and session dispatch remain separate gates.
 
-#[cfg(test)]
+#[cfg(any(test, feature = "native-test-harness"))]
 extern crate self as prek;
 
 #[cfg(target_os = "linux")]
@@ -32,6 +32,9 @@ pub mod input_events;
 pub mod ipc;
 #[cfg(target_os = "linux")]
 pub mod kernel;
+#[cfg(all(target_os = "linux", any(test, feature = "native-test-harness")))]
+#[path = "../tests/support/kernel.rs"]
+pub(crate) mod kernel_fixture;
 pub mod keys;
 pub mod learner;
 #[cfg(target_os = "linux")]

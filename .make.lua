@@ -467,6 +467,23 @@ make.recipe{ name="test-generated-keyboard",desc="generated keyboard role, publi
                sh.cargo("test","--locked","--lib","kernel::tests::generated")
              end }
 
+make.recipe{ name="test-native-managed-model",desc="managed native fixture models, build and inventory only; no devices",
+             run=function()
+               local tested=oslo.run{"cargo","test","--locked","--features","native-test-harness","--lib","route_worker::native_fixture::models",capture=true}
+               io.stdout:write(tested.out or ""); io.stderr:write(tested.err or "")
+               assert(tested.ok and (tested.out or ""):match("running [1-9]%d* tests?"),"managed fixture models failed or selected no tests")
+               local built=oslo.run{"bash","-c",[[set -euo pipefail
+cargo test --locked --features native-test-harness --test native_managed --no-run --message-format=json | jq -ers '
+  [.[] | select(.reason=="compiler-artifact" and .target.name=="native_managed" and .executable!=null) | .executable] | unique |
+  if length==1 then .[0] else error("expected one managed fixture executable") end'
+]],capture=true}
+               assert(built.ok,"managed fixture build failed: "..(built.err or ""))
+               local executable=(built.out or ""):gsub("%s+$","")
+               local listed=oslo.run{executable,"--inventory",capture=true}
+               local expected='PREK_MANAGED_KEY_WORKER_INVENTORY_V1\n["managed::selective_key_worker"]'
+               assert(listed.ok and (listed.out==expected or listed.out==expected.."\n"),"managed fixture inventory differs: "..string.format("%q",listed.out or ""))
+             end }
+
 make.recipe{ name="test-key-output-cage",desc="actual key output driver and app rendering on owned protocol keyboards",
              run=function()
                cage_test("cage-test-wayland-fix",{"--key-output","--hyprland-config","lua"})
@@ -718,6 +735,6 @@ make.alias("c", "compile")
 make.recipe{
   name = "verify",
   desc = "the whole local gate",
-  deps = { "fmt-check", "check-all", "test-all", "test-routing-helper", "test-composition-helper", "test-chain-helper", "test-composed-worker-helper", "test-root-session", "test-root-routing", "test-cage-startup", "test-distribution", "clippy", "rustdoc" },
+  deps = { "fmt-check", "check-all", "test-all", "test-routing-helper", "test-composition-helper", "test-chain-helper", "test-composed-worker-helper", "test-root-session", "test-root-routing", "test-native-managed-model", "test-cage-startup", "test-distribution", "clippy", "rustdoc" },
 }
 make.alias("v", "verify")

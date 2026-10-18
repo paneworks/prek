@@ -100,6 +100,10 @@
           root-routing-test = import ./tests/root-routing.nix {
             inherit pkgs;
             package = self.packages.${system}.default;
+            managed = self.packages.${system}.native-managed-test;
+          };
+          native-managed-test = import ./tests/native-managed.nix {
+            package = self.packages.${system}.default;
           };
           root-sleep-watch-test = import ./tests/root-sleep-watch.nix {
             inherit pkgs;

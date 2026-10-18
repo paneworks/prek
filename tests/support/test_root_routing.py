@@ -58,21 +58,94 @@ def key_output(**changes):
     return root.KEY_OUTPUT_RESULT + json.dumps(value) + "\ntest result: ok. 1 passed; 0 failed; 0 ignored;\n"
 
 
+def managed_phases():
+    return [dict(phase="mixed", raw0=[[31, 1], [31, 0]], raw1=[], generated=[[42, 1], [42, 2], [42, 0]],
+                 raw0_times_ns=[3, 5], raw1_times_ns=[], generated_times_ns=[1, 2, 4]),
+            dict(phase="cross_source", raw0=[], raw1=[[31, 1], [31, 0]], generated=[[42, 1]],
+                 raw0_times_ns=[], raw1_times_ns=[11], generated_times_ns=[10]),
+            dict(phase="revocation", raw0=[[31, 1], [31, 0]], raw1=[], generated=[[42, 0]],
+                 raw0_times_ns=[21], raw1_times_ns=[], generated_times_ns=[20])]
+
+
+def managed_output(phases=None, **changes):
+    value = dict(version=1, status="passed", uid=0, physical_devices_opened=0,
+                 worker_binding_tested=True, private_control_authenticated=True,
+                 raw_outputs=2, generated_outputs=1, source_readers_grabbed=2,
+                 native_projection_tested=True, native_repeat_tested=True, native_cancellation_tested=True,
+                 kernel_write_order_tested=True, native_partial_write_tested=False,
+                 broker_grant_tested=False, context_authority_modeled=True,
+                 production_input_loop_tested=False, production_route_admission_tested=False,
+                 compositor_delivery_tested=False, keys_neutral=True, worker_reaped=True, owned_devices_removed=True)
+    value.update(changes)
+    phases = managed_phases() if phases is None else phases
+    return "".join(root.MANAGED_PHASE + json.dumps(phase) + "\n" for phase in phases) + root.MANAGED_RESULT + json.dumps(value) + "\n"
+
+
 class KernelReceipt(unittest.TestCase):
     def value(self):
-        return dict(version=5, status="passed", uid=0, kernel=os.uname().release,
+        return dict(version=6, status="passed", uid=0, kernel=os.uname().release,
                     tests=sorted(root.ALL_EXPECTED), passed=len(root.ALL_EXPECTED),
                     routing_passed=len(root.EXPECTED), recovery_passed=8, physical_devices_opened=0,
                     repeat_characterization_passed=1, repeat_passthrough_tested=False,
                     fuzz_characterization_passed=1, fuzz_passthrough_tested=False,
                     generated_key_output_passed=1, generated_key_output_authorization_tested=False,
                     generated_key_output_compositor_tested=False, generated_key_output_partial_write_tested=False,
+                    managed_key_worker_passed=1, managed_key_worker_binding_tested=True,
+                    managed_key_worker_compositor_tested=False, managed_key_worker_partial_write_tested=False,
                     model_desktop_context=True, production_route_admission_tested=False,
                     compositor_consumer_retirement_tested=False, rule_removed=True, registry_clean=True,
                     unrelated_registry_preserved=True, recovery_controls_removed=True)
 
     def line(self, value):
         return root.PREFIX + json.dumps(value) + "\n"
+
+    def test_managed_inventory_is_exact_and_cannot_be_a_skip(self):
+        valid = root.MANAGED_INVENTORY + "\n" + json.dumps([root.MANAGED_CASE]) + "\n"
+        root.managed_inventory(valid)
+        for value in ["", "skipped\n", valid * 2, valid + "extra\n", valid.replace(root.MANAGED_CASE, "foreign")]:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                root.managed_inventory(value)
+
+    def test_managed_scope_is_exact_typed_and_cannot_promote_unproven_gates(self):
+        valid = managed_output()
+        value = root.managed_result(valid)
+        self.assertTrue(value["worker_binding_tested"])
+        self.assertFalse(value["broker_grant_tested"])
+        for output in ["", valid * 2, managed_output(extra=True), root.MANAGED_RESULT + "{", valid.replace(root.MANAGED_RESULT, "FOREIGN=")]:
+            with self.subTest(output=output), self.assertRaises((ValueError, json.JSONDecodeError)):
+                root.managed_result(output)
+        for key, expected in value.items():
+            missing = dict(value)
+            del missing[key]
+            phases = "\n".join(valid.splitlines()[:-1]) + "\n"
+            with self.subTest(missing=key), self.assertRaises(ValueError):
+                root.managed_result(phases + root.MANAGED_RESULT + json.dumps(missing))
+            changed = not expected if type(expected) is bool else str(expected) if type(expected) is int else "failed"
+            with self.subTest(changed=key), self.assertRaises(ValueError):
+                root.managed_result(managed_output(**{key: changed}))
+
+    def test_managed_phases_require_exact_keys_reports_and_strict_cross_fd_order(self):
+        for phases in [[], managed_phases()[:2], managed_phases()[::-1], managed_phases() + managed_phases()[:1], [None] * 3]:
+            with self.subTest(phases=phases), self.assertRaises(ValueError):
+                root.managed_result(managed_output(phases=phases))
+        for index, field, changed in [(0, "generated", [[42, 1], [42, 0]]), (0, "raw0", [[30, 1], [31, 0]]),
+                                      (0, "raw0_times_ns", [2, 5]), (1, "generated_times_ns", [12]),
+                                      (2, "generated_times_ns", [21]), (0, "generated_times_ns", [True, 2, 4]),
+                                      (0, "raw1_times_ns", [3]), (2, "raw0", [[31, True], [31, 0]]),
+                                      (0, "raw0_times_ns", [3.0, 5]), (1, "extra", True)]:
+            phases = managed_phases()
+            phases[index][field] = changed
+            with self.subTest(index=index, field=field), self.assertRaises(ValueError):
+                root.managed_result(managed_output(phases=phases))
+
+    def test_v5_receipt_cannot_claim_the_new_managed_worker_gate(self):
+        old = self.value()
+        old.update(version=5, passed=25, tests=sorted(root.ALL_EXPECTED - {root.MANAGED_CASE}))
+        for key in list(old):
+            if key.startswith("managed_"):
+                del old[key]
+        with self.assertRaises(ValueError):
+            root.receipt(self.line(old))
 
     def test_generated_key_output_requires_one_exact_inventory(self):
         root.key_output_inventory(root.KEY_OUTPUT_CASE + ": test\n")
@@ -485,6 +558,9 @@ class RootRunModel(unittest.TestCase):
                     return subprocess.CompletedProcess(argv, 0, "\n".join(name + ": test" for name in sorted(root.EXPECTED)))
                 if argv[0] == "/nix/store/model/recovery":
                     return subprocess.CompletedProcess(argv, 0, recovery_inventory())
+                if argv[0] == "/nix/store/model/managed":
+                    self.assertEqual(argv[1:], ["--inventory"])
+                    return subprocess.CompletedProcess(argv, 0, root.MANAGED_INVENTORY + "\n" + json.dumps([root.MANAGED_CASE]) + "\n")
                 if argv[0] == "/nix/store/model/native":
                     self.assertIn(argv[1], (root.REPEAT_CASE, root.FUZZ_CASE, root.KEY_OUTPUT_CASE))
                     self.assertEqual(argv[2:], ["--exact", "--list", "--ignored"])
@@ -497,6 +573,9 @@ class RootRunModel(unittest.TestCase):
                 self.assertEqual(len(list(rules.iterdir())), 1)
                 if effect is not None:
                     effect(argv[0], path, registry, rules)
+                if argv[0] == "/nix/store/model/managed":
+                    self.assertEqual(argv[1:], ["--run"])
+                    return managed_output()
                 if argv[0] == "/nix/store/model/native":
                     self.assertIn(argv[1], (root.REPEAT_CASE, root.FUZZ_CASE, root.KEY_OUTPUT_CASE))
                     self.assertEqual(argv[2:], ["--exact", "--ignored", "--nocapture", "--test-threads=1"])
@@ -515,21 +594,21 @@ class RootRunModel(unittest.TestCase):
             commands = stack.enter_context(mock.patch.object(root.subprocess, "run", side_effect=command))
             stack.enter_context(mock.patch.object(root, "execute", side_effect=execute))
             output = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
-            args = argparse.Namespace(tests="/nix/store/model/routing", recovery="/nix/store/model/recovery", native="/nix/store/model/native",
+            args = argparse.Namespace(tests="/nix/store/model/routing", recovery="/nix/store/model/recovery", native="/nix/store/model/native", managed="/nix/store/model/managed",
                                       importer="/nix/store/model/importer", udevadm="/nix/store/model/udevadm")
             yield args, path, registry, rules, commands, output
 
     def test_model_success_correlates_all_executables_and_removes_controls(self):
         with self.model() as (args, path, registry, rules, commands, output):
             root.run(args)
-            self.assertEqual(root.receipt(output.getvalue())["passed"], 25)
+            self.assertEqual(root.receipt(output.getvalue())["passed"], 26)
             self.assertEqual({entry.name for entry in path.iterdir()}, {"devices", "rules"})
             self.assertEqual(list(rules.iterdir()), [])
             self.assertEqual((registry / "foreign-record").read_text(), "preserved")
-            self.assertEqual(commands.call_count, 7)
+            self.assertEqual(commands.call_count, 8)
 
     def test_model_all_executable_failures_remove_only_original_rule(self):
-        for failure in ["routing", "recovery", "native"]:
+        for failure in ["routing", "recovery", "native", "managed"]:
             def fail(executable, *_):
                 if executable.endswith("/" + failure):
                     raise RuntimeError("modeled executable failure")
@@ -538,7 +617,7 @@ class RootRunModel(unittest.TestCase):
                     root.run(args)
                 self.assertEqual(list(rules.iterdir()), [])
                 self.assertEqual((registry / "foreign-record").read_text(), "preserved")
-                self.assertEqual(commands.call_count, 7)
+                self.assertEqual(commands.call_count, 8)
                 self.assertNotIn(root.PREFIX, output.getvalue())
 
     def test_model_malformed_repeat_evidence_removes_the_rule_without_acceptance(self):
@@ -548,7 +627,7 @@ class RootRunModel(unittest.TestCase):
                     root.run(args)
             self.assertEqual(list(rules.iterdir()), [])
             self.assertEqual((registry / "foreign-record").read_text(), "preserved")
-            self.assertEqual(commands.call_count, 7)
+            self.assertEqual(commands.call_count, 8)
             self.assertNotIn(root.PREFIX, output.getvalue())
 
     def test_model_malformed_fuzz_evidence_removes_the_rule_without_acceptance(self):
@@ -558,7 +637,7 @@ class RootRunModel(unittest.TestCase):
                     root.run(args)
             self.assertEqual(list(rules.iterdir()), [])
             self.assertEqual((registry / "foreign-record").read_text(), "preserved")
-            self.assertEqual(commands.call_count, 7)
+            self.assertEqual(commands.call_count, 8)
             self.assertNotIn(root.PREFIX, output.getvalue())
 
     def test_model_malformed_generated_output_cleans_its_rule_without_acceptance(self):
@@ -568,7 +647,17 @@ class RootRunModel(unittest.TestCase):
                     root.run(args)
             self.assertEqual(list(rules.iterdir()), [])
             self.assertEqual((registry / "foreign-record").read_text(), "preserved")
-            self.assertEqual(commands.call_count, 7)
+            self.assertEqual(commands.call_count, 8)
+            self.assertNotIn(root.PREFIX, output.getvalue())
+
+    def test_model_malformed_managed_output_cleans_its_rule_without_acceptance(self):
+        with self.model() as (args, _, registry, rules, commands, output):
+            with mock.patch.object(root, "managed_result", side_effect=ValueError("invalid managed evidence")):
+                with self.assertRaisesRegex(ValueError, "invalid managed evidence"):
+                    root.run(args)
+            self.assertEqual(list(rules.iterdir()), [])
+            self.assertEqual((registry / "foreign-record").read_text(), "preserved")
+            self.assertEqual(commands.call_count, 8)
             self.assertNotIn(root.PREFIX, output.getvalue())
 
     def test_model_registry_changes_are_retained_and_cannot_pass(self):

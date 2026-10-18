@@ -11,6 +11,14 @@ publish = false
 [lib]
 path = "src/lib.rs"
 
+[features]
+native-test-harness = []
+
+[[test]]
+name = "native_managed"
+harness = false
+required-features = ["native-test-harness"]
+
 [[test]]
 name = "supervisor"
 # Worker fixtures must start on the exec thread for parent-death protection.

@@ -91,6 +91,15 @@ impl<P: Preparation> Slot<P> {
     pub(super) fn source(&self) -> &Source {
         &self.descriptor.source
     }
+
+    #[cfg(feature = "native-test-harness")]
+    pub(super) fn fixture_settled(&self) -> bool {
+        match &self.phase {
+            Phase::Active(actor) | Phase::Closing(actor) => actor.fixture_settled(),
+            Phase::Preparing(_) => false,
+            Phase::Closed => true,
+        }
+    }
     pub(super) fn offer(&mut self, at: Duration) -> Option<Descriptor> {
         if self.failed
             || matches!(self.phase, Phase::Closing(_) | Phase::Closed)

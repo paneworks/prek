@@ -154,6 +154,14 @@ pub(crate) fn permitted_property(key: &str) -> bool {
 }
 
 impl Descriptor {
+    #[cfg(feature = "native-test-harness")]
+    pub(crate) fn fixture_source(&self) -> Option<&Device> {
+        match &self.origin {
+            Origin::Physical(original) => Some(original),
+            Origin::GeneratedKeyboard => None,
+        }
+    }
+
     pub(crate) fn isolated_fixture(&self) -> bool {
         match &self.origin {
             Origin::Physical(original) => {

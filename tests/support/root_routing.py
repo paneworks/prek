@@ -38,7 +38,11 @@ FUZZ_CASE = "kernel::tests::fuzz::isolated_uinput_fuzz_refiltering_and_slot_rest
 FUZZ_RESULT = "PREK_UINPUT_FUZZ_RESULT="
 KEY_OUTPUT_CASE = "keys::native::tests::isolated_generated_keyboard_executes_owned_keys_and_exact_cancellation"
 KEY_OUTPUT_RESULT = "PREK_GENERATED_KEY_OUTPUT_RESULT="
-ALL_EXPECTED = EXPECTED | RECOVERY_EXPECTED | {REPEAT_CASE, FUZZ_CASE, KEY_OUTPUT_CASE}
+MANAGED_CASE = "managed::selective_key_worker"
+MANAGED_INVENTORY = "PREK_MANAGED_KEY_WORKER_INVENTORY_V1"
+MANAGED_RESULT = "PREK_MANAGED_KEY_WORKER_RESULT="
+MANAGED_PHASE = "PREK_MANAGED_KEY_WORKER_PHASE="
+ALL_EXPECTED = EXPECTED | RECOVERY_EXPECTED | {REPEAT_CASE, FUZZ_CASE, KEY_OUTPUT_CASE, MANAGED_CASE}
 RECOVERY_INVENTORY = "PREK_KERNEL_RECOVERY_INVENTORY_V1"
 RECOVERY_RESULT = "PREK_KERNEL_RECOVERY_RESULT="
 EXECUTION_TIMEOUT = 90
@@ -158,17 +162,65 @@ def key_output_result(stdout):
     return value
 
 
+def managed_inventory(stdout):
+    if stdout.splitlines() != [MANAGED_INVENTORY, json.dumps([MANAGED_CASE], separators=(",", ":"))]:
+        raise ValueError("managed worker executable has a different inventory")
+
+
+def managed_result(stdout):
+    values = [json.loads(line[len(MANAGED_RESULT):]) for line in stdout.splitlines() if line.startswith(MANAGED_RESULT)]
+    expected = dict(version=1, status="passed", uid=0, physical_devices_opened=0,
+                    worker_binding_tested=True, private_control_authenticated=True,
+                    raw_outputs=2, generated_outputs=1, source_readers_grabbed=2,
+                    native_projection_tested=True, native_repeat_tested=True, native_cancellation_tested=True,
+                    kernel_write_order_tested=True, native_partial_write_tested=False,
+                    broker_grant_tested=False, context_authority_modeled=True,
+                    production_input_loop_tested=False, production_route_admission_tested=False,
+                    compositor_delivery_tested=False, keys_neutral=True, worker_reaped=True, owned_devices_removed=True)
+    if len(values) != 1 or not isinstance(values[0], dict) or set(values[0]) != set(expected):
+        raise ValueError("managed native worker has a different result schema")
+    for key, wanted in expected.items():
+        if type(values[0][key]) is not type(wanted) or values[0][key] != wanted:
+            raise ValueError(f"invalid managed native result: {key}")
+    phases = [json.loads(line[len(MANAGED_PHASE):]) for line in stdout.splitlines() if line.startswith(MANAGED_PHASE)]
+    if len(phases) != 3 or [phase.get("phase") for phase in phases if isinstance(phase, dict)] != ["mixed", "cross_source", "revocation"]:
+        raise ValueError("managed native worker did not execute three exact phases")
+    wanted_edges = [([[31, 1], [31, 0]], [], [[42, 1], [42, 2], [42, 0]]),
+                    ([], [[31, 1], [31, 0]], [[42, 1]]),
+                    ([[31, 1], [31, 0]], [], [[42, 0]])]
+    counts = [(2, 0, 3), (0, 1, 1), (1, 0, 1)]
+    for phase, edges, frames in zip(phases, wanted_edges, counts):
+        if set(phase) != {"phase", "raw0", "raw1", "generated", "raw0_times_ns", "raw1_times_ns", "generated_times_ns"}:
+            raise ValueError("managed phase has a different schema")
+        for role, wanted, count in zip(("raw0", "raw1", "generated"), edges, frames):
+            actual = phase[role]
+            times = phase[role + "_times_ns"]
+            if not isinstance(actual, list) or actual != wanted or any(not isinstance(edge, list) or any(type(value) is not int for value in edge) for edge in actual):
+                raise ValueError("managed phase key stream differs")
+            if not isinstance(times, list) or len(times) != count or any(type(value) is not int or value <= 0 for value in times):
+                raise ValueError("managed phase kernel timestamps differ")
+    mixed, cross, cancelled = phases
+    g, r = mixed["generated_times_ns"], mixed["raw0_times_ns"]
+    if not (g[0] <= g[1] < r[0] < g[2] < r[1]) \
+            or cross["generated_times_ns"][0] >= cross["raw1_times_ns"][0] \
+            or cancelled["generated_times_ns"][0] >= cancelled["raw0_times_ns"][0]:
+        raise ValueError("managed phase kernel write order differs")
+    return values[0]
+
+
 def receipt(stdout):
     values = [json.loads(line[len(PREFIX):]) for line in stdout.splitlines() if line.startswith(PREFIX)]
     if len(values) != 1 or not isinstance(values[0], dict):
         raise ValueError("expected exactly one complete isolated kernel receipt")
     value = values[0]
-    expected = dict(version=5, status="passed", uid=0, passed=len(ALL_EXPECTED),
+    expected = dict(version=6, status="passed", uid=0, passed=len(ALL_EXPECTED),
                     routing_passed=len(EXPECTED), recovery_passed=len(RECOVERY_EXPECTED),
                     repeat_characterization_passed=1, repeat_passthrough_tested=False,
                     fuzz_characterization_passed=1, fuzz_passthrough_tested=False,
                     generated_key_output_passed=1, generated_key_output_authorization_tested=False,
                     generated_key_output_compositor_tested=False, generated_key_output_partial_write_tested=False,
+                    managed_key_worker_passed=1, managed_key_worker_binding_tested=True,
+                    managed_key_worker_compositor_tested=False, managed_key_worker_partial_write_tested=False,
                     physical_devices_opened=0, model_desktop_context=True,
                     production_route_admission_tested=False, compositor_consumer_retirement_tested=False,
                     rule_removed=True, registry_clean=True, unrelated_registry_preserved=True, recovery_controls_removed=True)
@@ -305,7 +357,7 @@ def run(args):
     # No filesystem mutation or udev/device access occurs before this check.
     if os.geteuid() != 0:
         raise PermissionError("isolated kernel runner requires user-launched root credentials")
-    for path in [args.tests, args.recovery, args.native, args.importer, args.udevadm]:
+    for path in [args.tests, args.recovery, args.native, args.managed, args.importer, args.udevadm]:
         resolved = Path(path).resolve(strict=True)
         if not str(resolved).startswith("/nix/store/") or not resolved.is_file():
             raise ValueError("isolated root runner accepts immutable packaged executables only")
@@ -324,6 +376,9 @@ def run(args):
     listed = subprocess.run([args.native, KEY_OUTPUT_CASE, "--exact", "--list", "--ignored"], env=env,
                             capture_output=True, text=True, check=True, timeout=10)
     key_output_inventory(listed.stdout)
+    listed = subprocess.run([args.managed, "--inventory"], env=env,
+                            capture_output=True, text=True, check=True, timeout=10)
+    managed_inventory(listed.stdout)
     if not stat.S_ISCHR(os.stat("/dev/uinput").st_mode):
         raise RuntimeError("/dev/uinput is unavailable; the runner does not load kernel modules")
     with directories() as (parent, registry, rules):
@@ -351,6 +406,7 @@ def run(args):
             repeat_result(execute([args.native, REPEAT_CASE, "--exact", "--ignored", "--nocapture", "--test-threads=1"], env))
             fuzz_result(execute([args.native, FUZZ_CASE, "--exact", "--ignored", "--nocapture", "--test-threads=1"], env))
             key_output_result(execute([args.native, KEY_OUTPUT_CASE, "--exact", "--ignored", "--nocapture", "--test-threads=1"], env))
+            managed_result(execute([args.managed, "--run"], env))
             with recovery_directory(parent) as (name, run_identity):
                 recovery_env = dict(env, PREK_RECOVERY_DIRECTORY=f"/run/prek/{name}",
                                     PREK_RECOVERY_IDENTITY=f"{run_identity[0]}:{run_identity[1]}")
@@ -362,12 +418,14 @@ def run(args):
             raise RuntimeError("isolated device metadata remains; preserving it for inspection")
         if registry_snapshot(registry) != original_registry:
             raise RuntimeError("unrelated registry state changed; preserving it for inspection")
-    print(PREFIX + json.dumps(dict(version=5, status="passed", uid=0, kernel=os.uname().release,
+    print(PREFIX + json.dumps(dict(version=6, status="passed", uid=0, kernel=os.uname().release,
           tests=sorted(ALL_EXPECTED), passed=len(ALL_EXPECTED), routing_passed=len(EXPECTED), recovery_passed=8, physical_devices_opened=0,
           repeat_characterization_passed=1, repeat_passthrough_tested=False,
           fuzz_characterization_passed=1, fuzz_passthrough_tested=False,
           generated_key_output_passed=1, generated_key_output_authorization_tested=False,
           generated_key_output_compositor_tested=False, generated_key_output_partial_write_tested=False,
+          managed_key_worker_passed=1, managed_key_worker_binding_tested=True,
+          managed_key_worker_compositor_tested=False, managed_key_worker_partial_write_tested=False,
           model_desktop_context=True, production_route_admission_tested=False,
           compositor_consumer_retirement_tested=False, rule_removed=True, registry_clean=True,
           unrelated_registry_preserved=True, recovery_controls_removed=True)), flush=True)
@@ -378,6 +436,7 @@ def main():
     parser.add_argument("--tests", required=True)
     parser.add_argument("--recovery", required=True)
     parser.add_argument("--native", required=True)
+    parser.add_argument("--managed", required=True)
     parser.add_argument("--importer", required=True)
     parser.add_argument("--udevadm", required=True)
     args = parser.parse_args()

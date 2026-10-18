@@ -28,6 +28,14 @@ compositor/console consumers, not the test-only isolated receiver. Isolated
 generated publications accept only their explicitly isolated receiver, not a
 production compositor/console acknowledgement.
 
+`Registry::prepare_generated_isolated_for_worker` retains the same authenticated
+worker binding for an explicitly isolated generated publication. The nondefault
+managed native test harness uses it with the actual Slot/Stream, owned kernel
+receivers and three correlated key/timestamp phases. Its desktop context and
+source normalization are modeled; it does not open public grants or production
+consumer admission. Build/inventory evidence is not kernel execution; only the
+user-launched [root runner](root-routing.md) can supply that receipt.
+
 The preparation keeps its native device private and unwritten. The caller
 obtains `descriptor()` observations for its authenticated consumer registration,
 calls `observe(evidence)`, and retries `activate()` until it returns an

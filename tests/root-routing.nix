@@ -1,4 +1,4 @@
-{ pkgs, package }:
+{ pkgs, package, managed }:
 let
   # No caller-selected command, source checkout or output path is elevated.
   probe = pkgs.writeShellScript "prek-isolated-root-routing-probe" ''
@@ -8,6 +8,7 @@ let
       --tests ${package.nativeTests}/libexec/prek-routing-tests \
       --recovery ${package.nativeTests}/libexec/prek-recovery-tests \
       --native ${package.nativeTests}/libexec/prek-native-tests \
+      --managed ${managed}/bin/prek-native-managed-tests \
       --importer ${package}/bin/prek --udevadm ${pkgs.systemd}/bin/udevadm
   '';
 in pkgs.writeShellScriptBin "prek-root-routing-test" ''

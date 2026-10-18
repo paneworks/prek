@@ -4,8 +4,7 @@ use crate::{
     transport::{Class, KernelIdentity, Repeat},
 };
 
-#[path = "../../../tests/support/kernel.rs"]
-mod kernel;
+use crate::kernel_fixture as kernel;
 
 fn source() -> Source {
     Source {
