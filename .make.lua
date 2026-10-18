@@ -117,6 +117,25 @@ local function project_root()
   return oslo.sys.pwd()
 end
 
+local function pin_test_store(path, name)
+  local store = path:match("^(/nix/store/[^/]+)")
+  if not store then return end
+  local directory = project_root() .. "/target/test-fixtures"
+  sh.mkdir("-p", directory)
+  assert(oslo.run{"nix-store", "--max-jobs", "1", "--cores", "2", "--realise", store,
+    "--add-root", directory .. "/" .. name, "--indirect"}.ok,
+    "test fixture is unavailable; restore its derivation with make pin-test-fixture")
+end
+
+make.recipe{ name="pin-test-fixture", desc="restore and retain a Nix test fixture closure in target/test-fixtures",
+             params={{"--derivation",desc="absolute existing Nix store derivation"},
+                     {"--name",desc="project-local fixture root name"}},
+             run=function(a)
+               assert(type(a.derivation)=="string" and a.derivation:match("^/nix/store/[^/]+%.drv$"),"supply an absolute --derivation .drv path")
+               assert(type(a.name)=="string" and #a.name<=64 and a.name:match("^[a-z][a-z0-9%-]*$"),"supply a bounded --name identifier")
+               pin_test_store(a.derivation, a.name)
+             end }
+
 make.recipe{
   name = "configs",
   desc = "install config/ into $XDG_CONFIG_HOME/prek",
@@ -520,6 +539,13 @@ make.recipe{ name="test-key-projection",desc="per-press raw-key ownership and co
                sh.cargo("test","--locked","--lib","router::keyboard::tests")
              end }
 
+make.recipe{ name="test-tail-journal",desc="coherent non-key scopes, atomic key/tail settlement and bounded absolute repair; no devices",
+             run=function()
+               local tested=oslo.run{"cargo","test","--locked","--lib","router::keyboard::tests::pending::tails",capture=true}
+               io.stdout:write(tested.out or ""); io.stderr:write(tested.err or "")
+               assert(tested.ok and (tested.out or ""):match("running [1-9]%d* tests?"),"tail journal gate failed or selected no tests")
+             end }
+
 make.recipe{ name="test-key-journal",desc="pending press decisions, bounded raw FIFO and fallback cadence; no devices",
              run=function()
                for _,filter in ipairs({"router::keyboard::tests::pending","routing::keys::projection::tests","keys::worker::tests::coordinator","routing::keys::ordering"}) do
@@ -599,6 +625,9 @@ make.recipe{ name="test-key-worker-cage-dev",desc="current Cargo scheduler fixtu
              run=function(a)
                assert(type(a.runner)=="string" and a.runner:match("^/nix/store/[^/]+/bin/prek%-cage%-host%-test$"),
                       "supply the immutable --runner executable explicitly")
+               pin_test_store(a.runner, "key-worker-runner")
+               local script=oslo.fs.read(a.runner)
+               assert(script and not script:find("--morf-root-probe",1,true),"supply a non-root Cage runner")
                sh.mkdir("-p","target/hybrid-key-journal")
                for _,tool in ipairs{"keyboard","receiver"} do
                  assert(oslo.run{"nix","--option","eval-cache","false","--extra-experimental-features","nix-command flakes",
@@ -650,6 +679,7 @@ make.recipe{ name = "test-cage-touch-dev", desc = "current debug touch controlle
              run = function(a)
                for _, name in ipairs{"cage","receiver","grim","dbus"} do
                  assert(type(a[name])=="string" and a[name]:sub(1,1)=="/", "supply an absolute --"..name.." path")
+                 pin_test_store(a[name], "touch-"..name)
                end
                local built = oslo.run{"bash","-c",[[set -euo pipefail
 app=$(cargo build --locked --bin prek --message-format=json | jq -ers '
@@ -678,6 +708,16 @@ make.recipe{ name = "test-cage-lua-wayland-fix", desc = "typed window/power effe
 make.recipe{ name="build-cage-receiver",desc="immutable instrumented receiver without rebuilding Rust",
              run=function()
                assert(oslo.run{"nix","--option","eval-cache","false","--extra-experimental-features","nix-command flakes","--max-jobs","1","--cores","2","build","--no-write-lock-file","--out-link",project_root().."/target/reorder-rendering/receiver",".#cage-test-receiver"}.ok,"receiver build failed")
+             end }
+
+make.recipe{ name="build-cage-touch-tools",desc="retain current Cage/receiver/grim/dbus tools without a release Rust build",
+             run=function()
+               sh.mkdir("-p", "target/test-fixtures")
+               for _,name in ipairs{"cage","receiver","grim","dbus"} do
+                 assert(oslo.run{"nix","--option","eval-cache","false","--extra-experimental-features","nix-command flakes",
+                   "--max-jobs","1","--cores","2","build","--no-write-lock-file","--out-link",
+                   project_root().."/target/test-fixtures/touch-"..name,".#cage-touch-test."..name}.ok,"touch test tool failed: "..name)
+               end
              end }
 make.recipe{ name="test-cage-runtime-dev",desc="current Cargo controller with an explicit immutable owned test runner",
              params={{"--runner",desc="absolute pinned test-only Cage runner"},{"--receiver",desc="absolute current instrumented receiver"}},

@@ -14,13 +14,16 @@ use crate::{
 };
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
+    sync::Arc,
     time::Duration,
 };
 mod chain;
 mod keyboard;
 use chain::Retention;
 pub use chain::{ChainAdmission, ChainToken, ClaimedChain};
-pub use keyboard::pending::{KeyDecision, KeyDisposition, PendingKey};
+pub use keyboard::pending::{
+    KeyDecision, KeyDisposition, PendingKey, PendingTail, TailDecision, TailDisposition,
+};
 pub use keyboard::{ConsumedKey, InputSpan, KeyClaim, KeyProjection};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -220,7 +223,7 @@ pub struct Router {
     limits: Limits,
     physical: State,
     delivered: State,
-    physical_absolute: crate::input::AbsoluteState,
+    physical_absolute: Arc<crate::input::AbsoluteState>,
     planned_absolute: crate::input::AbsoluteState,
     group: Option<Group>,
     queue: VecDeque<Scheduled>,
@@ -272,7 +275,7 @@ impl Router {
             limits,
             physical: State::default(),
             delivered: State::default(),
-            physical_absolute: crate::input::AbsoluteState::default(),
+            physical_absolute: Arc::default(),
             planned_absolute: crate::input::AbsoluteState::default(),
             group: None,
             queue: VecDeque::new(),
@@ -372,7 +375,7 @@ impl Router {
             .map_err(|_| Fault::InvalidFrame)?;
         self.physical.slot = state.selected_slot();
         self.delivered.slot = state.selected_slot();
-        self.physical_absolute = state.clone();
+        self.physical_absolute = Arc::new(state.clone());
         self.planned_absolute = state.clone();
         Ok(())
     }
@@ -698,8 +701,9 @@ impl Router {
             Vec::new()
         };
         // Track the physical delta, not the inserted virtual-state repair.
+        let physical_absolute = Arc::make_mut(&mut self.physical_absolute);
         for event in &frame.events {
-            self.physical_absolute.update(*event);
+            physical_absolute.update(*event);
         }
         let insert_at = frame
             .events

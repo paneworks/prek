@@ -382,8 +382,9 @@ impl Router {
             self.positions.insert(self.next_ticket, report.span);
             tickets.push(self.next_ticket);
         }
+        let physical_absolute = Arc::make_mut(&mut self.physical_absolute);
         for event in &frame.events {
-            self.physical_absolute.update(*event);
+            physical_absolute.update(*event);
         }
         self.physical = physical;
         self.last_sequence = Some(frame.sequence);

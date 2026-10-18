@@ -2,13 +2,13 @@ use super::*;
 use crate::input::{ABS_MT_POSITION_X, ABS_MT_POSITION_Y, ABS_MT_SLOT, ABS_MT_TRACKING_ID, Axis};
 use crate::router::keyboard::pending::Journal;
 
-fn mixed(sequence: u64, at: u64, events: &[(u16, u16, i32)]) -> Frame {
+pub(super) fn mixed(sequence: u64, at: u64, events: &[(u16, u16, i32)]) -> Frame {
     Frame {
         at: ms(at),
         ..packet(sequence, events)
     }
 }
-fn touch() -> Router {
+pub(super) fn touch() -> Router {
     let mut device = model(Limits::default(), true).device.clone();
     device.properties = vec![1];
     device.capabilities.get_mut(&EV_KEY).unwrap().push(0x14a);

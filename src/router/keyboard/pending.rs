@@ -1,4 +1,23 @@
 use super::*;
+mod tails;
+pub use tails::{PendingTail, TailDecision, TailDisposition};
+
+#[derive(Default)]
+struct TailFrame {
+    pending: Option<PendingTail>,
+    active: bool,
+    absolute_before: Option<Arc<crate::input::AbsoluteState>>,
+}
+
+fn absolute_storage(state: &crate::input::AbsoluteState) -> usize {
+    state.values.len()
+        + state
+            .slots
+            .values()
+            .map(|slot| slot.values.len() + 1)
+            .sum::<usize>()
+        + 1
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct PendingKey {
@@ -27,6 +46,42 @@ struct Choice {
     disposition: KeyDisposition,
     at: Duration,
 }
+impl Choice {
+    fn validate(self, owner: Option<u64>, at: Duration) -> Result<(), Fault> {
+        match (self.disposition, owner) {
+            (KeyDisposition::Pending { deadline }, Some(_)) if at > deadline => {
+                return Err(Fault::TooLate);
+            }
+            (KeyDisposition::Pending { .. }, _) | (KeyDisposition::Ordinary, None) => {}
+            (KeyDisposition::Consumed { owner }, Some(wanted)) if owner == wanted => {}
+            _ => return Err(Fault::TooLate),
+        }
+        if at < self.at {
+            return Err(Fault::BackwardTime);
+        }
+        Ok(())
+    }
+    fn decided(self, owner: Option<u64>, at: Duration) -> Self {
+        match self.disposition {
+            KeyDisposition::Pending { deadline } => Self {
+                disposition: owner.map_or(KeyDisposition::Ordinary, |owner| {
+                    KeyDisposition::Consumed { owner }
+                }),
+                at: at.min(deadline),
+            },
+            _ => self,
+        }
+    }
+    fn expired(self, at: Duration) -> Self {
+        match self.disposition {
+            KeyDisposition::Pending { deadline } if at >= deadline => Self {
+                disposition: KeyDisposition::Ordinary,
+                at: deadline,
+            },
+            _ => self,
+        }
+    }
+}
 struct PendingPress {
     code: u16,
     references: usize,
@@ -39,6 +94,9 @@ struct Binding {
 }
 struct Input {
     frame: Frame,
+    tail: Option<InputPosition>,
+    absolute_before: Option<Arc<crate::input::AbsoluteState>>,
+    storage: usize,
     watermark: u64,
     cursor: usize,
     positions: Vec<Option<InputPosition>>,
@@ -66,7 +124,7 @@ impl Input {
                     next.kind == EV_KEY && crate::input::independent_key(next.code)
                 })
     }
-    fn tail(&self, ready: Duration, reports: &mut Vec<ReadyReport>) {
+    fn tail(&mut self, ready: Duration, reports: &mut Vec<ReadyReport>) {
         let end = self.frame.events.len() - 1;
         let events = self
             .frame
@@ -82,6 +140,7 @@ impl Input {
         };
         reports.push(ReadyReport {
             ready,
+            absolute_before: self.absolute_before.take(),
             report: Report {
                 frame: Frame {
                     source: self.frame.source.clone(),
@@ -100,6 +159,7 @@ impl Input {
 }
 #[derive(Default)]
 pub(in crate::router) struct Journal {
+    tails: tails::Tails,
     held: BTreeMap<u16, Binding>,
     presses: BTreeMap<InputPosition, PendingPress>,
     frames: VecDeque<Input>,
@@ -117,6 +177,7 @@ pub(super) struct Released {
 pub(super) struct ReadyReport {
     report: Report,
     ready: Duration,
+    absolute_before: Option<Arc<crate::input::AbsoluteState>>,
 }
 
 impl std::fmt::Debug for Journal {
@@ -133,10 +194,7 @@ impl Journal {
     pub(in crate::router) fn storage(&self) -> (usize, usize) {
         (
             self.frames.len(),
-            self.frames
-                .iter()
-                .map(|input| input.frame.events.len())
-                .sum(),
+            self.frames.iter().map(|input| input.storage).sum(),
         )
     }
     pub(in crate::router) fn first(&self) -> Option<InputPosition> {
@@ -157,6 +215,7 @@ impl Journal {
                 KeyDisposition::Pending { deadline } => Some(deadline),
                 _ => None,
             })
+            .chain(self.tails.deadline())
             .min()
     }
     pub(super) fn can_release_before(&self, barrier: Option<InputPosition>) -> bool {
@@ -173,9 +232,13 @@ impl Journal {
                 .get(input.index())
                 .and_then(|position| *position)
                 .and_then(|position| self.presses.get(&position))
-                .is_none_or(|press| {
-                    !matches!(press.choice.disposition, KeyDisposition::Pending { .. })
+                .map(|press| press.choice)
+                .or_else(|| {
+                    (input.index() == input.frame.events.len() - 1)
+                        .then(|| input.tail.and_then(|root| self.tails.choice(root)))
+                        .flatten()
                 })
+                .is_none_or(|choice| !matches!(choice.disposition, KeyDisposition::Pending { .. }))
     }
     pub(super) fn disposition(&self, code: u16, position: InputPosition) -> Option<KeyDisposition> {
         self.presses
@@ -183,6 +246,7 @@ impl Journal {
             .filter(|press| press.code == code)
             .map(|press| press.choice.disposition)
     }
+    #[cfg(test)]
     pub(super) fn stage(
         &mut self,
         frame: Frame,
@@ -190,6 +254,25 @@ impl Journal {
         pending: &[PendingKey],
         cuts: &BTreeSet<usize>,
         offset: Duration,
+    ) -> Result<(), Fault> {
+        self.stage_with_tail(
+            frame,
+            watermark,
+            pending,
+            cuts,
+            offset,
+            TailFrame::default(),
+        )
+    }
+
+    fn stage_with_tail(
+        &mut self,
+        frame: Frame,
+        watermark: u64,
+        pending: &[PendingKey],
+        cuts: &BTreeSet<usize>,
+        offset: Duration,
+        tail_frame: TailFrame,
     ) -> Result<(), Fault> {
         if frame.events.is_empty()
             || frame
@@ -296,8 +379,24 @@ impl Journal {
             }
             positions[index] = held.get(&event.code).map(|binding| binding.position);
         }
+        let end = frame.events.len() - 1;
+        let has_tail = frame.events[..end]
+            .iter()
+            .enumerate()
+            .any(|(index, _)| !Input::key_event(&frame, index));
+        let tail = self.tails.prepare(
+            has_tail.then_some(InputPosition {
+                frame: watermark,
+                event: end,
+            }),
+            tail_frame.pending,
+            tail_frame.active,
+            frame.at,
+            offset,
+        )?;
         let transformed = !pending.is_empty()
             || !cuts.is_empty()
+            || tail.transformed()
             || positions.iter().flatten().any(|position| {
                 self.presses
                     .get(position)
@@ -316,17 +415,12 @@ impl Journal {
                 return Err(Fault::UnsupportedProjection);
             }
         }
-        let end = frame.events.len() - 1;
-        let order = frame.events[..end]
-            .iter()
-            .enumerate()
-            .any(|(index, _)| !Input::key_event(&frame, index))
-            .then(|| {
-                (0..end)
-                    .filter(|&index| Input::key_event(&frame, index))
-                    .chain([end])
-                    .collect()
-            });
+        let order = has_tail.then(|| {
+            (0..end)
+                .filter(|&index| Input::key_event(&frame, index))
+                .chain([end])
+                .collect()
+        });
         for (position, press) in additions {
             self.presses.insert(position, press);
         }
@@ -338,8 +432,18 @@ impl Journal {
         }
         self.held = held;
         self.watermark = watermark;
+        let input_tail = tail.input();
+        self.tails.commit(tail);
+        let storage = frame.events.len()
+            + tail_frame
+                .absolute_before
+                .as_ref()
+                .map_or(0, |state| absolute_storage(state));
         self.frames.push_back(Input {
             frame,
+            tail: input_tail,
+            absolute_before: tail_frame.absolute_before,
+            storage,
             watermark,
             cursor: 0,
             positions,
@@ -364,17 +468,7 @@ impl Journal {
             if press.code != decision.code {
                 return Err(Fault::InvalidCandidate);
             }
-            match (press.choice.disposition, decision.owner) {
-                (KeyDisposition::Pending { deadline }, Some(_)) if at > deadline => {
-                    return Err(Fault::TooLate);
-                }
-                (KeyDisposition::Pending { .. }, _) | (KeyDisposition::Ordinary, None) => {}
-                (KeyDisposition::Consumed { owner }, Some(wanted)) if owner == wanted => {}
-                _ => return Err(Fault::TooLate),
-            }
-            if at < press.choice.at {
-                return Err(Fault::BackwardTime);
-            }
+            press.choice.validate(decision.owner, at)?;
         }
         Ok(())
     }
@@ -382,28 +476,15 @@ impl Journal {
         self.validate_decisions(decisions, at)?;
         for decision in decisions {
             let press = self.presses.get_mut(&decision.position).unwrap();
-            if let KeyDisposition::Pending { deadline } = press.choice.disposition {
-                press.choice = Choice {
-                    disposition: decision.owner.map_or(KeyDisposition::Ordinary, |owner| {
-                        KeyDisposition::Consumed { owner }
-                    }),
-                    at: at.min(deadline),
-                };
-            }
+            press.choice = press.choice.decided(decision.owner, at);
         }
         Ok(())
     }
     pub(super) fn expire(&mut self, at: Duration) {
         for press in self.presses.values_mut() {
-            if let KeyDisposition::Pending { deadline } = press.choice.disposition
-                && at >= deadline
-            {
-                press.choice = Choice {
-                    disposition: KeyDisposition::Ordinary,
-                    at: deadline,
-                };
-            }
+            press.choice = press.choice.expired(at);
         }
+        self.tails.expire(at);
     }
 
     #[cfg(test)]
@@ -427,7 +508,14 @@ impl Journal {
             let mut first = None;
             let mut last = input.index();
             let start = input.cursor;
-            let mut changed = start != 0 || !input.cuts.is_empty();
+            let tail_choice = input.tail.and_then(|root| self.tails.choice(root));
+            let tail_pending = tail_choice.is_some_and(|choice| {
+                matches!(choice.disposition, TailDisposition::Pending { .. })
+            });
+            let tail_consumed = tail_choice.is_some_and(|choice| {
+                matches!(choice.disposition, TailDisposition::Consumed { .. })
+            });
+            let mut changed = start != 0 || !input.cuts.is_empty() || tail_consumed;
             while input.cursor + 1 < input.len() {
                 if barrier.is_some_and(|barrier| {
                     InputPosition {
@@ -522,7 +610,8 @@ impl Journal {
                 }
                 input.cursor += 1;
             }
-            let finished = input.cursor + 1 == input.len()
+            let finished = !tail_pending
+                && input.cursor + 1 == input.len()
                 && (input.order.is_none()
                     || barrier.is_none_or(|barrier| {
                         InputPosition {
@@ -531,8 +620,13 @@ impl Journal {
                         } < barrier
                     }));
             if finished && !changed && start == 0 {
+                self.clock = self
+                    .clock
+                    .max(input.frame.at)
+                    .max(tail_choice.map_or(Duration::ZERO, |choice| choice.at));
                 reports.push(ReadyReport {
-                    ready: self.clock.max(input.frame.at),
+                    ready: self.clock,
+                    absolute_before: input.absolute_before.take(),
                     report: Report {
                         frame: input.frame.clone(),
                         span: InputSpan {
@@ -558,10 +652,17 @@ impl Journal {
                     &mut reports,
                 );
                 if finished && input.order.is_some() {
-                    input.tail(self.clock.max(input.frame.at), &mut reports);
+                    self.clock = self
+                        .clock
+                        .max(input.frame.at)
+                        .max(tail_choice.map_or(Duration::ZERO, |choice| choice.at));
+                    if !tail_consumed {
+                        input.tail(self.clock, &mut reports);
+                    }
                 }
             }
             if finished {
+                self.tails.released(input.tail);
                 self.frames.pop_front();
             } else {
                 break;
@@ -576,7 +677,11 @@ impl Journal {
         let retained: BTreeSet<_> = self.held.values().map(|binding| binding.position).collect();
         self.presses
             .retain(|position, press| press.references != 0 || retained.contains(position));
-        if self.frames.is_empty() && self.held.values().all(|binding| !binding.down) {
+        self.tails.prune();
+        if self.frames.is_empty()
+            && self.held.values().all(|binding| !binding.down)
+            && self.tails.current().is_none()
+        {
             self.clock = Duration::ZERO;
         }
         Released {
@@ -596,7 +701,11 @@ impl Journal {
     ) {
         let mut raw = Vec::new();
         Ledger::report(&input.frame, input.watermark, events, first, last, &mut raw);
-        reports.extend(raw.into_iter().map(|report| ReadyReport { report, ready }));
+        reports.extend(raw.into_iter().map(|report| ReadyReport {
+            report,
+            ready,
+            absolute_before: None,
+        }));
     }
 }
 
@@ -608,6 +717,20 @@ impl Router {
         frame: Frame,
         watermark: u64,
         pending: &[PendingKey],
+        cuts: &BTreeSet<usize>,
+        at: Duration,
+    ) -> Result<(), Fault> {
+        self.stage_owned_frame(frame, watermark, pending, None, cuts, at)
+    }
+
+    /// Retain original key atoms and one coherent non-key cohort.
+    /// Switch-capable sources do not admit tail ownership.
+    pub fn stage_owned_frame(
+        &mut self,
+        frame: Frame,
+        watermark: u64,
+        pending: &[PendingKey],
+        tail: Option<PendingTail>,
         cuts: &BTreeSet<usize>,
         at: Duration,
     ) -> Result<(), Fault> {
@@ -626,6 +749,7 @@ impl Router {
         if pending
             .iter()
             .any(|entry| entry.authorization != self.authorization)
+            || tail.is_some_and(|entry| entry.authorization != self.authorization)
         {
             return self.fail(Fault::Unauthorized);
         }
@@ -649,17 +773,67 @@ impl Router {
         {
             return self.fail(Fault::InvalidFrame);
         }
-        self.capacity(frame.events.len())?;
+        if tail.is_some() && self.device.capabilities.contains_key(&EV_SW) {
+            return self.fail(Fault::UnsupportedProjection);
+        }
+        let absolute_before = (frame.events.iter().any(|event| event.kind == EV_ABS)
+            && (tail.is_some()
+                || self
+                    .pending_keyboard
+                    .as_ref()
+                    .is_some_and(|journal| journal.tails.enabled())))
+        .then(|| self.physical_absolute.clone());
+        if absolute_before
+            .as_ref()
+            .is_some_and(|state| state.validate(&self.device.axes).is_err())
+        {
+            return self.fail(Fault::InvalidFrame);
+        }
+        self.capacity(
+            frame.events.len().saturating_add(
+                absolute_before
+                    .as_ref()
+                    .map_or(0, |state| absolute_storage(state)),
+            ),
+        )?;
         let mut physical = self.physical.clone();
         if let Err(error) = physical.apply(&frame, &self.device) {
             return self.fail(error);
         }
+        let tail_active = !physical.contacts.is_empty()
+            || physical
+                .keys
+                .iter()
+                .any(|code| !crate::input::independent_key(*code));
+        let absolute_updates: Vec<_> = frame
+            .events
+            .iter()
+            .filter(|event| event.kind == EV_ABS)
+            .copied()
+            .collect();
         let sequence = frame.sequence;
         let journal = self.pending_keyboard.get_or_insert_with(Journal::default);
-        if let Err(error) = journal.stage(frame, watermark, pending, cuts, self.limits.offset) {
+        if let Err(error) = journal.stage_with_tail(
+            frame,
+            watermark,
+            pending,
+            cuts,
+            self.limits.offset,
+            TailFrame {
+                pending: tail,
+                active: tail_active,
+                absolute_before,
+            },
+        ) {
             return self.fail(error);
         }
         self.physical = physical;
+        if !absolute_updates.is_empty() {
+            let absolute = Arc::make_mut(&mut self.physical_absolute);
+            for event in absolute_updates {
+                absolute.update(event);
+            }
+        }
         self.last_sequence = Some(sequence);
         self.last_at = at;
         Ok(())
@@ -672,24 +846,32 @@ impl Router {
         decisions: &[KeyDecision],
         at: Duration,
     ) -> Result<(), Fault> {
+        self.decide_input_scopes(decisions, &[], at)
+    }
+
+    /// Validate and settle original key and tail scopes as one decision batch.
+    pub fn decide_input_scopes(
+        &mut self,
+        keys: &[KeyDecision],
+        tails: &[TailDecision],
+        at: Duration,
+    ) -> Result<(), Fault> {
         if self.stopped {
             return Err(Fault::Stopped);
         }
-        if decisions
+        if keys
             .iter()
             .any(|decision| decision.authorization != self.authorization)
+            || tails
+                .iter()
+                .any(|decision| decision.authorization != self.authorization)
         {
             return self.fail(Fault::Unauthorized);
         }
         if at < self.last_at {
             return self.fail(Fault::BackwardTime);
         }
-        self.pending_keyboard
-            .as_mut()
-            .ok_or(Fault::WrongTicket)?
-            .decide(decisions, at)?;
-        self.last_at = at;
-        Ok(())
+        self.decide_input_clocked(keys, tails, at, at)
     }
 
     pub(crate) fn validate_key_decisions(
@@ -698,22 +880,34 @@ impl Router {
         input_at: Duration,
         admitted_at: Duration,
     ) -> Result<(), Fault> {
+        self.validate_input_decisions(decisions, &[], input_at, admitted_at)
+    }
+
+    pub(crate) fn validate_input_decisions(
+        &self,
+        keys: &[KeyDecision],
+        tails: &[TailDecision],
+        input_at: Duration,
+        admitted_at: Duration,
+    ) -> Result<(), Fault> {
         if self.stopped {
             return Err(Fault::Stopped);
         }
-        if decisions
+        if keys
             .iter()
             .any(|decision| decision.authorization != self.authorization)
+            || tails
+                .iter()
+                .any(|decision| decision.authorization != self.authorization)
         {
             return Err(Fault::Unauthorized);
         }
         if admitted_at < input_at || input_at < self.last_at {
             return Err(Fault::BackwardTime);
         }
-        self.pending_keyboard
-            .as_ref()
-            .ok_or(Fault::WrongTicket)?
-            .validate_decisions(decisions, admitted_at)
+        let journal = self.pending_keyboard.as_ref().ok_or(Fault::WrongTicket)?;
+        journal.validate_decisions(keys, admitted_at)?;
+        journal.tails.validate(tails, admitted_at)
     }
     pub(crate) fn decide_keys_clocked(
         &mut self,
@@ -721,11 +915,20 @@ impl Router {
         input_at: Duration,
         admitted_at: Duration,
     ) -> Result<(), Fault> {
-        self.validate_key_decisions(decisions, input_at, admitted_at)?;
-        self.pending_keyboard
-            .as_mut()
-            .unwrap()
-            .decide(decisions, admitted_at)?;
+        self.decide_input_clocked(decisions, &[], input_at, admitted_at)
+    }
+
+    pub(crate) fn decide_input_clocked(
+        &mut self,
+        keys: &[KeyDecision],
+        tails: &[TailDecision],
+        input_at: Duration,
+        admitted_at: Duration,
+    ) -> Result<(), Fault> {
+        self.validate_input_decisions(keys, tails, input_at, admitted_at)?;
+        let journal = self.pending_keyboard.as_mut().unwrap();
+        journal.decide(keys, admitted_at)?;
+        journal.tails.settle(tails, admitted_at);
         self.last_at = input_at;
         Ok(())
     }
@@ -763,6 +966,25 @@ impl Router {
         self.pending_keyboard.as_ref()?.disposition(code, position)
     }
 
+    /// Current coherent cohort root, including a pending neutral report.
+    pub fn tail_scope(&self) -> Option<InputPosition> {
+        if self.stopped {
+            return None;
+        }
+        self.pending_keyboard.as_ref()?.tails.current()
+    }
+
+    pub fn tail_disposition(&self, root: InputPosition) -> Option<TailDisposition> {
+        if self.stopped {
+            return None;
+        }
+        self.pending_keyboard
+            .as_ref()?
+            .tails
+            .choice(root)
+            .map(|choice| choice.disposition)
+    }
+
     pub fn pending_key_position(&self) -> Option<InputPosition> {
         self.pending_keyboard.as_ref()?.first()
     }
@@ -782,8 +1004,30 @@ impl Router {
         }
         let mut sequence = self.pending_keyboard.as_ref().unwrap().output_sequence;
         let mut offset = self.offset.max(self.key_offset_floor);
+        let mut absolute = reports
+            .iter()
+            .any(|ready| ready.absolute_before.is_some())
+            .then(|| self.planned_absolute.clone());
         for ready in &mut reports {
             let report = &mut ready.report;
+            if let Some(before) = ready.absolute_before.take() {
+                let repairs = before.restore_for(absolute.as_ref().unwrap(), &report.frame);
+                if report.frame.events.len().saturating_add(repairs.len()) > 4096 {
+                    return self.fail(Fault::Overflow);
+                }
+                let insert_at = report
+                    .frame
+                    .events
+                    .iter()
+                    .position(|event| event.kind == EV_ABS)
+                    .unwrap_or(report.frame.events.len() - 1);
+                report.frame.events.splice(insert_at..insert_at, repairs);
+            }
+            if let Some(absolute) = absolute.as_mut() {
+                for event in &report.frame.events {
+                    absolute.update(*event);
+                }
+            }
             sequence = match sequence.checked_add(1) {
                 Some(next) => next.max(report.frame.sequence),
                 None => return self.fail(Fault::Overflow),

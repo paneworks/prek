@@ -500,6 +500,49 @@ prints the Cargo and validator SHA-256 hashes and explicitly supplies those path
 It runs both configuration dialects without rebuilding the release
 application. This is development-binary evidence, not packaged-release evidence.
 
+The development recipe retains the supplied Nix runner closure under
+`target/test-fixtures` before building Cargo helpers and rejects root-probe
+runners. To restore an unavailable saved derivation, use
+`oslo make pin-test-fixture --derivation=/nix/store/...drv --name=cage-host`.
+`oslo make build-cage-touch-tools` retains the current Cage, receiver, grim and
+DBus tools independently of the release Rust application. These project-local
+roots keep fixture closures available across long verification runs.
+
+### Coherent non-key ownership journal
+
+The trusted Rust `Router` also provides `stage_owned_frame` with optional
+`PendingTail` admission alongside pending key presses. One indivisible non-key
+cohort is rooted at its original `SYN_REPORT` position. `tail_scope` and
+`tail_disposition` inspect that exact root; `decide_input_scopes` validates the
+complete key/tail batch before changing either domain. Source authorization,
+original position and the fixed decision deadline remain mandatory. Already
+ordinary input cannot be reclaimed.
+
+Claimed cohorts drain all their remaining contact/tool state, including empty
+reports, without consuming independent key atoms. Ordinary key prefixes can be
+acknowledged before a pending cohort. Untouched reports remain byte-exact;
+fallback preserves original report intervals under the same bounded FIFO offset.
+Fresh input after a neutral cohort receives a new root and commits the unanswered
+prior cohort to ordinary delivery. Deliberate multi-group retention names the exact pending
+root in `PendingTail.continuation` and cannot extend its original deadline.
+
+Retained ABS reports capture immutable physical coordinate versions. Repairs are
+computed against actual planned output after earlier ownership decisions settle,
+so consumed cursor/axis changes cannot corrupt a later delta-only contact. Only
+addressed inactive slots are restored. Snapshot entries count against journal
+capacity; ordinary legacy key projection does not copy absolute snapshots or
+planned state when it has never admitted tail ownership.
+
+`oslo make test-tail-journal` exercises this transport model, including exact
+roots, atomicity, cadence, independent keys, replay repair, bounds and recovery.
+It is not a session permission or device-readiness proof. Native custom/sequence
+tail provenance and cross-domain arbitration are not yet connected to this API;
+the key-only projection predicate and production grants remain unchanged. Lua
+cannot call these privileged raw-journal operations directly. Stateful switch
+ownership is explicitly refused until initial-state and recovery contracts are
+implemented; ordinary switch passthrough is preserved. Full semantic-domain,
+native MT/consumer and physical acceptance remain required.
+
 ## Private native worker binding
 
 The supervised input loop calls `InputSink::service_owned(health)` even with no

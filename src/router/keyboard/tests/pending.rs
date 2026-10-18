@@ -2,6 +2,7 @@ use super::*;
 use crate::router::{KeyDecision, KeyDisposition, PendingKey};
 
 mod hybrid;
+mod tails;
 
 fn position(frame: u64, event: usize) -> InputPosition {
     InputPosition { frame, event }
