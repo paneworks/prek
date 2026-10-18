@@ -45,12 +45,7 @@ impl Runtime {
                     let entry: Table = registry.get(ctx, index)?;
                     let name: luna::String = entry.get(ctx, "name")?;
                     let requires: Value = entry.get(ctx, "requires")?;
-                    let requires = luna_util::serde::from_value_with(
-                        ctx,
-                        requires,
-                        luna_util::serde::DeOptions::default().max_depth(4),
-                    )
-                    .map_err(io::Error::other)?;
+                    let requires = values::decode(ctx, requires, 4, 4096, 64 * 1024)?;
                     registrations.push(HandlerRegistration {
                         id: index as u16,
                         name: name.to_str()?.into(),
@@ -108,7 +103,6 @@ impl Runtime {
                 }
                 let Some(value) = values.0.first().copied() else { return Ok(Vec::<Action>::new()); };
                 if matches!(value, Value::Nil) { return Ok(Vec::new()); }
-                let options = luna_util::serde::DeOptions::default().max_depth(8);
                 let table = match value { Value::Table(table) => table, _ => return Err(io::Error::other("invalid Lua action result").into()) };
                 let kind: Value = table.get(ctx, "kind")?;
                 let actions: Vec<Action> = if matches!(kind, Value::Nil) {
@@ -121,8 +115,8 @@ impl Runtime {
                         count+=1;
                     }
                     if count!=length { return Err(io::Error::other("Lua action array must be dense").into()); }
-                    luna_util::serde::from_value_with(ctx, value, options).map_err(io::Error::other)?
-                } else { vec![luna_util::serde::from_value_with(ctx, value, options).map_err(io::Error::other)?] };
+                    values::decode(ctx, value, 8, values::EFFECT_VALUES, values::EFFECT_EXPANDED_BYTES)?
+                } else { vec![values::decode(ctx, value, 8, values::EFFECT_VALUES, values::EFFECT_EXPANDED_BYTES)?] };
                 Ok(actions)
             }).map_err(error)?;
             if actions.len() > 32 {

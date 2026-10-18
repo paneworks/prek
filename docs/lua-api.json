@@ -460,6 +460,46 @@
     "optional_ipc_budget_ms": 50,
     "unavailable": "nil for unsupported, unavailable, inconsistent, non-desktop, stale or inhibited context; a verified empty inventory is an empty workspace array"
   },
+  "native_value_limits": {
+    "accounting": "expanded keys and values; aliases counted for every expansion; conservative bytes are not measured RSS",
+    "action_plan": {
+      "conservative_bytes": 524288,
+      "depth": 8,
+      "values": 32768
+    },
+    "collections": {
+      "devices": 256,
+      "layers": 64,
+      "modes": 64,
+      "recognizers": 64,
+      "rules": 1024,
+      "shapes": 128
+    },
+    "configuration": {
+      "conservative_bytes": 16777216,
+      "depth": 64,
+      "values": 1048576
+    },
+    "metadata": {
+      "depth": 4,
+      "hook_or_effect_bytes": 65536,
+      "hook_or_effect_values": 4096,
+      "recognizer_bytes": 1048576,
+      "recognizer_values": 65536
+    },
+    "offline_replay_configuration": {
+      "conservative_bytes": 1048576,
+      "depth": 64,
+      "values": 65536
+    },
+    "preset_name_bytes": 64,
+    "rule_identity_bytes": 256,
+    "rule_replacement": {
+      "conservative_bytes": 524288,
+      "depth": 64,
+      "values": 32768
+    }
+  },
   "offline_replay": {
     "configuration": "validated copy; no live rule or policy change",
     "custom": {
@@ -658,6 +698,12 @@
       "description": "Return a mutable minimal, desktop or phone preset.",
       "name": "config.preset",
       "signature": "config.preset(name) -> Config"
+    },
+    {
+      "description": "Preflight expanded values, validate the complete Rust schema/model and return a normalized independent copy; no activation, reload, source binding approval or execution grant.",
+      "name": "config.validate",
+      "phase": "configuration",
+      "signature": "config.validate(config) -> Config"
     },
     {
       "description": "Copy the owning VM's acknowledged validated configuration and exact rule revision; no source closures or live effect authority.",

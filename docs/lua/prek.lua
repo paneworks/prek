@@ -919,6 +919,10 @@ function ConfigAPI.new(fields) error("Prek editor definition") end
 ---@param name 'minimal'|'desktop'|'phone'
 ---@return prek.Preset
 function ConfigAPI.preset(name) error("Prek editor definition") end
+---Configuration-only schema/model validation with an independent normalized copy; no reload, registration or grants.
+---@param config prek.Config
+---@return prek.Config
+function ConfigAPI.validate(config) error("Prek editor definition") end
 ---Export a fully validated declarative model, bounded to 1 MiB. Named handlers and rule hooks require original source.
 ---@param config prek.Config
 ---@return string

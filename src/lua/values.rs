@@ -1,8 +1,58 @@
-//! Lossless Lua representations of host identities. Lua integers are signed;
-//! opaque u64 identities always use decimal strings, even for small values.
+//! Bounded native decoding and lossless host identities. Lua integers are
+//! signed; opaque u64 identities always use decimal strings.
 use super::*;
 use luna::Context;
 use serde_json::Value as Json;
+
+pub(super) const CONFIG_VALUES: usize = MAX_CONFIG_BYTES;
+pub(super) const CONFIG_EXPANDED_BYTES: usize = 16 * MAX_CONFIG_BYTES;
+pub(super) const EFFECT_VALUES: usize = 32 * 1024;
+pub(super) const EFFECT_EXPANDED_BYTES: usize = 16 * EFFECT_VALUES;
+
+pub(super) fn decode<'gc, T: serde::de::DeserializeOwned>(
+    ctx: Context<'gc>,
+    value: Value<'gc>,
+    depth: usize,
+    nodes: usize,
+    bytes: usize,
+) -> Result<T, luna::Error<'gc>> {
+    budget(ctx, value, depth, nodes, bytes)?;
+    luna_util::serde::from_value_with(
+        ctx,
+        value,
+        luna_util::serde::DeOptions::default().max_depth(depth),
+    )
+    .map_err(|error| io::Error::other(error).into())
+}
+
+pub(super) fn configuration<'gc>(
+    ctx: Context<'gc>,
+    value: Value<'gc>,
+) -> Result<Config, luna::Error<'gc>> {
+    configuration_fields(ctx, value)?;
+    decode(ctx, value, 64, CONFIG_VALUES, CONFIG_EXPANDED_BYTES)
+}
+
+pub(super) fn configuration_fields<'gc>(ctx: Context<'gc>, value: Value<'gc>) -> io::Result<()> {
+    policy_booleans(ctx, value)?;
+    if let Value::Table(config) = value {
+        for (field, limit) in [
+            ("rules", crate::config::MAX_RULES),
+            ("devices", crate::config::MAX_SELECTORS),
+            ("layers", crate::config::MAX_LAYERS),
+            ("shapes", crate::config::MAX_SHAPES),
+            ("modes", crate::config::MAX_MODES),
+            ("recognizers", crate::recognition::MAX_RECOGNIZERS),
+        ] {
+            if let Value::Table(collection) = config.get(ctx, field).map_err(io::Error::other)?
+                && collection.iter(ctx).take(limit + 1).count() > limit
+            {
+                return Err(io::Error::other("configuration collection limit exceeded"));
+            }
+        }
+    }
+    Ok(())
+}
 
 pub(super) fn optional_boolean<'gc>(
     ctx: Context<'gc>,

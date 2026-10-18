@@ -1315,8 +1315,6 @@ fn t89_module_capture_refuses_unsafe_files_and_permission_expansion() {
 fn t88_isolated_lua_rejects_expansion_and_recovers_for_the_next_compile() {
     let directory = Directory::new();
     let path = directory.0.join("bounded.lua");
-    // Reused Lua tables occupy little arena memory but expand when decoded
-    // into owned Rust strings. Neither failure may terminate the CLI parent.
     for (rules, arguments, bytes) in [(32, 32, 4096), (1024, 256, 4096)] {
         let source = format!(
             r#"
@@ -1348,14 +1346,12 @@ return config
         }
         assert!(!rejected.stderr.is_empty());
         let error = String::from_utf8_lossy(&rejected.stderr);
-        assert!(
-            error.contains("model exceeds")
-                || error.contains("compiler failed")
-                || error.contains("timed out")
-                || error.contains("memory allocation")
-                || (rules == 1024 && error.contains("time limit exceeded")),
-            "{error}"
-        );
+        let expected = if rules == 32 {
+            "model exceeds"
+        } else {
+            "Lua value exceeds expanded"
+        };
+        assert!(error.contains(expected), "{error}");
     }
     fs::write(&path, "return require('prek').config.preset('minimal')").unwrap();
     let checked = run(&["check", "--config", path.to_str().unwrap(), "--json"]);
@@ -1364,6 +1360,40 @@ return config
         "{}",
         String::from_utf8_lossy(&checked.stderr)
     );
+}
+
+#[test]
+fn lua_native_values_are_preflighted_in_each_isolated_compiler_entry_point() {
+    let directory = Directory::new();
+    let path = directory.0.join("preflight.lua");
+    for decode in [
+        "return c",
+        "p.config.export(c);return {version=1}",
+        "return p.config.validate(c)",
+    ] {
+        let source = format!(
+            "local p=require('prek');local word=string.rep('x',8192);local argv={{}};\
+             for i=1,2049 do argv[i]=word end;\
+             local c={{version=1,rules={{{{id='bounded',trigger=p.triggers.key{{key='KEY_A'}},\
+             action=p.actions.command{{argv=argv}}}}}}}};{decode}"
+        );
+        fs::write(&path, source).unwrap();
+        let rejected = run(&["check", "--config", path.to_str().unwrap()]);
+        assert_eq!(rejected.status.code(), Some(1), "{rejected:?}");
+        let error = String::from_utf8_lossy(&rejected.stderr);
+        assert!(
+            error.contains("Lua value exceeds expanded"),
+            "{decode}: {error}"
+        );
+        assert!(rejected.stderr.len() < 4096);
+    }
+    fs::write(
+        &path,
+        "local p=require('prek');return p.config.validate(p.config.preset('minimal'))",
+    )
+    .unwrap();
+    let checked = run(&["check", "--config", path.to_str().unwrap(), "--json"]);
+    assert!(checked.status.success(), "{checked:?}");
 }
 
 impl Directory {

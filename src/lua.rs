@@ -9,6 +9,7 @@ use std::{
 
 #[cfg(target_os = "linux")]
 mod capabilities;
+mod config_api;
 #[cfg(target_os = "linux")]
 mod context;
 #[cfg(target_os = "linux")]
@@ -24,6 +25,8 @@ mod lifetimes;
 mod modules;
 #[cfg(target_os = "linux")]
 mod morf;
+#[cfg(test)]
+mod native_values;
 mod recognizers;
 mod replay;
 mod rule_api;
@@ -59,6 +62,7 @@ pub fn api() -> serde_json::Value {
     let mut symbols = vec![
         serde_json::json!({"name":"config.new", "signature":"config.new(table) -> Config", "description":"Apply the schema version default; validate the returned model."}),
         serde_json::json!({"name":"config.preset", "signature":"config.preset(name) -> Config", "description":"Return a mutable minimal, desktop or phone preset."}),
+        serde_json::json!({"name":"config.validate", "signature":"config.validate(config) -> Config", "phase":"configuration", "description":"Preflight expanded values, validate the complete Rust schema/model and return a normalized independent copy; no activation, reload, source binding approval or execution grant."}),
         serde_json::json!({"name":"config.current", "signature":"config.current() -> ConfigurationView | nil", "phase":"runtime", "description":"Copy the owning VM's acknowledged validated configuration and exact rule revision; no source closures or live effect authority."}),
         serde_json::json!({"name":"policy.current", "signature":"policy.current() -> PolicyView | nil", "phase":"runtime", "description":"Copy protected policy from the acknowledged configuration and its revision; negotiated execution grants remain separate."}),
         serde_json::json!({"name":"config.export", "signature":"config.export(config) -> string", "phase":"configuration", "description":"Validate and export a complete declarative model as bounded Lua source; performs no I/O and requires original source for named handlers."}),
@@ -385,6 +389,16 @@ pub fn api() -> serde_json::Value {
     let morf_adapter = serde_json::json!({"agent_flags":["morf"],"named_handler_flags":["lua","morf"],"public_session_negotiation":false,"production_gate":"native rendered context and physical cutover","transport":"broker offer ID/ordinal and typed action only; no caller target, motion or deadline","completion":"native controller acceptance; no rendered animation/presentation proof","pending_agent":8,"pending_broker":64,"morf_effects_per_ordinal":1,"result_wait_after_grant_ms":2000,"native_receipt_poll_ms":5,"ownership_refresh_ms":100,"cancellation":"known owning gesture only; no uncertain retry"});
     let custom_recognizers = serde_json::json!({"constructor":"recognizers.define","agent_flags":["lua","recognizers"],"capability":"custom_recognizers","system_permission":"policy.allow_input_events","production_broker":"observation_mode","context":"fresh owning desktop without secure overlay","inputs":["key","relative","wheel","absolute","switch","touch"],"declaration_registry":"Config.recognizers; canonical source-approved definitions persist without rules; runtime additions need no template and cannot add or alter definitions","maximum_declarations":64,"maximum_candidates_and_cleanup":64,"maximum_pending_tickets":64,"ticket_bytes":65536,"pending_bytes":1048576,"reply_ms":[1,250],"timeout_ms":[1,10000],"wake_ms":[5,250],"callback_ms":20,"callback_instructions":100000,"data_bytes":4096,"data_depth":8,"identities":"canonical decimal strings","result":"nil for pending or a strict phase/data table; cancellation returns nil","source":"private canonical declaration, exact rule binding and complete approved snapshot parity","claims":false,"raw_frames":false,"routing":"unavailable","custom_sequences":"source-bound nested plans; native coordinator required","device_catalog":"independent declaration-scoped metadata without held state or ordinary input callbacks; ordinary resets when --input is also enabled","root_acceptance":"pending user-launched live tests"});
     let capability_queries = serde_json::json!({"source":"broker-negotiated registration flags and parent executor readiness; never inferred from Lua source","freshness_ms":250,"refresh_ms":100,"queued_snapshots":1,"in_flight_snapshots":1,"ready_families":["commands","lua_actions","power_actions","hyprland_actions","morf_actions"],"hyprland":"protected policy.allow_hyprland_actions and session --hyprland on a routing broker; production takeover remains unavailable","unavailable":"current returns nil; has and ready return false","unknown_names":"false; names must be strings of 1 to 128 bytes","grants":false,"lifetime":"negotiated flags immutable within the owning fence; stop clears metadata"});
+    let native_value_limits = serde_json::json!({
+        "accounting":"expanded keys and values; aliases counted for every expansion; conservative bytes are not measured RSS",
+        "configuration":{"depth":64,"values":values::CONFIG_VALUES,"conservative_bytes":values::CONFIG_EXPANDED_BYTES},
+        "collections":{"rules":crate::config::MAX_RULES,"devices":crate::config::MAX_SELECTORS,"layers":crate::config::MAX_LAYERS,"shapes":crate::config::MAX_SHAPES,"modes":crate::config::MAX_MODES,"recognizers":crate::recognition::MAX_RECOGNIZERS},
+        "action_plan":{"depth":8,"values":values::EFFECT_VALUES,"conservative_bytes":values::EFFECT_EXPANDED_BYTES},
+        "rule_replacement":{"depth":64,"values":crate::rule_transactions::MAX_BYTES,"conservative_bytes":16 * crate::rule_transactions::MAX_BYTES},
+        "offline_replay_configuration":{"depth":64,"values":replay::MAX_CONFIG_VALUES,"conservative_bytes":replay::MAX_BYTES},
+        "metadata":{"depth":4,"hook_or_effect_values":4096,"hook_or_effect_bytes":65536,"recognizer_values":65536,"recognizer_bytes":1048576},
+        "preset_name_bytes":64,"rule_identity_bytes":256
+    });
     let mut manifest = serde_json::json!({"api_version":API_VERSION,"schema_version":crate::config::SCHEMA_VERSION,
         "engine":"onix-os/luna", "engine_version":"0.5.1", "phase":"configuration_and_session_actions",
         "symbols":symbols, "limits":{"source_bytes":MAX_CONFIG_BYTES,"memory_bytes":MEMORY,
@@ -409,6 +423,7 @@ pub fn api() -> serde_json::Value {
         "editor":{"format":"LuaCATS","module":"prek","cli":["prek","api","--lua"],"path":"share/prek/lua/prek.lua","scope":"implemented_configuration_and_runtime"},
         "device_queries":{"catalog":"permitted metadata received through input resets or declaration-scoped custom recognizer metadata; no host inventory scan","delivery":"ordinary --input resets, or independent --recognizers metadata without held state or ordinary input callbacks; current owning context and capabilities required","maximum_sources":256,"maximum_bytes":4194304,"lookup":"exact Source device/generation/seat with canonical decimal strings","nil":"no received metadata, unknown source, missing mapping or unavailable/stale desktop context","empty_list":"all known sources removed while context remains usable","revision":"decimal string; metadata changes/removals only","map_keys":"numeric evdev type/axis keys in Lua","position":"validated device counts to normalized/mm/output-local/global coordinates; no action authority","seat":"current fresh desktop binding/fence only; no other-seat enumeration"},
         "runtime_api":"partial"});
+    manifest["native_value_limits"] = native_value_limits;
     manifest["custom_recognizers"] = custom_recognizers;
     manifest["morf_adapter"] = morf_adapter;
     manifest["service_inspection"] = serde_json::json!({
@@ -842,11 +857,11 @@ fn instantiate(
                 "preset",
                 Callback::from_fn(&ctx, |ctx, _, mut stack| {
                     let name: luna::String = stack.consume(ctx)?;
-                    let preset = Config::preset(
-                        name.to_str()
-                            .map_err(|err| io::Error::other(err.to_string()))?,
-                    )
-                    .map_err(io::Error::other)?;
+                    let name = name.to_str().map_err(io::Error::other)?;
+                    if name.len() > 64 || name.chars().any(char::is_control) {
+                        return Err(io::Error::other("invalid preset name").into());
+                    }
+                    let preset = Config::preset(name).map_err(io::Error::other)?;
                     let value =
                         luna_util::serde::to_value(ctx, &preset).map_err(io::Error::other)?;
                     stack.replace(ctx, value);
@@ -871,13 +886,7 @@ fn instantiate(
                         return Err(io::Error::other("recognizer callbacks require original Lua source; declarative export would discard them").into());
                     }
                     let value: Value = stack.consume(ctx)?;
-                    values::policy_booleans(ctx, value)?;
-                    let config: Config = luna_util::serde::from_value_with(
-                        ctx,
-                        value,
-                        luna_util::serde::DeOptions::default().max_depth(64),
-                    )
-                    .map_err(io::Error::other)?;
+                    let config = values::configuration(ctx, value)?;
                     let source = export_config(&config).map_err(io::Error::other)?;
                     stack.replace(ctx, ctx.intern(source.as_bytes()));
                     Ok(CallbackReturn::Return)
@@ -897,6 +906,7 @@ fn instantiate(
             let module_loaders = Table::new(&ctx);
             ctx.globals().set(ctx, "__prek_modules", module_loaders)?;
             let actions: Table = module.get(ctx, "actions")?;
+            config_api::register(&ctx, config, host.clone())?;
             replay::register(&ctx, module.get(ctx, "replay")?, host.clone())?;
             rule_api::register(&ctx, module.get(ctx, "rules")?, host.clone())?;
             rule_api::register_inspection(&ctx, module, host.clone())?;
@@ -1021,13 +1031,7 @@ fn instantiate(
             if values.0.len() != 1 {
                 return Err(io::Error::other("Lua configuration must return one table").into());
             }
-            self::values::policy_booleans(ctx, values.0[0])?;
-            let config: Config = luna_util::serde::from_value_with(
-                ctx,
-                values.0[0],
-                luna_util::serde::DeOptions::default().max_depth(64),
-            )
-            .map_err(io::Error::other)?;
+            let config = self::values::configuration(ctx, values.0[0])?;
             config.validate().map_err(io::Error::other)?;
             Ok(config)
         })

@@ -12,6 +12,11 @@ use std::{
 
 pub const SCHEMA_VERSION: u32 = 1;
 pub const MAX_CONFIG_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_RULES: usize = 1024;
+pub(crate) const MAX_SELECTORS: usize = 256;
+pub(crate) const MAX_LAYERS: usize = 64;
+pub(crate) const MAX_SHAPES: usize = 128;
+pub(crate) const MAX_MODES: usize = 64;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Millis(pub u64);
@@ -1071,10 +1076,10 @@ impl Config {
         if self.version != SCHEMA_VERSION {
             return fail(format!("unsupported schema version {}", self.version));
         }
-        if self.rules.len() > 1024
-            || self.devices.len() > 256
-            || self.layers.len() > 64
-            || self.shapes.len() > 128
+        if self.rules.len() > MAX_RULES
+            || self.devices.len() > MAX_SELECTORS
+            || self.layers.len() > MAX_LAYERS
+            || self.shapes.len() > MAX_SHAPES
             || self.recognizers.len() > crate::recognition::MAX_RECOGNIZERS
         {
             return fail("configuration collection limit exceeded".into());
@@ -1167,7 +1172,8 @@ impl Config {
             }
         }
         let mut modes = BTreeSet::new();
-        if self.modes.len() > 64 || self.modes.iter().filter(|mode| mode.active).count() > 1 {
+        if self.modes.len() > MAX_MODES || self.modes.iter().filter(|mode| mode.active).count() > 1
+        {
             return fail("modes: at most 64 declarations and one selected mode".into());
         }
         for mode in &self.modes {

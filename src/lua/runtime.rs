@@ -324,18 +324,14 @@ impl Runtime {
                         id: index as u16,
                         kind,
                         active: entry.get(ctx, "active")?,
-                        rule: luna_util::serde::from_value_with(
-                            ctx,
-                            entry.get(ctx, "rule")?,
-                            luna_util::serde::DeOptions::default().max_depth(4),
-                        )
-                        .map_err(io::Error::other)?,
-                        recognizer: luna_util::serde::from_value_with(
+                        rule: values::decode(ctx, entry.get(ctx, "rule")?, 4, 4096, 64 * 1024)?,
+                        recognizer: values::decode(
                             ctx,
                             entry.get(ctx, "recognizer")?,
-                            luna_util::serde::DeOptions::default().max_depth(4),
-                        )
-                        .map_err(io::Error::other)?,
+                            4,
+                            65536,
+                            1024 * 1024,
+                        )?,
                     });
                 }
                 Ok(result)
@@ -406,12 +402,8 @@ impl Runtime {
                     if !active || event.to_str()? != kind.name() {
                         return Ok(None);
                     }
-                    let rule: Option<super::hooks::RuleHook> = luna_util::serde::from_value_with(
-                        ctx,
-                        entry.get(ctx, "rule")?,
-                        luna_util::serde::DeOptions::default().max_depth(4),
-                    )
-                    .map_err(io::Error::other)?;
+                    let rule: Option<super::hooks::RuleHook> =
+                        values::decode(ctx, entry.get(ctx, "rule")?, 4, 4096, 64 * 1024)?;
                     if rule
                         .as_ref()
                         .is_some_and(|rule| !rule.matches(kind, payload))

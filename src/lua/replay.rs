@@ -272,37 +272,6 @@ fn identities(value: &mut serde_json::Value) {
     }
 }
 
-// Count expanded Lua values before deserialization can duplicate shared tables
-// into native vectors. Tiny cyclic/aliased tables must not bypass host limits.
-fn configuration_budget<'gc>(ctx: luna::Context<'gc>, value: Value<'gc>) -> io::Result<()> {
-    fn visit<'gc>(
-        ctx: luna::Context<'gc>,
-        value: Value<'gc>,
-        depth: usize,
-        values: &mut usize,
-        bytes: &mut usize,
-    ) -> io::Result<()> {
-        *values += 1;
-        *bytes += match value {
-            Value::String(text) => text.as_bytes().len(),
-            _ => 16,
-        };
-        if depth > 64 || *values > MAX_CONFIG_VALUES || *bytes > MAX_BYTES {
-            return Err(io::Error::other(
-                "offline replay configuration value limit exceeded",
-            ));
-        }
-        if let Value::Table(table) = value {
-            for (key, value) in table.iter(ctx) {
-                visit(ctx, key, depth + 1, values, bytes)?;
-                visit(ctx, value, depth + 1, values, bytes)?;
-            }
-        }
-        Ok(())
-    }
-    visit(ctx, value, 0, &mut 0, &mut 0)
-}
-
 pub(super) fn register<'gc>(
     ctx: &luna::Context<'gc>,
     api: Table<'gc>,
@@ -317,13 +286,14 @@ pub(super) fn register<'gc>(
         name,
         Callback::from_fn(ctx, move |ctx, _, mut stack| {
             let value: Value = stack.consume(ctx)?;
-            configuration_budget(ctx, value)?;
+            values::configuration_fields(ctx, value)?;
+            values::budget(ctx, value, 64, MAX_CONFIG_VALUES, MAX_BYTES)
+                .map_err(|_| io::Error::other("offline replay configuration value limit exceeded"))?;
             let config: Option<Config> = luna_util::serde::from_value_with(
                 ctx,
                 value,
                 luna_util::serde::DeOptions::default().max_depth(64),
-            )
-            .map_err(io::Error::other)?;
+            ).map_err(io::Error::other)?;
             let mut active = sessions.borrow_mut();
             active.retain(|session| {
                 session

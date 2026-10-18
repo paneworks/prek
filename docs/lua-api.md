@@ -919,7 +919,35 @@ Use [the capability example](../examples/lua/capabilities.lua) for inspection.
 
 ## Callback limits
 
-Callbacks are observational: action constructors still produce declarations and
+Native deserialization preflights expanded Lua table keys and values, counting
+every repeated reference separately. The configuration compiler, declarative
+export and `config.validate` allow at most 1,048,576 expanded values, 64 nesting
+levels and 16 MiB of conservative expansion charges. Each nonstring value costs
+16 bytes; strings cost their byte length. These charges bound traversal and
+prevent small aliased/cyclic tables from bypassing native decoding limits; they
+are not measurements of total Rust heap or RSS. Source, model, VM arena, fuel,
+wall-clock and supervised-process limits remain separate and unchanged.
+
+Before decoding, configuration collections retain the native schema limits:
+1,024 rules, 256 device selectors, 64 layers, 128 shapes, 64 modes and 64 custom
+recognizers. Every table entry counts, including non-array keys. The compiler,
+export, validation and both offline replay constructors apply these checks.
+
+Named action results are preflighted at 32,768 values, depth 8 and 512 KiB before
+native decoding. Rule replacement uses the same value/byte bounds at depth 64.
+Their final action-plan/transaction wire limit remains 32 KiB. Hook/effect
+metadata uses 4,096 values/64 KiB at depth 4; recognizer metadata uses
+65,536 values/1 MiB at depth 4. Offline replay retains its smaller existing
+configuration budget. Preset names are bounded to 64 bytes and transaction IDs
+to 256 bytes before native copying. `native_value_limits` in the API manifest
+publishes these bounds.
+
+An excessive action result follows ordinary failure handling: no returned
+effects or buffered logs escape, and the callback VM retires. A caught invalid
+replacement leaves its transaction open and unchanged, so a later valid edit
+can still be proposed. These checks create no routing or execution authority.
+
+Event subscription callbacks are observational: action constructors produce declarations and
 these subscriptions cannot execute commands, claim input or call adapters.
 `log.info(message, fields)` appends a structured record; `fields` defaults to
 nil and must be JSON-compatible, at most 16 levels deep. Messages have a 1 KiB
@@ -1051,6 +1079,14 @@ return p.config.preset("minimal")
 
 - `config.new(table)` supplies `version = 1` if absent and returns the table.
 - `config.preset(name)` returns a mutable `minimal`, `desktop` or `phone` preset.
+- `config.validate(config)` preflights expanded values, applies the Rust schema and
+  model validation, and returns a normalized independent copy with defaults.
+  It is configuration-only and performs no I/O or effects. It does not reload an
+  active configuration, register callbacks, approve new source bindings or grant
+  capabilities. The complete source compilation still validates every named
+  handler, rule hook and custom recognizer registration. Invalid models and
+  excessive/cyclic input raise an error without modifying the original table.
+  See the executable [validation example](../examples/lua/config_validation.lua).
 - `rules.define(table)` returns a rule declaration.
 - `units.duration(string)` and `units.distance(string)` require a string with
   explicit units; model validation checks its unit and range.

@@ -231,11 +231,15 @@ pub(super) fn register<'gc>(
                             Change::Mode { id: None }
                         } else if operation == "replace" {
                             let (_, value): (Value, Value) = stack.consume(ctx)?;
-                            let rule = luna_util::serde::from_value_with(ctx, value, luna_util::serde::DeOptions::default().max_depth(64)).map_err(io::Error::other)?;
+                            let rule = values::decode(ctx, value, 64, crate::rule_transactions::MAX_BYTES, 16 * crate::rule_transactions::MAX_BYTES)?;
                             Change::Replace { rule: Box::new(rule) }
                         } else {
                             let (_, id): (Value, luna::String) = stack.consume(ctx)?;
-                            let id = id.to_str().map_err(io::Error::other)?.to_owned();
+                            let id = id.to_str().map_err(io::Error::other)?;
+                            if id.is_empty() || id.len() > 256 || id.chars().any(char::is_control) {
+                                return Err(io::Error::other("invalid runtime rule identity").into());
+                            }
+                            let id = id.to_owned();
                             match operation {
                                 "remove" => Change::Remove { id },
                                 "select_mode" => Change::Mode { id: Some(id) },
