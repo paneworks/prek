@@ -4,7 +4,7 @@ use crate::{
     recognition::{Definition, InputKind, Phase, Proposal, Ticket},
 };
 
-fn recognizer() -> Rule {
+pub(super) fn recognizer() -> Rule {
     let mut rule = rule(
         "custom",
         Action::Keys {
@@ -26,7 +26,12 @@ fn recognizer() -> Rule {
     rule.priority = 10;
     rule
 }
-fn respond(routing: &mut Routing, ticket: &Ticket, phase: Phase, at: u64) -> Vec<KeyWork> {
+pub(super) fn respond(
+    routing: &mut Routing,
+    ticket: &Ticket,
+    phase: Phase,
+    at: u64,
+) -> Vec<KeyWork> {
     routing
         .recognition_response(
             Proposal {

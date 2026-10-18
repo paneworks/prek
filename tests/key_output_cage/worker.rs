@@ -16,6 +16,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[path = "worker/custom.rs"]
 mod custom;
+#[path = "worker/hybrid.rs"]
+mod hybrid;
 #[path = "worker/pending.rs"]
 mod pending;
 
@@ -916,9 +918,10 @@ fn local_cage_scoped_key_worker() {
     let text = custom::exercise(&output, socket, 33, &text, custom::Case::NativeFirst);
     let text = custom::exercise(&output, socket, 34, &text, custom::Case::CustomFirst);
     pending::exercise(&output, socket, 35, &text);
-    phase(&output, 38, &format!("{text}a"), &[]);
-    fs::write(output.join("key-output-runtime-result.json"),serde_json::to_vec(&json!({"status":"passed","phases":39,
-        "source":"twelve_owned_wayland_virtual_keyboards","production_route_tested":false,"kernel_input_tested":false,
+    let text = hybrid::exercise(&output, socket, 38, &format!("{text}a"));
+    phase(&output, 41, &text, &[]);
+    fs::write(output.join("key-output-runtime-result.json"),serde_json::to_vec(&json!({"status":"passed","phases":42,
+        "source":"fourteen_owned_wayland_virtual_keyboards_and_one_pointer","production_route_tested":false,"kernel_input_tested":false,
         "unmodified_stock_acceptance":false,"test_backpressure":true,"scoped_worker_tested":true,
         "authority_modeled":true,"transport_readiness_modeled":true,"selective_consumption_tested":true,
         "selective_consumption_scope":"owned_protocol_native_keys","physical_takeover_tested":false,
@@ -933,5 +936,7 @@ fn local_cage_scoped_key_worker() {
         "root_custom_key_arbitration_rendering_tested":true,
         "event_local_custom_activation_rendering_tested":true,
         "composed_custom_key_arbitration_rendering_tested":true,
+        "hybrid_key_relative_rendering_tested":true,"hybrid_key_fallback_cadence_tested":true,
+        "native_hybrid_topology_tested":false,"hybrid_mt_rendering_tested":false,
         "mixed_delayed_gesture_arbitration_tested":false})).unwrap()).unwrap();
 }

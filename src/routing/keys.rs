@@ -121,12 +121,7 @@ impl KeyWork {
 }
 
 pub(super) fn projectable(config: &Config, device: &Device) -> bool {
-    !device.capabilities.keys().any(|kind| {
-        matches!(
-            *kind,
-            crate::input::EV_REL | crate::input::EV_ABS | crate::input::EV_SW
-        )
-    }) && config
+    config
         .rules
         .iter()
         .filter(|rule| rule.enabled && rule.delivery != crate::config::Delivery::Observe)
@@ -139,8 +134,21 @@ pub(super) fn projectable(config: &Config, device: &Device) -> bool {
         })
         .all(|rule| {
             arbitration::projected(&rule.trigger)
+                && independent_trigger(&rule.trigger)
                 && matches!(rule.action, Action::Keys { .. } | Action::Remap { .. })
         })
+}
+
+fn independent_trigger(trigger: &Trigger) -> bool {
+    match trigger {
+        Trigger::Key { key }
+        | Trigger::ButtonTaps { key, .. }
+        | Trigger::ButtonHold { key, .. } => crate::input::independent_key(key.0),
+        Trigger::Chord { keys, .. } => keys.iter().all(|key| crate::input::independent_key(key.0)),
+        Trigger::Sequence { steps, .. } => steps.iter().all(independent_trigger),
+        Trigger::Custom { .. } => true,
+        _ => false,
+    }
 }
 
 impl Routing {

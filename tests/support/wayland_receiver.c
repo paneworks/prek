@@ -262,7 +262,8 @@ static void touch_frame(void *data,struct wl_touch *touch) {struct app *app=data
 static void touch_cancel(void *data,struct wl_touch *touch) {struct app *app=data;app->touch_pending=false;memset(app->contacts,0,sizeof(app->contacts));receipt(app,"touch_cancel",NULL);}
 static const struct wl_touch_listener touch_listener={.down=touch_down,.up=touch_up,.motion=touch_motion,.frame=touch_frame,.cancel=touch_cancel};
 static void pointer_enter(void *data,struct wl_pointer *pointer,uint32_t serial,struct wl_surface *surface,wl_fixed_t x,wl_fixed_t y) {
-    struct app *app=data;app->pointer_x=wl_fixed_to_double(x);app->pointer_y=wl_fixed_to_double(y);wl_pointer_set_cursor(pointer,serial,NULL,0,0);receipt(app,"pointer_enter",NULL);
+    struct app *app=data;app->pointer_x=wl_fixed_to_double(x);app->pointer_y=wl_fixed_to_double(y);wl_pointer_set_cursor(pointer,serial,NULL,0,0);
+    char detail[100];snprintf(detail,sizeof(detail),"\"x\":%.6f,\"y\":%.6f",app->pointer_x,app->pointer_y);receipt(app,"pointer_enter",detail);
 }
 static void pointer_leave(void *data,struct wl_pointer *pointer,uint32_t serial,struct wl_surface *surface) {receipt(data,"pointer_leave",NULL);}
 static void pointer_motion(void *data,struct wl_pointer *pointer,uint32_t time,wl_fixed_t x,wl_fixed_t y) {

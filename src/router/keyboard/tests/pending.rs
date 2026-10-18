@@ -1,6 +1,8 @@
 use super::*;
 use crate::router::{KeyDecision, KeyDisposition, PendingKey};
 
+mod hybrid;
+
 fn position(frame: u64, event: usize) -> InputPosition {
     InputPosition { frame, event }
 }
@@ -475,7 +477,7 @@ fn ordinary_held_down_cannot_be_reenrolled_as_pending_by_duplicate_down() {
 }
 
 #[test]
-fn journal_and_legacy_modes_cannot_mix_and_hybrid_admission_stays_closed() {
+fn journal_and_legacy_modes_cannot_mix_but_hybrid_key_reports_are_admitted() {
     let mut router = model(Limits::default(), false);
     stage(&mut router, keys(1, &[(30, 1)]), &[waiting(0, 100)]);
     assert_eq!(
@@ -483,10 +485,10 @@ fn journal_and_legacy_modes_cannot_mix_and_hybrid_admission_stays_closed() {
         Err(Fault::TooLate)
     );
     let mut hybrid = model(Limits::default(), true);
-    assert_eq!(
-        hybrid.stage_key_frame(keys(1, &[(30, 1)]), 1, &[], &BTreeSet::new(), ms(1)),
-        Err(Fault::UnsupportedProjection)
-    );
+    hybrid
+        .stage_key_frame(keys(1, &[(30, 1)]), 1, &[], &BTreeSet::new(), ms(1))
+        .unwrap();
+    assert_eq!(edges(&delivered(&mut hybrid, 1)[0].frame), [(30, 1)]);
 }
 
 #[test]

@@ -19,7 +19,7 @@ quiesce_spec.loader.exec_module(quiesce)
 
 class CustomKeyArbitration(unittest.TestCase):
     def fixture(self):
-        observations = [dict(name="unused", receipt=dict(sequence=(index + 1) * 10)) for index in range(39)]
+        observations = [dict(name="unused", receipt=dict(sequence=(index + 1) * 10)) for index in range(42)]
         observations[31]["name"] = "custom-lua-unseen-key-tail"
         received = [dict(event="key", sequence=311 + index, code=code, state=state, at_ns=1000 + index)
                     for index, (code, state) in enumerate([(31, 1), (31, 0), (30, 1), (30, 0)])]
@@ -242,9 +242,84 @@ class ComposedCustomKeys(unittest.TestCase):
                     quiesce.validate_custom_key_arbitration(observations, received, runtime, composition=composition)
 
 
+class HybridKeyArbitration(unittest.TestCase):
+    def fixture(self):
+        observations = [dict(name="unused", receipt=dict(sequence=(index + 1) * 10)) for index in range(42)]
+        for index, name in enumerate(("hybrid-pointer-baseline", "hybrid-key-relative-consumed", "hybrid-key-relative-fallback"), 38):
+            observations[index]["name"] = name
+        def stamp(ns):
+            return dict(secs=ns // 1_000_000_000, nanos=ns % 1_000_000_000)
+        def events(values):
+            return [dict(kind=kind, code=code, value=value) for kind, code, value in values] + [dict(kind=0, code=0, value=0)]
+        source = dict(device=600, generation=1, seat="seat0")
+        payloads = [events([(2, 0, 7), (1, 202, 1), (2, 0, 9), (1, 31, 1), (1, 31, 0), (1, 202, 0)]),
+                    events([(2, 0, 7), (1, 203, 1)]), events([(2, 0, 9), (1, 203, 0)])]
+        inputs = [dict(source=source, sequence=index + 1, events=payload, at=stamp(at))
+                  for index, (payload, at) in enumerate(zip(payloads, (1_000_000_000, 2_000_000_000, 2_080_000_000)))]
+        projected = [events([(1, 31, 1), (1, 31, 0)]), events([(2, 0, 7), (2, 0, 9)]), payloads[1], payloads[2]]
+        delivered = [dict(frame=dict(source=source, sequence=index + 1, events=payload, at=inputs[max(0, index - 1)]["at"]),
+                          due=stamp(at), sent=stamp(at))
+                     for index, (payload, at) in enumerate(zip(projected, (1_000_000_000, 1_000_000_000, 3_000_000_000, 3_080_000_000)))]
+        runtime = dict(status="passed", scope="owned_decoded_keyboard_relative_protocol", dispatches=2,
+                       source_and_readiness_modeled=True, native_hybrid_topology_tested=False,
+                       physical_takeover_tested=False, kernel_input_opened=False, mt_rendering_tested=False,
+                       generated_neutral=True, slack_ns=20_000_000, inputs=inputs, delivered=delivered)
+        raw = [dict(event="enqueue", frame=dict(output["frame"], source=dict(device=962, generation=1, seat="seat0"))) for output in delivered]
+        generated = [dict(event="enqueue", frame=dict(events=events([(1, 30, 1), (1, 30, 0)])))]
+        received = [dict(event="pointer_enter", sequence=389, at_ns=500, x=100, y=200)]
+        received += [dict(event="key", sequence=391 + index, at_ns=1000 + index, code=code, state=state)
+                     for index, (code, state) in enumerate(((30, 1), (30, 0), (31, 1), (31, 0)))]
+        received += [dict(event="pointer_motion", sequence=395, at_ns=1005, x=116, y=200),
+                     dict(event="pointer_frame", sequence=396, at_ns=1006)]
+        for index, (state, x) in enumerate(((1, 123), (0, 132))):
+            at = 5_000_000_000 + index * 80_000_000
+            sequence = 401 + index * 3
+            received += [dict(event="key", sequence=sequence, at_ns=at, code=203, state=state),
+                         dict(event="pointer_motion", sequence=sequence + 1, at_ns=at + 1, x=x, y=200),
+                         dict(event="pointer_frame", sequence=sequence + 2, at_ns=at + 2)]
+        return observations, received, runtime, raw, generated
+
+    def test_coherent_relative_commit_and_original_fallback_cadence_pass(self):
+        result = quiesce.validate_hybrid_keys(*self.fixture())
+        self.assertEqual(result["pointer_displacement"], 32)
+        self.assertEqual(result["consumed_control_leaks"], 0)
+
+    def test_changed_projection_protocol_or_scope_refuses(self):
+        for change in ("input", "tail", "raw", "generated", "leak", "motion", "frame", "order", "cadence", "app-cadence", "native", "bool", "capture"):
+            observations, received, runtime, raw, generated = self.fixture()
+            if change == "input":
+                runtime["inputs"][0]["events"].pop(0)
+            elif change == "tail":
+                runtime["delivered"][1]["frame"]["events"].pop(0)
+            elif change == "raw":
+                raw.pop()
+            elif change == "generated":
+                generated[0]["frame"]["events"].insert(0, dict(kind=1, code=48, value=1))
+            elif change == "leak":
+                received[1]["code"] = 202
+            elif change == "motion":
+                received[5]["x"] = 115
+            elif change == "frame":
+                received.pop(6)
+            elif change == "order":
+                received[1], received[2] = received[2], received[1]
+            elif change == "cadence":
+                runtime["delivered"][3]["due"] = runtime["delivered"][2]["due"]
+            elif change == "app-cadence":
+                received[-3]["at_ns"] = received[-6]["at_ns"]
+            elif change == "native":
+                runtime["native_hybrid_topology_tested"] = True
+            elif change == "bool":
+                runtime["inputs"][0]["events"][1]["value"] = True
+            else:
+                observations.pop()
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                quiesce.validate_hybrid_keys(observations, received, runtime, raw, generated)
+
+
 class NativeKeyArbitration(unittest.TestCase):
     def fixture(self):
-        observations = [dict(name="unused", receipt=dict(sequence=(index + 1) * 10)) for index in range(39)]
+        observations = [dict(name="unused", receipt=dict(sequence=(index + 1) * 10)) for index in range(42)]
         cases = [
             ("buffered-tap-selective", [(31, 1), (31, 0), (30, 1), (30, 0)]),
             ("buffered-hold-priority", [(30, 1), (30, 0)]),

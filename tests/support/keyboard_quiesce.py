@@ -496,6 +496,81 @@ def run_ownership(args, env, output, socket, rows, wait_rendered, capture):
             keyboard["log"].close()
 
 
+def validate_hybrid_keys(observations, received, runtime, raw_trace, generated_trace):
+    flags = dict(status="passed", scope="owned_decoded_keyboard_relative_protocol", dispatches=2,
+                 source_and_readiness_modeled=True, native_hybrid_topology_tested=False,
+                 physical_takeover_tested=False, kernel_input_opened=False, mt_rendering_tested=False,
+                 generated_neutral=True, slack_ns=20_000_000)
+    if any(type(runtime.get(key)) is not type(value) or runtime[key] != value for key, value in flags.items()):
+        raise ValueError("invalid hybrid protocol scope")
+    if len(observations) != 42 or [row["name"] for row in observations[38:41]] != [
+            "hybrid-pointer-baseline", "hybrid-key-relative-consumed", "hybrid-key-relative-fallback"]:
+        raise ValueError("missing hybrid protocol captures")
+    def nanos(stamp):
+        if (not isinstance(stamp, dict) or set(stamp) != {"secs", "nanos"}
+                or any(type(stamp[key]) is not int or stamp[key] < 0 for key in stamp) or stamp["nanos"] >= 1_000_000_000):
+            raise ValueError("invalid hybrid timestamp")
+        return stamp["secs"] * 1_000_000_000 + stamp["nanos"]
+    def events(values):
+        return [dict(kind=kind, code=code, value=value) for kind, code, value in values] + [dict(kind=0, code=0, value=0)]
+    def equal(left, right):
+        return json.dumps(left, sort_keys=True) == json.dumps(right, sort_keys=True)
+    expected = [events([(2, 0, 7), (1, 202, 1), (2, 0, 9), (1, 31, 1), (1, 31, 0), (1, 202, 0)]),
+                events([(2, 0, 7), (1, 203, 1)]), events([(2, 0, 9), (1, 203, 0)])]
+    inputs, delivered = runtime.get("inputs"), runtime.get("delivered")
+    if not isinstance(inputs, list) or len(inputs) != 3 or not isinstance(delivered, list) or len(delivered) != 4:
+        raise ValueError("invalid hybrid report counts")
+    source = dict(device=600, generation=1, seat="seat0")
+    for index, frame in enumerate(inputs):
+        if not equal(frame.get("source"), source) or type(frame.get("sequence")) is not int or frame["sequence"] != index + 1 or not equal(frame.get("events"), expected[index]):
+            raise ValueError("hybrid original report changed")
+    gap = nanos(inputs[2]["at"]) - nanos(inputs[1]["at"])
+    if gap < 80_000_000 or nanos(inputs[1]["at"]) <= nanos(inputs[0]["at"]):
+        raise ValueError("invalid hybrid original cadence")
+    projected = [events([(1, 31, 1), (1, 31, 0)]), events([(2, 0, 7), (2, 0, 9)]), expected[1], expected[2]]
+    for index, output in enumerate(delivered):
+        frame = output["frame"]
+        if (not equal(frame.get("source"), source) or type(frame.get("sequence")) is not int or frame["sequence"] != index + 1 or not equal(frame.get("events"), projected[index])
+                or frame.get("at") != inputs[max(0, index - 1)]["at"] or nanos(output["sent"]) < nanos(output["due"])):
+            raise ValueError("hybrid projection, provenance or delivery changed")
+    if (nanos(delivered[3]["due"]) - nanos(delivered[2]["due"]) != gap
+            or nanos(delivered[3]["sent"]) - nanos(delivered[2]["sent"]) < gap - flags["slack_ns"]):
+        raise ValueError("hybrid fallback cadence collapsed")
+    raw = [row["frame"] for row in raw_trace if row.get("event") == "enqueue"]
+    if len(raw) != 4 or any(not equal(frame, dict(output["frame"], source=dict(device=962, generation=1, seat="seat0")))
+                            for frame, output in zip(raw, delivered)):
+        raise ValueError("decoded hybrid sink differs from scheduled reports")
+    generated = [event for row in generated_trace if row.get("event") == "enqueue" for event in row["frame"]["events"] if event["kind"] == 1]
+    if not equal(generated, [dict(kind=1, code=30, value=1), dict(kind=1, code=30, value=0)]):
+        raise ValueError("hybrid generated action leaked or duplicated")
+    lower, middle, upper = [observations[index]["receipt"]["sequence"] for index in (38, 39, 40)]
+    if any(type(value) is not int for value in (lower, middle, upper)) or not lower < middle < upper:
+        raise ValueError("invalid hybrid capture boundaries")
+    baseline = [row for row in received if row.get("event") in ("pointer_enter", "pointer_motion") and row["sequence"] <= lower]
+    if not baseline:
+        raise ValueError("missing actual hybrid pointer baseline")
+    x, y = baseline[-1]["x"], baseline[-1]["y"]
+    if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+        raise ValueError("invalid actual pointer baseline")
+    claimed = [row for row in received if lower < row["sequence"] <= middle and row.get("event") in ("key", "pointer_motion", "pointer_frame")]
+    fallback = [row for row in received if middle < row["sequence"] <= upper and row.get("event") in ("key", "pointer_motion", "pointer_frame")]
+    if any(any(type(row.get(field)) is not int for field in ("sequence", "at_ns")) for row in claimed + fallback):
+        raise ValueError("invalid hybrid app event identity")
+    if any(any(type(row.get(field)) is not int for field in ("code", "state")) for row in claimed + fallback if row["event"] == "key"):
+        raise ValueError("invalid hybrid app key event")
+    if ([row["event"] for row in claimed] != ["key"] * 4 + ["pointer_motion", "pointer_frame"]
+            or [(row["code"], row["state"]) for row in claimed[:4]] != [(30, 1), (30, 0), (31, 1), (31, 0)]
+            or claimed[4]["x"] != x + 16 or claimed[4]["y"] != y):
+        raise ValueError("hybrid key cut or coherent relative commit changed at the app")
+    if ([row["event"] for row in fallback] != ["key", "pointer_motion", "pointer_frame"] * 2
+            or [(fallback[index]["code"], fallback[index]["state"]) for index in (0, 3)] != [(203, 1), (203, 0)]
+            or [(fallback[index]["x"], fallback[index]["y"]) for index in (1, 4)] != [(x + 23, y), (x + 32, y)]
+            or fallback[3]["at_ns"] - fallback[0]["at_ns"] < gap - flags["slack_ns"]):
+        raise ValueError("hybrid raw fallback changed payload, ordering or actual app cadence")
+    return dict(flags, input_gap_ns=gap, app_gap_ns=fallback[3]["at_ns"] - fallback[0]["at_ns"],
+                coherent_relative_reports=3, consumed_control_leaks=0, pointer_displacement=32)
+
+
 def validate_native_key_arbitration(observations, received, inputs):
     expected = [
         ("buffered-tap-selective", [(31, 1), (31, 0), (30, 1), (30, 0)]),
@@ -505,7 +580,7 @@ def validate_native_key_arbitration(observations, received, inputs):
         ("buffered-unmatched-tap-fallback", [(31, 1), (31, 0)]),
         ("buffered-deferred-action-order", [(30, 1), (30, 0), (48, 1), (48, 0)]),
     ]
-    if len(observations) != 39:
+    if len(observations) != 42:
         raise ValueError("missing native key arbitration captures")
     keys = [row for row in received if row.get("event") == "key"]
     if any(any(type(row.get(field)) is not int for field in ("sequence", "code", "state", "at_ns")) for row in keys):
@@ -582,7 +657,7 @@ def validate_custom_key_arbitration(observations, received, runtime, event_local
     if (runtime["activation"] != activation or type(runtime["activation"].get("keys_throughout")) is not bool
             or any(type(code) is not int for code in runtime["activation"]["require_keys"])):
         raise ValueError("invalid custom key activation policy")
-    if len(observations) != 39 or observations[phase]["name"] != name:
+    if len(observations) != 42 or observations[phase]["name"] != name:
         raise ValueError("missing custom key rendered phase")
     lower, upper = (observations[index]["receipt"]["sequence"] for index in (phase - 1, phase))
     if type(lower) is not int or type(upper) is not int or lower >= upper:
@@ -703,14 +778,19 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
                     ("journal-pending-withheld", "bAAaAaAAAaaaaaaaaaaasaaasasabsassa" + "ssa" + "sa", []),
                     ("journal-decided-consumed", "bAAaAaAAAaaaaaaaaaaasaaasasabsassa" + "ssa" + "sa", []),
                     ("journal-fallback-cadence", "bAAaAaAAAaaaaaaaaaaasaaasasabsassa" + "ssa" + "sa" + "a", []),
-                    ("software-scoped-shutdown", "bAAaAaAAAaaaaaaaaaaasaaasasabsassa" + "ssa" + "sa" + "a", [])]
+                    ("hybrid-pointer-baseline", "bAAaAaAAAaaaaaaaaaaasaaasasabsassa" + "ssa" + "sa" + "a", []),
+                    ("hybrid-key-relative-consumed", "bAAaAaAAAaaaaaaaaaaasaaasasabsassa" + "ssa" + "sa" + "aas", []),
+                    ("hybrid-key-relative-fallback", "bAAaAaAAAaaaaaaaaaaasaaasasabsassa" + "ssa" + "sa" + "aas", []),
+                    ("software-scoped-shutdown", "bAAaAaAAAaaaaaaaaaaasaaasasabsassa" + "ssa" + "sa" + "aas", [])]
     fixture_env = dict(env, PREK_LOCAL_CAGE="1", PREK_CAGE_OUTPUT=str(output), PREK_CAGE_KEYBOARD=args.keyboard,
                        PREK_CAGE_KEY_SOCKET=str(socket))
     if args.key_worker:
         if not args.prek_app:
             raise RuntimeError("custom Lua keyboard test requires its explicit helper binary")
         fixture_env["PREK_TEST_LUA_BINARY"] = str(args.prek_app)
-    before = {device["address"] for device in json.loads(command(["-j", "devices"]))["keyboards"]}
+    devices = json.loads(command(["-j", "devices"]))
+    before = {device["address"] for device in devices["keyboards"]}
+    pointers_before = {device["address"] for device in devices["mice"]}
     with (output / "key-output-runtime.log").open("w") as log:
         test_name = "worker::local_cage_scoped_key_worker" if args.key_worker else "local_cage_generated_key_output"
         process = subprocess.Popen([str(args.key_output_fixture), "--ignored", "--exact", test_name, "--nocapture"],
@@ -740,11 +820,13 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
     after = {device["address"] for device in json.loads(command(["-j", "devices"]))["keyboards"]}
     if after != before:
         raise RuntimeError("owned key-output producer did not retire")
+    if {device["address"] for device in json.loads(command(["-j", "devices"]))["mice"]} != pointers_before:
+        raise RuntimeError("owned pointer producer did not retire")
     result = json.loads((output / "key-output-runtime-result.json").read_text())
     wanted = dict(status="passed", phases=15, source="two_owned_wayland_virtual_keyboards", production_route_tested=False,
                   kernel_input_tested=False, unmodified_stock_acceptance=False, test_backpressure=True)
     if args.key_worker:
-        wanted.update(phases=39, source="twelve_owned_wayland_virtual_keyboards", scoped_worker_tested=True, authority_modeled=True,
+        wanted.update(phases=42, source="fourteen_owned_wayland_virtual_keyboards_and_one_pointer", scoped_worker_tested=True, authority_modeled=True,
                       transport_readiness_modeled=True, selective_consumption_tested=True,
                       selective_consumption_scope="owned_protocol_native_keys", physical_takeover_tested=False,
                       selective_projection_tested=True, within_frame_order_tested=True, cross_source_order_tested=True,
@@ -758,6 +840,8 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
                       root_custom_key_arbitration_rendering_tested=True,
                       event_local_custom_activation_rendering_tested=True,
                       composed_custom_key_arbitration_rendering_tested=True,
+                      hybrid_key_relative_rendering_tested=True, hybrid_key_fallback_cadence_tested=True,
+                      native_hybrid_topology_tested=False, hybrid_mt_rendering_tested=False,
                       mixed_delayed_gesture_arbitration_tested=False)
         journal = json.loads((output / "pending-journal-receipt.json").read_text())
         if (journal.get("status") != "passed" or journal.get("consumed_reports_written") != 0
@@ -782,6 +866,9 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
             suffix = "native-prefix" if composition == "native_prefix" else "native-suffix"
             receipt = validate_custom_key_arbitration(phases, rows(), json.loads((output / f"custom-key-{suffix}-runtime.json").read_text()), composition=composition)
             (output / f"custom-key-{suffix}-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
+        trace = lambda device: [json.loads(line) for line in (output / f"key-output-{device}.jsonl").read_text().splitlines()]
+        hybrid = validate_hybrid_keys(phases, rows(), json.loads((output / "hybrid-key-runtime.json").read_text()), trace(962), trace(963))
+        (output / "hybrid-key-receipt.json").write_text(json.dumps(hybrid, indent=2) + "\n")
     else:
         wanted.update(software_owner_tested=True, software_authorization_tested=False, software_repeat_rendering_tested=False)
     if json.dumps(result, sort_keys=True) != json.dumps(wanted, sort_keys=True):
@@ -791,7 +878,7 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
     name = "key-worker" if args.key_worker else "key-output"
     (output / f"{name}-result.json").write_text(json.dumps(result, indent=2) + "\n")
     if args.key_worker:
-        print("PASS: native key arbitration and actual Luna root/composed key-only custom replies preserved event-local activation, original sequence boundaries, unrelated typing, deferred action order and fallback cadence; thirty-nine rendered protocol-sink phases. Authority/readiness modeled; non-key/mixed/hybrid arbitration, native takeover, software authorization and repeat rendering are not tested.")
+        print("PASS: native/custom key arbitration plus coherent hybrid relative reports and fallback cadence; forty-two rendered protocol-sink phases. Authority/readiness modeled; native hybrid topology, MT rendering, general non-key/mixed arbitration, physical takeover and software authorization remain untested.")
     else:
         print("PASS: actual key-output driver preserved overlapping owners, software producer isolation, exact cancellation and context reentry; fifteen rendered app phases. Software authorization and repeat rendering are not tested.")
     return result

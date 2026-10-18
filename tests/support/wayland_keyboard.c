@@ -12,10 +12,12 @@
 #include <wayland-client.h>
 #include <xkbcommon/xkbcommon.h>
 #include "virtual-keyboard-client-protocol.h"
+#include "virtual-pointer-client-protocol.h"
 
 struct client {
     struct wl_seat *seat;
     struct zwp_virtual_keyboard_manager_v1 *manager;
+    struct zwlr_virtual_pointer_manager_v1 *pointers;
 };
 static void global(void *data, struct wl_registry *registry, uint32_t name,
                    const char *interface, uint32_t version) {
@@ -26,6 +28,9 @@ static void global(void *data, struct wl_registry *registry, uint32_t name,
     else if (!strcmp(interface, "zwp_virtual_keyboard_manager_v1"))
         client->manager = wl_registry_bind(registry, name,
             &zwp_virtual_keyboard_manager_v1_interface, 1);
+    else if (!strcmp(interface, "zwlr_virtual_pointer_manager_v1"))
+        client->pointers = wl_registry_bind(registry, name,
+            &zwlr_virtual_pointer_manager_v1_interface, 1);
 }
 static void removed(void *data, struct wl_registry *registry, uint32_t name) {
     (void)data; (void)registry; (void)name;
@@ -34,17 +39,20 @@ static const struct wl_registry_listener registry_listener = {
     .global = global, .global_remove = removed,
 };
 int main(int argc, char **argv) {
-    if ((argc != 2 && argc != 3 && argc != 4) || argv[1][0] != '/' ||
-        (argc == 4 && strcmp(argv[3], "--persistent"))) {
+    if ((argc < 2 || argc > 5) || argv[1][0] != '/' ||
+        (argc >= 4 && strcmp(argv[3], "--persistent")) ||
+        (argc == 5 && strcmp(argv[4], "--hybrid"))) {
         fprintf(stderr, "supply the absolute owned Cage socket path\n");
         return 2;
     }
     struct wl_display *display = wl_display_connect(argv[1]);
     if (!display) { perror("Cage socket"); return 1; }
     struct client client = {0};
+    bool hybrid = argc == 5;
     struct wl_registry *registry = wl_display_get_registry(display);
     wl_registry_add_listener(registry, &registry_listener, &client);
-    if (wl_display_roundtrip(display) < 0 || !client.seat || !client.manager) {
+    if (wl_display_roundtrip(display) < 0 || !client.seat || !client.manager ||
+        (hybrid && !client.pointers)) {
         fprintf(stderr, "Cage seat/virtual keyboard unavailable\n"); return 1;
     }
     struct xkb_context *context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
@@ -71,22 +79,54 @@ int main(int argc, char **argv) {
     close(fd);
     if (wl_display_roundtrip(display) < 0) return 1;
     unsigned timestamp = 0;
+    struct zwlr_virtual_pointer_v1 *pointer = hybrid ?
+        zwlr_virtual_pointer_manager_v1_create_virtual_pointer(client.pointers, client.seat) : NULL;
     struct xkb_state *state = xkb_state_new(keymap);
     bool pressed[768] = {false};
     if (!state) return 1;
     puts("ready"); fflush(stdout);
     for (;;) {
-    if (getchar() != '\n') {
-        if (argc == 4 && feof(stdin)) break;
+    int start = getchar();
+    if (pointer && start == 'c' && getchar() == '\n') {
+        for (unsigned x = 400; x <= 500; x += 100) {
+            zwlr_virtual_pointer_v1_motion_absolute(pointer, ++timestamp, x, 500, 1000, 1000);
+            zwlr_virtual_pointer_v1_frame(pointer);
+            if (wl_display_roundtrip(display) < 0) return 1;
+        }
+        puts("done"); fflush(stdout);
+        continue;
+    }
+    if (start != '\n') {
+        if (argc >= 4 && feof(stdin)) break;
         fprintf(stderr, "keyboard test requires a start acknowledgement\n"); return 1;
     }
     if (argc >= 3) {
         FILE *input = fopen(argv[2], "r");
         if (!input) { perror("routed keys"); return 1; }
-        unsigned code, value, count = 0;
+        unsigned kind = 1, code, count = 0;
+        int value;
+        int64_t dx = 0, dy = 0;
+        bool report = false, motion = false;
         int fields;
-        while ((fields = fscanf(input, "%u %u", &code, &value)) == 2) {
-            if (code >= 768 || value > 1 || ++count > 64) {
+        while ((fields = hybrid ? fscanf(input, "%u %u %d", &kind, &code, &value) :
+                fscanf(input, "%u %d", &code, &value)) == (hybrid ? 3 : 2)) {
+            if (++count > 64 || report) return 1;
+            if (hybrid && kind == 2 && code <= 1) {
+                if (value < -32767 || value > 32767) return 1;
+                if (code == 0) dx += value; else dy += value;
+                motion = true;
+                continue;
+            }
+            if (hybrid && kind == 0 && code == 0 && value == 0) {
+                report = true;
+                if (motion) {
+                    zwlr_virtual_pointer_v1_motion(pointer, ++timestamp,
+                        wl_fixed_from_double((double)dx), wl_fixed_from_double((double)dy));
+                    zwlr_virtual_pointer_v1_frame(pointer);
+                }
+                continue;
+            }
+            if (kind != 1 || code >= 768 || value < 0 || value > 1) {
                 fprintf(stderr, "invalid routed key\n"); return 1;
             }
             zwp_virtual_keyboard_v1_key(keyboard, ++timestamp, code, value);
@@ -101,7 +141,7 @@ int main(int argc, char **argv) {
                 xkb_state_serialize_mods(state, XKB_STATE_MODS_LOCKED),
                 xkb_state_serialize_layout(state, XKB_STATE_LAYOUT_EFFECTIVE));
         }
-        if (fields != EOF || ferror(input)) return 1;
+        if (fields != EOF || ferror(input) || (hybrid && !report)) return 1;
         fclose(input);
     } else {
     zwp_virtual_keyboard_v1_key(keyboard, 1, 48, WL_KEYBOARD_KEY_STATE_PRESSED);
@@ -117,8 +157,9 @@ int main(int argc, char **argv) {
     }
     if (wl_display_roundtrip(display) < 0) return 1;
     puts("done"); fflush(stdout);
-    if (argc != 4) break;
+    if (argc < 4) break;
     }
+    if (pointer) zwlr_virtual_pointer_v1_destroy(pointer);
     zwp_virtual_keyboard_v1_destroy(keyboard);
     int result = wl_display_roundtrip(display);
     wl_display_disconnect(display);

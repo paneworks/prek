@@ -422,7 +422,7 @@ impl Worker {
                 closed.retain(|source| source.device != state.device.source.device);
                 blocked.retain(|source| source.device != state.device.source.device);
                 wakes.retain(|source, _| source.device != state.device.source.device);
-                if !state.keys.is_empty() || !state.contacts.is_empty() {
+                if custom::group_active(&self.rule, state) {
                     blocked.insert(state.device.source.clone());
                 }
             }

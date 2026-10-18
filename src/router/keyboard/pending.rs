@@ -44,6 +44,59 @@ struct Input {
     positions: Vec<Option<InputPosition>>,
     edges: BTreeSet<usize>,
     cuts: BTreeSet<usize>,
+    order: Option<Vec<usize>>,
+}
+impl Input {
+    fn index(&self) -> usize {
+        self.order
+            .as_ref()
+            .map_or(self.cursor, |order| order[self.cursor])
+    }
+    fn len(&self) -> usize {
+        self.order
+            .as_ref()
+            .map_or(self.frame.events.len(), Vec::len)
+    }
+    fn key_event(frame: &Frame, index: usize) -> bool {
+        let event = frame.events[index];
+        event.kind == EV_KEY && crate::input::independent_key(event.code)
+            || event.kind == EV_MSC
+                && event.code == MSC_SCAN
+                && frame.events.get(index + 1).is_some_and(|next| {
+                    next.kind == EV_KEY && crate::input::independent_key(next.code)
+                })
+    }
+    fn tail(&self, ready: Duration, reports: &mut Vec<ReadyReport>) {
+        let end = self.frame.events.len() - 1;
+        let events = self
+            .frame
+            .events
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index == end || !Self::key_event(&self.frame, *index))
+            .map(|(_, event)| *event)
+            .collect();
+        let position = InputPosition {
+            frame: self.watermark,
+            event: end,
+        };
+        reports.push(ReadyReport {
+            ready,
+            report: Report {
+                frame: Frame {
+                    source: self.frame.source.clone(),
+                    at: self.frame.at,
+                    sequence: self.frame.sequence,
+                    events,
+                },
+                span: InputSpan {
+                    sequence: self.frame.sequence,
+                    first: position,
+                    last: position,
+                },
+            },
+        });
+    }
 }
 #[derive(Default)]
 pub(in crate::router) struct Journal {
@@ -89,7 +142,7 @@ impl Journal {
     pub(in crate::router) fn first(&self) -> Option<InputPosition> {
         self.frames.front().map(|input| InputPosition {
             frame: input.watermark,
-            event: input.cursor,
+            event: input.index(),
         })
     }
     pub(in crate::router) fn prefix_delivered(&self, sequence: u64, inclusive: bool) -> bool {
@@ -112,12 +165,12 @@ impl Journal {
         };
         let first = InputPosition {
             frame: input.watermark,
-            event: input.cursor,
+            event: input.index(),
         };
         barrier.is_none_or(|barrier| first < barrier)
             && input
                 .positions
-                .get(input.cursor)
+                .get(input.index())
                 .and_then(|position| *position)
                 .and_then(|position| self.presses.get(&position))
                 .is_none_or(|press| {
@@ -152,6 +205,13 @@ impl Journal {
         if watermark == 0 || watermark <= self.watermark {
             return Err(Fault::BackwardTime);
         }
+        if frame
+            .events
+            .iter()
+            .any(|event| event.kind == EV_KEY && event.code > 0x2ff)
+        {
+            return Err(Fault::InvalidFrame);
+        }
         let mut waiting = BTreeMap::new();
         for entry in pending {
             if entry.deadline < frame.at
@@ -169,16 +229,18 @@ impl Journal {
             {
                 return Err(Fault::InvalidCandidate);
             }
+            if !crate::input::independent_key(frame.events[event].code) {
+                return Err(Fault::UnsupportedProjection);
+            }
         }
         let mut held = self.held.clone();
         let mut positions = vec![None; frame.events.len()];
         let mut edges = BTreeSet::new();
         let mut additions = Vec::new();
-        for (index, event) in frame
-            .events
-            .iter()
-            .enumerate()
-            .filter(|(_, event)| event.kind == EV_KEY)
+        for (index, event) in
+            frame.events.iter().enumerate().filter(|(_, event)| {
+                event.kind == EV_KEY && crate::input::independent_key(event.code)
+            })
         {
             if event.code > 0x2ff {
                 return Err(Fault::InvalidFrame);
@@ -250,10 +312,21 @@ impl Journal {
                     .is_some_and(|next| next.kind == EV_KEY)
             {
                 positions[index] = positions[index + 1];
-            } else if event.kind != EV_KEY && transformed {
+            } else if transformed && !matches!(event.kind, EV_KEY | EV_REL | EV_ABS | EV_SW) {
                 return Err(Fault::UnsupportedProjection);
             }
         }
+        let end = frame.events.len() - 1;
+        let order = frame.events[..end]
+            .iter()
+            .enumerate()
+            .any(|(index, _)| !Input::key_event(&frame, index))
+            .then(|| {
+                (0..end)
+                    .filter(|&index| Input::key_event(&frame, index))
+                    .chain([end])
+                    .collect()
+            });
         for (position, press) in additions {
             self.presses.insert(position, press);
         }
@@ -272,6 +345,7 @@ impl Journal {
             positions,
             edges,
             cuts: cuts.clone(),
+            order,
         });
         Ok(())
     }
@@ -344,26 +418,26 @@ impl Journal {
             if barrier.is_some_and(|barrier| {
                 InputPosition {
                     frame: input.watermark,
-                    event: input.cursor,
+                    event: input.index(),
                 } >= barrier
             }) {
                 break;
             }
             let mut events = Vec::new();
             let mut first = None;
-            let mut last = input.cursor;
+            let mut last = input.index();
             let start = input.cursor;
             let mut changed = start != 0 || !input.cuts.is_empty();
-            while input.cursor + 1 < input.frame.events.len() {
+            while input.cursor + 1 < input.len() {
                 if barrier.is_some_and(|barrier| {
                     InputPosition {
                         frame: input.watermark,
-                        event: input.cursor,
+                        event: input.index(),
                     } >= barrier
                 }) {
                     break;
                 }
-                let index = input.cursor;
+                let index = input.index();
                 let choice = input.positions[index]
                     .and_then(|position| self.presses.get(&position))
                     .map(|press| press.choice);
@@ -448,7 +522,14 @@ impl Journal {
                 }
                 input.cursor += 1;
             }
-            let finished = input.cursor + 1 == input.frame.events.len();
+            let finished = input.cursor + 1 == input.len()
+                && (input.order.is_none()
+                    || barrier.is_none_or(|barrier| {
+                        InputPosition {
+                            frame: input.watermark,
+                            event: input.index(),
+                        } < barrier
+                    }));
             if finished && !changed && start == 0 {
                 reports.push(ReadyReport {
                     ready: self.clock.max(input.frame.at),
@@ -476,6 +557,9 @@ impl Journal {
                     self.clock,
                     &mut reports,
                 );
+                if finished && input.order.is_some() {
+                    input.tail(self.clock.max(input.frame.at), &mut reports);
+                }
             }
             if finished {
                 self.frames.pop_front();
@@ -564,14 +648,6 @@ impl Router {
                 .any(|event| event.kind == EV_SYN)
         {
             return self.fail(Fault::InvalidFrame);
-        }
-        if self
-            .device
-            .capabilities
-            .keys()
-            .any(|kind| matches!(*kind, EV_ABS | EV_REL | EV_SW))
-        {
-            return self.fail(Fault::UnsupportedProjection);
         }
         self.capacity(frame.events.len())?;
         let mut physical = self.physical.clone();

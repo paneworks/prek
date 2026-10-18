@@ -33,6 +33,9 @@ fn model(limits: Limits, hybrid: bool) -> Router {
         axes: BTreeMap::new(),
         virtual_device: false,
     };
+    prepared(limits, device)
+}
+fn prepared(limits: Limits, device: Device) -> Router {
     let descriptor = Descriptor::mirror(
         &device,
         KernelIdentity {

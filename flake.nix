@@ -60,6 +60,7 @@
         in {
           native-root-probe = nativeProbe;
           cage-test-receiver = import ./tests/wayland-receiver.nix { inherit pkgs; };
+          cage-test-keyboard = import ./tests/wayland-keyboard.nix { inherit pkgs; };
           cage-touch-test = import ./tests/cage-touch.nix { inherit pkgs; package = self.packages.${system}.default; };
           cage-test = import ./tests/cage-host.nix {
             inherit pkgs;

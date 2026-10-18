@@ -12,6 +12,14 @@ use std::collections::VecDeque;
 #[cfg(test)]
 mod tests;
 
+pub(super) fn group_active(rule: &Rule, state: &DeviceState) -> bool {
+    if key_only_custom(&rule.trigger) {
+        state.keys.iter().any(|code| crate::input::is_button(*code))
+    } else {
+        !state.keys.is_empty() || !state.contacts.is_empty()
+    }
+}
+
 pub(super) struct State {
     pub fence: Fence,
     pub gate: Gate,
@@ -165,9 +173,11 @@ fn frame_at(
     edge: Option<(usize, u16, KeyState)>,
     finish_report: bool,
 ) {
+    let active = group_active(&worker.rule, state);
+    let key_only = key_only_custom(&worker.rule.trigger);
     if !context.custom.ready || frame.raw.at < context.custom.ready_at {
         if let Recognizer::Custom { blocked, .. } = &mut worker.recognizer {
-            if !state.keys.is_empty() || !state.contacts.is_empty() {
+            if active {
                 blocked.insert(state.device.source.clone());
             } else {
                 blocked.remove(&state.device.source);
@@ -193,7 +203,7 @@ fn frame_at(
         unreachable!()
     };
     if blocked.contains(source) {
-        if state.keys.is_empty() && state.contacts.is_empty() {
+        if !active {
             blocked.remove(source);
         }
         return;
@@ -331,6 +341,10 @@ fn frame_at(
             context.events,
         );
         if let Some(candidate) = worker.candidates.get_mut(source) {
+            if key_only {
+                candidate.contacts.clear();
+                candidate.peak_contacts = 0;
+            }
             candidate.expires = at.checked_add(timeout);
             context.custom.live.insert(candidate.id);
             if let Recognizer::Custom { wakes, .. } = &mut worker.recognizer
@@ -339,7 +353,7 @@ fn frame_at(
                 wakes.insert(source.clone(), at.saturating_add(wake));
             }
         }
-    } else if let Some(candidate) = worker.candidates.get_mut(source) {
+    } else if !key_only && let Some(candidate) = worker.candidates.get_mut(source) {
         // Freeze scope against every joined contact before exposing the frame.
         if let Some(permit) = candidate.permit.as_mut() {
             for contact in frame
@@ -425,13 +439,13 @@ fn frame_at(
     }
     if finish_report
         && worker.rule.delivery != crate::config::Delivery::Observe
-        && state.keys.is_empty()
-        && state.contacts.is_empty()
+        && !active
         && let Recognizer::Custom { closed, .. } = &mut worker.recognizer
     {
         closed.insert(source.clone());
     }
-    if let Some(candidate) = worker.candidates.get_mut(source)
+    if !key_only
+        && let Some(candidate) = worker.candidates.get_mut(source)
         && state.contacts.len() > candidate.peak_contacts
     {
         candidate.peak_contacts = state.contacts.len();
@@ -824,8 +838,7 @@ impl Engine {
                 closed.retain(|source| worker.candidates.contains_key(source));
                 blocked.retain(|source| {
                     self.devices.get(&source.device).is_some_and(|state| {
-                        state.device.source == *source
-                            && (!state.keys.is_empty() || !state.contacts.is_empty())
+                        state.device.source == *source && group_active(&worker.rule, state)
                     })
                 });
                 wakes.retain(|source, _| worker.candidates.contains_key(source));

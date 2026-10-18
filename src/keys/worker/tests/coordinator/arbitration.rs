@@ -45,7 +45,7 @@ pub(super) fn routed(rules: Vec<Rule>) -> Routing {
     routing.actions_available(1, BTreeSet::from([Capability::SyntheticInput]), ms(0));
     routing
 }
-fn tick(routing: &mut Routing, at: u64) -> Vec<KeyWork> {
+pub(super) fn tick(routing: &mut Routing, at: u64) -> Vec<KeyWork> {
     routing.push(Record::Tick { at: ms(at) }).unwrap();
     routing
         .take_scoped_dispatches(ms(at))

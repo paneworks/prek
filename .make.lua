@@ -575,6 +575,12 @@ make.recipe{ name="test-key-worker-cage-dev",desc="current Cargo scheduler fixtu
              run=function(a)
                assert(type(a.runner)=="string" and a.runner:match("^/nix/store/[^/]+/bin/prek%-cage%-host%-test$"),
                       "supply the immutable --runner executable explicitly")
+               sh.mkdir("-p","target/hybrid-key-journal")
+               for _,tool in ipairs{"keyboard","receiver"} do
+                 assert(oslo.run{"nix","--option","eval-cache","false","--extra-experimental-features","nix-command flakes",
+                   "--max-jobs","1","--cores","2","build","--no-write-lock-file","--out-link",
+                   project_root().."/target/hybrid-key-journal/"..tool,".#cage-test-"..tool}.ok,"current protocol helper failed to build")
+               end
                local built=oslo.run{"bash","-c",[[set -euo pipefail
 cargo test --locked --features native-test-harness --test key_output_cage --no-run --message-format=json | jq -ers '
   [.[] | select(.reason=="compiler-artifact" and .executable!=null)] as $artifacts |
@@ -593,7 +599,10 @@ cargo test --locked --features native-test-harness --test key_output_cage --no-r
                assert(oslo.run{"sha256sum",helper}.ok,"could not identify scheduler helper")
                for _,provider in ipairs{"lua","hyprlang"} do
                  assert(oslo.run{a.runner,"--hardware-rendering","--key-output","--key-worker",
-                   "--key-output-fixture",fixture,"--prek-app",app,"--keyboard-quiesce-check",helper,"--hyprland-config",provider}.ok,"local debug scheduler fixture failed")
+                   "--key-output-fixture",fixture,"--prek-app",app,"--keyboard-quiesce-check",helper,
+                   "--keyboard",project_root().."/target/hybrid-key-journal/keyboard/bin/prek-wayland-keyboard",
+                   "--receiver",project_root().."/target/hybrid-key-journal/receiver/bin/prek-wayland-receiver",
+                   "--hyprland-config",provider}.ok,"local debug scheduler fixture failed")
                end
              end }
 

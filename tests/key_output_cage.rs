@@ -27,17 +27,25 @@ struct Keyboard {
     trace: fs::File,
     pending: Option<Frame>,
     blocked: bool,
+    hybrid: bool,
 }
 impl Keyboard {
     fn open(output: &Path, socket: &Path, device: u64) -> Self {
+        Self::open_kind(output, socket, device, false)
+    }
+    fn open_kind(output: &Path, socket: &Path, device: u64, hybrid: bool) -> Self {
         let path = output.join(format!("key-output-{device}.keys"));
         fs::write(&path, "").unwrap();
-        let child = Command::new(std::env::var_os("PREK_CAGE_KEYBOARD").unwrap())
-            .args([
-                socket.as_os_str(),
-                path.as_os_str(),
-                "--persistent".as_ref(),
-            ])
+        let mut command = Command::new(std::env::var_os("PREK_CAGE_KEYBOARD").unwrap());
+        command.args([
+            socket.as_os_str(),
+            path.as_os_str(),
+            "--persistent".as_ref(),
+        ]);
+        if hybrid {
+            command.arg("--hybrid");
+        }
+        let child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(fs::File::create(output.join(format!("key-output-{device}.log"))).unwrap())
@@ -50,6 +58,7 @@ impl Keyboard {
             trace: fs::File::create(output.join(format!("key-output-{device}.jsonl"))).unwrap(),
             pending: None,
             blocked: false,
+            hybrid,
         };
         keyboard.ack(b"ready\n").unwrap();
         keyboard
@@ -124,10 +133,9 @@ impl Sink for Keyboard {
     fn enqueue(&mut self, frame: &Frame) -> io::Result<()> {
         assert!(self.pending.is_none());
         assert_eq!(frame.source, self.source);
-        assert!(
-            frame.events.iter().all(|event| event.kind == EV_SYN
-                || event.kind == EV_KEY && matches!(event.value, 0 | 1))
-        );
+        assert!(frame.events.iter().all(|event| event.kind == EV_SYN
+            || event.kind == EV_KEY && matches!(event.value, 0 | 1)
+            || self.hybrid && event.kind == prek::input::EV_REL && event.code <= 1));
         serde_json::to_writer(&mut self.trace, &json!({"event":"enqueue", "frame":frame}))?;
         writeln!(self.trace)?;
         self.pending = Some(frame.clone());
@@ -143,8 +151,14 @@ impl Sink for Keyboard {
         let keys = frame
             .events
             .iter()
-            .filter(|event| event.kind == EV_KEY)
-            .map(|event| format!("{} {}\n", event.code, event.value))
+            .filter(|event| self.hybrid || event.kind == EV_KEY)
+            .map(|event| {
+                if self.hybrid {
+                    format!("{} {} {}\n", event.kind, event.code, event.value)
+                } else {
+                    format!("{} {}\n", event.code, event.value)
+                }
+            })
             .collect::<String>();
         fs::write(&self.path, keys)?;
         self.child.stdin.as_mut().unwrap().write_all(b"\n")?;

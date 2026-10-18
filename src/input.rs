@@ -29,6 +29,10 @@ pub const REL_HWHEEL: u16 = 6;
 pub const REL_WHEEL_HI_RES: u16 = 11;
 pub const REL_HWHEEL_HI_RES: u16 = 12;
 
+pub(crate) fn independent_key(code: u16) -> bool {
+    code <= 0x2ff && is_button(code)
+}
+
 /// Identity assigned from stable discovery properties, with a fresh generation
 /// on every connection. Seat is part of the identity, not caller action context.
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]

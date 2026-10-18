@@ -236,13 +236,14 @@ into it. Returning from step advancement includes an already-active next candida
 and abandoning an unfinished step removes its observations from the projection.
 The existing private cancellation and held-contact continuation rules still apply.
 
-Pure-key native key/tap/hold/chord/key-only-sequence rules and root key-only custom
-recognizers with typed key actions use exact participant arbitration. General
-custom, mixed and hybrid selective buffering, event-local custom/non-key admission
+Native key/tap/hold/chord/key-only-sequence rules and root key-only custom
+recognizers with typed key actions use exact participant arbitration on eligible
+pure-key and hybrid nodes. General
+custom and mixed selective buffering, event-local non-key admission
 and native kernel acceptance remain required.
 This does not create public grants or production takeover authority.
 
-`Router::stage_key_frame` retains bounded original pure-key reports and enrolls
+`Router::stage_key_frame` retains bounded original reports and enrolls
 fresh downs with explicit authorization and decision deadlines. It does not advance
 time or expose output. `decide_key_presses` atomically settles exact original
 positions; ordinary presses cannot be reclaimed and consumed ownership cannot be
@@ -259,6 +260,17 @@ the maximum required epoch offset, not accumulated delays, and preserves origina
 inter-report cadence. Buffered and scheduled input share capacity limits. Recovery
 discards unwritten input and neutralizes only acknowledged output.
 
+On hybrid nodes, independent keyboard/button edges and their adjacent scan metadata
+retain their original offsets. Non-key fields and contact/tool flags form one
+indivisible report-tail atom committed at the original `SYN_REPORT` offset.
+Key cuts never split slot selection, tracking IDs, coordinates or contact flags
+into partial contact reports. Untouched and wholly deferred fallback reports keep
+their exact raw ordering and boundaries. Transformed reports preserve non-key
+payload order in the coherent tail, under the same barriers and cadence offsets.
+Contact/tool flags cannot be enrolled as independent key presses; ambiguous scan
+metadata still refuses projection. Transport classification restrictions remain.
+The physical counterpart is not split into separate virtual event nodes.
+
 Live native key arbitration uses this journal for immediate and delayed decisions.
 The direct `push_key_frame` ledger retains its original contract and cannot be
 mixed with journal staging. The old private immediate adapter remains a test
@@ -267,7 +279,7 @@ still supplies explicit modeled decisions; the separate native-key Cage phases
 use actual recognizer outcomes instead. Neither grants broker authorization.
 
 `Routing::with_key_projection` retains original positions across attached
-sources. Eligible pure-key sources with native key/tap/hold/chord/key-only-sequence
+sources. Eligible sources with native key/tap/hold/chord/key-only-sequence
 triggers and typed key actions arbitrate exact participants. Unrelated keys remain
 ordinary. Existing claims retain ownership; otherwise priority/rule ID determines
 overlapping candidates. Completed lower-priority outcomes wait under count/byte
@@ -326,7 +338,11 @@ remain protected, while new unowned input still competes by priority.
 
 Private pending-ticket and confirmed snapshots use charged shared press storage
 under the existing 64-ticket/candidate limits. Terminal/lifecycle cleanup retires
-them. `oslo make test-custom-key-arbitration` covers native competition, original
+them. Key-only custom physical groups track normalized keys, not unrelated held
+contacts or tool flags. Releasing their keys closes progress admission even while
+touch remains held; completion and helper restart do not require releasing that
+unrelated touch. Other custom input definitions retain their own group semantics.
+`oslo make test-custom-key-arbitration` covers native competition, original
 offer versus delivery time, event-local activation, atomic queue bounds,
 continuous cancellation, timer isolation and actual
 supervised Luna callbacks feeding the acknowledged device-free output actor.
@@ -423,12 +439,12 @@ boundaries. Output-sequence exhaustion cannot publish a prefix of a multi-report
 plan. The existing scheduler/write deadlines and fatal recovery rules remain.
 Legacy and selective modes cannot be mixed within one router incarnation.
 
-Transformed reports containing nonkeyboard data or ambiguous scan metadata
-currently fail with `UnsupportedProjection` and require recovery; untouched
-hybrid reports remain intact. Eligible native and root/composed key-only custom combinations
-use the journal; non-key/mixed/hybrid modes retain their existing whole-report paths while
-their complete selective semantics remain unfinished. Hybrid/ambiguous
-transformations, native consumer acknowledgement,
+The direct `push_key_frame` ledger still rejects transformed nonkeyboard reports
+and ambiguous scan metadata with `UnsupportedProjection`; untouched reports remain
+intact. Eligible native and root/composed key-only custom combinations use the
+journal's coherent hybrid tails instead. Non-key/mixed consumers retain existing
+whole-report paths while their complete selective semantics remain unfinished.
+General mixed transformations, native consumer acknowledgement,
 neutral reentry and the full original acceptance matrix remain required. The
 public synthetic capability stays closed.
 
@@ -443,11 +459,11 @@ sole-worker ABI writes on owned private regular files (no devices).
 cancellation, timeout and bounds regressions. `oslo make test-key-worker-cage`
 drives the actual scheduler through owned protocol keyboards and a rendered app
 with both Hyprland configuration dialects. Its authority/readiness fixtures are
-explicitly modeled. Thirty-nine phases include consumed immediate per-key
+explicitly modeled. Forty-two phases include consumed immediate per-key
 projection, ordinary typing, cross-source modifiers, tap-tail lifecycle,
 multiple same-report sequences, delayed tap/key completions, rejection of reversed
 steps and fresh reentry, plus explicitly decided journal fallback cadence, using
-twelve owned protocol keyboards. Six native arbitration phases additionally prove
+fourteen owned protocol keyboards and one owned pointer. Six native arbitration phases additionally prove
 selective buffered tap/hold/sequence consumption, deferred action order and unmatched fallback. The strict
 receiver checks every delivered edge, the absence of consumed control keys and
 the original unmatched down/up interval within existing scheduler slack. Earlier
@@ -460,15 +476,23 @@ two root phases are joined by native-to-custom and custom-to-native cases. Their
 receipts include the actual configured trigger, original reports, reply dispatch
 count and distinct reply/work admission clocks. The latter case forwards an early
 native-looking press normally and waits for a fresh post-reply press to complete.
-These
-are owned protocol-key paths, not mixed/hybrid arbitration, native takeover or
+Three hybrid phases establish a real pointer baseline, exercise a consumed key
+with ordinary same-report typing and a coherent relative-motion commit, then
+exercise unmatched whole-report fallback with original motion/key cadence.
+The validator compares original inputs, scheduled reports, decoded sink traces,
+actual app key/pointer/frame ordering and displacement. Pointer initialization
+waits for an actual app motion receipt. Both owned keyboard and pointer devices
+must retire. These decoded protocol interfaces do not prove the native single-node
+hybrid counterpart topology or MT rendering. These
+are owned protocol paths, not general mixed ownership, native takeover or
 physical/kernel selective consumption. Repeat interleaving has direct worker/file
 evidence; these rendered phases do not simulate kernel repeat.
 
 For fixture development, `test-key-worker-cage-dev --runner=/nix/store/.../bin/prek-cage-host-test`
 requires an explicitly supplied, already built immutable compositor runner. It
-builds and selects the current Cargo test and helper executables, prints their
-SHA-256 hashes and explicitly supplies both binaries. It runs both configuration dialects without rebuilding the release
+builds and selects the current Cargo test/helper and Nix protocol producer/receiver,
+prints the Cargo and validator SHA-256 hashes and explicitly supplies those paths.
+It runs both configuration dialects without rebuilding the release
 application. This is development-binary evidence, not packaged-release evidence.
 
 ## Private native worker binding
