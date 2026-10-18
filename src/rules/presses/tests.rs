@@ -1,5 +1,7 @@
 use super::*;
 
+mod admission;
+
 fn press(frame: u64, event: usize, code: u16) -> Press {
     Press {
         source: Source {

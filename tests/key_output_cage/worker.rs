@@ -2,7 +2,7 @@
 use super::*;
 use prek::keys::producer::{Operation as SoftwareOp, Request as SoftwareRequest};
 use prek::{
-    config::{Action, Config, Context, Delivery, Key, Rule, Scope, Selector, Trigger},
+    config::{Action, Config, Context, Delivery, Key, Millis, Rule, Scope, Selector, Trigger},
     context::{Binding, SessionKind, Snapshot, State},
     input::Device,
     keys::worker::{Remap, Seat, Submission},
@@ -113,6 +113,47 @@ impl RoutedKeyboard {
         ];
         config.rules[0].delivery = Delivery::Buffer;
         config.rules[0].priority = 10;
+        config.timing.tap_gap = Millis(20);
+        for (id, trigger, throughout) in [
+            (
+                "conditional-hold",
+                Trigger::ButtonHold {
+                    key: Key(185),
+                    after: Millis(20),
+                    repeat: None,
+                },
+                false,
+            ),
+            (
+                "conditional-taps",
+                Trigger::ButtonTaps {
+                    key: Key(187),
+                    count: 1,
+                },
+                false,
+            ),
+            (
+                "conditional-chord",
+                Trigger::Chord {
+                    keys: vec![Key(188), Key(189)],
+                    ordered: false,
+                    timeout: Millis(100),
+                },
+                true,
+            ),
+        ] {
+            let mut conditional = rule(
+                id,
+                185,
+                Action::Keys {
+                    keys: vec![Key(30)],
+                },
+            );
+            conditional.trigger = trigger;
+            conditional.require_keys = vec![Key(190)];
+            conditional.keys_throughout = throughout;
+            config.rules.push(conditional);
+        }
         let fence = Fence {
             broker: Epoch([1, 2]),
             configuration: 1,
@@ -168,7 +209,7 @@ impl RoutedKeyboard {
             vendor: 1,
             product: 1,
             properties: vec![],
-            capabilities: BTreeMap::from([(EV_KEY, vec![30, 183, 184])]),
+            capabilities: BTreeMap::from([(EV_KEY, vec![30, 183, 184, 185, 187, 188, 189, 190])]),
             axes: BTreeMap::new(),
             virtual_device: false,
         };
@@ -292,6 +333,16 @@ impl RoutedKeyboard {
     }
     fn pump(&mut self) {
         let at = self.refresh();
+        self.routing.push(Record::Tick { at }).unwrap();
+        let works = self
+            .routing
+            .take_scoped_dispatches(at)
+            .into_iter()
+            .map(|dispatch| dispatch.into_key_work().ok().unwrap())
+            .collect();
+        self.generated
+            .admit(&self.routing, works, None, at)
+            .unwrap();
         let renew = self
             .software
             .iter()
@@ -371,6 +422,13 @@ impl RoutedKeyboard {
                 Instant::now() < until,
                 "scoped key scheduling did not settle"
             );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    fn advance(&mut self, delay: Duration) {
+        let until = Instant::now() + delay;
+        while Instant::now() < until {
+            self.pump();
             std::thread::sleep(Duration::from_millis(1));
         }
     }
@@ -591,6 +649,42 @@ fn local_cage_scoped_key_worker() {
     keyboard.feed_from(2, &[(30, 1), (30, 0)]);
     keyboard.drain();
     keyboard.capture(&output, 11, "bAAaAaAAAa", &[]);
+    keyboard.feed_from(2, &[(185, 1), (190, 1)]);
+    keyboard.advance(Duration::from_millis(60));
+    keyboard.feed_from(2, &[(185, 0), (190, 0)]);
+    keyboard.drain();
+    keyboard.capture(&output, 12, "bAAaAaAAAa", &[]);
+    keyboard.feed_from(2, &[(190, 1), (185, 1), (190, 0)]);
+    keyboard.advance(Duration::from_millis(60));
+    keyboard.feed_from(2, &[(185, 0)]);
+    keyboard.drain();
+    keyboard.capture(&output, 13, "bAAaAaAAAaa", &[]);
+    keyboard.feed_from(2, &[(190, 1), (187, 1), (187, 0), (190, 0)]);
+    keyboard.advance(Duration::from_millis(60));
+    keyboard.drain();
+    keyboard.capture(&output, 14, "bAAaAaAAAaaa", &[]);
+    keyboard.feed_from(
+        2,
+        &[
+            (190, 1),
+            (188, 1),
+            (190, 0),
+            (190, 1),
+            (189, 1),
+            (188, 0),
+            (189, 0),
+            (190, 0),
+        ],
+    );
+    keyboard.advance(Duration::from_millis(60));
+    keyboard.drain();
+    keyboard.capture(&output, 15, "bAAaAaAAAaaa", &[]);
+    keyboard.feed_from(
+        2,
+        &[(190, 1), (188, 1), (189, 1), (188, 0), (189, 0), (190, 0)],
+    );
+    keyboard.drain();
+    keyboard.capture(&output, 16, "bAAaAaAAAaaaa", &[]);
     keyboard.generated.retire(monotonic().unwrap()).unwrap();
     for _ in 0..8 {
         if keyboard.generated.drain(monotonic().unwrap()).unwrap() == Progress::Complete {
@@ -605,12 +699,13 @@ fn local_cage_scoped_key_worker() {
     assert!(generated.into_sink().is_ok());
     drop(keyboard.raw);
     drop(keyboard.other_raw);
-    phase(&output, 12, "bAAaAaAAAa", &[]);
-    fs::write(output.join("key-output-runtime-result.json"),serde_json::to_vec(&json!({"status":"passed","phases":13,
+    phase(&output, 17, "bAAaAaAAAaaaa", &[]);
+    fs::write(output.join("key-output-runtime-result.json"),serde_json::to_vec(&json!({"status":"passed","phases":18,
         "source":"three_owned_wayland_virtual_keyboards","production_route_tested":false,"kernel_input_tested":false,
         "unmodified_stock_acceptance":false,"test_backpressure":true,"scoped_worker_tested":true,
         "authority_modeled":true,"transport_readiness_modeled":true,"selective_consumption_tested":false,
         "selective_projection_tested":true,"within_frame_order_tested":true,"cross_source_order_tested":true,
         "software_actor_tested":true,"software_lease_tested":true,"software_private_control_tested":false,
-        "software_authorization_tested":false,"software_repeat_rendering_tested":false})).unwrap()).unwrap();
+        "software_authorization_tested":false,"software_repeat_rendering_tested":false,
+        "timed_condition_rendering_tested":true,"chord_condition_rendering_tested":true})).unwrap()).unwrap();
 }

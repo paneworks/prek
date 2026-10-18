@@ -1328,7 +1328,7 @@ impl Engine {
         self.key_edges(&frame, &positioned_keys, allowed)?;
         let state = &self.devices[&source.device];
         for worker in &mut self.workers {
-            if matches!(worker.rule.trigger, Trigger::Key { .. }) {
+            if edges::is_key_trigger(&worker.rule.trigger) {
                 continue;
             }
             let finish = match worker.rule.trigger {
@@ -1357,10 +1357,13 @@ impl Engine {
             let state = &self.devices[&source.device];
             if worker.trace {
                 if match &worker.rule.trigger {
-                    Trigger::ButtonTaps { key, .. } => frame.changes.iter().any(|change| matches!(change, Change::Key { code, state:KeyState::Release } if *code == key.0)),
-                    Trigger::TouchTaps { .. } => frame.contacts.is_empty() && !frame.contacts_ended.is_empty(),
+                    Trigger::TouchTaps { .. } => {
+                        frame.contacts.is_empty() && !frame.contacts_ended.is_empty()
+                    }
                     _ => false,
-                } { worker.released.insert(source.clone(), at); }
+                } {
+                    worker.released.insert(source.clone(), at);
+                }
                 if !matches!(worker.rule.trigger, Trigger::Custom { .. })
                     && let Some(candidate) = worker.candidates.get_mut(source)
                     && !frame.contacts.is_empty()
@@ -1409,238 +1412,10 @@ impl Engine {
                         &mut self.events,
                     )?;
                 }
-                Trigger::Key { .. } => unreachable!(),
-                Trigger::ButtonTaps { key, .. } | Trigger::ButtonHold { key, .. } => {
-                    let key = key.0;
-                    for &(event, code, key_state) in &positioned_keys {
-                        if code == key && key_state != KeyState::Repeat {
-                            if key_state == KeyState::Press
-                                && !worker.candidates.contains_key(source)
-                            {
-                                start_candidate(
-                                    worker,
-                                    state,
-                                    &self.authority,
-                                    &self.conditions,
-                                    (at, &[]),
-                                    &mut self.next_id,
-                                    &mut self.events,
-                                );
-                            }
-                            if key_state == KeyState::Press
-                                && let Some(candidate) = worker.candidates.get_mut(source)
-                            {
-                                candidate
-                                    .source_inputs
-                                    .insert(source.clone(), state.input_watermark);
-                            }
-                            if let Some(candidate) = worker.candidates.get_mut(source) {
-                                if key_state == KeyState::Release
-                                    && let Recognizer::Taps(buttons) = &worker.recognizer
-                                    && buttons.is_tap_release(
-                                        Button {
-                                            device: source.device,
-                                            code,
-                                        },
-                                        at,
-                                    )
-                                {
-                                    candidate.key_tap_end = Some(InputPosition {
-                                        frame: self.input_watermark,
-                                        event,
-                                    });
-                                }
-                                candidate.key_edge(
-                                    InputPosition {
-                                        frame: self.input_watermark,
-                                        event,
-                                    },
-                                    key_state,
-                                );
-                            }
-                            if key_state == KeyState::Press
-                                && !presses::record(
-                                    worker,
-                                    source,
-                                    presses::Press {
-                                        source: source.clone(),
-                                        code,
-                                        position: InputPosition {
-                                            frame: self.input_watermark,
-                                            event,
-                                        },
-                                    },
-                                    at,
-                                    &mut self.events,
-                                )
-                            {
-                                continue;
-                            }
-                            let signals = match &mut worker.recognizer {
-                                Recognizer::Taps(buttons)
-                                    if worker.candidates.contains_key(source) =>
-                                {
-                                    buttons
-                                        .update(
-                                            Button {
-                                                device: source.device,
-                                                code,
-                                            },
-                                            key_state == KeyState::Press,
-                                            at,
-                                        )
-                                        .into_iter()
-                                        .map(Signal::Button)
-                                        .collect()
-                                }
-                                Recognizer::Taps(_) => Vec::new(),
-                                Recognizer::Keys(keys)
-                                    if worker.candidates.contains_key(source) =>
-                                {
-                                    keys.update(source, code, key_state, at)
-                                        .map_err(invalid)?
-                                        .into_iter()
-                                        .map(Signal::Key)
-                                        .collect()
-                                }
-                                Recognizer::Keys(keys) => {
-                                    keys.reconcile(source, state.keys.iter().copied())
-                                        .map_err(invalid)?;
-                                    Vec::new()
-                                }
-                                _ => unreachable!(),
-                            };
-                            report_signals(
-                                worker,
-                                signals,
-                                self.generation,
-                                at,
-                                InputPosition::after_frame(self.input_watermark),
-                                &mut self.events,
-                            );
-                            if key_state == KeyState::Release {
-                                if matches!(worker.rule.trigger, Trigger::ButtonTaps { .. }) {
-                                    if let Some(candidate) = worker.candidates.get_mut(source) {
-                                        candidate.expires =
-                                            Some(at.saturating_add(
-                                                self.config.timing.tap_gap.duration(),
-                                            ));
-                                    }
-                                } else {
-                                    worker.candidates.remove(source);
-                                }
-                            } else if let Some(candidate) = worker.candidates.get_mut(source) {
-                                candidate.expires = None;
-                            }
-                        }
-                    }
-                }
-                Trigger::Chord {
-                    keys: chord_keys,
-                    timeout,
-                    ..
-                } => {
-                    let timeout = timeout.duration();
-                    let chord_keys: Vec<_> = chord_keys.iter().map(|key| key.0).collect();
-                    for &(event, code, key_state) in &positioned_keys {
-                        if chord_keys.contains(&code) {
-                            if key_state == KeyState::Press
-                                && !worker.candidates.keys().any(|key| key.seat == source.seat)
-                            {
-                                start_candidate(
-                                    worker,
-                                    state,
-                                    &self.authority,
-                                    &self.conditions,
-                                    (at, &[]),
-                                    &mut self.next_id,
-                                    &mut self.events,
-                                );
-                                if let Some(c) = worker.candidates.get_mut(source) {
-                                    c.expires = Some(at.saturating_add(timeout));
-                                }
-                            }
-                            for candidate in worker
-                                .candidates
-                                .values_mut()
-                                .filter(|candidate| candidate.source.seat == source.seat)
-                            {
-                                candidate.key_edge(
-                                    InputPosition {
-                                        frame: self.input_watermark,
-                                        event,
-                                    },
-                                    key_state,
-                                );
-                            }
-                            if key_state == KeyState::Press {
-                                for candidate in worker
-                                    .candidates
-                                    .values_mut()
-                                    .filter(|candidate| candidate.source.seat == source.seat)
-                                {
-                                    candidate.sources.insert(source.clone());
-                                    candidate
-                                        .source_inputs
-                                        .insert(source.clone(), state.input_watermark);
-                                }
-                                let owners: Vec<_> = worker
-                                    .candidates
-                                    .keys()
-                                    .filter(|owner| owner.seat == source.seat)
-                                    .cloned()
-                                    .collect();
-                                for owner in owners {
-                                    presses::record(
-                                        worker,
-                                        &owner,
-                                        presses::Press {
-                                            source: source.clone(),
-                                            code,
-                                            position: InputPosition {
-                                                frame: self.input_watermark,
-                                                event,
-                                            },
-                                        },
-                                        at,
-                                        &mut self.events,
-                                    );
-                                }
-                            }
-                            let Recognizer::Keys(keys) = &mut worker.recognizer else {
-                                unreachable!()
-                            };
-                            if !worker.candidates.keys().any(|key| key.seat == source.seat) {
-                                keys.reconcile(source, state.keys.iter().copied())
-                                    .map_err(invalid)?;
-                                continue;
-                            }
-                            let signals = keys
-                                .update(source, code, key_state, at)
-                                .map_err(invalid)?
-                                .into_iter()
-                                .map(Signal::Key)
-                                .collect();
-                            report_signals(
-                                worker,
-                                signals,
-                                self.generation,
-                                at,
-                                InputPosition::after_frame(self.input_watermark),
-                                &mut self.events,
-                            );
-                            let Recognizer::Keys(keys) = &worker.recognizer else {
-                                unreachable!()
-                            };
-                            if chord_keys
-                                .iter()
-                                .all(|code| !keys.down(&source.seat, *code))
-                            {
-                                worker.candidates.retain(|key, _| key.seat != source.seat);
-                            }
-                        }
-                    }
-                }
+                Trigger::Key { .. }
+                | Trigger::ButtonTaps { .. }
+                | Trigger::ButtonHold { .. }
+                | Trigger::Chord { .. } => unreachable!(),
                 Trigger::Wheel {
                     horizontal,
                     minimum,
@@ -1902,6 +1677,7 @@ struct SequenceGroup {
 }
 struct PendingSequence {
     key_presses: presses::Set,
+    step_candidates: BTreeMap<Source, u64>,
     id: u64,
     ordinal: u64,
     first: Candidate,
@@ -1945,6 +1721,7 @@ impl PendingSequence {
     }
 }
 struct Sequence {
+    condition_loss: Option<(String, InputPosition)>,
     rule: Rule,
     steps: Vec<Engine>,
     triggers: Vec<Trigger>,
@@ -2026,6 +1803,7 @@ impl Sequence {
             steps.push(engine);
         }
         Ok(Self {
+            condition_loss: None,
             rule,
             steps,
             triggers,
@@ -2135,6 +1913,7 @@ impl Sequence {
             seat,
             PendingSequence {
                 key_presses: candidate.key_presses.clone(),
+                step_candidates: BTreeMap::new(),
                 id: *next_id,
                 ordinal: 0,
                 finished: candidate.started,
@@ -2208,6 +1987,34 @@ impl Sequence {
         events: &mut Vec<Event>,
         coordinator: &mut Option<custom::State>,
     ) -> io::Result<()> {
+        let loss = self.condition_loss.take();
+        let usable = |candidate: &Candidate| {
+            loss.as_ref().is_none_or(|(seat, position)| {
+                candidate.source.seat != *seat
+                    || candidate.key_start.is_some_and(|start| start > *position)
+                    || candidate.started_input > position.frame
+            })
+        };
+        if loss.is_some() {
+            for engine in &mut self.steps {
+                let worker = &mut engine.workers[0];
+                let stale: Vec<_> = worker
+                    .candidates
+                    .iter()
+                    .filter(|(_, candidate)| !usable(candidate))
+                    .map(|(source, _)| source.clone())
+                    .collect();
+                for source in stale {
+                    cancel_candidate(
+                        worker,
+                        &source,
+                        context.at,
+                        "activation condition released",
+                        &mut engine.events,
+                    );
+                }
+            }
+        }
         let mut traces = Vec::new();
         let mut cancelled = Vec::new();
         let mut skipped = Vec::new();
@@ -2218,9 +2025,9 @@ impl Sequence {
             }
             for event in engine.take_events() {
                 match event {
-                    Event::Cancelled { source, reason, .. } => {
-                        cancelled.push((index, source, reason))
-                    }
+                    Event::Cancelled {
+                        source, id, reason, ..
+                    } => cancelled.push((index, source, id, reason)),
                     Event::Skipped { ref source, .. }
                         if index == 0 && !self.pending.contains_key(&source.seat) =>
                     {
@@ -2230,9 +2037,29 @@ impl Sequence {
                 }
             }
         }
+        let mut reset = BTreeSet::new();
+        let recognized: BTreeSet<_> = traces
+            .iter()
+            .map(|(index, trace)| (*index, &trace.candidate.source, trace.candidate.id))
+            .collect();
+        for (index, source, id, reason) in &cancelled {
+            if !recognized.contains(&(*index, source, *id))
+                && self.pending.get(&source.seat).is_some_and(|pending| {
+                    pending.step == *index && pending.step_candidates.get(source) == Some(id)
+                })
+            {
+                self.cancel(&source.seat, context.at, reason, events);
+                reset.insert(source.seat.clone());
+            }
+        }
+        drop(recognized);
+        traces.retain(|(_, trace)| {
+            !reset.contains(&trace.candidate.source.seat) && usable(&trace.candidate)
+        });
         let starters: Vec<_> = self.steps[0].workers[0]
             .candidates
             .values()
+            .filter(|candidate| !reset.contains(&candidate.source.seat) && usable(candidate))
             .cloned()
             .collect();
         for candidate in starters {
@@ -2251,6 +2078,7 @@ impl Sequence {
                 .values()
                 .find(|candidate| {
                     candidate.source.seat == *seat
+                        && usable(candidate)
                         && pending.admits_input(candidate)
                         && (pending.step == 0
                             || candidate.started >= pending.finished
@@ -2271,6 +2099,9 @@ impl Sequence {
                     continue;
                 }
                 pending.sources.extend(candidate.sources.iter().cloned());
+                pending
+                    .step_candidates
+                    .insert(candidate.source.clone(), candidate.id);
                 if pending.key_presses.merge(&candidate.key_presses).is_err() {
                     invalid_presses.insert(seat.clone());
                     continue;
@@ -2330,7 +2161,6 @@ impl Sequence {
                 reason.map(|reason| (seat.clone(), reason))
             })
             .collect();
-        let mut reset = BTreeSet::new();
         for (seat, reason) in invalidated {
             self.cancel(&seat, context.at, &reason, events);
             reset.insert(seat);
@@ -2418,6 +2248,9 @@ impl Sequence {
                 continue;
             }
             pending.sources.extend(trace.candidate.sources.clone());
+            pending
+                .step_candidates
+                .insert(trace.candidate.source.clone(), trace.candidate.id);
             if pending
                 .key_presses
                 .merge(&trace.candidate.key_presses)
@@ -2513,6 +2346,7 @@ impl Sequence {
                     _ => None,
                 };
                 pending.step += 1;
+                pending.step_candidates.clear();
                 if matches!(self.triggers[pending.step], Trigger::Custom { .. })
                     || matches!(&self.triggers[index], Trigger::Custom { recognizer, .. }
                         if recognizer.inputs.contains(&crate::recognition::InputKind::Touch))
@@ -2533,12 +2367,10 @@ impl Sequence {
                 }
             }
         }
-        for (index, source, reason) in cancelled {
-            if self
-                .pending
-                .get(&source.seat)
-                .is_some_and(|pending| pending.step == index && pending.sources.contains(&source))
-            {
+        for (index, source, id, reason) in cancelled {
+            if self.pending.get(&source.seat).is_some_and(|pending| {
+                pending.step == index && pending.step_candidates.get(&source) == Some(&id)
+            }) {
                 self.cancel(&source.seat, context.at, &reason, events);
                 reset.insert(source.seat);
             }
@@ -2637,6 +2469,11 @@ impl Sequence {
             return Ok(Some(reason));
         }
         let pending = self.pending.get_mut(seat).unwrap();
+        if let Some(candidate) = worker.candidates.get(&state.device.source) {
+            pending
+                .step_candidates
+                .insert(candidate.source.clone(), candidate.id);
+        }
         for (index, _) in self
             .groups
             .iter()
@@ -2701,6 +2538,11 @@ impl Sequence {
             return Ok(Some(reason));
         }
         let pending = self.pending.get_mut(seat).unwrap();
+        if let Some(candidate) = worker.candidates.get(&state.device.source) {
+            pending
+                .step_candidates
+                .insert(candidate.source.clone(), candidate.id);
+        }
         for (index, _) in self
             .groups
             .iter()
@@ -2771,6 +2613,9 @@ impl Sequence {
             return Ok(Some("sequence target changed"));
         }
         let pending = self.pending.get_mut(&source.seat).unwrap();
+        pending
+            .step_candidates
+            .insert(candidate.source.clone(), candidate.id);
         for source in &candidate.sources {
             if !pending.sources.contains(source) {
                 pending.sources.insert(source.clone());
@@ -3301,7 +3146,9 @@ fn cancel_candidate(
     reason: &str,
     events: &mut Vec<Event>,
 ) {
+    let mut sources = BTreeSet::from([source.clone()]);
     if let Some(candidate) = worker.candidates.remove(source) {
+        sources.extend(candidate.sources);
         candidate
             .cancelled
             .store(true, std::sync::atomic::Ordering::Release);
@@ -3326,7 +3173,9 @@ fn cancel_candidate(
         }
         Recognizer::Taps(buttons) => buttons.cancel_device(source.device),
         Recognizer::Keys(keys) => {
-            keys.cancel_source(source);
+            for source in sources {
+                keys.cancel_source(&source);
+            }
         }
         Recognizer::Touch(touches) => {
             if let Some(touch) = touches.get_mut(&source.device) {

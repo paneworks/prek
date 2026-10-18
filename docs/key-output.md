@@ -132,15 +132,29 @@ through a healthy sink after a scheduling timeout, but the failed actor is not
 reusable. A failed sink retains its exact uncertain frame and cannot prove
 neutrality.
 
-Plain `Key` triggers evaluate activation conditions at each normalized key edge,
+Plain `Key`, timed button and chord triggers evaluate activation conditions at each normalized key edge,
 in original raw-event order. A later activation press cannot authorize an earlier
 trigger press in the same report. `KeyWork::position()` retains the original
 event offset under the coordinator's increasing input-frame watermark, including
 offsets occupied by metadata and ignored duplicate edges. Rule/configuration
 replacement preserves the watermark. Interleaved key matches are dequeued by
 position, not grouped by gesture ID. A sequence ending in a key inherits that
-final edge's position. This does not change other recognizers' frame-level
-condition evaluation or allow arbitrary sequence steps within one report.
+final edge's position. Begin-only conditions survive a later modifier release;
+throughout conditions revoke the active candidate at an actual release, even
+when a later event in the same report presses the modifier again. Momentary and
+toggled layers use that same ordered state. A revoked chord discards every
+participating source's pressed state, not only its owning source.
+
+Throughout sequence parents also revoke during idle gaps between steps. A
+completed prefix before condition loss cannot revive after reentry; a genuinely
+fresh prefix later in that report remains eligible. Child cancellation binds
+the exact admitted step candidate, including native/custom held-touch children,
+rather than a source that a replacement may reuse. Each step retains only the
+latest admitted child ID per source, not a history of short-lived candidates.
+Non-key admission remains
+frame-based; this does not allow arbitrary mixed steps within one report.
+`oslo make test-key-admission` checks these conditions together with custom-ticket
+and held-touch cancellation boundaries; the nonempty gate is included in verify.
 Non-key reports and asynchronous completions use the current after-frame
 boundary (`event == usize::MAX`); timers advanced before a new input report use
 the previous frame's boundary. A due timer cannot be sorted behind the new
@@ -177,7 +191,7 @@ A tap candidate can observe a following held down before its earlier taps settle
 completed participating presses still need to be separated from unfinished or
 invalid tails. Timed, chord, sequence, custom,
 mixed and hybrid selective buffering still need the bounded pending-key journal,
-event-local condition admission and native/rendered acceptance. This prerequisite
+non-key/mixed event-local admission and native/rendered acceptance. This prerequisite
 does not expand projectable triggers, public grants or production takeover.
 
 `Routing::with_key_projection` retains original positions across attached
@@ -454,7 +468,10 @@ and consumer fields are correlation data, not authenticated UI credentials.
 `oslo make test-software-worker` checks actor ordering/leases, exact slot scopes,
 strict packet schemas and actual private-channel/native-ABI writes on protected
 ordinary files, without kernel devices. The nondefault test harness also drives
-thirteen owned Cage actor phases, including lease expiry without new input.
+eighteen owned Cage actor phases, including lease expiry without new input,
+timed starts with correctly ordered begin-only modifiers, and throughout chord
+revocation/reentry. The five conditional-action phases use observational rules;
+they do not establish consuming timed/chord raw projection.
 Its authority/readiness remain modeled and it does not test private software IPC,
 public authorization or repeat rendering. Default application packages expose no
 fixture admission method.

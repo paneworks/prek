@@ -1,6 +1,18 @@
 use super::*;
 use crate::input::EV_KEY;
 
+mod timed;
+
+pub(super) fn is_key_trigger(trigger: &Trigger) -> bool {
+    matches!(
+        trigger,
+        Trigger::Key { .. }
+            | Trigger::ButtonTaps { .. }
+            | Trigger::ButtonHold { .. }
+            | Trigger::Chord { .. }
+    )
+}
+
 pub(super) fn positioned_keys(frame: &NormalizedFrame) -> io::Result<Vec<(usize, u16, KeyState)>> {
     let mut next = 0;
     let mut result = Vec::new();
@@ -52,12 +64,30 @@ impl Engine {
                 }
                 KeyState::Repeat => {}
             }
+            for sequence in &mut self.sequences {
+                if sequence.rule.keys_throughout
+                    && !conditions(&sequence.rule, &self.conditions, &source.seat)
+                {
+                    sequence.condition_loss = Some((
+                        source.seat.clone(),
+                        InputPosition {
+                            frame: self.input_watermark,
+                            event,
+                        },
+                    ));
+                    sequence.cancel(
+                        &source.seat,
+                        at,
+                        "activation condition released",
+                        &mut self.events,
+                    );
+                }
+            }
             for worker in &mut self.workers {
-                let Trigger::Key { key } = worker.rule.trigger else {
+                if !is_key_trigger(&worker.rule.trigger) {
                     continue;
-                };
-                let finish =
-                    (key.0 == code && key_state == KeyState::Release).then_some((source, code));
+                }
+                let finish = matches!(worker.rule.trigger, Trigger::Key { key } if key.0 == code && key_state == KeyState::Release).then_some((source, code));
                 validate_candidates_except(
                     worker,
                     &self.authority,
@@ -68,10 +98,32 @@ impl Engine {
                     finish,
                 );
                 let state = &self.devices[&source.device];
-                if key.0 != code
-                    || key_state == KeyState::Repeat
-                    || !selected(&self.config, &worker.rule, &state.device)
-                {
+                if !selected(&self.config, &worker.rule, &state.device) {
+                    continue;
+                }
+                let Trigger::Key { key } = worker.rule.trigger else {
+                    timed::process(
+                        worker,
+                        timed::Edge {
+                            state,
+                            authority: &self.authority,
+                            conditions: &self.conditions,
+                            config: &self.config,
+                            at,
+                            position: InputPosition {
+                                frame: self.input_watermark,
+                                event,
+                            },
+                            code,
+                            key_state,
+                            generation: self.generation,
+                            next_id: &mut self.next_id,
+                            events: &mut self.events,
+                        },
+                    )?;
+                    continue;
+                };
+                if key.0 != code || key_state == KeyState::Repeat {
                     continue;
                 }
                 if key_state == KeyState::Press && !worker.candidates.contains_key(source) {
