@@ -13,11 +13,12 @@ use std::collections::VecDeque;
 mod tests;
 
 pub(super) fn group_active(rule: &Rule, state: &DeviceState) -> bool {
-    if key_only_custom(&rule.trigger) {
-        state.keys.iter().any(|code| crate::input::is_button(*code))
-    } else {
-        !state.keys.is_empty() || !state.contacts.is_empty()
-    }
+    let Trigger::Custom { recognizer, .. } = &rule.trigger else {
+        return false;
+    };
+    recognizer.inputs.contains(&InputKind::Key)
+        && state.keys.iter().any(|code| crate::input::is_button(*code))
+        || recognizer.inputs.contains(&InputKind::Touch) && !state.contacts.is_empty()
 }
 
 pub(super) struct State {
@@ -174,7 +175,6 @@ fn frame_at(
     finish_report: bool,
 ) {
     let active = group_active(&worker.rule, state);
-    let key_only = key_only_custom(&worker.rule.trigger);
     if !context.custom.ready || frame.raw.at < context.custom.ready_at {
         if let Recognizer::Custom { blocked, .. } = &mut worker.recognizer {
             if active {
@@ -341,7 +341,7 @@ fn frame_at(
             context.events,
         );
         if let Some(candidate) = worker.candidates.get_mut(source) {
-            if key_only {
+            if !touch_inputs {
                 candidate.contacts.clear();
                 candidate.peak_contacts = 0;
             }
@@ -353,7 +353,7 @@ fn frame_at(
                 wakes.insert(source.clone(), at.saturating_add(wake));
             }
         }
-    } else if !key_only && let Some(candidate) = worker.candidates.get_mut(source) {
+    } else if touch_inputs && let Some(candidate) = worker.candidates.get_mut(source) {
         // Freeze scope against every joined contact before exposing the frame.
         if let Some(permit) = candidate.permit.as_mut() {
             for contact in frame
@@ -444,7 +444,7 @@ fn frame_at(
     {
         closed.insert(source.clone());
     }
-    if !key_only
+    if touch_inputs
         && let Some(candidate) = worker.candidates.get_mut(source)
         && state.contacts.len() > candidate.peak_contacts
     {

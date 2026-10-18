@@ -2,7 +2,10 @@
 use super::*;
 use prek::{
     config::Delivery,
-    input::{Device, EV_KEY, EV_SYN, Frame, RawEvent, SYN_REPORT, Source},
+    input::{
+        ABS_MT_POSITION_X, ABS_MT_POSITION_Y, ABS_MT_SLOT, ABS_MT_TRACKING_ID, Axis, Device,
+        EV_ABS, EV_KEY, EV_REL, EV_SYN, Frame, RawEvent, SYN_REPORT, Source,
+    },
     input_events::{DeviceInfo, ResetReason},
     protocol::Capability,
     recognition::{Metadata, Phase, Proposal, Retirement, Ticket},
@@ -254,15 +257,63 @@ fn projected_custom_keys_native_suffix_waits_for_a_fresh_post_reply_press() {
     harness.stop();
 }
 
+#[test]
+fn input_domains_real_helper_cannot_extend_an_exclusive_group_with_undeclared_held_input() {
+    for touch in [false, true] {
+        let (inputs, body) = if touch {
+            (
+                "'touch'",
+                "assert(#ticket.input.contacts==1 and #ticket.input.changes==0);return {phase='begin'}",
+            )
+        } else {
+            (
+                "'key','relative'",
+                "assert(#ticket.input.contacts==0 and #ticket.input.changes==2);return {phase='begin'}",
+            )
+        };
+        let mut harness = Harness::configured(body, true, "buffer", false, "", None, inputs);
+        let ticket = harness
+            .raw_report(&[
+                (EV_ABS, ABS_MT_SLOT, 0),
+                (EV_ABS, ABS_MT_TRACKING_ID, 7),
+                (EV_ABS, ABS_MT_POSITION_X, 100),
+                (EV_ABS, ABS_MT_POSITION_Y, 200),
+                (EV_KEY, 0x14a, 1),
+                (EV_KEY, 30, 1),
+                (EV_REL, 0, 4),
+            ])
+            .unwrap();
+        let proposal = harness.proposal(ticket);
+        if touch {
+            harness.raw_report(&[(EV_ABS, ABS_MT_TRACKING_ID, -1), (EV_KEY, 0x14a, 0)]);
+        } else {
+            harness.raw_report(&[(EV_KEY, 30, 0)]);
+        }
+        let error = harness
+            .routing
+            .recognition_response(proposal, monotonic().unwrap())
+            .unwrap_err();
+        assert!(error.to_string().contains("physical completion"), "{error}");
+        assert!(
+            harness
+                .routing
+                .take_dispatches(monotonic().unwrap())
+                .is_empty()
+        );
+        harness.cleanup(Retirement::Cancelled);
+        harness.stop();
+    }
+}
+
 impl Harness {
     fn new(body: &str, continuous: bool, delivery: &str) -> Self {
         Self::with_key_output(body, continuous, delivery, false)
     }
     fn with_key_output(body: &str, continuous: bool, delivery: &str, projected: bool) -> Self {
-        Self::configured(body, continuous, delivery, projected, "", None)
+        Self::configured(body, continuous, delivery, projected, "", None, "'key'")
     }
     fn with_conditions(body: &str, activation: &str) -> Self {
-        Self::configured(body, false, "buffer", true, activation, None)
+        Self::configured(body, false, "buffer", true, activation, None, "'key'")
     }
     fn with_sequence(order: SequenceOrder) -> Self {
         Self::configured(
@@ -272,6 +323,7 @@ impl Harness {
             true,
             "",
             Some(order),
+            "'key'",
         )
     }
     fn configured(
@@ -281,6 +333,7 @@ impl Harness {
         projected: bool,
         activation: &str,
         sequence: Option<SequenceOrder>,
+        inputs: &str,
     ) -> Self {
         let trigger = match sequence {
             None => "trigger",
@@ -302,7 +355,7 @@ impl Harness {
 local p=require('prek');local calls=0
 p.events.on('input',function()error('ordinary input reached custom-only helper')end)
 local trigger=p.recognizers.define('native_route',{{
- selectors={{'keyboard'}},inputs={{'key'}},reply_within='250ms',continuous={continuous},
+ selectors={{'keyboard'}},inputs={{{inputs}}},reply_within='250ms',continuous={continuous},
 }},function(ticket)
  if ticket.cause=='cancel' then
   assert(ticket.input==nil);p.log.info('cleanup',{{reason=ticket.reason}});return nil
@@ -347,6 +400,7 @@ return p.config.new{{mode='route',
         authorize_recognizer(&mut session);
         let at = monotonic().unwrap();
         let provided = context_view(at, 0).context.unwrap();
+        let mapped_output = (inputs != "'key'").then(|| provided.snapshot.outputs[0].clone());
         let mut routing = if projected {
             Routing::with_key_projection(config, fence(1))
         } else {
@@ -370,7 +424,7 @@ return p.config.new{{mode='route',
             },
             at,
         );
-        let device = Device {
+        let mut device = Device {
             source: Source {
                 device: u64::MAX,
                 generation: u64::MAX - 1,
@@ -398,6 +452,40 @@ return p.config.new{{mode='route',
             ]),
             virtual_device: false,
         };
+        if inputs != "'key'" {
+            device.properties = vec![1];
+            device.capabilities.get_mut(&EV_KEY).unwrap().push(0x14a);
+            device.capabilities.insert(EV_REL, vec![0]);
+            device.axes = [
+                (ABS_MT_SLOT, 1),
+                (ABS_MT_TRACKING_ID, 65535),
+                (ABS_MT_POSITION_X, 1000),
+                (ABS_MT_POSITION_Y, 1000),
+            ]
+            .into_iter()
+            .map(|(code, maximum)| {
+                (
+                    code,
+                    Axis {
+                        minimum: 0,
+                        maximum,
+                        resolution: 0,
+                        fuzz: 0,
+                        flat: 0,
+                    },
+                )
+            })
+            .collect();
+            device
+                .capabilities
+                .insert(EV_ABS, device.axes.keys().copied().collect());
+        }
+        let mapping = mapped_output.map(|output| {
+            let mut mapping = prek::gestures::Mapping::from_device(&device).unwrap();
+            mapping.output = Some(output.geometry);
+            mapping.generation = output.geometry_generation;
+            mapping
+        });
         let descriptor = Descriptor::mirror(
             &device,
             KernelIdentity {
@@ -430,7 +518,12 @@ return p.config.new{{mode='route',
             .unwrap();
         readiness.neutral(true, at).unwrap();
         routing
-            .attach(device.clone(), &readiness.finish(at).unwrap(), None, at)
+            .attach(
+                device.clone(),
+                &readiness.finish(at).unwrap(),
+                mapping.clone(),
+                at,
+            )
             .unwrap();
         session
             .recognizer_metadata(Metadata {
@@ -441,7 +534,7 @@ return p.config.new{{mode='route',
                 metadata: Some(Box::new(DeviceInfo {
                     device: device.clone(),
                     selectors: vec!["keyboard".into()],
-                    mapping: None,
+                    mapping,
                 })),
             })
             .unwrap();
@@ -457,6 +550,14 @@ return p.config.new{{mode='route',
         self.key_report(&[(30, value)])
     }
     fn key_report(&mut self, changes: &[(u16, i32)]) -> Option<Ticket> {
+        self.raw_report(
+            &changes
+                .iter()
+                .map(|&(code, value)| (EV_KEY, code, value))
+                .collect::<Vec<_>>(),
+        )
+    }
+    fn raw_report(&mut self, changes: &[(u16, u16, i32)]) -> Option<Ticket> {
         self.sequence += 1;
         self.routing
             .push(Record::Frame {
@@ -466,11 +567,7 @@ return p.config.new{{mode='route',
                     sequence: self.sequence,
                     events: changes
                         .iter()
-                        .map(|&(code, value)| RawEvent {
-                            kind: EV_KEY,
-                            code,
-                            value,
-                        })
+                        .map(|&(kind, code, value)| RawEvent { kind, code, value })
                         .chain([RawEvent {
                             kind: EV_SYN,
                             code: SYN_REPORT,

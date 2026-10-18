@@ -73,6 +73,14 @@
     ],
     "callback_instructions": 100000,
     "callback_ms": 20,
+    "candidate_state": {
+      "exclusive_progress": "begin/update after the declared held domains finish is rejected",
+      "helper_reentry": "already-held declared domains must become neutral before a new candidate",
+      "key_activity": "physical button keys only when key is declared; contact/tool flags are excluded",
+      "mixed_activity": "key and touch declarations remain active until both held families are neutral",
+      "other_families": "relative, wheel, absolute and switch values do not create held key/contact state",
+      "touch_activity": "contacts only when touch is declared; only these declarations retain contact identities, joining and peak counts"
+    },
     "capability": "custom_recognizers",
     "claims": false,
     "constructor": "recognizers.define",

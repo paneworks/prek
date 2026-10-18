@@ -2,6 +2,7 @@ use super::*;
 
 mod admission;
 mod custom;
+mod domains;
 mod participants;
 mod sequences;
 

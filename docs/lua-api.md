@@ -514,6 +514,16 @@ altering the returned declaration cannot widen its binding. Custom rules without
 their exact source callback fail compilation. Callback-bearing configurations
 require their original source; declarative export fails.
 
+Declared input families also bound candidate state. `key` tracks physical button
+keys, excluding contact/tool flags; `touch` tracks contacts. A recognizer without
+`touch` neither inherits contact identities/counts nor joins new contacts into its
+frozen scope. A `key`+`touch` candidate remains active until both declared held
+families are neutral. Relative, wheel, absolute and switch values are per-frame
+input, not additional held keys or contacts. Non-observing candidates reject
+`begin`/`update` after their declared held domains finish. Helper re-entry blocks
+already-held declared families, not unrelated input from the same device. These
+candidate boundaries do not replace the routing layer's separate ownership proof.
+
 An observation session opts in with `--lua --recognizers`; protected
 `policy.allow_input_events=true`, allowed devices and fresh owning desktop
 context are also required. Ordinary `--input` is independent. The callback gets

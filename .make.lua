@@ -495,6 +495,17 @@ make.recipe{ name="test-key-admission",desc="event-local timed conditions and ex
                end
              end }
 
+make.recipe{ name="test-input-domains",desc="declared custom input lifecycle and mixed key/contact evidence; no devices",
+             run=function()
+               for _,args in ipairs({{"cargo","test","--locked","--lib","rules::presses::tests::domains"},
+                                    {"cargo","test","--locked","--test","lua_session","input_domains_"}}) do
+                 args.capture=true
+                 local tested=oslo.run(args)
+                 io.stdout:write(tested.out or ""); io.stderr:write(tested.err or "")
+                 assert(tested.ok and (tested.out or ""):match("running [1-9]%d* tests?"),"input domain gate failed or selected no tests")
+               end
+             end }
+
 make.recipe{ name="test-key-participants",desc="exact participants, original-edge sequences and bounded deferred completions; no devices",
              run=function()
                for _,filter in ipairs({"rules::presses::tests","keys::tests","routing::tests::custom::chains","rules::tests::composition"}) do

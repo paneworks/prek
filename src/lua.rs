@@ -425,6 +425,14 @@ pub fn api() -> serde_json::Value {
         "runtime_api":"partial"});
     manifest["native_value_limits"] = native_value_limits;
     manifest["custom_recognizers"] = custom_recognizers;
+    manifest["custom_recognizers"]["candidate_state"] = serde_json::json!({
+        "key_activity":"physical button keys only when key is declared; contact/tool flags are excluded",
+        "touch_activity":"contacts only when touch is declared; only these declarations retain contact identities, joining and peak counts",
+        "mixed_activity":"key and touch declarations remain active until both held families are neutral",
+        "other_families":"relative, wheel, absolute and switch values do not create held key/contact state",
+        "exclusive_progress":"begin/update after the declared held domains finish is rejected",
+        "helper_reentry":"already-held declared domains must become neutral before a new candidate"
+    });
     manifest["morf_adapter"] = morf_adapter;
     manifest["service_inspection"] = serde_json::json!({
         "configuration":"acknowledged Rust model and canonical decimal-string rule revision; closures require original source",
