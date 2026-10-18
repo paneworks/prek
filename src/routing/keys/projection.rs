@@ -161,6 +161,10 @@ impl Routing {
                 }
             ) && event.value == 1
             {
+                if !outcome.intent.has_key_press(source, key.0, position) {
+                    self.recover(source);
+                    return Err(fault(crate::router::Fault::InvalidCandidate));
+                }
                 winners
                     .entry(position.event)
                     .or_insert_with(|| outcome.intent.clone());
@@ -208,5 +212,56 @@ impl Routing {
             );
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        config::Key,
+        input::{EV_SYN, RawEvent, SYN_REPORT},
+        keys::worker::tests::{ms, projected, rule, source},
+    };
+
+    #[test]
+    fn a_rewritten_trigger_and_frame_cannot_claim_a_different_original_press() {
+        let mut rule = rule("origin", Action::Remap { key: Key(42) });
+        rule.delivery = Delivery::Buffer;
+        let mut routing = projected(vec![rule]);
+        let source = source(1);
+        let mut frame = Frame {
+            source: source.clone(),
+            at: ms(10),
+            sequence: 1,
+            events: vec![
+                RawEvent {
+                    kind: EV_KEY,
+                    code: 30,
+                    value: 1,
+                },
+                RawEvent {
+                    kind: EV_SYN,
+                    code: SYN_REPORT,
+                    value: 0,
+                },
+            ],
+        };
+        routing
+            .engine
+            .push(Record::Frame {
+                frame: frame.clone(),
+            })
+            .unwrap();
+        let mut outcomes = routing.engine.take_route_outcomes();
+        assert_eq!(outcomes.len(), 1);
+        outcomes[0].intent.rule.trigger = Trigger::Key { key: Key(31) };
+        frame.events[0].code = 31;
+        assert!(
+            routing
+                .project_key_frame(&source, frame, &[], &outcomes, ms(10))
+                .is_err()
+        );
+        assert_eq!(routing.take_recoveries().len(), 1);
     }
 }

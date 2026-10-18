@@ -74,6 +74,12 @@ impl Buttons {
         })
     }
 
+    pub(crate) fn is_tap_release(&self, button: Button, at: Duration) -> bool {
+        self.pressed.get(&button).is_some_and(|press| {
+            !press.held && at.saturating_sub(press.started) <= self.timing.tap_max
+        })
+    }
+
     /// Process a press or release. Duplicate transitions are harmless.
     pub fn update(&mut self, button: Button, down: bool, at: Duration) -> Vec<Gesture> {
         let mut gestures = self.advance(at);

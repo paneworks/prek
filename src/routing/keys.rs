@@ -41,10 +41,13 @@ impl KeyWork {
             &self.dispatch.outcome.intent.rule.action,
             &self.dispatch.outcome.intent.rule.trigger,
         ) {
-            (Action::Remap { .. }, Trigger::Key { key }) => Some(SourceKey {
-                source: self.source().clone(),
-                code: key.0,
-            }),
+            (Action::Remap { .. }, Trigger::Key { key }) => {
+                let press = self.dispatch.outcome.intent.sole_key_press()?;
+                (press.source == *self.source() && press.code == key.0).then(|| SourceKey {
+                    source: press.source.clone(),
+                    code: press.code,
+                })
+            }
             _ => None,
         }
     }

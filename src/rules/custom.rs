@@ -291,6 +291,41 @@ pub(super) fn frame(
             }
         }
     }
+    if definition.inputs.contains(&InputKind::Key) && worker.routing {
+        let positions = match edges::positioned_keys(frame) {
+            Ok(positions) => positions,
+            Err(_) => {
+                cancel_candidate(
+                    worker,
+                    source,
+                    at,
+                    "custom key press position differs",
+                    context.events,
+                );
+                return;
+            }
+        };
+        for (event, code, edge) in positions {
+            if edge == KeyState::Press
+                && !presses::record(
+                    worker,
+                    source,
+                    presses::Press {
+                        source: source.clone(),
+                        code,
+                        position: InputPosition {
+                            frame: state.input_watermark,
+                            event,
+                        },
+                    },
+                    at,
+                    context.events,
+                )
+            {
+                return;
+            }
+        }
+    }
     if worker.rule.delivery != crate::config::Delivery::Observe
         && state.keys.is_empty()
         && state.contacts.is_empty()

@@ -1,7 +1,7 @@
 use super::*;
 use crate::input::EV_KEY;
 
-fn positioned_keys(frame: &NormalizedFrame) -> io::Result<Vec<(usize, u16, KeyState)>> {
+pub(super) fn positioned_keys(frame: &NormalizedFrame) -> io::Result<Vec<(usize, u16, KeyState)>> {
     let mut next = 0;
     let mut result = Vec::new();
     for change in &frame.changes {
@@ -25,10 +25,15 @@ fn positioned_keys(frame: &NormalizedFrame) -> io::Result<Vec<(usize, u16, KeySt
 }
 
 impl Engine {
-    pub(super) fn key_edges(&mut self, frame: &NormalizedFrame, allowed: bool) -> io::Result<()> {
+    pub(super) fn key_edges(
+        &mut self,
+        frame: &NormalizedFrame,
+        edges: &[(usize, u16, KeyState)],
+        allowed: bool,
+    ) -> io::Result<()> {
         let source = &frame.raw.source;
         let at = frame.raw.at;
-        for (event, code, key_state) in positioned_keys(frame)? {
+        for &(event, code, key_state) in edges {
             if allowed {
                 self.conditions
                     .update(source, code, key_state, at)
@@ -86,6 +91,33 @@ impl Engine {
                     candidate
                         .source_inputs
                         .insert(source.clone(), state.input_watermark);
+                }
+                if let Some(candidate) = worker.candidates.get_mut(source) {
+                    candidate.key_edge(
+                        InputPosition {
+                            frame: self.input_watermark,
+                            event,
+                        },
+                        key_state,
+                    );
+                }
+                if key_state == KeyState::Press
+                    && !presses::record(
+                        worker,
+                        source,
+                        presses::Press {
+                            source: source.clone(),
+                            code,
+                            position: InputPosition {
+                                frame: self.input_watermark,
+                                event,
+                            },
+                        },
+                        at,
+                        &mut self.events,
+                    )
+                {
+                    continue;
                 }
                 report_signals(
                     worker,

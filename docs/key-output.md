@@ -146,6 +146,40 @@ boundary (`event == usize::MAX`); timers advanced before a new input report use
 the previous frame's boundary. A due timer cannot be sorted behind the new
 report's first key merely because both have the same timestamp.
 
+### Original press evidence
+
+Native routing candidates retain immutable evidence for each actual normalized
+key down: source incarnation, key code and original input-frame/event position.
+Repeats, releases, ignored duplicate downs and keys held at registration do not
+create press identities. Timed buttons, chords and key-bearing custom candidates
+retain their observed downs; sequences union evidence across participating steps
+and sources. Snapshots cannot acquire later presses retroactively. Existing
+immediate selective claims and physical remap origins require this private
+evidence, not only a configured key code or an editable match event.
+
+Retained evidence shares a bounded persistent store across the root engine,
+sequence children and configuration replacements: at most 4096 distinct presses
+per footprint and 8 MiB of charged storage, including source-seat bytes and
+conservative node overhead. Exhaustion cancels the candidate instead of issuing
+a partial footprint. Retained snapshots remain charged until released.
+
+Ordered key steps also retain physical start/completion positions independently
+of recognition-time output positions. An earlier down cannot become a later
+step merely because timestamps match. Existing same-press key/chord-to-hold
+continuations retain the exact shared input event. A completed tap's physical
+release precedes its settlement notification; a hold's recognition boundary is
+its timer boundary.
+This ordering also applies to observation-only recognition without storing a
+routing footprint.
+
+Press evidence records candidate observations, not exclusive consumption claims.
+A tap candidate can observe a following held down before its earlier taps settle;
+completed participating presses still need to be separated from unfinished or
+invalid tails. Timed, chord, sequence, custom,
+mixed and hybrid selective buffering still need the bounded pending-key journal,
+event-local condition admission and native/rendered acceptance. This prerequisite
+does not expand projectable triggers, public grants or production takeover.
+
 `Routing::with_key_projection` retains original positions across attached
 sources. Eligible pure-key sources with immediate consuming key actions arbitrate
 one winner per physical press by priority/rule ID. Unrelated keys remain ordinary.

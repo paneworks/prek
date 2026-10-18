@@ -30,6 +30,10 @@ pub(super) fn candidate(
     candidate.id = id;
     candidate.cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     candidate.position = None;
+    candidate.key_start = None;
+    candidate.key_end = None;
+    candidate.key_tap_end = None;
+    candidate.key_presses = presses::Set::empty(state.press_budget.clone());
     candidate.ordinal = 0;
     candidate.progress = false;
     candidate.started = at;

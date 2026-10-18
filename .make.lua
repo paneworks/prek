@@ -464,6 +464,15 @@ make.recipe{ name="test-key-positions",desc="ordered key edges, original positio
                sh.cargo("test","--locked","--lib","rules::tests::composition::motion")
              end }
 
+make.recipe{ name="test-key-provenance",desc="bounded original press evidence across native key recognizers; no devices",
+             run=function()
+               for _,filter in ipairs({"rules::presses::tests","routing::keys::projection::tests"}) do
+                 local tested=oslo.run{"cargo","test","--locked","--lib",filter,capture=true}
+                 io.stdout:write(tested.out or ""); io.stderr:write(tested.err or "")
+                 assert(tested.ok and (tested.out or ""):match("running [1-9]%d* tests?"),"key provenance gate failed or selected no tests: "..filter)
+               end
+             end }
+
 make.recipe{ name="test-key-projection",desc="per-press raw-key ownership and complete report projection; no devices",
              run=function()
                sh.cargo("test","--locked","--lib","router::keyboard::tests")
@@ -761,6 +770,6 @@ make.alias("c", "compile")
 make.recipe{
   name = "verify",
   desc = "the whole local gate",
-  deps = { "fmt-check", "check-all", "test-all", "test-lua-lifetimes", "test-lua-tasks", "test-software-worker", "test-routing-helper", "test-composition-helper", "test-chain-helper", "test-composed-worker-helper", "test-root-session", "test-root-routing", "test-native-managed-model", "test-cage-startup", "test-distribution", "clippy", "rustdoc" },
+  deps = { "fmt-check", "check-all", "test-all", "test-lua-lifetimes", "test-lua-tasks", "test-key-provenance", "test-software-worker", "test-routing-helper", "test-composition-helper", "test-chain-helper", "test-composed-worker-helper", "test-root-session", "test-root-routing", "test-native-managed-model", "test-cage-startup", "test-distribution", "clippy", "rustdoc" },
 }
 make.alias("v", "verify")
