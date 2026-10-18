@@ -10,7 +10,13 @@ local task = prek.scheduler.spawn(function(wake)
     })
 end)
 
+local observer = prek.scheduler.spawn(function()
+    local state = task:join()
+    prek.log.info("task-joined", {state = state})
+end)
+
 prek.events.on("stop", function()
+    observer:cancel()
     task:cancel()
 end)
 

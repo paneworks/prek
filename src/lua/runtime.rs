@@ -224,6 +224,8 @@ pub(super) struct Host {
     pub(super) now: Option<Duration>,
     pub(super) task: Option<u64>,
     pub(super) sleep: Option<Duration>,
+    pub(super) waiting: Option<StashedTable>,
+    pub(super) task_joins: std::collections::BTreeMap<u64, u64>,
     pub(super) task_clock: Option<(Duration, Instant)>,
     pub(super) rules: super::rule_api::State,
     #[cfg(target_os = "linux")]

@@ -7,6 +7,8 @@ use prek::{
 use std::{path::Path, time::Duration};
 #[path = "lua_session/routing.rs"]
 mod native_routing;
+#[path = "lua_session/task_joins.rs"]
+mod task_joins;
 fn fence(generation: u64) -> Fence {
     Fence {
         broker: Epoch([1, 2]),

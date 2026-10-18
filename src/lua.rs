@@ -79,7 +79,8 @@ pub fn api() -> serde_json::Value {
         serde_json::json!({"name":"scheduler.spawn", "signature":"scheduler.spawn(callback) -> Task", "description":"Start a bounded generation-scoped coroutine on a later scheduler wake; never execute it during configuration evaluation."}),
         serde_json::json!({"name":"scheduler.sleep", "signature":"scheduler.sleep(duration) -> TaskWake", "description":"Suspend the current scheduler task for a unit-qualified monotonic delay and return its next wake context."}),
         serde_json::json!({"name":"Task.cancel", "receiver":"Task", "signature":"task:cancel() -> nil", "description":"Cancel future resumes and release retained coroutine state at the next scheduler boundary."}),
-        serde_json::json!({"name":"Task.status", "receiver":"Task", "signature":"task:status() -> TaskState", "description":"Inspect pending, running, sleeping, completed or cancelled state in the owning generation."}),
+        serde_json::json!({"name":"Task.status", "receiver":"Task", "signature":"task:status() -> TaskState", "description":"Inspect pending, running, sleeping, waiting, completed or cancelled state in the owning generation."}),
+        serde_json::json!({"name":"Task.join", "receiver":"Task", "signature":"task:join() -> TaskTerminal, TaskWake?", "description":"Inside a scheduler task, wait without polling for this exact task to complete or cancel; resume on a later bounded wake with its terminal state and fresh wake payload. Already-terminal targets return immediately with nil wake. Self-joins and cycles raise errors."}),
         serde_json::json!({"name":"actions.define", "signature":"actions.define(name, {requires = capabilities}, callback) -> Action", "description":"Register an approved generation-scoped named handler; resolve a bounded typed effect plan in the unprivileged session after a broker execution grant."}),
         serde_json::json!({"name":"replay.new", "signature":"replay.new(config = nil) -> Replay", "phase":"configuration_and_runtime", "description":"Create an offline observation or configured replay; custom callbacks require the approved runtime source and fresh isolated closures, never live effects."}),
         serde_json::json!({"name":"replay.routing", "signature":"replay.routing(config) -> Replay", "phase":"configuration_and_runtime", "description":"Simulate downstream routing with explicit recorded readiness, dual clocks and exact write receipts; require route mode and explicit transport retirement, never kernel I/O or effects."}),
@@ -493,6 +494,16 @@ pub fn api() -> serde_json::Value {
         "authority":"inspection only; no camera/work-area/effective-rule bounds or input ownership/grants",
         "effects":false
     });
+    manifest["task_dependencies"] = serde_json::json!({
+        "operation":"Task.join","states":["pending","running","sleeping","waiting","completed","cancelled"],
+        "terminal":["completed","cancelled"],"maximum_edges":tasks::MAX_TASKS,
+        "scheduling":"one later wake; shared eight-resume budget and deadline/identity ordering",
+        "polling":false,"cycles":"self and dependency cycles raise errors",
+        "identity":"exact private task entry; capacity reuse never retargets a handle",
+        "cancellation":"target wakes joiners; waiter cancellation does not cancel its target",
+        "result":"terminal state and fresh TaskWake after suspension; nil wake for an already-terminal target",
+        "authority":"observational owning-VM dependency only; no execution grant or native input ownership"
+    });
     manifest
 }
 const MEMORY: usize = 32 * 1024 * 1024;
@@ -545,6 +556,8 @@ function api.scheduler.every(period, callback) return schedule(period,callback,t
 function api.scheduler.defer(callback) return schedule("1ms",callback,false) end
 local task_defer = api.scheduler.__task_defer
 api.scheduler.__task_defer = nil
+local task_join = api.scheduler.__task_join
+api.scheduler.__task_join = nil
 local task_assert, task_type = assert, type
 local next_task_id = 0
 function api.scheduler.spawn(callback)
@@ -563,6 +576,10 @@ function api.scheduler.spawn(callback)
             if entry.active then entry.active=false; entry.state="cancelled"; entry.callback=nil end
         end,
         status=function(self)return entry.state end,
+        join=function(self)
+            local wake=task_join(entry)
+            return entry.state,wake
+        end,
     }
 end
 local allowed_events = {
@@ -917,6 +934,7 @@ fn instantiate(
             let scheduler: Table = module.get(ctx, "scheduler")?;
             scheduler.set(ctx, "__duration", scheduler::duration(&ctx, host.clone()))?;
             scheduler.set(ctx, "__task_defer", tasks::defer(&ctx, host.clone()))?;
+            scheduler.set(ctx, "__task_join", tasks::wait(&ctx, host.clone()))?;
             scheduler.set(ctx, "sleep", tasks::sleep(&ctx, host.clone()))?;
             let log: Table = module.get(ctx, "log")?;
             log.set(ctx, "info", runtime::logger(&ctx, host.clone()))?;
@@ -1106,7 +1124,8 @@ mod tests {
                 continue;
             }
             if symbol["receiver"] == "Task" {
-                source.push_str("local task=p.scheduler.spawn(function()end); assert(type(task.cancel)=='function' and type(task.status)=='function'); task:cancel();\n");
+                let method = symbol["name"].as_str().unwrap().split('.').nth(1).unwrap();
+                source.push_str(&format!("local task=p.scheduler.spawn(function()end);assert(type(task.{method})=='function');task:cancel();\n"));
                 continue;
             }
             if symbol["receiver"] == "RuleTransaction" {

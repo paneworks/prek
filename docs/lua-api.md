@@ -1000,8 +1000,8 @@ rejected. Each resume has 100,000 instructions and a 20 ms wall limit; at most
 eight tasks resume per wake, ordered by deadline and identity. New tasks start
 on a subsequent wake. Tasks share the VM's memory, log and callback limits.
 
-`task:status() -> TaskState` returns `pending`, `running`, `sleeping`, `completed`
-or `cancelled`. `task:cancel() -> nil` is idempotent. Cancellation stops later
+`task:status() -> TaskState` returns `pending`, `running`, `sleeping`, `waiting`,
+`completed` or `cancelled`. `task:cancel() -> nil` is idempotent. Cancellation stops later
 resumes and releases the retained coroutine at the next scheduler boundary.
 A task cancelling itself finishes its current bounded slice; that slice's logs
 are discarded. Cancellation cannot roll back Lua closure changes. A completed
@@ -1009,6 +1009,23 @@ task remains completed when cancelled. Errors/resource failures retire the VM
 and discard the current scheduler wake's logs; other service components remain
 supervised independently. Successful source/generation replacement retires all
 old task state, while rejected reloads preserve the active generation.
+
+`task:join() -> TaskTerminal, TaskWake?` is available only inside another scheduler
+task. It waits for that exact task to complete or cancel without blocking a thread
+or polling its status. While suspended the caller reports `waiting`; it remains
+within the 64-active-task bound. Completion or target cancellation schedules the
+caller on a later wake, sharing the existing eight-resume budget and stable order.
+The result is `completed` or `cancelled`, followed by that resume's fresh wake
+payload. An already-terminal target returns its state immediately with a nil
+wake. Returning from a join does not confer authority from either task's context.
+
+Cancelling a waiter releases its coroutine and dependency at the next scheduler
+boundary without cancelling the target. Reusing a completed/cancelled task's
+capacity slot cannot retarget its retained handles or joiners. Each active task
+has at most one dependency; self-joins and dependency cycles raise errors under
+the existing fail-closed VM policy. Generation replacement retires all waits.
+Use an ordinary cancellation timer when a target needs a timeout. Joins carry no
+device descriptors, synthetic ownership or action grants.
 
 The runnable task recipe is `examples/lua/tasks/config.lua`, also installed at
 `share/prek/examples/lua/tasks/config.lua`.

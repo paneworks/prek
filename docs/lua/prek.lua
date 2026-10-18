@@ -16,7 +16,8 @@
 ---@alias prek.Screen 'on'|'off'
 ---@alias prek.LayerActivation 'physical'|'active'|'inactive'
 ---@alias prek.Stage 'discrete'|'begin'|'update'|'end'|'cancel'
----@alias prek.TaskState 'pending'|'running'|'sleeping'|'completed'|'cancelled'
+---@alias prek.TaskState 'pending'|'running'|'sleeping'|'waiting'|'completed'|'cancelled'
+---@alias prek.TaskTerminal 'completed'|'cancelled'
 ---@alias prek.EffectKind 'observations'|'commands'|'synthetic_input'|'hyprland_actions'|'morf_actions'|'power_actions'
 ---@alias prek.Capability 'context'|'observations'|'lua_events'|'input_events'|'custom_recognizers'|'lua_actions'|'runtime_rules'|'hyprland_actions'|'morf_actions'|'power_actions'|'commands'|'synthetic_input'
 ---@alias prek.EventKind 'input'|'matched'|'begin'|'update'|'end'|'cancel'|'skipped'|'ready'|'reload'|'stop'|'recovery'|'session_changed'|'context_changed'|'rules_changed'
@@ -654,6 +655,10 @@ local Task = {}
 function Task:cancel() error("Prek editor definition") end
 ---@return prek.TaskState
 function Task:status() error("Prek editor definition") end
+---Task only. Wait for this exact task without polling; self-joins and cycles raise errors.
+---@return prek.TaskTerminal
+---@return prek.TaskWake? wake Nil when the target was already terminal.
+function Task:join() error("Prek editor definition") end
 
 ---@class (exact) prek.RuleTransactionStatus
 ---@field state 'open'|'cancelled'|'pending'|'accepted'|'rejected'

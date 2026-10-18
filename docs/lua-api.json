@@ -768,10 +768,16 @@
       "signature": "task:cancel() -> nil"
     },
     {
-      "description": "Inspect pending, running, sleeping, completed or cancelled state in the owning generation.",
+      "description": "Inspect pending, running, sleeping, waiting, completed or cancelled state in the owning generation.",
       "name": "Task.status",
       "receiver": "Task",
       "signature": "task:status() -> TaskState"
+    },
+    {
+      "description": "Inside a scheduler task, wait without polling for this exact task to complete or cancel; resume on a later bounded wake with its terminal state and fresh wake payload. Already-terminal targets return immediately with nil wake. Self-joins and cycles raise errors.",
+      "name": "Task.join",
+      "receiver": "Task",
+      "signature": "task:join() -> TaskTerminal, TaskWake?"
     },
     {
       "description": "Register an approved generation-scoped named handler; resolve a bounded typed effect plan in the unprivileged session after a broker execution grant.",
@@ -1214,5 +1220,28 @@
       "name": "actions.power",
       "signature": "actions.power(named_fields) -> Action"
     }
-  ]
+  ],
+  "task_dependencies": {
+    "authority": "observational owning-VM dependency only; no execution grant or native input ownership",
+    "cancellation": "target wakes joiners; waiter cancellation does not cancel its target",
+    "cycles": "self and dependency cycles raise errors",
+    "identity": "exact private task entry; capacity reuse never retargets a handle",
+    "maximum_edges": 64,
+    "operation": "Task.join",
+    "polling": false,
+    "result": "terminal state and fresh TaskWake after suspension; nil wake for an already-terminal target",
+    "scheduling": "one later wake; shared eight-resume budget and deadline/identity ordering",
+    "states": [
+      "pending",
+      "running",
+      "sleeping",
+      "waiting",
+      "completed",
+      "cancelled"
+    ],
+    "terminal": [
+      "completed",
+      "cancelled"
+    ]
+  }
 }

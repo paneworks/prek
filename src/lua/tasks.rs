@@ -1,15 +1,25 @@
-//! Bounded generation-owned coroutine tasks. Only host-approved sleeps yield.
+//! Bounded generation-owned coroutines with host-approved sleep and join waits.
 use super::*;
 use luna::{Context, Function};
 use serde::{Deserialize, Serialize};
 use std::{cell::RefCell, rc::Rc};
 
+mod joins;
+pub(super) use joins::wait;
+
 pub const MAX_TASKS: usize = 64;
 pub const TASKS_PER_WAKE: usize = 8;
+#[cfg(test)]
+mod join_tests;
 pub(super) const MAX_TASK_ID: u64 = 9_007_199_254_740_991;
 pub(super) struct TaskExecution {
     executor: StashedExecutor,
     entry: luna::StashedTable,
+    waiting: Option<luna::StashedTable>,
+}
+enum Suspension {
+    Sleep,
+    Join(luna::StashedTable),
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -87,7 +97,8 @@ impl Runtime {
                 let tasks = ctx.fetch(&self.tasks);
                 for id in 1..=tasks.length(&ctx) {
                     let entry: Table = tasks.get(ctx, id)?;
-                    if entry.get::<_, Value>(ctx, "due")?.is_nil() {
+                    let state: luna::String = entry.get(ctx, "state")?;
+                    if state.to_str()? == "pending" && entry.get::<_, Value>(ctx, "due")?.is_nil() {
                         entry.set(ctx, "due", due)?;
                     }
                 }
@@ -111,12 +122,13 @@ impl Runtime {
             })
             .map_err(error)?;
         for id in cancelled {
+            self.host.borrow_mut().task_joins.remove(&id);
             if let Some(executor) = self.task_executors.remove(&id) {
                 self.lua
                     .enter(|ctx| ctx.fetch(&executor.executor).stop(&ctx));
             }
         }
-        Ok(())
+        self.wake_joiners()
     }
     pub fn scheduler_deadline(&mut self) -> Result<Option<Duration>, ConfigError> {
         let timer = self.timer_deadline()?;
@@ -157,8 +169,10 @@ impl Runtime {
                 for id in 1..=tasks.length(&ctx) {
                     let entry: Table = tasks.get(ctx, id)?;
                     if entry.get::<_, bool>(ctx, "active")? {
-                        let due: i64 = entry.get(ctx, "due")?;
-                        if due <= timestamp {
+                        let due: Option<i64> = entry.get(ctx, "due")?;
+                        if let Some(due) = due
+                            && due <= timestamp
+                        {
                             ready.push((due, entry.get::<_, u64>(ctx, "id")?, ctx.stash(entry)));
                         }
                     }
@@ -180,6 +194,7 @@ impl Runtime {
             }
             let payload = serde_json::json!({"context":context,"task":{"id":id},"at":now});
             let executor = if let Some(executor) = self.task_executors.remove(&id) {
+                self.host.borrow_mut().task_joins.remove(&id);
                 self.lua
                     .try_enter(|ctx| {
                         let value = values::payload(ctx, &payload)?;
@@ -204,6 +219,7 @@ impl Runtime {
                 let mut host = self.host.borrow_mut();
                 host.task = Some(id);
                 host.sleep = None;
+                host.waiting = None;
                 host.task_clock = Some((now, Instant::now()));
                 (host.logs.len(), host.bytes, host.rules.pending_id())
             };
@@ -211,8 +227,15 @@ impl Runtime {
             let mut host = self.host.borrow_mut();
             host.task = None;
             host.sleep = None;
+            host.waiting = None;
             host.task_clock = None;
-            let retained = outcome?;
+            let suspension = match outcome {
+                Ok(suspension) => suspension,
+                Err(reason) => {
+                    host.task_joins.remove(&id);
+                    return Err(reason);
+                }
+            };
             let cancelled = self
                 .lua
                 .try_enter(|ctx| {
@@ -221,9 +244,21 @@ impl Runtime {
                     Ok(state.to_str()? == "cancelled")
                 })
                 .map_err(error)?;
-            if retained {
-                self.task_executors
-                    .insert(id, TaskExecution { executor, entry });
+            if let Some(suspension) = suspension {
+                let waiting = match suspension {
+                    Suspension::Sleep => None,
+                    Suspension::Join(target) => Some(target),
+                };
+                self.task_executors.insert(
+                    id,
+                    TaskExecution {
+                        executor,
+                        entry,
+                        waiting,
+                    },
+                );
+            } else {
+                host.task_joins.remove(&id);
             }
             if cancelled {
                 host.logs.truncate(logs_before);
@@ -239,7 +274,7 @@ impl Runtime {
         &mut self,
         executor: &StashedExecutor,
         entry: &luna::StashedTable,
-    ) -> Result<bool, ConfigError> {
+    ) -> Result<Option<Suspension>, ConfigError> {
         self.lua
             .try_enter(|ctx| {
                 let entry = ctx.fetch(entry);
@@ -255,6 +290,7 @@ impl Runtime {
             runtime::CALLBACK_INSTRUCTIONS,
         )?;
         let sleep = self.host.borrow().sleep;
+        let waiting = self.host.borrow_mut().waiting.take();
         self.lua
             .try_enter(|ctx| {
                 let executor = ctx.fetch(executor);
@@ -263,7 +299,7 @@ impl Runtime {
                 let entry = ctx.fetch(entry);
                 if !entry.get::<_, bool>(ctx, "active")? {
                     executor.stop(&ctx);
-                    return Ok(false);
+                    return Ok(None);
                 }
                 if !values.0.is_empty() {
                     return Err(io::Error::other(
@@ -271,21 +307,27 @@ impl Runtime {
                     )
                     .into());
                 }
-                match (executor.mode(), sleep) {
-                    (luna::ExecutorMode::Stopped, None) => {
+                match (executor.mode(), sleep, waiting) {
+                    (luna::ExecutorMode::Stopped, None, None) => {
                         entry.set(ctx, "active", false)?;
                         entry.set(ctx, "state", "completed")?;
                         entry.set(ctx, "callback", Value::Nil)?;
-                        Ok(false)
+                        Ok(None)
                     }
-                    (luna::ExecutorMode::Suspended, Some(deadline)) => {
+                    (luna::ExecutorMode::Suspended, Some(deadline), None) => {
                         entry.set(ctx, "due", nanos(deadline)?)?;
                         entry.set(ctx, "state", "sleeping")?;
-                        Ok(true)
+                        Ok(Some(Suspension::Sleep))
                     }
-                    _ => Err(
-                        io::Error::other("Lua tasks may yield only through scheduler.sleep").into(),
-                    ),
+                    (luna::ExecutorMode::Suspended, None, Some(target)) => {
+                        entry.set(ctx, "due", Value::Nil)?;
+                        entry.set(ctx, "state", "waiting")?;
+                        Ok(Some(Suspension::Join(target)))
+                    }
+                    _ => Err(io::Error::other(
+                        "Lua tasks may yield only through scheduler.sleep or Task.join",
+                    )
+                    .into()),
                 }
             })
             .map_err(error)
