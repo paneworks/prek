@@ -3,7 +3,7 @@ assert aquamarine == null || stockAquamarine == null;
 let
   receiver = import ./wayland-receiver.nix { inherit pkgs; };
   runtime = import ./cage-runtime.nix { inherit package; };
-  keyRuntime = import ./cage-runtime.nix { inherit package; testName = "key_output_cage"; };
+  keyRuntime = import ./cage-runtime.nix { inherit package; testName = "key_output_cage"; features = [ "native-test-harness" ]; };
   keyboard = pkgs.stdenv.mkDerivation {
     pname = "prek-wayland-keyboard";
     version = "1";

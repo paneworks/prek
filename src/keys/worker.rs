@@ -24,6 +24,8 @@ const MAX_BYTES: usize = 512 * 1024;
 const MAX_AGE: Duration = Duration::from_secs(1);
 const DRAIN: Duration = Duration::from_millis(250);
 
+mod software;
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct Gesture {
     source: Source,
@@ -53,6 +55,7 @@ struct Binding {
     bytes: usize,
 }
 enum Operation {
+    Software(software::Work),
     Begin(Gesture),
     End(Gesture, Box<KeyWork>),
     Tap(Box<KeyWork>),
@@ -70,6 +73,11 @@ struct Pending {
     bytes: usize,
 }
 enum FlightKind {
+    Software {
+        producer: [u64; 2],
+        id: u64,
+        release: bool,
+    },
     Begin,
     End(Gesture),
     Tap(Box<KeyWork>, Claim),
@@ -109,6 +117,7 @@ pub struct Seat<S: Sink> {
     draining: Option<Duration>,
     failed: bool,
     at: Duration,
+    software: BTreeMap<[u64; 2], software::Producer>,
 }
 
 impl<S: Sink> fmt::Debug for Seat<S> {
@@ -123,6 +132,16 @@ impl<S: Sink> fmt::Debug for Seat<S> {
 }
 
 impl<S: Sink> Seat<S> {
+    #[cfg(feature = "native-test-harness")]
+    #[doc(hidden)]
+    pub fn fixture_producer_request(
+        &mut self,
+        routing: &Routing,
+        request: &crate::keys::producer::Request,
+        at: Duration,
+    ) -> io::Result<bool> {
+        self.producer_request(routing, request, at)
+    }
     pub fn new(fence: Fence, output: Output<S>) -> Result<Self, Box<StartError<S>>> {
         if let Err(error) = fence.validate().and_then(|()| {
             if output.idle() && !output.retiring() && output.configuration_live(fence.configuration)
@@ -150,6 +169,7 @@ impl<S: Sink> Seat<S> {
             draining: None,
             failed: false,
             at,
+            software: BTreeMap::new(),
         })
     }
 
@@ -185,7 +205,7 @@ impl<S: Sink> Seat<S> {
                     if self.bindings.contains_key(&gesture) {
                         return Err(invalid("remap begin is already accepted"));
                     }
-                    if self.bindings.len() >= MAX_BINDINGS {
+                    if self.bindings.len() + self.software_binding_count() >= MAX_BINDINGS {
                         return Err(invalid("remap binding limit exceeded"));
                     }
                     self.capacity(bytes, 1)?;
@@ -547,6 +567,7 @@ impl<S: Sink> Seat<S> {
         let at = at.max(self.at);
         self.at = at;
         self.remove_pending(|_| true);
+        self.retire_software(at)?;
         for binding in self.bindings.values_mut() {
             binding.cancelled = true;
         }
@@ -606,6 +627,11 @@ impl<S: Sink> Seat<S> {
     fn poll_inner(&mut self, routing: &Routing, at: Duration) -> io::Result<Progress> {
         self.live(at)?;
         self.at = at;
+        self.expire_software(routing, at)?;
+        if self.output.retiring() && self.retiring.is_none() {
+            self.paused = true;
+            self.retire(at)?;
+        }
         if self.retiring.is_some_and(|deadline| at >= deadline) && !self.settled() {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -689,7 +715,7 @@ impl<S: Sink> Seat<S> {
                     bytes: pending.bytes,
                 });
             } else if let Some(Flight {
-                kind: FlightKind::Tap(_, _),
+                kind: FlightKind::Tap(_, _) | FlightKind::Software { .. },
                 bytes,
                 ..
             }) = &mut self.flight
@@ -716,6 +742,7 @@ impl<S: Sink> Seat<S> {
         at: Duration,
     ) -> io::Result<Option<Operation>> {
         match operation {
+            Operation::Software(work) => self.execute_software(work, at)?,
             Operation::Begin(gesture) => {
                 let Some(binding) = self
                     .bindings
@@ -851,16 +878,29 @@ impl<S: Sink> Seat<S> {
     }
 
     pub fn blocks_raw(&self, source: &Source, sequence: u64) -> bool {
+        if source.seat != self.output.source().seat {
+            return false;
+        }
+        if self.software_cleanup_pending() {
+            return true;
+        }
         self.flight.as_ref().is_some_and(|flight| {
-            flight
-                .inputs
-                .get(source)
-                .is_some_and(|bound| sequence >= *bound)
+            if matches!(flight.kind, FlightKind::Software { .. }) {
+                sequence > flight.inputs.get(source).copied().unwrap_or(0)
+            } else {
+                flight
+                    .inputs
+                    .get(source)
+                    .is_some_and(|bound| sequence >= *bound)
+            }
         }) || self
             .bindings
             .values()
             .any(|binding| binding.cancelled && binding.work.affects(source))
             || self.pending.iter().any(|pending| match &pending.operation {
+                Operation::Software(work) => {
+                    sequence > work.inputs.get(source).copied().unwrap_or(0)
+                }
                 Operation::Begin(gesture) => self
                     .bindings
                     .get(gesture)
@@ -881,6 +921,7 @@ impl<S: Sink> Seat<S> {
         }
         (routing.key_orders_source(source)
             || self.draining.is_some()
+            || self.software_cleanup_pending()
             || self.bindings.values().any(|binding| binding.cancelled))
             && self.blocks_raw_span(source, span)
     }
@@ -890,7 +931,13 @@ impl<S: Sink> Seat<S> {
         self.pending.is_empty() && self.flight.is_none() && self.draining.is_none()
     }
     pub fn blocks_raw_span(&self, source: &Source, span: InputSpan) -> bool {
-        if self.draining.is_some() || self.bindings.values().any(|binding| binding.cancelled) {
+        if source.seat != self.output.source().seat {
+            return false;
+        }
+        if self.draining.is_some()
+            || self.software_cleanup_pending()
+            || self.bindings.values().any(|binding| binding.cancelled)
+        {
             return true;
         }
         self.flight.as_ref().is_some_and(|flight| {
@@ -904,6 +951,7 @@ impl<S: Sink> Seat<S> {
                 |position| span.last > position,
             )
         }) || self.pending.iter().any(|pending| match &pending.operation {
+            Operation::Software(work) => span.last > work.position,
             Operation::Begin(gesture) => self
                 .bindings
                 .get(gesture)
@@ -932,6 +980,9 @@ impl<S: Sink> Seat<S> {
     }
     fn prefix_ready(&self, operation: &Operation, routing: &Routing) -> bool {
         match operation {
+            Operation::Software(work) => {
+                routing.key_position_prefix_ready(work.position, true, &self.output.source().seat)
+            }
             Operation::Begin(gesture) => self
                 .bindings
                 .get(gesture)
@@ -967,6 +1018,13 @@ impl<S: Sink> Seat<S> {
             self.bytes -= flight.bytes;
             if let FlightKind::End(gesture) = flight.kind {
                 self.remove_binding(&gesture);
+            } else if let FlightKind::Software {
+                producer,
+                id,
+                release: true,
+            } = flight.kind
+            {
+                self.remove_software_press(producer, id);
             }
         }
         let removed: Vec<_> = self
@@ -984,17 +1042,24 @@ impl<S: Sink> Seat<S> {
         for gesture in removed {
             self.remove_binding(&gesture);
         }
+        self.prune_software();
         self.repeats.retain(|key, _| {
             self.bindings
                 .values()
                 .any(|binding| binding.work.remap_key().as_ref() == Some(key))
         });
-        if self.output.settled() && self.bindings.values().all(|binding| !binding.cancelled) {
+        if self.output.settled()
+            && !self.software_cleanup_pending()
+            && self.bindings.values().all(|binding| !binding.cancelled)
+        {
             self.draining = None;
         }
     }
     fn mark_draining(&mut self, at: Duration) {
-        if !self.output.settled() || self.bindings.values().any(|binding| binding.cancelled) {
+        if !self.output.settled()
+            || self.software_cleanup_pending()
+            || self.bindings.values().any(|binding| binding.cancelled)
+        {
             self.draining.get_or_insert(at.saturating_add(DRAIN));
         }
     }
@@ -1053,6 +1118,7 @@ impl<S: Sink> Seat<S> {
         self.pending.is_empty()
             && self.flight.is_none()
             && self.bindings.values().all(|binding| !binding.cancelled)
+            && !self.software_cleanup_pending()
             && self.output.settled()
     }
     pub fn down(&self, code: u16) -> bool {
@@ -1083,7 +1149,7 @@ impl<S: Sink> Seat<S> {
     }
     pub fn deadline(&self) -> Option<Duration> {
         if self.settled() {
-            return None;
+            return self.software_deadline();
         }
         if self.paused || self.retiring.is_some() {
             return self.retiring.into_iter().chain(self.draining).min();
@@ -1091,6 +1157,7 @@ impl<S: Sink> Seat<S> {
         self.retiring
             .into_iter()
             .chain(self.draining)
+            .chain(self.software_deadline())
             .chain(self.flight.as_ref().map(|flight| flight.deadline))
             .chain(
                 self.pending
@@ -1100,7 +1167,7 @@ impl<S: Sink> Seat<S> {
             .min()
     }
     pub fn into_output(self) -> Result<Output<S>, Box<Self>> {
-        if !self.failed && self.settled() && self.bindings.is_empty() {
+        if !self.failed && self.settled() && self.bindings.is_empty() && self.software.is_empty() {
             Ok(self.output)
         } else {
             Err(Box::new(self))
@@ -1112,7 +1179,7 @@ impl Operation {
         match self {
             Self::Begin(gesture) | Self::End(gesture, _) => Some(gesture.clone()),
             Self::Tap(work) => identity(work.event()).ok().map(|(gesture, _)| gesture),
-            Self::Repeat { .. } => None,
+            Self::Repeat { .. } | Self::Software(_) => None,
         }
     }
 }

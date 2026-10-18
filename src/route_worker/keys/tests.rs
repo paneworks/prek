@@ -10,6 +10,7 @@ use std::{cell::RefCell, collections::BTreeMap, os::unix::net::UnixStream, rc::R
 mod consumer_drain;
 mod coordinator;
 mod lifecycle;
+mod producers;
 
 #[derive(Default)]
 struct State {

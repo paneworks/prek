@@ -13,6 +13,7 @@ mod bounds;
 mod coordinator;
 mod independence;
 mod lifecycle;
+mod producers;
 mod scope;
 
 enum Step {
@@ -173,7 +174,7 @@ fn config(rules: Vec<Rule>) -> Config {
     config.rules = rules;
     config
 }
-fn context(routing: &mut Routing, at: u64, revision: u64, state: ContextState) {
+pub(crate) fn context(routing: &mut Routing, at: u64, revision: u64, state: ContextState) {
     if at == 0 {
         routing
             .authority_mut()

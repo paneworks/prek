@@ -2,6 +2,8 @@ use super::*;
 use crate::keys::output::Sink;
 use std::{fs::OpenOptions, os::unix::fs::OpenOptionsExt};
 
+mod producers;
+
 #[test]
 fn generated_incarnations_have_distinct_consumer_names() {
     let mut fixture = Fixture::new(profile(), super::owner());

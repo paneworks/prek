@@ -523,7 +523,11 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
                     ("cancelled-one-sibling-held", "bAA", [42]), ("scoped-unwritten-chord", "bAA", []),
                     ("grant-revoked-neutral", "bAA", []), ("fresh-scoped-chord", "bAAa", []),
                     ("within-report-selective", "bAAaAa", []), ("cross-source-modifier", "bAAaAaA", []),
-                    ("scoped-source-retired", "bAAaAaA", [])]
+                    ("scoped-source-retired", "bAAaAaA", []),
+                    ("software-scoped-held", "bAAaAaAA", [42]),
+                    ("software-scoped-sibling-held", "bAAaAaAAA", [42]),
+                    ("software-scoped-expired", "bAAaAaAAAa", []),
+                    ("software-scoped-shutdown", "bAAaAaAAAa", [])]
     fixture_env = dict(env, PREK_LOCAL_CAGE="1", PREK_CAGE_OUTPUT=str(output), PREK_CAGE_KEYBOARD=args.keyboard,
                        PREK_CAGE_KEY_SOCKET=str(socket))
     before = {device["address"] for device in json.loads(command(["-j", "devices"]))["keyboards"]}
@@ -560,9 +564,11 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
     wanted = dict(status="passed", phases=15, source="two_owned_wayland_virtual_keyboards", production_route_tested=False,
                   kernel_input_tested=False, unmodified_stock_acceptance=False, test_backpressure=True)
     if args.key_worker:
-        wanted.update(phases=9, source="three_owned_wayland_virtual_keyboards", scoped_worker_tested=True, authority_modeled=True,
+        wanted.update(phases=13, source="three_owned_wayland_virtual_keyboards", scoped_worker_tested=True, authority_modeled=True,
                       transport_readiness_modeled=True, selective_consumption_tested=False,
-                      selective_projection_tested=True, within_frame_order_tested=True, cross_source_order_tested=True)
+                      selective_projection_tested=True, within_frame_order_tested=True, cross_source_order_tested=True,
+                      software_actor_tested=True, software_lease_tested=True, software_private_control_tested=False,
+                      software_authorization_tested=False, software_repeat_rendering_tested=False)
     else:
         wanted.update(software_owner_tested=True, software_authorization_tested=False, software_repeat_rendering_tested=False)
     if json.dumps(result, sort_keys=True) != json.dumps(wanted, sort_keys=True):
@@ -572,7 +578,7 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
     name = "key-worker" if args.key_worker else "key-output"
     (output / f"{name}-result.json").write_text(json.dumps(result, indent=2) + "\n")
     if args.key_worker:
-        print("PASS: selective routing and shared scheduler preserved within-report/cross-source order, sibling ownership, cancellation and reentry; nine rendered protocol-sink phases. Authority/readiness modeled; no kernel consumption or native takeover.")
+        print("PASS: shared scheduler preserved selective routing and scoped software leases, sibling ownership and expiry without input; thirteen rendered protocol-sink phases. Authority/readiness modeled; no private software control, authorization, repeat rendering or native takeover.")
     else:
         print("PASS: actual key-output driver preserved overlapping owners, software producer isolation, exact cancellation and context reentry; fifteen rendered app phases. Software authorization and repeat rendering are not tested.")
     return result

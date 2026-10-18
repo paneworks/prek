@@ -284,16 +284,28 @@ impl<S: Sink> Output<S> {
 
     /// Permanently retire every press owned by this software producer.
     pub fn retire_producer(&mut self, producer: [u64; 2], at: Duration) -> io::Result<Progress> {
+        self.retire_producers(&[producer], at)
+    }
+    pub(crate) fn producer_retired(&self, producer: &[u64; 2]) -> bool {
+        self.retired_producers.contains(producer) || self.closing
+    }
+    pub(crate) fn retire_producers(
+        &mut self,
+        producers: &[[u64; 2]],
+        at: Duration,
+    ) -> io::Result<Progress> {
         self.live(self.at)?;
-        if producer == [0, 0] {
+        if producers.contains(&[0, 0]) {
             return Err(invalid("software producer identity must be nonzero"));
         }
-        if !self.retired_producers.contains(&producer)
-            && self.retired_producers.len() >= MAX_PRODUCERS
-        {
-            self.closing = true;
-        } else {
-            self.retired_producers.insert(producer);
+        for producer in producers {
+            if !self.retired_producers.contains(producer)
+                && self.retired_producers.len() >= MAX_PRODUCERS
+            {
+                self.closing = true;
+            } else {
+                self.retired_producers.insert(*producer);
+            }
         }
         self.at = self.at.max(at);
         self.cleanup()

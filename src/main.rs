@@ -1193,6 +1193,9 @@ fn run_broker(
                             "consumer drain acknowledgement unsupported; generated slot will expire"
                         );
                     }
+                    prek::worker::Message::SoftwareResult { .. } => {
+                        eprintln!("software admission receipt has no public producer service");
+                    }
                 },
                 Ok(None) => break,
                 Err(error) if worker_link_closed(&error) => control_closed = true,

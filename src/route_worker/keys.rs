@@ -101,6 +101,40 @@ impl<P: Preparation> Slot<P> {
     pub(super) fn source(&self) -> &Source {
         &self.descriptor.source
     }
+    pub(super) fn producer_request(
+        &mut self,
+        routing: &Routing,
+        request: &crate::keys::producer::Request,
+        at: Duration,
+    ) -> io::Result<bool> {
+        if !self.matches(request.fence, &request.source, &request.marker)
+            || request.consumer != self.consumer
+        {
+            return Ok(false);
+        }
+        let close = matches!(
+            request.operation,
+            crate::keys::producer::Operation::Close {}
+        );
+        if !close && !self.available(at) {
+            return Ok(false);
+        }
+        if let crate::keys::producer::Operation::Open { expires }
+        | crate::keys::producer::Operation::Renew { expires } = request.operation
+            && self
+                .evidence
+                .as_ref()
+                .is_none_or(|evidence| expires > evidence.deadline())
+        {
+            return Ok(false);
+        }
+        match &mut self.phase {
+            Phase::Active(actor) | Phase::Closing(actor) => {
+                actor.producer_request(routing, request, at)
+            }
+            _ => Ok(false),
+        }
+    }
 
     #[cfg(feature = "native-test-harness")]
     pub(super) fn fixture_settled(&self) -> bool {

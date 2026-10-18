@@ -439,6 +439,15 @@ make.recipe{ name="test-key-worker",desc="scoped key scheduling, repeats and raw
                sh.cargo("test","--locked","--lib","routing::keys::tests")
              end }
 
+make.recipe{ name="test-software-worker",desc="private software leases, exact output scopes and real regular-file worker IPC; no devices",
+             run=function()
+               for _,filter in ipairs({"keys::worker::tests::producers","route_worker::keys::tests::producers","route_worker::tests::recognizers::keys::producers"}) do
+                 local tested=oslo.run{"cargo","test","--locked","--lib",filter,capture=true}
+                 io.stdout:write(tested.out or ""); io.stderr:write(tested.err or "")
+                 assert(tested.ok and (tested.out or ""):match("running [1-9]%d* tests?"),"software worker gate failed or selected no tests: "..filter)
+               end
+             end }
+
 make.recipe{ name="test-key-positions",desc="ordered key edges, original positions and retained cancellation scopes; no devices",
              run=function()
                sh.cargo("test","--locked","--lib","rules::edges::tests")
@@ -509,7 +518,7 @@ make.recipe{ name="test-key-worker-cage-dev",desc="current Cargo scheduler fixtu
                assert(type(a.runner)=="string" and a.runner:match("^/nix/store/[^/]+/bin/prek%-cage%-host%-test$"),
                       "supply the immutable --runner executable explicitly")
                local built=oslo.run{"bash","-c",[[set -euo pipefail
-cargo test --locked --test key_output_cage --no-run --message-format=json | jq -ers '
+cargo test --locked --features native-test-harness --test key_output_cage --no-run --message-format=json | jq -ers '
   [.[] | select(.reason=="compiler-artifact" and .target.name=="key_output_cage" and .profile.test and .executable!=null) | .executable] | unique |
   if length==1 then .[0] else error("expected one current scheduler test executable") end'
 ]],capture=true}
@@ -742,6 +751,6 @@ make.alias("c", "compile")
 make.recipe{
   name = "verify",
   desc = "the whole local gate",
-  deps = { "fmt-check", "check-all", "test-all", "test-lua-lifetimes", "test-routing-helper", "test-composition-helper", "test-chain-helper", "test-composed-worker-helper", "test-root-session", "test-root-routing", "test-native-managed-model", "test-cage-startup", "test-distribution", "clippy", "rustdoc" },
+  deps = { "fmt-check", "check-all", "test-all", "test-lua-lifetimes", "test-software-worker", "test-routing-helper", "test-composition-helper", "test-chain-helper", "test-composed-worker-helper", "test-root-session", "test-root-routing", "test-native-managed-model", "test-cage-startup", "test-distribution", "clippy", "rustdoc" },
 }
 make.alias("v", "verify")

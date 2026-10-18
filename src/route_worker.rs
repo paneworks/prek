@@ -216,6 +216,7 @@ impl Outbox {
                 } => changed_seat == seat,
                 Message::Released { .. } => false,
                 Message::KeyDrain { .. } => false,
+                Message::SoftwareResult { .. } => false,
             };
             !discard
         });
@@ -944,6 +945,32 @@ impl InputSink for Stream {
             };
             let now = monotonic()?;
             match packet.message {
+                Command::Software { request } => {
+                    let accepted = if let Some(seat) = self.seats.get_mut(&request.source.seat) {
+                        let lease_valid = match request.operation {
+                            crate::keys::producer::Operation::Open { expires }
+                            | crate::keys::producer::Operation::Renew { expires } => {
+                                expires <= seat.expires
+                            }
+                            _ => true,
+                        };
+                        if let Some(keys) = &mut seat.keys
+                            && lease_valid
+                        {
+                            keys.producer_request(&seat.routing, &request, now)?
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    self.queue(Message::SoftwareResult {
+                        fence: request.fence,
+                        producer: request.producer,
+                        sequence: request.sequence,
+                        accepted,
+                    })?;
+                }
                 command @ (Command::Recognition { .. } | Command::Rules { .. }) => {
                     self.enqueue(command, now)?
                 }

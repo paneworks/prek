@@ -64,7 +64,7 @@ fn profile(required: bool, slow_keyboard: bool) -> Config {
     }
     config
 }
-fn setup(required: bool, slow_keyboard: bool) -> Routing {
+pub(super) fn setup(required: bool, slow_keyboard: bool) -> Routing {
     configured(profile(required, slow_keyboard))
 }
 fn configured(config: Config) -> Routing {

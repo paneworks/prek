@@ -6,6 +6,43 @@ use crate::{
 };
 
 impl Routing {
+    pub(crate) fn software_key_scope(
+        &self,
+        fence: crate::protocol::Fence,
+        at: std::time::Duration,
+    ) -> Option<(u64, InputPosition, std::time::Duration)> {
+        if !self.ordered_keys
+            || !self.key_lane(fence, at)
+            || self.authority().state(at) != crate::context::State::Desktop
+        {
+            return None;
+        }
+        let snapshot = self.authority().fresh(at).ok()?;
+        let until = snapshot
+            .captured_at
+            .saturating_add(crate::context::SNAPSHOT_MAX_AGE)
+            .saturating_add(std::time::Duration::from_nanos(1));
+        Some((
+            self.key_epoch,
+            InputPosition::after_frame(self.engine.input_watermark()),
+            until.min(self.capability_expires),
+        ))
+    }
+    pub(crate) fn software_key_prefix(
+        &self,
+        seat: &str,
+    ) -> std::collections::BTreeMap<Source, u64> {
+        self.routes
+            .iter()
+            .filter(|(source, route)| source.seat == seat && route.key_domain)
+            .map(|(source, _)| {
+                (
+                    source.clone(),
+                    self.engine.source_input_sequence(source).unwrap_or(0),
+                )
+            })
+            .collect()
+    }
     pub fn input_span(&self, source: &Source, ticket: u64) -> Option<InputSpan> {
         self.routes.get(source)?.router.input_span(ticket)
     }

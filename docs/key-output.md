@@ -295,7 +295,7 @@ still refuses takeover, public `SyntheticInput` negotiation stays disabled, and
 the complete native consumer prefix/drain/neutral boundary remains unproven.
 Mixed press/release/repeat reports use canonical merged admission, which rejects
 unrecorded or modified repeat frames before admitting new work.
-Provider-owned repeat, neutral reentry and the complete Lua input-effect APIs
+Authenticated provider-owned repeat, native neutral reentry and the complete Lua input-effect APIs
 also remain open.
 
 `oslo make test-native-key-worker` runs slot models, actual sole-worker dispatch
@@ -369,12 +369,57 @@ within this output incarnation. At 4096 retained producer identities, a further
 retirement seals and drains the entire output rather than recycling a nonce.
 
 These are emission/ownership primitives, not authentication. The nonce alone
-grants nothing. Managed-worker producer admission, authenticated software-keyboard
-registration and Lua held-key handles still require their full broker/consumer
-contract. Public `SyntheticInput` remains disabled. Model tests cover explicit
+grants nothing. Private managed-worker admission is described below; authenticated
+software-keyboard registration and Lua held-key handles still require their full
+broker/consumer contract. Public `SyntheticInput` remains disabled. Model tests cover explicit
 repeat and byte-prefix cancellation; the owned Cage fixture renders provider
 isolation and physical-modifier overlap, but does not render repeat or establish
 software authorization or native consumer delivery.
+
+## Private managed software producers
+
+The supervisor's private `Software` command addresses one exact fence,
+generated-source incarnation, publication marker and consumer. Preparing,
+unavailable or mismatched destinations refuse new work without updating another
+slot. This uses the existing sole writer, not a separate input device or worker.
+
+Each nonzero producer nonce opens once with request sequence 1. Normal accepted
+requests advance that producer's sequence by exactly one; rejection does not
+advance it. Permanent `Close` accepts a higher sequence so cleanup need not wait
+for pending admission replies; an old/equal sequence cannot close a newer lease.
+Press IDs increase and are never reused. `Press`, `Repeat` and normal `Release`
+queue in order, preserving a fast down/up pair even before the first write.
+`Close`, execution-epoch loss and lease expiry instead discard unwritten work
+and reconcile written prefixes. A retired nonce cannot open again in this output.
+
+`Open` and `Renew` require an absolute monotonic expiry after now and within
+250 ms, no later than the current context approval, consumer evidence and seat
+registration deadlines. Fresh metadata cannot revive an expired lease. Active
+leases advertise wake deadlines even with no input frames or pending writes.
+Local cancellation retains same-seat cleanup barriers within the existing
+250 ms drain bound. The slot's separate consumer-drain acknowledgement still
+fences final writer removal and original-reader release.
+
+Queued software operations capture a key-domain boundary after the last accepted
+input frame. Earlier raw reports finish first; later ordered reports wait for the
+software operation. Unrelated pointer/touch lanes remain independent outside
+neutral cleanup. Software requests never invent a physical source or key event.
+At most 64 producer leases share the actor's existing 4096 bindings, 64 pending
+operations and 512 KiB accounting budget; provider, press and prefix charges are
+reclaimed after cleanup. This is not process-RSS acceptance.
+
+`SoftwareResult.accepted` acknowledges queue admission only, not execution,
+consumer delivery or permission to retry a possibly executed effect. Public
+broker/session registration and Lua input handles remain unavailable. The nonce
+and consumer fields are correlation data, not authenticated UI credentials.
+
+`oslo make test-software-worker` checks actor ordering/leases, exact slot scopes,
+strict packet schemas and actual private-channel/native-ABI writes on protected
+ordinary files, without kernel devices. The nondefault test harness also drives
+thirteen owned Cage actor phases, including lease expiry without new input.
+Its authority/readiness remain modeled and it does not test private software IPC,
+public authorization or repeat rendering. Default application packages expose no
+fixture admission method.
 
 ## Bounds and verification
 

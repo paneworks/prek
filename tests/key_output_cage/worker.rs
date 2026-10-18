@@ -1,4 +1,6 @@
+#![cfg(feature = "native-test-harness")]
 use super::*;
+use prek::keys::producer::{Operation as SoftwareOp, Request as SoftwareRequest};
 use prek::{
     config::{Action, Config, Context, Delivery, Key, Rule, Scope, Selector, Trigger},
     context::{Binding, SessionKind, Snapshot, State},
@@ -77,6 +79,14 @@ struct RoutedKeyboard {
     other_sequence: u64,
     revision: u64,
     refreshed: Duration,
+    software: Vec<SoftwareLease>,
+    retired_first: bool,
+}
+struct SoftwareLease {
+    id: u64,
+    sequence: u64,
+    renewed: Duration,
+    keep: bool,
 }
 impl RoutedKeyboard {
     fn open(output: &Path, socket: &Path) -> Self {
@@ -183,6 +193,8 @@ impl RoutedKeyboard {
             other_sequence: 0,
             revision: 1,
             refreshed: at,
+            software: Vec::new(),
+            retired_first: false,
         }
     }
     fn refresh(&mut self) -> Duration {
@@ -280,8 +292,28 @@ impl RoutedKeyboard {
     }
     fn pump(&mut self) {
         let at = self.refresh();
+        let renew = self
+            .software
+            .iter()
+            .filter(|lease| {
+                lease.keep && at.saturating_sub(lease.renewed) >= Duration::from_millis(30)
+            })
+            .map(|lease| lease.id)
+            .collect::<Vec<_>>();
+        for id in renew {
+            self.software_request(
+                id,
+                SoftwareOp::Renew {
+                    expires: at + Duration::from_millis(120),
+                },
+                at,
+            );
+        }
         self.generated.poll(&self.routing, at).unwrap();
         for id in [1, 2] {
+            if id == 1 && self.retired_first {
+                continue;
+            }
             while let Some(scheduled) = self
                 .routing
                 .due(&source(id), monotonic().unwrap())
@@ -324,16 +356,14 @@ impl RoutedKeyboard {
         loop {
             self.pump();
             if self.generated.settled()
-                && self
-                    .routing
-                    .due(&source(1), monotonic().unwrap())
-                    .unwrap()
-                    .is_none()
-                && self
-                    .routing
-                    .due(&source(2), monotonic().unwrap())
-                    .unwrap()
-                    .is_none()
+                && [1, 2].into_iter().all(|id| {
+                    id == 1 && self.retired_first
+                        || self
+                            .routing
+                            .due(&source(id), monotonic().unwrap())
+                            .unwrap()
+                            .is_none()
+                })
             {
                 return;
             }
@@ -346,6 +376,66 @@ impl RoutedKeyboard {
     }
     fn capture(&mut self, output: &Path, index: usize, text: &str, keys: &[u16]) {
         phase_service(output, index, text, keys, || self.pump());
+    }
+    fn software_packet(
+        &mut self,
+        id: u64,
+        sequence: u64,
+        operation: SoftwareOp,
+        at: Duration,
+    ) -> bool {
+        self.generated
+            .fixture_producer_request(
+                &self.routing,
+                &SoftwareRequest {
+                    fence: self.fence,
+                    source: source(100),
+                    marker: "protocol-actor-model".into(),
+                    consumer: Consumer::IsolatedReceiver { pid: 1, start: 1 },
+                    producer: Epoch([id, 1]),
+                    sequence,
+                    operation,
+                },
+                at,
+            )
+            .unwrap()
+    }
+    fn software_open(&mut self, id: u64) {
+        let at = self.refresh();
+        assert!(self.software_packet(
+            id,
+            1,
+            SoftwareOp::Open {
+                expires: at + Duration::from_millis(120)
+            },
+            at
+        ));
+        self.software.push(SoftwareLease {
+            id,
+            sequence: 1,
+            renewed: at,
+            keep: true,
+        });
+    }
+    fn software_request(&mut self, id: u64, operation: SoftwareOp, at: Duration) {
+        let lease = self.software.iter().find(|lease| lease.id == id).unwrap();
+        let sequence = lease.sequence + 1;
+        let close = matches!(operation, SoftwareOp::Close {});
+        let renew = matches!(operation, SoftwareOp::Renew { .. });
+        assert!(self.software_packet(id, sequence, operation, at));
+        if close {
+            self.software.retain(|lease| lease.id != id);
+        } else {
+            let lease = self
+                .software
+                .iter_mut()
+                .find(|lease| lease.id == id)
+                .unwrap();
+            lease.sequence = sequence;
+            if renew {
+                lease.renewed = at;
+            }
+        }
     }
     fn cancel(&mut self, event: &Event) {
         self.generated
@@ -446,6 +536,7 @@ fn local_cage_scoped_key_worker() {
         .retire_source(&source(1), monotonic().unwrap())
         .unwrap();
     keyboard.routing.recover(&source(1));
+    keyboard.retired_first = true;
     for recovery in keyboard.routing.take_recoveries() {
         let edges = recovery
             .neutral_events
@@ -456,6 +547,50 @@ fn local_cage_scoped_key_worker() {
         keyboard.raw_sequences[0] += 1;
         keyboard.raw.send(keyboard.raw_sequences[0], &edges);
     }
+    keyboard.drain();
+    keyboard.capture(&output, 8, "bAAaAaA", &[]);
+    keyboard.software_open(7);
+    keyboard.software_open(8);
+    for id in [7, 8] {
+        let at = keyboard.refresh();
+        keyboard.software_request(id, SoftwareOp::Press { id: 1, key: 42 }, at);
+    }
+    keyboard.feed_from(2, &[(30, 1), (30, 0)]);
+    keyboard.drain();
+    keyboard.capture(&output, 9, "bAAaAaAA", &[42]);
+    let at = keyboard.refresh();
+    keyboard.software_request(7, SoftwareOp::Close {}, at);
+    keyboard.feed_from(2, &[(30, 1), (30, 0)]);
+    keyboard.drain();
+    keyboard.capture(&output, 10, "bAAaAaAAA", &[42]);
+    keyboard
+        .software
+        .iter_mut()
+        .find(|lease| lease.id == 8)
+        .unwrap()
+        .keep = false;
+    let until = Instant::now() + Duration::from_secs(2);
+    while keyboard.generated.down(42) {
+        keyboard.pump();
+        assert!(
+            Instant::now() < until,
+            "software lease did not expire without input"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let at = keyboard.refresh();
+    assert!(!keyboard.software_packet(
+        8,
+        1,
+        SoftwareOp::Open {
+            expires: at + Duration::from_millis(100)
+        },
+        at
+    ));
+    keyboard.software.clear();
+    keyboard.feed_from(2, &[(30, 1), (30, 0)]);
+    keyboard.drain();
+    keyboard.capture(&output, 11, "bAAaAaAAAa", &[]);
     keyboard.generated.retire(monotonic().unwrap()).unwrap();
     for _ in 0..8 {
         if keyboard.generated.drain(monotonic().unwrap()).unwrap() == Progress::Complete {
@@ -470,10 +605,12 @@ fn local_cage_scoped_key_worker() {
     assert!(generated.into_sink().is_ok());
     drop(keyboard.raw);
     drop(keyboard.other_raw);
-    phase(&output, 8, "bAAaAaA", &[]);
-    fs::write(output.join("key-output-runtime-result.json"),serde_json::to_vec(&json!({"status":"passed","phases":9,
+    phase(&output, 12, "bAAaAaAAAa", &[]);
+    fs::write(output.join("key-output-runtime-result.json"),serde_json::to_vec(&json!({"status":"passed","phases":13,
         "source":"three_owned_wayland_virtual_keyboards","production_route_tested":false,"kernel_input_tested":false,
         "unmodified_stock_acceptance":false,"test_backpressure":true,"scoped_worker_tested":true,
         "authority_modeled":true,"transport_readiness_modeled":true,"selective_consumption_tested":false,
-        "selective_projection_tested":true,"within_frame_order_tested":true,"cross_source_order_tested":true})).unwrap()).unwrap();
+        "selective_projection_tested":true,"within_frame_order_tested":true,"cross_source_order_tested":true,
+        "software_actor_tested":true,"software_lease_tested":true,"software_private_control_tested":false,
+        "software_authorization_tested":false,"software_repeat_rendering_tested":false})).unwrap()).unwrap();
 }

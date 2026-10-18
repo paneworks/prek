@@ -4,6 +4,7 @@ pub mod drain;
 #[cfg(target_os = "linux")]
 pub mod native;
 pub mod output;
+pub mod producer;
 pub mod worker;
 use crate::{
     config::Layer,

@@ -149,6 +149,13 @@ pub enum Report {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Message {
+    /// Private queue admission only, not execution or consumer delivery.
+    SoftwareResult {
+        fence: Fence,
+        producer: crate::protocol::Epoch,
+        sequence: u64,
+        accepted: bool,
+    },
     KeyDrain {
         request: crate::keys::drain::Request,
     },

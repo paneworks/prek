@@ -1,8 +1,8 @@
-{ package, testName ? "cage_runtime" }:
+{ package, testName ? "cage_runtime", features ? [] }:
 package.overrideAttrs (_: {
   pname = "prek-local-${testName}-tests";
   outputs = [ "out" ];
-  cargoBuildFlags = [ "--test" testName ];
+  cargoBuildFlags = [ "--test" testName ] ++ (if features == [] then [] else [ "--features" (builtins.concatStringsSep "," features) ]);
   doCheck = false;
   installPhase = ''
     mkdir -p "$out/bin"
