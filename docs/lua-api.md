@@ -470,6 +470,12 @@ Subscriptions execute in registration order and retain closure state. A
 subscription added by a callback starts with the next event. At most 256
 subscriptions can be registered over one VM's lifetime, including disposed ones.
 
+Disposal clears the stored callback reference, allowing captured state to be
+collected even when the subscription handle remains reachable. The subscription's
+bounded identity and inactive metadata remain until the generation ends. An
+invocation already running keeps its callback alive and finishes normally;
+disposal prevents later invocations and does not replenish the lifetime quota.
+
 Supported kinds are `matched` (all matching phases), `begin`, `update`, `end`,
 `cancel`, `skipped`, `ready`, `reload`, `session_changed`, `context_changed`,
 `recovery` and `stop`.
@@ -931,6 +937,13 @@ privileges, no inherited input descriptors, and Linux data/heap/core limits.
 CPU limits are renewed per operation while preserving an inherited hard limit.
 
 ## Timers
+
+Cancelling a timer clears its stored callback reference, including when its
+handle remains reachable. A one-shot clears that reference when it starts; its
+running executor keeps the callback alive until completion. Self-cancellation
+does not interrupt the current invocation. These releases allow captured state
+to be collected without recycling timer identities or replenishing the
+generation's lifetime quota.
 
 `scheduler.after(duration, callback)` schedules one callback after the delay;
 `scheduler.every(period, callback)` schedules periodic callbacks;

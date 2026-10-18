@@ -720,7 +720,7 @@
       "signature": "recognizers.define(name, options, callback) -> CustomTrigger"
     },
     {
-      "description": "Idempotently disable this subscription before its next invocation.",
+      "description": "Idempotently disable this subscription and release its callback reference; an invocation already running finishes normally.",
       "name": "Subscription.dispose",
       "receiver": "Subscription",
       "signature": "subscription:dispose() -> nil"
@@ -746,7 +746,7 @@
       "signature": "scheduler.defer(callback) -> Timer"
     },
     {
-      "description": "Idempotently cancel this generation-scoped timer before its next invocation.",
+      "description": "Idempotently cancel this generation-scoped timer and release its callback reference; an invocation already running finishes normally.",
       "name": "Timer.cancel",
       "receiver": "Timer",
       "signature": "timer:cancel() -> nil"

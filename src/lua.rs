@@ -19,6 +19,8 @@ mod export;
 mod geometry;
 mod handlers;
 mod hooks;
+#[cfg(test)]
+mod lifetimes;
 mod modules;
 #[cfg(target_os = "linux")]
 mod morf;
@@ -68,12 +70,12 @@ pub fn api() -> serde_json::Value {
         serde_json::json!({"name":"units.distance", "signature":"units.distance(string) -> string", "description":"Declare an explicitly unit-qualified distance."}),
         serde_json::json!({"name":"events.on", "signature":"events.on(kind, callback) -> Subscription", "description":"Subscribe to approved semantic or lifecycle events in this session generation; registration has no evaluation effects."}),
         serde_json::json!({"name":"recognizers.define", "signature":"recognizers.define(name, options, callback) -> CustomTrigger", "phase":"configuration", "description":"Declare a source-bound recognizer with explicit permitted selectors, normalized input kinds and reply budget; callbacks return proposals to the native coordinator."}),
-        serde_json::json!({"name":"Subscription.dispose", "receiver":"Subscription", "signature":"subscription:dispose() -> nil", "description":"Idempotently disable this subscription before its next invocation."}),
+        serde_json::json!({"name":"Subscription.dispose", "receiver":"Subscription", "signature":"subscription:dispose() -> nil", "description":"Idempotently disable this subscription and release its callback reference; an invocation already running finishes normally."}),
         serde_json::json!({"name":"log.info", "signature":"log.info(message, fields = nil) -> nil", "description":"Append a bounded structured log in an event callback; unavailable during configuration evaluation."}),
         serde_json::json!({"name":"scheduler.after", "signature":"scheduler.after(duration, callback) -> Timer", "description":"Schedule one callback after an explicitly unit-qualified monotonic delay in this VM generation."}),
         serde_json::json!({"name":"scheduler.every", "signature":"scheduler.every(period, callback) -> Timer", "description":"Schedule periodic callbacks; preserve phase and skip missed ticks instead of catching up in a burst."}),
         serde_json::json!({"name":"scheduler.defer", "signature":"scheduler.defer(callback) -> Timer", "description":"Schedule a callback on a later runtime wake using a one-millisecond delay."}),
-        serde_json::json!({"name":"Timer.cancel", "receiver":"Timer", "signature":"timer:cancel() -> nil", "description":"Idempotently cancel this generation-scoped timer before its next invocation."}),
+        serde_json::json!({"name":"Timer.cancel", "receiver":"Timer", "signature":"timer:cancel() -> nil", "description":"Idempotently cancel this generation-scoped timer and release its callback reference; an invocation already running finishes normally."}),
         serde_json::json!({"name":"scheduler.spawn", "signature":"scheduler.spawn(callback) -> Task", "description":"Start a bounded generation-scoped coroutine on a later scheduler wake; never execute it during configuration evaluation."}),
         serde_json::json!({"name":"scheduler.sleep", "signature":"scheduler.sleep(duration) -> TaskWake", "description":"Suspend the current scheduler task for a unit-qualified monotonic delay and return its next wake context."}),
         serde_json::json!({"name":"Task.cancel", "receiver":"Task", "signature":"task:cancel() -> nil", "description":"Cancel future resumes and release retained coroutine state at the next scheduler boundary."}),
@@ -536,7 +538,7 @@ local function schedule(delay, callback, periodic)
     local entry = {id=#timers+1, delay_ms=milliseconds, due=deadline,
         periodic=periodic, active=true, callback=callback}
     timers[entry.id]=entry
-    return {cancel=function(self)entry.active=false end}
+    return {cancel=function(self)entry.active=false; entry.callback=nil end}
 end
 function api.scheduler.after(delay, callback) return schedule(delay,callback,false) end
 function api.scheduler.every(period, callback) return schedule(period,callback,true) end
@@ -575,7 +577,7 @@ local function subscribe(kind, callback, rule)
     assert(#registrations < 256, "Lua subscription limit exceeded")
     local entry = {id=#registrations+1, kind=kind, callback=callback, active=true, rule=rule}
     registrations[entry.id] = entry
-    return {dispose=function(self) entry.active=false end}
+    return {dispose=function(self) entry.active=false; entry.callback=nil end}
 end
 function api.events.on(kind, callback) return subscribe(kind,callback,nil) end
 local recognizer_guard=api.recognizers.__define

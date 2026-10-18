@@ -314,6 +314,13 @@ make.recipe{
 make.recipe{ name = "test-all", desc = "the suite, with every feature on",
              run = function() sh.cargo("test", "--locked", "--all-targets", "--all-features") end }
 
+make.recipe{ name="test-lua-lifetimes", desc="disposed subscription and timer capture release; no devices",
+             run=function()
+               local tested=oslo.run{"cargo","test","--locked","--lib","lua::lifetimes::",capture=true}
+               io.stdout:write(tested.out or ""); io.stderr:write(tested.err or "")
+               assert(tested.ok and (tested.out or ""):match("running [1-9]%d* tests?"),"Lua lifetime gate failed or selected no tests")
+             end }
+
 make.recipe{
   name = "test-composition-helper",
   desc = "test private held-touch composition with the real unprivileged Lua helper",
@@ -735,6 +742,6 @@ make.alias("c", "compile")
 make.recipe{
   name = "verify",
   desc = "the whole local gate",
-  deps = { "fmt-check", "check-all", "test-all", "test-routing-helper", "test-composition-helper", "test-chain-helper", "test-composed-worker-helper", "test-root-session", "test-root-routing", "test-native-managed-model", "test-cage-startup", "test-distribution", "clippy", "rustdoc" },
+  deps = { "fmt-check", "check-all", "test-all", "test-lua-lifetimes", "test-routing-helper", "test-composition-helper", "test-chain-helper", "test-composed-worker-helper", "test-root-session", "test-root-routing", "test-native-managed-model", "test-cage-startup", "test-distribution", "clippy", "rustdoc" },
 }
 make.alias("v", "verify")

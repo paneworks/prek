@@ -153,6 +153,7 @@ impl Runtime {
                         entry.set(ctx,"due",next)?;
                     } else {entry.set(ctx,"active",false)?;}
                     let callback:Function=entry.get(ctx,"callback")?;
+                    if !periodic {entry.set(ctx,"callback",Value::Nil)?;}
                     let payload=serde_json::json!({"context":context,"timer":{"id":id,"periodic":periodic},"at":now});
                     let value=values::payload(ctx,&payload)?;
                     Ok(Some(ctx.stash(Executor::start(ctx,callback,(value,)))))
