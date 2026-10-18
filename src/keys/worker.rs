@@ -540,6 +540,9 @@ impl<S: Sink> Seat<S> {
         self.retiring.get_or_insert(at.saturating_add(DRAIN));
         self.clear(at, true)
     }
+    pub(crate) fn retirement_deadline(&self) -> Option<Duration> {
+        self.retiring
+    }
     fn clear(&mut self, at: Duration, retire: bool) -> io::Result<Progress> {
         let at = at.max(self.at);
         self.at = at;

@@ -54,6 +54,10 @@ pub enum Command {
     MorfActivated {
         grant: crate::morf::admission::Grant,
     },
+    KeyDrained {
+        request: crate::keys::drain::Request,
+        at: Duration,
+    },
     Begin {
         generation: u64,
         bytes: usize,

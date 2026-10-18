@@ -7,6 +7,7 @@ use crate::{
 };
 use std::{cell::RefCell, collections::BTreeMap, os::unix::net::UnixStream, rc::Rc};
 
+mod consumer_drain;
 mod coordinator;
 mod lifecycle;
 
@@ -77,6 +78,9 @@ struct ModelPreparation {
 }
 impl Preparation for ModelPreparation {
     type Sink = ModelSink;
+    fn completed_at(at: Duration) -> io::Result<Duration> {
+        Ok(at)
+    }
     fn descriptor(&self) -> &Descriptor {
         &self.descriptor
     }

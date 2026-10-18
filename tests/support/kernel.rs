@@ -352,6 +352,54 @@ impl Receiver {
             }
         }
     }
+
+    pub fn drain_complete(&mut self) -> io::Result<Vec<Frame>> {
+        let mut frames: Vec<_> = self.pending.drain(..).collect();
+        for _ in 0..64 {
+            match self.raw.fetch_events() {
+                Ok(events) => {
+                    let mut count = 0;
+                    for event in events {
+                        count += 1;
+                        let at = event
+                            .timestamp()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_err(io::Error::other)?;
+                        match self.assembler.push(
+                            RawEvent {
+                                kind: event.event_type().0,
+                                code: event.code(),
+                                value: event.value(),
+                            },
+                            at,
+                        ) {
+                            Assembly::Frame(frame) => frames.push(frame),
+                            Assembly::Lost => {
+                                return Err(io::Error::other("isolated receiver lost input"));
+                            }
+                            Assembly::Pending => {}
+                        }
+                    }
+                    if count == 0 || frames.len() > 4096 {
+                        return Err(io::Error::other(
+                            "isolated receiver empty read or frame limit",
+                        ));
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    if !self.assembler.at_boundary() {
+                        return Err(io::Error::other(
+                            "isolated receiver stopped inside a report",
+                        ));
+                    }
+                    return Ok(frames);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(io::Error::other("isolated receiver drain budget exceeded"))
+    }
 }
 
 pub fn send(output: &mut Virtual, sequence: u64, events: &[(u16, u16, i32)]) {

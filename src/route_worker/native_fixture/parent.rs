@@ -11,11 +11,108 @@ struct Parent {
     renewed: Instant,
     endpoints: BTreeMap<Source, Endpoint>,
     receivers: BTreeMap<Source, kernel::Receiver>,
+    captured: BTreeMap<Source, Vec<Frame>>,
+    neutral_drains: BTreeMap<Source, crate::keys::drain::Request>,
     released: BTreeSet<Source>,
     finishing: bool,
     reaped: bool,
 }
 impl Parent {
+    fn capture(&mut self) -> io::Result<()> {
+        for (source, receiver) in &mut self.receivers {
+            if self.neutral_drains.contains_key(source) {
+                continue;
+            }
+            let frames = receiver.drain_complete()?;
+            for frame in &frames {
+                if frame.events.last()
+                    != Some(&RawEvent {
+                        kind: EV_SYN,
+                        code: SYN_REPORT,
+                        value: 0,
+                    })
+                    || frame.events[..frame.events.len() - 1]
+                        .iter()
+                        .any(|event| event.kind != EV_KEY)
+                {
+                    return Err(invalid(
+                        "managed kernel output is not a complete key report",
+                    ));
+                }
+            }
+            let buffered = self.captured.entry(source.clone()).or_default();
+            if buffered.len().saturating_add(frames.len()) > 64 {
+                return Err(invalid(
+                    "managed captured output exceeded its fixture bound",
+                ));
+            }
+            buffered.extend(frames);
+        }
+        Ok(())
+    }
+    fn acknowledge_drain(&mut self, request: crate::keys::drain::Request) -> io::Result<()> {
+        let now = monotonic()?;
+        let endpoint = self
+            .endpoints
+            .get(&request.source)
+            .ok_or_else(|| invalid("managed drain source is unknown"))?;
+        if request.fence != self.fence
+            || request.consumer != self.consumer
+            || request.marker != endpoint.descriptor.marker
+            || !endpoint.descriptor.is_generated_keyboard()
+            || request.requested_at > now
+            || now >= request.deadline
+            || request.nonce.0 == [0, 0]
+            || self.neutral_drains.contains_key(&request.source)
+        {
+            return Err(invalid("managed consumer drain challenge differs"));
+        }
+        self.capture()?;
+        let receiver = self
+            .receivers
+            .get(&request.source)
+            .ok_or_else(|| invalid("managed drain receiver is missing"))?;
+        let keys_down: Vec<_> = receiver
+            .raw
+            .get_key_state()?
+            .iter()
+            .map(|key| key.0)
+            .collect();
+        if !keys_down.is_empty() {
+            return Err(invalid("managed drain receiver is not actually neutral"));
+        }
+        let at = monotonic()?;
+        if at >= request.deadline {
+            return Err(invalid("managed consumer drain deadline expired"));
+        }
+        let drained = self
+            .captured
+            .get(&request.source)
+            .ok_or_else(|| invalid("managed final release was not read"))?;
+        if drained.len() != 1 || edges(drained) != [(42, 0)] {
+            return Err(invalid("managed final release was not completely consumed"));
+        }
+        let last_report_at_ns = drained[0].at.as_nanos();
+        control::send(
+            &mut self.channel,
+            &Command::KeyDrained {
+                request: request.clone(),
+                at,
+            },
+        )?;
+        println!(
+            "{DRAIN}{}",
+            serde_json::json!({
+                "version":1, "nonce":request.nonce.0,
+                "requested_at_ns":request.requested_at.as_nanos(),
+                "neutral_at_ns":at.as_nanos(), "deadline_ns":request.deadline.as_nanos(),
+                "last_report_at_ns":last_report_at_ns, "keys_down":keys_down,
+                "generated":[[42,0]], "reports":drained.len()
+            })
+        );
+        self.neutral_drains.insert(request.source.clone(), request);
+        Ok(())
+    }
     fn renew(&mut self) -> io::Result<()> {
         self.revision += 1;
         let subscription = subscription(self.fence, &self.consumer, self.revision, self.synthetic)?;
@@ -68,6 +165,7 @@ impl Parent {
                 Err(error) => return Err(error),
             };
             match packet.message {
+                Message::KeyDrain { request } => self.acknowledge_drain(request)?,
                 Message::Configuration {
                     generation: 1,
                     error: None,
@@ -117,6 +215,9 @@ impl Parent {
         if !self.finishing && self.renewed.elapsed() >= Duration::from_millis(30) {
             self.renew()?;
         }
+        if !self.finishing {
+            self.capture()?;
+        }
         Ok(())
     }
     fn notice(&mut self) -> io::Result<Notice> {
@@ -152,23 +253,9 @@ impl Parent {
         let mut quiet = Instant::now();
         loop {
             self.tick()?;
-            for (source, receiver) in &mut self.receivers {
-                if let Some(frame) = receiver.next(Duration::from_millis(1)) {
-                    if frame.events.last()
-                        != Some(&RawEvent {
-                            kind: EV_SYN,
-                            code: SYN_REPORT,
-                            value: 0,
-                        })
-                        || frame.events[..frame.events.len() - 1]
-                            .iter()
-                            .any(|event| event.kind != EV_KEY)
-                    {
-                        return Err(invalid(
-                            "managed kernel output is not a complete key report",
-                        ));
-                    }
-                    frames.get_mut(source).unwrap().push(frame);
+            for (source, buffered) in &mut self.captured {
+                if !buffered.is_empty() {
+                    frames.get_mut(source).unwrap().append(buffered);
                     quiet = Instant::now();
                 }
             }
@@ -193,6 +280,7 @@ impl Parent {
                     "managed native output timed out: {actual:?}, expected {expected:?}"
                 )));
             }
+            thread::sleep(Duration::from_millis(1));
         }
     }
 }
@@ -314,6 +402,8 @@ pub(super) fn run() -> io::Result<()> {
         renewed: Instant::now(),
         endpoints: BTreeMap::new(),
         receivers: BTreeMap::new(),
+        captured: BTreeMap::new(),
+        neutral_drains: BTreeMap::new(),
         released: BTreeSet::new(),
         finishing: false,
         reaped: false,
@@ -436,10 +526,11 @@ pub(super) fn run() -> io::Result<()> {
         ));
     }
     log_phase("revocation", &cancelled, &sources, &generated);
-    if parent
-        .receivers
-        .values()
-        .any(|receiver| !receiver.keys().is_empty())
+    if parent.neutral_drains.len() != 1
+        || !parent.neutral_drains.contains_key(&generated)
+        || parent.receivers.iter().any(|(source, receiver)| {
+            !parent.neutral_drains.contains_key(source) && !receiver.keys().is_empty()
+        })
     {
         return Err(invalid("managed native receivers did not return neutral"));
     }
@@ -484,7 +575,7 @@ pub(super) fn run() -> io::Result<()> {
     }
     println!(
         "{RESULT}{}",
-        serde_json::json!({"version":1,"status":"passed","uid":0,"physical_devices_opened":0,"worker_binding_tested":true,"private_control_authenticated":true,"raw_outputs":2,"generated_outputs":1,"source_readers_grabbed":2,"native_projection_tested":true,"native_repeat_tested":true,"native_cancellation_tested":true,"kernel_write_order_tested":true,"native_partial_write_tested":false,"broker_grant_tested":false,"context_authority_modeled":true,"production_input_loop_tested":false,"production_route_admission_tested":false,"compositor_delivery_tested":false,"keys_neutral":true,"worker_reaped":true,"owned_devices_removed":true})
+        serde_json::json!({"version":2,"status":"passed","uid":0,"physical_devices_opened":0,"worker_binding_tested":true,"private_control_authenticated":true,"consumer_neutral_drain_tested":true,"consumer_neutral_drain_acknowledgements":1,"raw_outputs":2,"generated_outputs":1,"source_readers_grabbed":2,"native_projection_tested":true,"native_repeat_tested":true,"native_cancellation_tested":true,"kernel_write_order_tested":true,"native_partial_write_tested":false,"broker_grant_tested":false,"context_authority_modeled":true,"production_input_loop_tested":false,"production_route_admission_tested":false,"compositor_delivery_tested":false,"keys_neutral":true,"worker_reaped":true,"owned_devices_removed":true})
     );
     Ok(())
 }

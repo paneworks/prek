@@ -1188,6 +1188,11 @@ fn run_broker(
                             let _ = control.send(&command, monotonic()?)?;
                         }
                     }
+                    prek::worker::Message::KeyDrain { .. } => {
+                        eprintln!(
+                            "consumer drain acknowledgement unsupported; generated slot will expire"
+                        );
+                    }
                 },
                 Ok(None) => break,
                 Err(error) if worker_link_closed(&error) => control_closed = true,

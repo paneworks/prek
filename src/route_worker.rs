@@ -109,6 +109,7 @@ pub struct Stream {
     pending: VecDeque<Pending>,
     pending_bytes: usize,
     closing_keys: Vec<keys::Slot>,
+    closing_outputs: Vec<(crate::router::Recovery, Output)>,
     key_generation: u64,
     key_failure: Option<io::Error>,
 }
@@ -214,6 +215,7 @@ impl Outbox {
                     seat: changed_seat, ..
                 } => changed_seat == seat,
                 Message::Released { .. } => false,
+                Message::KeyDrain { .. } => false,
             };
             !discard
         });
@@ -318,6 +320,7 @@ impl Stream {
             pending: VecDeque::new(),
             pending_bytes: 0,
             closing_keys: Vec::new(),
+            closing_outputs: Vec::new(),
             key_generation: 0,
             key_failure: None,
         })
@@ -327,20 +330,23 @@ impl Stream {
             .push_reserved(message, self.pending.len(), self.pending_bytes)
     }
     fn retire(&mut self, recovery: crate::router::Recovery, now: Duration) {
-        if let Some(mut output) = self.outputs.remove(&recovery.source) {
-            let frame = Frame {
-                source: recovery.source,
-                at: now,
-                sequence: output.sequence.saturating_add(1),
-                events: recovery.neutral_events,
-            };
-            // Complete an already started frame before attempting neutral.
-            // All operations are nonblocking; destruction remains mandatory
-            // when a partial/faulted write prevents a complete neutral frame.
-            if matches!(output.virtual_device.flush(), Ok(Flush::Complete)) {
-                let _ = output.virtual_device.enqueue(&frame);
-                let _ = output.virtual_device.flush();
-            }
+        if let Some(output) = self.outputs.remove(&recovery.source) {
+            Self::retire_output(recovery, output, now);
+        }
+    }
+    fn retire_output(recovery: crate::router::Recovery, mut output: Output, now: Duration) {
+        let frame = Frame {
+            source: recovery.source,
+            at: now,
+            sequence: output.sequence.saturating_add(1),
+            events: recovery.neutral_events,
+        };
+        // Complete an already started frame before attempting neutral.
+        // All operations are nonblocking; destruction remains mandatory
+        // when a partial/faulted write prevents a complete neutral frame.
+        if matches!(output.virtual_device.flush(), Ok(Flush::Complete)) {
+            let _ = output.virtual_device.enqueue(&frame);
+            let _ = output.virtual_device.flush();
         }
     }
     fn teardown(&mut self, seat: &str, now: Duration) {
@@ -360,7 +366,13 @@ impl Stream {
                 owner.routing.recover(source);
             }
             for recovery in owner.routing.take_recoveries() {
-                self.retire(recovery, now);
+                if self.key_drain_pending(seat) {
+                    if let Some(output) = self.outputs.remove(&recovery.source) {
+                        self.closing_outputs.push((recovery, output));
+                    }
+                } else {
+                    self.retire(recovery, now);
+                }
             }
         }
         self.outputs.retain(|source, _| source.seat != seat);
@@ -718,7 +730,7 @@ impl InputSink for Stream {
         self.service_keys(health)
     }
     fn reader_released(&mut self, source: &Source) -> io::Result<()> {
-        if self.outputs.contains_key(source) {
+        if self.outputs.contains_key(source) || self.key_drain_pending(&source.seat) {
             return Err(invalid("original closed before virtual retirement"));
         }
         let Some((fence, worker)) = self.releases.remove(source) else {
@@ -739,6 +751,9 @@ impl InputSink for Stream {
         health: Option<&Heartbeat>,
     ) -> io::Result<ReaderDisposition> {
         let now = monotonic()?;
+        if self.key_drain_pending(&device.source.seat) {
+            return Ok(ReaderDisposition::Keep);
+        }
         if (self.grabbed.contains(&device.source) || self.releases.contains_key(&device.source))
             && !self.outputs.contains_key(&device.source)
         {
@@ -988,6 +1003,9 @@ impl InputSink for Stream {
                     {
                         output.admission.grant(&grant, monotonic()?);
                     }
+                }
+                Command::KeyDrained { request, at } => {
+                    self.acknowledge_key_drain(&request, at, monotonic()?);
                 }
                 command => {
                     if let Some(installation) = self.assembly.accept(command, now)? {

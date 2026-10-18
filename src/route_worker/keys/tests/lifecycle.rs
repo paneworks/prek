@@ -39,14 +39,17 @@ fn consumer_loss_abandons_unwritten_chord_tails_then_requires_worker_recovery() 
     assert!(slot.retiring());
     state.borrow_mut().blocked = false;
     slot.advance(ms(252)).unwrap();
-    assert!(slot.closed());
+    assert!(!slot.closed());
     assert_eq!(keys(&state), [(42, 1), (42, 0)]);
     assert!(slot.offer(ms(253)).is_none());
+    let request = slot.drain_request().unwrap();
+    assert!(slot.acknowledge_drain(&request, ms(253), ms(253)));
+    assert!(slot.closed());
     assert_eq!(state.borrow().dropped, 1);
 }
 
 #[test]
-fn retirement_drains_a_held_release_without_requiring_the_old_routing() {
+fn retirement_retains_the_writer_after_local_release_until_consumer_acknowledgement() {
     let (mut slot, state) = model();
     activate(&mut slot, &state, 0);
     let mut routing = routing(vec![rule("shift", Action::Remap { key: Key(42) })]);
@@ -55,9 +58,16 @@ fn retirement_drains_a_held_release_without_requiring_the_old_routing() {
     slot.retire(ms(20)).unwrap();
     drop(routing);
     slot.advance(ms(21)).unwrap();
-    assert!(slot.closed());
+    assert!(!slot.closed());
     assert_eq!(keys(&state), [(42, 1), (42, 0)]);
+    assert_eq!(state.borrow().dropped, 0);
+    assert_eq!(slot.deadline(), Some(ms(270)));
+    let request = slot.drain_request().unwrap();
+    assert!(slot.drain_request().is_none());
+    assert!(slot.acknowledge_drain(&request, ms(22), ms(22)));
+    assert!(slot.closed());
     assert_eq!(state.borrow().dropped, 1);
+    assert!(!slot.acknowledge_drain(&request, ms(22), ms(22)));
 }
 
 #[test]

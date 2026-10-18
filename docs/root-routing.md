@@ -79,6 +79,14 @@ Success also requires neutral receivers, output removal, actual source closure
 acknowledgements and a successful reaped worker without leftover owned metadata.
 Failure cleanup never removes unrelated registry entries.
 
+The generated writer remains alive after its final local release. The receiver
+drains complete kernel reports to `EAGAIN`, reads live key state, then replies to
+the worker's exact private fence/publication/consumer/nonce challenge. The shared
+250 ms deadline includes both local writes and consumer waiting. A separate
+`PREK_MANAGED_KEY_WORKER_DRAIN` record correlates the final consumed key-up,
+actual neutral sample and subsequent ordinary reentry. No removed-device ioctl
+or fixture-owned writer duplicate substitutes for that acknowledgement.
+
 This is an explicitly modeled desktop context and isolated source normalization,
 not production discovery, the production reader/cutover loop or broker grant.
 It does not prove stock compositor delivery, consumer retirement, native partial
@@ -141,7 +149,7 @@ Logs belong to your regular user under `target/root-routing/run-*`; `latest`
 points to that attempt. `console.log` records build, wrapper and cleanup output;
 `kernel.log` retains root probe stdout. `status.json` records running/passed/failed
 and the final exit code. `receipt.json` is written only after checking one complete
-version-6 root receipt, the exact fourteen routing, eight recovery, two transport
+version-7 root receipt, the exact fourteen routing, eight recovery, two transport
 characterization, one generated-keyboard and one managed-worker inventory, all twenty-six tests actually executed and passed,
 cleanup flags and the explicit scope limits. The recovery summary must match its
 eight per-case results. The repeat case must supply its complete typed observation
@@ -153,7 +161,7 @@ typed record and one passing result, retaining false authorization, compositor,
 worker-binding and partial-native-write scope flags. The separate managed-worker
 record requires actual worker binding and three correlated typed kernel phases,
 while retaining its false public-grant, production-loop and compositor scope flags.
-Older version-2/3/4/5 receipts
+Older version-2/3/4/5/6 receipts
 are not current acceptance.
 Skips and zero-test runs
 cannot pass. Tell the agent when the script finishes so it can inspect these files.

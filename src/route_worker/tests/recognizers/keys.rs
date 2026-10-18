@@ -621,23 +621,75 @@ fn a_late_generated_reply_cannot_mutate_a_physical_output_with_equal_source_numb
 fn teardown_drains_generated_releases_before_dropping_its_publication() {
     let mut fixture = Fixture::new(profile(), owner());
     let (slot, descriptor, path) = slot(&fixture);
+    let raw = physical_file(&mut fixture, &device(), "raw-bytes");
     fixture.stream.seats.get_mut("seat0").unwrap().keys = Some(slot);
     fixture.stream.refresh_keys(monotonic().unwrap()).unwrap();
     fixture.key(1, true);
-    ack(&mut fixture);
     for _ in 0..3 {
         fixture.stream.flush().unwrap();
     }
+    fixture
+        .stream
+        .push(Record::Frame {
+            frame: raw_frame(&device(), 2, &[(48, 1)]),
+        })
+        .unwrap();
+    for _ in 0..3 {
+        fixture.stream.flush().unwrap();
+    }
+    assert_eq!(events(&raw), [(30, 1), (48, 1)]);
     fixture.stream.teardown("seat0", monotonic().unwrap());
     assert!(fixture.stream.seats.is_empty());
     assert_eq!(fixture.stream.closing_keys.len(), 1);
     fixture.stream.refresh_keys(monotonic().unwrap()).unwrap();
-    assert!(fixture.stream.closing_keys.is_empty());
+    assert_eq!(fixture.stream.closing_keys.len(), 1);
+    assert_eq!(fixture.stream.closing_outputs.len(), 1);
+    assert!(fixture.stream.key_drain_pending("seat0"));
+    assert!(fixture.stream.reader_released(&device().source).is_err());
     assert_eq!(events(&path), [(42, 1), (42, 0)]);
+    assert_eq!(events(&raw), [(30, 1), (48, 1)]);
+    let mut requests: Vec<_> = fixture
+        .drain()
+        .into_iter()
+        .filter_map(|message| match message {
+            Message::KeyDrain { request } => Some(request),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(requests.len(), 1);
+    let request = requests.pop().unwrap();
+    assert_eq!(request.marker, descriptor.marker);
+    let mut wrong = request.clone();
+    wrong.nonce.0[0] ^= 1;
+    fixture.send(Command::KeyDrained {
+        request: wrong,
+        at: monotonic().unwrap(),
+    });
+    fixture.stream.refresh_keys(monotonic().unwrap()).unwrap();
+    assert_eq!(fixture.stream.closing_keys.len(), 1);
+    assert_eq!(events(&raw), [(30, 1), (48, 1)]);
+    fixture.send(Command::KeyDrained {
+        request: request.clone(),
+        at: monotonic().unwrap(),
+    });
+    assert!(fixture.stream.key_drain_pending("seat0"));
+    assert!(fixture.stream.reader_released(&device().source).is_err());
+    fixture.stream.refresh_keys(monotonic().unwrap()).unwrap();
+    assert!(fixture.stream.closing_keys.is_empty());
+    assert!(fixture.stream.closing_outputs.is_empty());
+    assert!(!fixture.stream.key_drain_pending("seat0"));
+    assert_eq!(events(&raw), [(30, 1), (48, 1), (30, 0), (48, 0)]);
+    fixture.send(Command::KeyDrained {
+        request,
+        at: monotonic().unwrap(),
+    });
     assert!(
         fs::read_dir(&fixture.directory)
             .unwrap()
-            .all(|entry| entry.unwrap().file_name() == "generated-bytes")
+            .all(|entry| matches!(
+                entry.unwrap().file_name().to_str(),
+                Some("generated-bytes" | "raw-bytes")
+            ))
     );
     assert!(descriptor.is_generated_keyboard());
 }
@@ -728,4 +780,111 @@ fn runtime_route_replacement_accepts_the_fresh_reader_incarnation() {
         fixture.stream.flush().unwrap();
     }
     assert_eq!(events(&path), [(42, 1), (42, 0), (42, 1)]);
+}
+
+#[test]
+fn shutdown_services_consumer_drain_without_reactivating_subscriptions() {
+    let mut fixture = Fixture::new(profile(), owner());
+    let (slot, descriptor, path) = slot(&fixture);
+    let raw = physical_file(&mut fixture, &device(), "raw-bytes");
+    fixture.stream.seats.get_mut("seat0").unwrap().keys = Some(slot);
+    fixture.stream.refresh_keys(monotonic().unwrap()).unwrap();
+    fixture.key(1, true);
+    for _ in 0..3 {
+        fixture.stream.flush().unwrap();
+    }
+    let (replacement, _peer) = Channel::pair().unwrap();
+    let mut peer = std::mem::replace(&mut fixture.parent, replacement);
+    let owner = fixture.owner.clone();
+    let expected = descriptor.marker;
+    let receiver = std::thread::spawn(move || {
+        let until = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(packet) = peer.receive::<Message>().unwrap()
+                && let Message::KeyDrain { request } = packet.message
+            {
+                assert_eq!(request.marker, expected);
+                assert_eq!(events(&path), [(42, 1), (42, 0)]);
+                assert_eq!(events(&raw), [(30, 1)]);
+                assert!(
+                    peer.send(
+                        &Command::Subscriptions {
+                            update: Subscriptions {
+                                revision: 999,
+                                seats: vec![owner]
+                            }
+                        },
+                        monotonic().unwrap()
+                    )
+                    .unwrap()
+                );
+                let mut wrong = request.clone();
+                wrong.nonce.0[0] ^= 1;
+                assert!(
+                    peer.send(
+                        &Command::KeyDrained {
+                            request: wrong,
+                            at: monotonic().unwrap()
+                        },
+                        monotonic().unwrap()
+                    )
+                    .unwrap()
+                );
+                assert!(
+                    peer.send(
+                        &Command::KeyDrained {
+                            request,
+                            at: monotonic().unwrap()
+                        },
+                        monotonic().unwrap()
+                    )
+                    .unwrap()
+                );
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < until,
+                "shutdown did not request consumer drain"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    });
+    fixture.stream.shutdown();
+    receiver.join().unwrap();
+    assert!(fixture.stream.seats.is_empty());
+    assert!(fixture.stream.closing_keys.is_empty());
+    assert!(fixture.stream.closing_outputs.is_empty());
+    assert!(!fixture.stream.key_drain_pending("seat0"));
+    assert!(fs::read_dir(&fixture.directory).unwrap().all(|entry| {
+        matches!(
+            entry.unwrap().file_name().to_str(),
+            Some("generated-bytes" | "raw-bytes")
+        )
+    }));
+}
+
+#[test]
+fn shutdown_without_a_receipt_is_bounded_and_destroys_all_outputs() {
+    let mut fixture = Fixture::new(profile(), owner());
+    let (slot, _, path) = slot(&fixture);
+    physical_file(&mut fixture, &device(), "raw-bytes");
+    fixture.stream.seats.get_mut("seat0").unwrap().keys = Some(slot);
+    fixture.stream.refresh_keys(monotonic().unwrap()).unwrap();
+    fixture.key(1, true);
+    for _ in 0..3 {
+        fixture.stream.flush().unwrap();
+    }
+    let started = std::time::Instant::now();
+    fixture.stream.shutdown();
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(fixture.stream.closing_keys.is_empty());
+    assert!(fixture.stream.closing_outputs.is_empty());
+    assert!(!fixture.stream.key_drain_pending("seat0"));
+    assert_eq!(events(&path), [(42, 1), (42, 0)]);
+    assert!(fs::read_dir(&fixture.directory).unwrap().all(|entry| {
+        matches!(
+            entry.unwrap().file_name().to_str(),
+            Some("generated-bytes" | "raw-bytes")
+        )
+    }));
 }

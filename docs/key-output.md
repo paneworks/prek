@@ -279,11 +279,16 @@ are applied before new work. New reader incarnations remain necessary after
 raw-route replacement; a retained physical source generation is not reusable.
 
 The slot supplies preparation/offer/consumer/write/drain deadlines and pending
-write fds. Scope teardown retains retiring output until release-only draining
-finishes or its 250 ms deadline fails. Shutdown attempts bounded cleanup before
-original reader release. Neither local write completion nor descriptor removal
-is a consumer-neutral acknowledgement. There is no automatic in-place resume of
-a retired native slot in its old coordinator.
+write fds. Scope teardown retains the generated writer, dependent raw-output
+cleanup and original-reader barrier after local release completion. Only then
+does it issue a one-use private consumer-drain challenge bound to the fence,
+source incarnation, publication, consumer and nonce. The trusted consumer must
+consume complete final reports and verify live neutral state before replying;
+inventory evidence cannot acknowledge drain. Local writes and consumer waiting
+share the same 250 ms retirement deadline. Stale, foreign, early, future and
+duplicate receipts cannot close another slot. Shutdown pumps private receipts
+within that bound, destroys outputs on failure, and reports neutrality unproven
+before releasing original readers. A retired slot never resumes in place.
 
 This binding does not complete native acceptance. The stock consumer boundary
 still refuses takeover, public `SyntheticInput` negotiation stays disabled, and

@@ -22,6 +22,7 @@ use crate::keys::worker::Submission;
 
 pub(super) trait Preparation {
     type Sink: Sink;
+    fn completed_at(at: Duration) -> io::Result<Duration>;
     fn descriptor(&self) -> &Descriptor;
     fn deadline(&self) -> Duration;
     fn observe(&mut self, evidence: &ConsumerEvidence, at: Duration) -> io::Result<()>;
@@ -29,6 +30,9 @@ pub(super) trait Preparation {
 }
 impl Preparation for Prepared {
     type Sink = crate::kernel::Virtual;
+    fn completed_at(_at: Duration) -> io::Result<Duration> {
+        crate::ipc::monotonic()
+    }
     fn descriptor(&self) -> &Descriptor {
         self.descriptor()
     }
@@ -57,6 +61,9 @@ pub(super) struct Slot<P: Preparation = Prepared> {
     offered: Option<Duration>,
     phase: Phase<P>,
     failed: bool,
+    retirement: Option<Duration>,
+    drain: Option<crate::keys::drain::Request>,
+    drain_offered: bool,
 }
 impl<P: Preparation> Slot<P> {
     pub(super) fn new(fence: Fence, consumer: Consumer, prepared: P) -> io::Result<Self> {
@@ -80,6 +87,9 @@ impl<P: Preparation> Slot<P> {
             offered: None,
             phase: Phase::Preparing(Box::new(prepared)),
             failed: false,
+            retirement: None,
+            drain: None,
+            drain_offered: false,
         })
     }
     pub(super) fn matches(&self, fence: Fence, source: &Source, marker: &str) -> bool {
@@ -95,7 +105,8 @@ impl<P: Preparation> Slot<P> {
     #[cfg(feature = "native-test-harness")]
     pub(super) fn fixture_settled(&self) -> bool {
         match &self.phase {
-            Phase::Active(actor) | Phase::Closing(actor) => actor.fixture_settled(),
+            Phase::Active(actor) => actor.fixture_settled(),
+            Phase::Closing(_) => false,
             Phase::Preparing(_) => false,
             Phase::Closed => true,
         }
@@ -196,10 +207,36 @@ impl<P: Preparation> Slot<P> {
                 "generated consumer or execution lease lost; worker recovery required",
             ));
         }
+        if matches!(self.phase, Phase::Closing(_))
+            && self.retirement.is_some_and(|deadline| at >= deadline)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "generated consumer did not acknowledge neutral drain",
+            ));
+        }
         if let Phase::Closing(actor) = &mut self.phase
+            && self.drain.is_none()
             && actor.drain(at)? == Progress::Complete
         {
-            self.phase = Phase::Closed;
+            let nonce = crate::protocol::Epoch::random()?;
+            let requested_at = P::completed_at(at)?;
+            let deadline = self.retirement.unwrap();
+            if requested_at < at || requested_at >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "generated local drain exhausted the consumer acknowledgement budget",
+                ));
+            }
+            self.drain = Some(crate::keys::drain::Request {
+                fence: self.fence,
+                source: self.descriptor.source.clone(),
+                marker: self.descriptor.marker.clone(),
+                consumer: self.consumer.clone(),
+                nonce,
+                requested_at,
+                deadline,
+            });
         }
         Ok(())
     }
@@ -208,6 +245,7 @@ impl<P: Preparation> Slot<P> {
         match phase {
             Phase::Active(mut actor) => {
                 let result = actor.retire(at);
+                self.retirement = actor.retirement_deadline();
                 self.phase = Phase::Closing(actor);
                 result?;
             }
@@ -218,6 +256,33 @@ impl<P: Preparation> Slot<P> {
     }
     pub(super) fn closed(&self) -> bool {
         matches!(self.phase, Phase::Closed)
+    }
+    pub(super) fn drain_request(&mut self) -> Option<crate::keys::drain::Request> {
+        if self.drain_offered {
+            return None;
+        }
+        let request = self.drain.clone()?;
+        self.drain_offered = true;
+        Some(request)
+    }
+    pub(super) fn acknowledge_drain(
+        &mut self,
+        request: &crate::keys::drain::Request,
+        at: Duration,
+        now: Duration,
+    ) -> bool {
+        if !matches!(self.phase, Phase::Closing(_))
+            || !self.drain_offered
+            || self.drain.as_ref() != Some(request)
+            || at < request.requested_at
+            || at > now
+            || now >= request.deadline
+        {
+            return false;
+        }
+        self.phase = Phase::Closed;
+        self.drain = None;
+        true
     }
     pub(super) fn retiring(&self) -> bool {
         matches!(self.phase, Phase::Closing(_) | Phase::Closed)
@@ -231,7 +296,9 @@ impl<P: Preparation> Slot<P> {
                 actor.poll(routing, at)?;
             }
             Phase::Closing(actor) => {
-                actor.drain(at)?;
+                if self.drain.is_none() {
+                    actor.drain(at)?;
+                }
             }
             Phase::Preparing(_) | Phase::Closed => {}
         }
@@ -298,6 +365,9 @@ impl<P: Preparation> Slot<P> {
         sequence: u64,
         span: Option<crate::router::InputSpan>,
     ) -> bool {
+        if matches!(self.phase, Phase::Closing(_)) {
+            return source.seat == self.descriptor.source.seat;
+        }
         match &self.phase {
             Phase::Active(actor) | Phase::Closing(actor) => span.map_or_else(
                 || actor.blocks_raw(source, sequence),
@@ -309,7 +379,8 @@ impl<P: Preparation> Slot<P> {
     pub(super) fn deadline(&self) -> Option<Duration> {
         let phase = match &self.phase {
             Phase::Preparing(prepared) => Some(prepared.deadline()),
-            Phase::Active(actor) | Phase::Closing(actor) => actor.deadline(),
+            Phase::Active(actor) => actor.deadline(),
+            Phase::Closing(_) => self.retirement,
             Phase::Closed => None,
         };
         phase
@@ -376,6 +447,9 @@ impl Slot<Prepared> {
             offered: Some(at),
             phase: Phase::Active(Box::new(actor)),
             failed: false,
+            retirement: None,
+            drain: None,
+            drain_offered: false,
         })
     }
 }

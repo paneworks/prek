@@ -149,6 +149,9 @@ pub enum Report {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Message {
+    KeyDrain {
+        request: crate::keys::drain::Request,
+    },
     RecognitionResult {
         seat: String,
         fence: Fence,

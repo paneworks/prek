@@ -7,8 +7,8 @@ if [[ ${1:-} == --help ]]; then
 Usage: ./tests/run-root-routing.sh
 Launch as your regular user, without sudo. The built runner prompts when ready.
 Runs fourteen routing, eight recovery, two transport-characterization, one
-generated-keyboard and one managed-worker gate (version-6 receipt, 26 cases).
-The managed gate logs three actual kernel key/ordering phases and worker cleanup.
+generated-keyboard and one managed-worker gate (version-7 receipt, 26 cases).
+The managed gate logs three kernel phases, consumer neutral drain and worker cleanup.
 Repeat/fuzz probes check kernel behavior, not transparent passthrough support.
 No physical input devices are opened and no production routing is enabled.
 Temporarily installs a test-only runtime udev rule, reloads rules without a trigger,

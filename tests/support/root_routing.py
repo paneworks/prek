@@ -42,6 +42,7 @@ MANAGED_CASE = "managed::selective_key_worker"
 MANAGED_INVENTORY = "PREK_MANAGED_KEY_WORKER_INVENTORY_V1"
 MANAGED_RESULT = "PREK_MANAGED_KEY_WORKER_RESULT="
 MANAGED_PHASE = "PREK_MANAGED_KEY_WORKER_PHASE="
+MANAGED_DRAIN = "PREK_MANAGED_KEY_WORKER_DRAIN="
 ALL_EXPECTED = EXPECTED | RECOVERY_EXPECTED | {REPEAT_CASE, FUZZ_CASE, KEY_OUTPUT_CASE, MANAGED_CASE}
 RECOVERY_INVENTORY = "PREK_KERNEL_RECOVERY_INVENTORY_V1"
 RECOVERY_RESULT = "PREK_KERNEL_RECOVERY_RESULT="
@@ -169,8 +170,9 @@ def managed_inventory(stdout):
 
 def managed_result(stdout):
     values = [json.loads(line[len(MANAGED_RESULT):]) for line in stdout.splitlines() if line.startswith(MANAGED_RESULT)]
-    expected = dict(version=1, status="passed", uid=0, physical_devices_opened=0,
+    expected = dict(version=2, status="passed", uid=0, physical_devices_opened=0,
                     worker_binding_tested=True, private_control_authenticated=True,
+                    consumer_neutral_drain_tested=True, consumer_neutral_drain_acknowledgements=1,
                     raw_outputs=2, generated_outputs=1, source_readers_grabbed=2,
                     native_projection_tested=True, native_repeat_tested=True, native_cancellation_tested=True,
                     kernel_write_order_tested=True, native_partial_write_tested=False,
@@ -205,6 +207,28 @@ def managed_result(stdout):
             or cross["generated_times_ns"][0] >= cross["raw1_times_ns"][0] \
             or cancelled["generated_times_ns"][0] >= cancelled["raw0_times_ns"][0]:
         raise ValueError("managed phase kernel write order differs")
+    drains = [json.loads(line[len(MANAGED_DRAIN):]) for line in stdout.splitlines() if line.startswith(MANAGED_DRAIN)]
+    if len(drains) != 1 or not isinstance(drains[0], dict):
+        raise ValueError("managed native worker did not acknowledge exactly one consumer drain")
+    drain = drains[0]
+    if set(drain) != {"version", "nonce", "requested_at_ns", "neutral_at_ns", "deadline_ns", "last_report_at_ns", "keys_down", "generated", "reports"}:
+        raise ValueError("managed consumer drain schema differs")
+    if type(drain["version"]) is not int or drain["version"] != 1 \
+            or type(drain["reports"]) is not int or drain["reports"] != 1 \
+            or drain["keys_down"] != [] or drain["generated"] != [[42, 0]] \
+            or any(type(item) is not int for edge in drain["generated"] for item in edge):
+        raise ValueError("managed consumer drain did not consume the final neutral release")
+    nonce = drain["nonce"]
+    if not isinstance(nonce, list) or len(nonce) != 2 or not any(nonce) \
+            or any(type(item) is not int or not 0 <= item < 2**64 for item in nonce):
+        raise ValueError("managed consumer drain nonce differs")
+    times = [drain[key] for key in ("last_report_at_ns", "requested_at_ns", "neutral_at_ns", "deadline_ns")]
+    if any(type(item) is not int or item <= 0 for item in times) \
+            or not times[0] <= times[1] <= times[2] < times[3] \
+            or times[3] - times[1] > 250_000_000 \
+            or times[0] != cancelled["generated_times_ns"][0] \
+            or times[2] >= cancelled["raw0_times_ns"][0]:
+        raise ValueError("managed consumer drain clock or reentry order differs")
     return values[0]
 
 
@@ -213,13 +237,14 @@ def receipt(stdout):
     if len(values) != 1 or not isinstance(values[0], dict):
         raise ValueError("expected exactly one complete isolated kernel receipt")
     value = values[0]
-    expected = dict(version=6, status="passed", uid=0, passed=len(ALL_EXPECTED),
+    expected = dict(version=7, status="passed", uid=0, passed=len(ALL_EXPECTED),
                     routing_passed=len(EXPECTED), recovery_passed=len(RECOVERY_EXPECTED),
                     repeat_characterization_passed=1, repeat_passthrough_tested=False,
                     fuzz_characterization_passed=1, fuzz_passthrough_tested=False,
                     generated_key_output_passed=1, generated_key_output_authorization_tested=False,
                     generated_key_output_compositor_tested=False, generated_key_output_partial_write_tested=False,
                     managed_key_worker_passed=1, managed_key_worker_binding_tested=True,
+                    managed_key_worker_consumer_drain_tested=True,
                     managed_key_worker_compositor_tested=False, managed_key_worker_partial_write_tested=False,
                     physical_devices_opened=0, model_desktop_context=True,
                     production_route_admission_tested=False, compositor_consumer_retirement_tested=False,
@@ -418,13 +443,14 @@ def run(args):
             raise RuntimeError("isolated device metadata remains; preserving it for inspection")
         if registry_snapshot(registry) != original_registry:
             raise RuntimeError("unrelated registry state changed; preserving it for inspection")
-    print(PREFIX + json.dumps(dict(version=6, status="passed", uid=0, kernel=os.uname().release,
+    print(PREFIX + json.dumps(dict(version=7, status="passed", uid=0, kernel=os.uname().release,
           tests=sorted(ALL_EXPECTED), passed=len(ALL_EXPECTED), routing_passed=len(EXPECTED), recovery_passed=8, physical_devices_opened=0,
           repeat_characterization_passed=1, repeat_passthrough_tested=False,
           fuzz_characterization_passed=1, fuzz_passthrough_tested=False,
           generated_key_output_passed=1, generated_key_output_authorization_tested=False,
           generated_key_output_compositor_tested=False, generated_key_output_partial_write_tested=False,
           managed_key_worker_passed=1, managed_key_worker_binding_tested=True,
+          managed_key_worker_consumer_drain_tested=True,
           managed_key_worker_compositor_tested=False, managed_key_worker_partial_write_tested=False,
           model_desktop_context=True, production_route_admission_tested=False,
           compositor_consumer_retirement_tested=False, rule_removed=True, registry_clean=True,

@@ -1,6 +1,63 @@
 use super::*;
 
 impl Stream {
+    pub(super) fn key_drain_pending(&self, seat: &str) -> bool {
+        self.key_consumer_pending(seat)
+            || self
+                .closing_outputs
+                .iter()
+                .any(|(recovery, _)| recovery.source.seat == seat)
+    }
+    fn key_consumer_pending(&self, seat: &str) -> bool {
+        self.closing_keys
+            .iter()
+            .any(|keys| keys.seat() == seat && !keys.closed())
+            || self
+                .seats
+                .get(seat)
+                .and_then(|seat| seat.keys.as_ref())
+                .is_some_and(|keys| keys.retiring() && !keys.closed())
+    }
+    fn retire_closing_outputs(&mut self, now: Duration) {
+        for (recovery, output) in std::mem::take(&mut self.closing_outputs) {
+            if self.key_consumer_pending(&recovery.source.seat) {
+                self.closing_outputs.push((recovery, output));
+            } else {
+                Self::retire_output(recovery, output, now);
+            }
+        }
+    }
+    pub(super) fn offer_key_drains(&mut self) -> io::Result<()> {
+        let requests: Vec<_> = self
+            .closing_keys
+            .iter_mut()
+            .chain(
+                self.seats
+                    .values_mut()
+                    .filter_map(|seat| seat.keys.as_mut()),
+            )
+            .filter_map(keys::Slot::drain_request)
+            .collect();
+        for request in requests {
+            self.queue(Message::KeyDrain { request })?;
+        }
+        Ok(())
+    }
+    pub(super) fn acknowledge_key_drain(
+        &mut self,
+        request: &crate::keys::drain::Request,
+        at: Duration,
+        now: Duration,
+    ) -> bool {
+        self.closing_keys
+            .iter_mut()
+            .chain(
+                self.seats
+                    .values_mut()
+                    .filter_map(|seat| seat.keys.as_mut()),
+            )
+            .any(|keys| keys.acknowledge_drain(request, at, now))
+    }
     pub(super) fn next_key_source(&mut self, seat: &str) -> io::Result<Source> {
         self.key_generation = self
             .key_generation
@@ -28,6 +85,7 @@ impl Stream {
             keys.advance(now)?;
         }
         self.closing_keys.retain(|keys| !keys.closed());
+        self.retire_closing_outputs(now);
         for seat in self.seats.values_mut() {
             let permitted = seat
                 .subscription
@@ -53,7 +111,7 @@ impl Stream {
                 keys.poll(&mut seat.routing, now)?;
             }
         }
-        Ok(())
+        self.offer_key_drains()
     }
     pub(super) fn service_keys(&mut self, health: Option<&Heartbeat>) -> io::Result<()> {
         let now = monotonic()?;
@@ -124,6 +182,16 @@ impl Stream {
                 for keys in &mut self.closing_keys {
                     keys.advance(now)?;
                 }
+                self.offer_key_drains()?;
+                self.messages.flush(&mut self.channel)?;
+                for _ in 0..8 {
+                    let Some(packet) = self.channel.receive::<Command>()? else {
+                        break;
+                    };
+                    if let Command::KeyDrained { request, at } = packet.message {
+                        self.acknowledge_key_drain(&request, at, monotonic()?);
+                    }
+                }
                 self.closing_keys.retain(|keys| !keys.closed());
                 if !self.closing_keys.is_empty() {
                     let mut fds = self
@@ -133,6 +201,7 @@ impl Stream {
                             keys.poll_fd().map(|fd| PollFd::new(fd, PollFlags::POLLOUT))
                         })
                         .collect::<Vec<_>>();
+                    fds.push(PollFd::new(self.channel.as_fd(), PollFlags::POLLIN));
                     nix::poll::poll(&mut fds, 1u16).map_err(io::Error::other)?;
                 }
                 Ok(())
@@ -145,5 +214,6 @@ impl Stream {
             }
         }
         self.closing_keys.clear();
+        self.retire_closing_outputs(monotonic().unwrap_or(until));
     }
 }

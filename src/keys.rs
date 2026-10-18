@@ -1,5 +1,6 @@
 //! Seat-scoped key conditions, chords, layers and synthetic-key ownership.
 //! Output execution uses an explicitly supplied frame sink in [`output`].
+pub mod drain;
 #[cfg(target_os = "linux")]
 pub mod native;
 pub mod output;

@@ -67,9 +67,15 @@ def managed_phases():
                  raw0_times_ns=[21], raw1_times_ns=[], generated_times_ns=[20])]
 
 
-def managed_output(phases=None, **changes):
-    value = dict(version=1, status="passed", uid=0, physical_devices_opened=0,
+def managed_drain():
+    return dict(version=1, nonce=[1, 2], requested_at_ns=20, neutral_at_ns=20,
+                deadline_ns=250_000_020, last_report_at_ns=20, keys_down=[], generated=[[42, 0]], reports=1)
+
+
+def managed_output(phases=None, drains=None, **changes):
+    value = dict(version=2, status="passed", uid=0, physical_devices_opened=0,
                  worker_binding_tested=True, private_control_authenticated=True,
+                 consumer_neutral_drain_tested=True, consumer_neutral_drain_acknowledgements=1,
                  raw_outputs=2, generated_outputs=1, source_readers_grabbed=2,
                  native_projection_tested=True, native_repeat_tested=True, native_cancellation_tested=True,
                  kernel_write_order_tested=True, native_partial_write_tested=False,
@@ -78,12 +84,15 @@ def managed_output(phases=None, **changes):
                  compositor_delivery_tested=False, keys_neutral=True, worker_reaped=True, owned_devices_removed=True)
     value.update(changes)
     phases = managed_phases() if phases is None else phases
-    return "".join(root.MANAGED_PHASE + json.dumps(phase) + "\n" for phase in phases) + root.MANAGED_RESULT + json.dumps(value) + "\n"
+    drains = [managed_drain()] if drains is None else drains
+    return ("".join(root.MANAGED_PHASE + json.dumps(phase) + "\n" for phase in phases)
+            + "".join(root.MANAGED_DRAIN + json.dumps(drain) + "\n" for drain in drains)
+            + root.MANAGED_RESULT + json.dumps(value) + "\n")
 
 
 class KernelReceipt(unittest.TestCase):
     def value(self):
-        return dict(version=6, status="passed", uid=0, kernel=os.uname().release,
+        return dict(version=7, status="passed", uid=0, kernel=os.uname().release,
                     tests=sorted(root.ALL_EXPECTED), passed=len(root.ALL_EXPECTED),
                     routing_passed=len(root.EXPECTED), recovery_passed=8, physical_devices_opened=0,
                     repeat_characterization_passed=1, repeat_passthrough_tested=False,
@@ -91,6 +100,7 @@ class KernelReceipt(unittest.TestCase):
                     generated_key_output_passed=1, generated_key_output_authorization_tested=False,
                     generated_key_output_compositor_tested=False, generated_key_output_partial_write_tested=False,
                     managed_key_worker_passed=1, managed_key_worker_binding_tested=True,
+                    managed_key_worker_consumer_drain_tested=True,
                     managed_key_worker_compositor_tested=False, managed_key_worker_partial_write_tested=False,
                     model_desktop_context=True, production_route_admission_tested=False,
                     compositor_consumer_retirement_tested=False, rule_removed=True, registry_clean=True,
@@ -146,6 +156,36 @@ class KernelReceipt(unittest.TestCase):
                 del old[key]
         with self.assertRaises(ValueError):
             root.receipt(self.line(old))
+
+    def test_v6_and_old_managed_receipts_cannot_claim_consumer_drain(self):
+        old = self.value()
+        old.update(version=6)
+        del old["managed_key_worker_consumer_drain_tested"]
+        with self.assertRaises(ValueError):
+            root.receipt(self.line(old))
+        with self.assertRaises(ValueError):
+            root.managed_result(managed_output(version=1))
+
+    def test_managed_drain_requires_a_live_neutral_sample_and_correlated_final_release(self):
+        root.managed_result(managed_output())
+        for drains in [[], [managed_drain(), managed_drain()], [None]]:
+            with self.subTest(drains=drains), self.assertRaises(ValueError):
+                root.managed_result(managed_output(drains=drains))
+        wrong = [dict(keys_down=[42]), dict(generated=[[42, False]]), dict(reports=True),
+                 dict(reports=0), dict(last_report_at_ns=19), dict(requested_at_ns=19),
+                 dict(neutral_at_ns=21), dict(neutral_at_ns=19), dict(deadline_ns=20),
+                 dict(deadline_ns=250_000_021), dict(nonce=[0, 0]), dict(nonce=[True, 2]),
+                 dict(nonce=[-1, 2]), dict(nonce=[2**64, 2]), dict(nonce="foreign"), dict(extra=True)]
+        for key in ("requested_at_ns", "neutral_at_ns", "deadline_ns", "last_report_at_ns"):
+            wrong.extend({key: value} for value in (True, 20.0, None, 0))
+        for changes in wrong:
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                root.managed_result(managed_output(drains=[dict(managed_drain(), **changes)]))
+        for key in managed_drain():
+            incomplete = managed_drain()
+            del incomplete[key]
+            with self.subTest(missing=key), self.assertRaises(ValueError):
+                root.managed_result(managed_output(drains=[incomplete]))
 
     def test_generated_key_output_requires_one_exact_inventory(self):
         root.key_output_inventory(root.KEY_OUTPUT_CASE + ": test\n")
