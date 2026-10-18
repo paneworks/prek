@@ -4,7 +4,7 @@ use prek::{
     router::{KeyDecision, Limits, PendingKey, Router},
 };
 
-pub(super) fn exercise(output: &Path, socket: &Path) {
+pub(super) fn exercise(output: &Path, socket: &Path, first_phase: usize, text: &str) {
     let mut sink = Keyboard::open(output, socket, 902);
     let at = monotonic().unwrap();
     let device = Device {
@@ -59,7 +59,7 @@ pub(super) fn exercise(output: &Path, socket: &Path) {
         .unwrap();
     router.advance(at).unwrap();
     assert!(router.due(at).unwrap().is_none());
-    phase(output, 17, "bAAaAaAAAaaaa", &[]);
+    phase(output, first_phase, text, &[]);
     let at = monotonic().unwrap();
     router
         .decide_key_presses(
@@ -73,7 +73,7 @@ pub(super) fn exercise(output: &Path, socket: &Path) {
         )
         .unwrap();
     assert!(router.due(at).unwrap().is_none());
-    phase(output, 18, "bAAaAaAAAaaaa", &[]);
+    phase(output, first_phase + 1, text, &[]);
 
     let down_at = monotonic().unwrap();
     router
@@ -128,7 +128,7 @@ pub(super) fn exercise(output: &Path, socket: &Path) {
     assert!(delivery_gap >= input_gap.saturating_sub(limits.scheduler_slack));
     assert!(router.physical_neutral());
     assert!(router.recover().unwrap().neutral_events.is_empty());
-    phase(output, 19, "bAAaAaAAAaaaaa", &[]);
+    phase(output, first_phase + 2, &format!("{text}a"), &[]);
     fs::write(
         output.join("pending-journal-receipt.json"),
         serde_json::to_vec(&json!({

@@ -186,10 +186,28 @@ its timer boundary.
 This ordering also applies to observation-only recognition without storing a
 routing footprint.
 
-Press evidence records candidate observations, not exclusive consumption claims.
-A tap candidate can observe a following held down before its earlier taps settle;
-completed participating presses still need to be separated from unfinished or
-invalid tails. Timed, chord, sequence, custom,
+Active press evidence records candidate observations, not exclusive consumption
+claims. Completed tap matches retain the shared snapshot at the last valid tap
+release, excluding a following held or invalid tail. Settlement drains the tail's
+button-recognizer state without revoking the valid completed action. An invalid
+press or a mismatched completed count ends its admission; the next group samples
+fresh conditions instead of borrowing a previous begin-only permit.
+
+Completed chords use the Keys core's exact newest fresh source for each code.
+Original-down positions include carried-held members of a preceding chord, not
+reconciled snapshots or earlier released incarnations. Completed source dependencies
+include the admission owner and actual selected members, not superseded observations.
+Dispatch validation rejects replacement of any participating source.
+
+Sequence storage separates completed prefixes from provisional current-step
+observations, including press sets, source dependencies and input watermarks.
+Earlier completed first-step traces precede trailing live starters in the same
+report. The admitted first child retains its identity; later attempts cannot merge
+into it. Returning from step advancement includes an already-active next candidate,
+and abandoning an unfinished step removes its observations from the projection.
+The existing private cancellation and held-contact continuation rules still apply.
+
+Timed, chord, sequence, custom,
 mixed and hybrid selective buffering still need exact participant arbitration,
 non-key/mixed event-local admission and native/rendered acceptance. This prerequisite
 does not expand projectable triggers, public grants or production takeover.

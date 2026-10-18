@@ -688,6 +688,27 @@ fn local_cage_scoped_key_worker() {
     );
     keyboard.drain();
     keyboard.capture(&output, 16, "bAAaAaAAAaaaa", &[]);
+    keyboard.feed_from(2, &[(190, 1), (187, 1), (187, 0)]);
+    keyboard.feed_from(2, &[(187, 1)]);
+    keyboard.advance(Duration::from_millis(620));
+    keyboard.drain();
+    keyboard.capture(&output, 17, "bAAaAaAAAaaaaa", &[187, 190]);
+    keyboard.feed_from(2, &[(187, 0)]);
+    keyboard.feed_from(2, &[(187, 1), (187, 0)]);
+    keyboard.advance(Duration::from_millis(60));
+    keyboard.drain();
+    keyboard.capture(&output, 18, "bAAaAaAAAaaaaaa", &[190]);
+    keyboard.feed_from(2, &[(187, 1)]);
+    keyboard.advance(Duration::from_millis(270));
+    keyboard.feed_from(2, &[(187, 0), (190, 0)]);
+    keyboard.feed_from(2, &[(187, 1), (187, 0)]);
+    keyboard.advance(Duration::from_millis(60));
+    keyboard.drain();
+    keyboard.capture(&output, 19, "bAAaAaAAAaaaaaa", &[]);
+    keyboard.feed_from(2, &[(190, 1), (187, 1), (187, 0), (190, 0)]);
+    keyboard.advance(Duration::from_millis(60));
+    keyboard.drain();
+    keyboard.capture(&output, 20, "bAAaAaAAAaaaaaaa", &[]);
     keyboard.generated.retire(monotonic().unwrap()).unwrap();
     for _ in 0..8 {
         if keyboard.generated.drain(monotonic().unwrap()).unwrap() == Progress::Complete {
@@ -702,9 +723,9 @@ fn local_cage_scoped_key_worker() {
     assert!(generated.into_sink().is_ok());
     drop(keyboard.raw);
     drop(keyboard.other_raw);
-    pending::exercise(&output, socket);
-    phase(&output, 20, "bAAaAaAAAaaaaa", &[]);
-    fs::write(output.join("key-output-runtime-result.json"),serde_json::to_vec(&json!({"status":"passed","phases":21,
+    pending::exercise(&output, socket, 21, "bAAaAaAAAaaaaaaa");
+    phase(&output, 24, "bAAaAaAAAaaaaaaaa", &[]);
+    fs::write(output.join("key-output-runtime-result.json"),serde_json::to_vec(&json!({"status":"passed","phases":25,
         "source":"four_owned_wayland_virtual_keyboards","production_route_tested":false,"kernel_input_tested":false,
         "unmodified_stock_acceptance":false,"test_backpressure":true,"scoped_worker_tested":true,
         "authority_modeled":true,"transport_readiness_modeled":true,"selective_consumption_tested":false,
@@ -712,6 +733,7 @@ fn local_cage_scoped_key_worker() {
         "software_actor_tested":true,"software_lease_tested":true,"software_private_control_tested":false,
         "software_authorization_tested":false,"software_repeat_rendering_tested":false,
         "timed_condition_rendering_tested":true,"chord_condition_rendering_tested":true,
+        "tap_tail_lifecycle_rendering_tested":true,"tap_invalid_activation_rendering_tested":true,
         "pending_journal_protocol_tested":true,"pending_fallback_cadence_tested":true,
         "delayed_gesture_arbitration_tested":false})).unwrap()).unwrap();
 }

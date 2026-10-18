@@ -257,7 +257,7 @@ fn phase_service(output: &Path, index: usize, text: &str, keys: &[u16], mut serv
     assert_eq!(receipt["contacts"], json!([]));
     assert_eq!(
         receipt["modifiers"],
-        json!({"depressed":u32::from(!keys.is_empty()),"latched":0,"locked":0,"group":0})
+        json!({"depressed":u32::from(keys.iter().any(|code| matches!(code, 42 | 54))),"latched":0,"locked":0,"group":0})
     );
     fs::write(
         output.join(format!("key-output-phase-{index}.json")),

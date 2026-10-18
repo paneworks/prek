@@ -58,9 +58,17 @@ impl Engine {
             match key_state {
                 KeyState::Press => {
                     state.keys.insert(code);
+                    state.key_origins.insert(
+                        code,
+                        InputPosition {
+                            frame: self.input_watermark,
+                            event,
+                        },
+                    );
                 }
                 KeyState::Release => {
                     state.keys.remove(&code);
+                    state.key_origins.remove(&code);
                 }
                 KeyState::Repeat => {}
             }
@@ -106,6 +114,7 @@ impl Engine {
                         worker,
                         timed::Edge {
                             state,
+                            devices: &self.devices,
                             authority: &self.authority,
                             conditions: &self.conditions,
                             config: &self.config,

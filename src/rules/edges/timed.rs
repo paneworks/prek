@@ -2,6 +2,7 @@ use super::*;
 
 pub(super) struct Edge<'a> {
     pub(super) state: &'a DeviceState,
+    pub(super) devices: &'a BTreeMap<u64, DeviceState>,
     pub(super) authority: &'a Authority,
     pub(super) conditions: &'a Keys,
     pub(super) config: &'a Config,
@@ -63,10 +64,19 @@ pub(super) fn process(worker: &mut Worker, mut edge: Edge<'_>) -> io::Result<()>
         _ => return Ok(()),
     }
     let source = &edge.state.device.source;
-    if worker.trace
-        && edge.key_state == KeyState::Release
-        && matches!(worker.rule.trigger, Trigger::ButtonTaps { .. })
-    {
+    let tap_release = if let Recognizer::Taps(buttons) = &worker.recognizer {
+        edge.key_state == KeyState::Release
+            && buttons.is_tap_release(
+                Button {
+                    device: source.device,
+                    code: edge.code,
+                },
+                edge.at,
+            )
+    } else {
+        false
+    };
+    if worker.trace && tap_release {
         worker.released.insert(source.clone(), edge.at);
     }
     if edge.key_state == KeyState::Press && !worker.candidates.contains_key(source) {
@@ -77,16 +87,9 @@ pub(super) fn process(worker: &mut Worker, mut edge: Edge<'_>) -> io::Result<()>
             candidate
                 .source_inputs
                 .insert(source.clone(), edge.state.input_watermark);
-        } else if let Recognizer::Taps(buttons) = &worker.recognizer
-            && buttons.is_tap_release(
-                Button {
-                    device: source.device,
-                    code: edge.code,
-                },
-                edge.at,
-            )
-        {
+        } else if tap_release {
             candidate.key_tap_end = Some(edge.position);
+            candidate.tap_presses = Some(candidate.key_presses.clone());
         }
         candidate.key_edge(edge.position, edge.key_state);
     }
@@ -123,6 +126,16 @@ pub(super) fn process(worker: &mut Worker, mut edge: Edge<'_>) -> io::Result<()>
     edge.report(worker, signals);
     if edge.key_state == KeyState::Release {
         if matches!(worker.rule.trigger, Trigger::ButtonTaps { .. }) {
+            if !tap_release {
+                cancel_candidate(
+                    worker,
+                    source,
+                    edge.at,
+                    "tap press exceeded maximum duration",
+                    edge.events,
+                );
+                return Ok(());
+            }
             if let Some(candidate) = worker.candidates.get_mut(source) {
                 candidate.expires = Some(
                     edge.at
@@ -189,12 +202,63 @@ fn chord(worker: &mut Worker, mut edge: Edge<'_>) -> io::Result<()> {
             .map_err(invalid)?;
         return Ok(());
     }
-    let signals = keys
+    let signals: Vec<_> = keys
         .update(source, edge.code, edge.key_state, edge.at)
         .map_err(invalid)?
         .into_iter()
         .map(Signal::Key)
         .collect();
+    if signals
+        .iter()
+        .any(|signal| matches!(signal, Signal::Key(KeyObservation::Chord { .. })))
+    {
+        let members = keys
+            .chord_members(&source.seat, &worker.rule.id)
+            .ok_or_else(|| invalid("matched chord has no fresh members"))?;
+        let mut presses = Vec::with_capacity(members.len());
+        for member in members {
+            let origin = edge
+                .devices
+                .get(&member.source.device)
+                .filter(|state| state.device.source == member.source)
+                .and_then(|state| state.key_origins.get(&member.code))
+                .copied()
+                .ok_or_else(|| invalid("matched chord has no original press"))?;
+            presses.push(presses::Press {
+                source: member.source,
+                code: member.code,
+                position: origin,
+            });
+        }
+        let owner = worker
+            .candidates
+            .keys()
+            .find(|owner| owner.seat == source.seat)
+            .cloned()
+            .unwrap();
+        let candidate = worker.candidates.get_mut(&owner).unwrap();
+        candidate.key_start = presses.iter().map(|press| press.position).min();
+        candidate.sources = BTreeSet::from([candidate.source.clone()]);
+        candidate.source_inputs =
+            BTreeMap::from([(candidate.source.clone(), candidate.started_input)]);
+        for press in &presses {
+            candidate.sources.insert(press.source.clone());
+            candidate
+                .source_inputs
+                .entry(press.source.clone())
+                .and_modify(|watermark| *watermark = (*watermark).max(press.position.frame))
+                .or_insert(press.position.frame);
+        }
+        if worker.routing {
+            match candidate.key_presses.select(presses) {
+                Ok(selected) => candidate.key_presses = selected,
+                Err(reason) => {
+                    cancel_candidate(worker, &owner, edge.at, reason, edge.events);
+                    return Ok(());
+                }
+            }
+        }
+    }
     edge.report(worker, signals);
     let Recognizer::Keys(keys) = &worker.recognizer else {
         unreachable!()

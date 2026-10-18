@@ -21,6 +21,7 @@ mod continuation;
 mod custom;
 mod edges;
 mod presses;
+mod sequence;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -122,11 +123,13 @@ struct DeviceState {
     last_input: Option<(u64, Duration)>,
     mapping: Option<Mapping>,
     keys: BTreeSet<u16>,
+    key_origins: BTreeMap<u16, InputPosition>,
     contacts: Vec<Contact>,
 }
 #[derive(Clone)]
 struct Candidate {
     key_presses: presses::Set,
+    tap_presses: Option<presses::Set>,
     key_start: Option<InputPosition>,
     key_end: Option<InputPosition>,
     key_tap_end: Option<InputPosition>,
@@ -693,6 +696,13 @@ impl Engine {
         if intent.candidate.session_generation != self.authority.generation() {
             return Err(Rejection::StaleGeneration);
         }
+        if intent
+            .sources()
+            .iter()
+            .any(|source| !self.source_current(source))
+        {
+            return Err(Rejection::SourceChanged);
+        }
         let state = self
             .devices
             .get(&intent.source().device)
@@ -891,6 +901,7 @@ impl Engine {
                     input_watermark: self.input_watermark,
                     last_input: None,
                     keys: keys.clone(),
+                    key_origins: BTreeMap::new(),
                     contacts: contacts.clone(),
                     mapping: Mapping::from_device(device).ok(),
                 };
@@ -953,6 +964,7 @@ impl Engine {
                     .get_mut(&source.device)
                     .ok_or_else(|| invalid("unregistered reconciliation source"))?;
                 state.keys = keys.clone();
+                state.key_origins.clear();
                 state.contacts = contacts.clone();
                 if policy_selected(&self.config, &state.device) {
                     self.conditions
@@ -1087,6 +1099,7 @@ impl Engine {
                 last_input: None,
                 mapping: Mapping::from_device(device).ok(),
                 keys: keys.clone(),
+                key_origins: BTreeMap::new(),
                 contacts: contacts.clone(),
             },
             Record::Mapping { source, .. } | Record::Reconcile { source, .. } => {
@@ -1100,6 +1113,7 @@ impl Engine {
                     Record::Mapping { mapping, .. } => state.mapping = Some(mapping.clone()),
                     Record::Reconcile { keys, contacts, .. } => {
                         state.keys = keys.clone();
+                        state.key_origins.clear();
                         state.contacts = contacts.clone();
                     }
                     _ => unreachable!(),
@@ -1677,6 +1691,7 @@ struct SequenceGroup {
 }
 struct PendingSequence {
     key_presses: presses::Set,
+    completed: sequence::Prefix,
     step_candidates: BTreeMap<Source, u64>,
     id: u64,
     ordinal: u64,
@@ -1913,6 +1928,7 @@ impl Sequence {
             seat,
             PendingSequence {
                 key_presses: candidate.key_presses.clone(),
+                completed: sequence::Prefix::new(&candidate),
                 step_candidates: BTreeMap::new(),
                 id: *next_id,
                 ordinal: 0,
@@ -2056,6 +2072,11 @@ impl Sequence {
         traces.retain(|(_, trace)| {
             !reset.contains(&trace.candidate.source.seat) && usable(&trace.candidate)
         });
+        for (index, trace) in &traces {
+            if *index == 0 {
+                self.begin(trace.candidate.clone(), next_id)?;
+            }
+        }
         let starters: Vec<_> = self.steps[0].workers[0]
             .candidates
             .values()
@@ -2065,32 +2086,14 @@ impl Sequence {
         for candidate in starters {
             self.begin(candidate, next_id)?;
         }
-        for (index, trace) in &traces {
-            if *index == 0 {
-                self.begin(trace.candidate.clone(), next_id)?;
-            }
-        }
         let mut changed_targets = BTreeSet::new();
         let mut invalid_presses = BTreeSet::new();
         for (seat, pending) in &mut self.pending {
+            pending.reset_projection();
             if let Some(candidate) = self.steps[pending.step].workers[0]
                 .candidates
                 .values()
-                .find(|candidate| {
-                    candidate.source.seat == *seat
-                        && usable(candidate)
-                        && pending.admits_input(candidate)
-                        && (pending.step == 0
-                            || candidate.started >= pending.finished
-                            || pending.previous.as_ref().is_some_and(|previous| {
-                                same_contact_continuation(
-                                    &self.triggers[pending.step - 1],
-                                    &self.triggers[pending.step],
-                                    previous,
-                                    candidate,
-                                )
-                            }))
-                })
+                .find(|candidate| usable(candidate) && pending.accepts(candidate, &self.triggers))
             {
                 if let (Some(first), Some(later)) = (&pending.first.permit, &candidate.permit)
                     && !same_target(first, later)
@@ -2098,20 +2101,13 @@ impl Sequence {
                     changed_targets.insert(seat.clone());
                     continue;
                 }
-                pending.sources.extend(candidate.sources.iter().cloned());
                 pending
                     .step_candidates
                     .insert(candidate.source.clone(), candidate.id);
-                if pending.key_presses.merge(&candidate.key_presses).is_err() {
+                if pending.observe(candidate).is_err() {
                     invalid_presses.insert(seat.clone());
                     continue;
                 }
-                pending.source_inputs.extend(
-                    candidate
-                        .source_inputs
-                        .iter()
-                        .map(|(source, input)| (source.clone(), *input)),
-                );
                 for (index, _) in self
                     .groups
                     .iter()
@@ -2247,15 +2243,10 @@ impl Sequence {
                 reset.insert(seat);
                 continue;
             }
-            pending.sources.extend(trace.candidate.sources.clone());
             pending
                 .step_candidates
                 .insert(trace.candidate.source.clone(), trace.candidate.id);
-            if pending
-                .key_presses
-                .merge(&trace.candidate.key_presses)
-                .is_err()
-            {
+            if pending.complete(&trace.candidate).is_err() {
                 self.cancel(
                     &seat,
                     context.at,
@@ -2265,9 +2256,6 @@ impl Sequence {
                 reset.insert(seat);
                 continue;
             }
-            pending
-                .source_inputs
-                .extend(trace.candidate.source_inputs.clone());
             if final_step {
                 pending.ordinal = pending
                     .ordinal
@@ -2403,6 +2391,44 @@ impl Sequence {
                 self.cancel(&seat, context.at, reason, events);
                 reset.insert(seat);
             }
+        }
+        let mut invalid = Vec::new();
+        for (seat, pending) in &mut self.pending {
+            if reset.contains(seat) {
+                continue;
+            }
+            pending.reset_projection();
+            if let Some(candidate) = self.steps[pending.step].workers[0]
+                .candidates
+                .values()
+                .find(|candidate| usable(candidate) && pending.accepts(candidate, &self.triggers))
+            {
+                if let (Some(first), Some(later)) = (&pending.first.permit, &candidate.permit)
+                    && !same_target(first, later)
+                {
+                    invalid.push((seat.clone(), "sequence target changed"));
+                    continue;
+                }
+                pending
+                    .step_candidates
+                    .insert(candidate.source.clone(), candidate.id);
+                if pending.observe(candidate).is_err() {
+                    invalid.push((seat.clone(), "sequence key press provenance exhausted"));
+                    continue;
+                }
+                for (index, _) in self
+                    .groups
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, group)| group.first == pending.step)
+                {
+                    pending.groups.entry(index).or_insert(candidate.started);
+                }
+            }
+        }
+        for (seat, reason) in invalid {
+            self.cancel(&seat, context.at, reason, events);
+            reset.insert(seat);
         }
         for seat in reset {
             self.reset_seat(&seat, context)?;
@@ -3040,6 +3066,7 @@ fn start_candidate(
                 source.clone(),
                 Candidate {
                     key_presses: presses::Set::empty(state.press_budget.clone()),
+                    tap_presses: None,
                     key_start: None,
                     key_end: None,
                     key_tap_end: None,
@@ -3231,6 +3258,28 @@ fn report_signals(
     events: &mut Vec<Event>,
 ) {
     for signal in signals {
+        if let (Trigger::ButtonTaps { count: wanted, .. }, Signal::Button(gesture)) =
+            (&worker.rule.trigger, &signal)
+        {
+            let (button, reason) = match gesture {
+                Gesture::Taps { button, count } if count != wanted => {
+                    (button, Some("tap count did not match"))
+                }
+                Gesture::Hold { button } => (button, Some("tap press held")),
+                Gesture::Taps { button, .. } => (button, None),
+            };
+            if let Some(reason) = reason {
+                if let Some(source) = worker
+                    .candidates
+                    .keys()
+                    .find(|source| source.device == button.device)
+                    .cloned()
+                {
+                    cancel_candidate(worker, &source, at, reason, events);
+                }
+                continue;
+            }
+        }
         if worker.routing
             && let (
                 Trigger::Swipe {
@@ -3437,11 +3486,20 @@ fn report_signals(
                     .and_then(|o| o.active_workspace),
             });
             if worker.trace {
+                let mut completed = candidate.clone();
+                if matches!(worker.rule.trigger, Trigger::ButtonTaps { .. }) {
+                    completed.key_presses = candidate
+                        .tap_presses
+                        .as_ref()
+                        .expect("completed tap release")
+                        .clone();
+                    completed.key_end = candidate.key_tap_end;
+                }
                 worker.matches.push(StepMatch {
                     expires: None,
                     after_input: None,
                     event: events.last().unwrap().clone(),
-                    candidate: candidate.clone(),
+                    candidate: completed,
                     finished: if matches!(
                         worker.rule.trigger,
                         Trigger::ButtonTaps { .. } | Trigger::TouchTaps { .. }
@@ -3464,6 +3522,9 @@ fn report_signals(
                     | Trigger::Shape { .. }
             ) {
                 worker.candidates.remove(&source);
+                if let Recognizer::Taps(buttons) = &mut worker.recognizer {
+                    buttons.cancel_device(source.device);
+                }
             }
             if let Recognizer::Wheel(sums) = &mut worker.recognizer {
                 sums.remove(&source);

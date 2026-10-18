@@ -1,6 +1,7 @@
 use super::*;
 
 mod admission;
+mod participants;
 
 fn press(frame: u64, event: usize, code: u16) -> Press {
     Press {

@@ -136,6 +136,33 @@ impl Keys {
             .keys()
             .any(|key| key.source.seat == seat && key.code == code)
     }
+    fn chord_presses<'a>(
+        &'a self,
+        seat: &str,
+        chord: &Chord,
+    ) -> Option<Vec<(&'a SourceKey, &'a Pressed)>> {
+        chord
+            .keys
+            .iter()
+            .map(|code| {
+                self.pressed
+                    .iter()
+                    .filter(|(key, pressed)| {
+                        key.source.seat == seat && key.code == *code && pressed.at.is_some()
+                    })
+                    .max_by_key(|(_, pressed)| pressed.order)
+            })
+            .collect()
+    }
+    pub(crate) fn chord_members(&self, seat: &str, id: &str) -> Option<Vec<SourceKey>> {
+        let chord = self.chords.iter().find(|chord| chord.id == id)?;
+        Some(
+            self.chord_presses(seat, chord)?
+                .into_iter()
+                .map(|(key, _)| key.clone())
+                .collect(),
+        )
+    }
     pub fn layer_active(&self, seat: &str, id: &str) -> bool {
         self.layers
             .iter()
@@ -220,29 +247,15 @@ impl Keys {
                     }
                     // Chords require actual presses after reconciliation. Held
                     // snapshot modifiers still participate in `down` conditions.
-                    let presses: Option<Vec<_>> = chord
-                        .keys
-                        .iter()
-                        .map(|code| {
-                            self.pressed
-                                .iter()
-                                .filter(|(key, pressed)| {
-                                    key.source.seat == source.seat
-                                        && key.code == *code
-                                        && pressed.at.is_some()
-                                })
-                                .max_by_key(|(_, pressed)| pressed.order)
-                                .map(|(_, pressed)| pressed)
-                        })
-                        .collect();
+                    let presses = self.chord_presses(&source.seat, chord);
                     if let Some(presses) = presses {
                         let first = presses
                             .iter()
-                            .filter_map(|p| p.at)
+                            .filter_map(|(_, p)| p.at)
                             .min()
                             .expect("fresh presses");
-                        let ordered =
-                            !chord.ordered || presses.windows(2).all(|p| p[0].order < p[1].order);
+                        let ordered = !chord.ordered
+                            || presses.windows(2).all(|p| p[0].1.order < p[1].1.order);
                         if ordered && at.saturating_sub(first) <= chord.timeout {
                             self.fired.insert(key);
                             events.push(KeyObservation::Chord {

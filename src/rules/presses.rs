@@ -133,10 +133,37 @@ impl Set {
             yielded: BTreeSet::new(),
         }
     }
+    pub(super) fn empty_like(&self) -> Self {
+        Self::empty(self.budget.clone())
+    }
     pub(super) fn contains(&self, source: &Source, code: u16, position: InputPosition) -> bool {
         self.iter().any(|press| {
             press.source == *source && press.code == code && press.position == position
         })
+    }
+    pub(super) fn select(&self, mut presses: Vec<Press>) -> Result<Self, &'static str> {
+        if presses.len() > MAX_PRESSES {
+            return Err("key press provenance member limit");
+        }
+        presses.sort_by_key(|press| press.position);
+        if presses
+            .windows(2)
+            .any(|pair| pair[0].position == pair[1].position)
+        {
+            return Err("conflicting original key press position");
+        }
+        if self.count == presses.len()
+            && presses
+                .iter()
+                .all(|press| self.contains(&press.source, press.code, press.position))
+        {
+            return Ok(self.clone());
+        }
+        let mut selected = Self::empty(self.budget.clone());
+        for press in presses {
+            selected.insert(press)?;
+        }
+        Ok(selected)
     }
     pub(super) fn insert(&mut self, press: Press) -> Result<(), &'static str> {
         if press.position.frame == 0
