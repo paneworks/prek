@@ -732,10 +732,12 @@ impl Engine {
         let intent = self.custom_intent(id, at)?;
         let owner = if let Some((sequence, _)) = self.custom_location(id)?.step {
             let sequence = &self.sequences[sequence];
-            sequence
-                .pending
-                .get(&intent.source().seat)?
-                .route_intent(&sequence.rule)
+            let pending = sequence.pending.get(&intent.source().seat)?;
+            let mut owner = pending.route_intent(&sequence.rule);
+            if sequence.key_timeline {
+                owner.candidate.key_presses = pending.completed.key_presses.clone();
+            }
+            owner
         } else {
             intent.clone()
         };
@@ -1200,6 +1202,8 @@ impl Engine {
                 admitted_at: at,
                 input_watermark: self.input_watermark,
                 normalized: None,
+                key_edge: None,
+                finish_report: true,
             };
             for sequence in &mut self.sequences {
                 sequence.collect(

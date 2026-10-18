@@ -566,6 +566,8 @@ fn a_failed_child_record_returns_the_same_coordinator_to_its_owner() {
         admitted_at: ms(0),
         input_watermark: engine.input_watermark,
         normalized: None,
+        key_edge: None,
+        finish_report: true,
     };
     assert!(
         sequence
@@ -595,6 +597,8 @@ fn a_private_step_refuses_a_missing_coordinator_without_creating_one() {
         admitted_at: ms(0),
         input_watermark: engine.input_watermark,
         normalized: None,
+        key_edge: None,
+        finish_report: true,
     };
     let mut absent = None;
     let error = sequence

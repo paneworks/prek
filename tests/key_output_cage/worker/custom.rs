@@ -43,13 +43,24 @@ fn feed(routing: &mut Routing, sequence: u64, events: &[(u16, i32)], inputs: &mu
     routing.push(Record::Frame { frame }).unwrap();
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Case {
+    Root,
+    Activation,
+    NativeFirst,
+    CustomFirst,
+}
+
 pub(super) fn exercise(
     output: &Path,
     socket: &Path,
     index: usize,
     text: &str,
-    event_local: bool,
+    case: Case,
 ) -> String {
+    let event_local = case == Case::Activation;
+    let native_first = case == Case::NativeFirst;
+    let custom_first = case == Case::CustomFirst;
     let definition = Definition::compile(
         &r#"
 local p=require('prek')
@@ -61,6 +72,7 @@ local trigger=p.recognizers.define('rendered_key',{
  @changes@
  return {phase='discrete',data={trigger=202}}
 end)
+@sequence@
 return p.config.new{mode='route',
  policy={allow_input_events=true,allowed_devices={'custom_keys'}},
  timing={join_window='1ms',decision_window='200ms'},
@@ -71,11 +83,17 @@ return p.config.new{mode='route',
 "#.replace("@changes@", if event_local {
             "assert(#ticket.input.changes==3);assert(ticket.input.changes[1].code==42 and ticket.input.changes[1].state=='press');assert(ticket.input.changes[2].code==202 and ticket.input.changes[2].state=='press');assert(ticket.input.changes[3].code==42 and ticket.input.changes[3].state=='release')"
         } else { "assert(#ticket.input.changes==1 and ticket.input.changes[1].code==202)" })
-        .replace("@activation@", if event_local { "require_keys={'KEY_LEFTSHIFT'}," } else { "" }),
+        .replace("@activation@", if event_local { "require_keys={'KEY_LEFTSHIFT'}," } else { "" })
+        .replace("@sequence@", match case {
+            Case::NativeFirst => "trigger=p.triggers.sequence{steps={p.triggers.key{key='KEY_PROG3'},trigger},timeout='200ms'}",
+            Case::CustomFirst => "trigger=p.triggers.sequence{steps={trigger,p.triggers.key{key='KEY_PROG4'}},timeout='200ms'}",
+            _ => "",
+        }),
         "cage-custom-key.lua",
     )
     .unwrap();
     let config = definition.validate().unwrap();
+    let trigger = serde_json::to_value(&config.rules[0].trigger).unwrap();
     let activation = json!({
         "require_keys":config.rules[0].require_keys.iter().map(|key| key.0).collect::<Vec<_>>(),
         "keys_throughout":config.rules[0].keys_throughout,
@@ -144,7 +162,7 @@ return p.config.new{mode='route',
         vendor: 1,
         product: 1,
         properties: vec![],
-        capabilities: BTreeMap::from([(EV_KEY, vec![31, 42, 202])]),
+        capabilities: BTreeMap::from([(EV_KEY, vec![31, 42, 202, 203])]),
         axes: BTreeMap::new(),
         virtual_device: false,
     };
@@ -187,6 +205,8 @@ return p.config.new{mode='route',
         1,
         if event_local {
             &[(31, 1), (31, 0), (42, 1), (202, 1), (42, 0)]
+        } else if native_first {
+            &[(31, 1), (31, 0), (202, 1)]
         } else {
             &[(202, 1)]
         },
@@ -205,19 +225,49 @@ return p.config.new{mode='route',
     assert_eq!(proposal.phase, Phase::Discrete);
     assert_eq!(proposal.data, json!({"trigger":202}));
     let proposed_at = monotonic().unwrap();
-    feed(&mut routing, 2, &[(31, 1), (31, 0)], &mut inputs);
+    feed(
+        &mut routing,
+        2,
+        if custom_first {
+            &[(203, 1), (203, 0), (31, 1), (31, 0)]
+        } else {
+            &[(31, 1), (31, 0)]
+        },
+        &mut inputs,
+    );
     let admitted_at = monotonic().unwrap();
     routing
         .recognition_response(proposal.clone(), admitted_at)
         .unwrap();
-    let work = routing
+    let mut work = routing
         .take_scoped_dispatches(admitted_at)
         .into_iter()
         .map(|dispatch| dispatch.into_key_work().ok().unwrap())
         .collect::<Vec<_>>();
+    let reply_dispatches = work.len();
+    let work_admitted_at = if custom_first {
+        assert!(work.is_empty());
+        feed(&mut routing, 3, &[(203, 1), (203, 0)], &mut inputs);
+        let at = monotonic().unwrap();
+        work = routing
+            .take_scoped_dispatches(at)
+            .into_iter()
+            .map(|dispatch| dispatch.into_key_work().ok().unwrap())
+            .collect();
+        at
+    } else {
+        admitted_at
+    };
     assert_eq!(work.len(), 1);
-    generated.admit(&routing, work, None, admitted_at).unwrap();
-    feed(&mut routing, 3, &[(202, 0)], &mut inputs);
+    generated
+        .admit(&routing, work, None, work_admitted_at)
+        .unwrap();
+    feed(
+        &mut routing,
+        if custom_first { 4 } else { 3 },
+        &[(202, 0)],
+        &mut inputs,
+    );
     let mut ordinary = Vec::new();
     let until = Instant::now() + Duration::from_millis(200);
     loop {
@@ -255,8 +305,10 @@ return p.config.new{mode='route',
     }
     assert_eq!(
         ordinary,
-        if event_local {
+        if event_local || native_first {
             vec![(31, 1), (31, 0), (31, 1), (31, 0)]
+        } else if custom_first {
+            vec![(203, 1), (203, 0), (31, 1), (31, 0)]
         } else {
             vec![(31, 1), (31, 0)]
         }
@@ -279,14 +331,27 @@ return p.config.new{mode='route',
     assert!(generated.settled());
     assert!(generated.into_output().unwrap().into_sink().is_ok());
     drop(raw);
-    fs::write(output.join(if event_local { "custom-key-activation-runtime.json" } else { "custom-key-runtime.json" }), serde_json::to_vec(&json!({
-        "status":"passed","scope":"owned_protocol_root_key_only_custom","actual_lua_callback":true,
+    fs::write(output.join(match case {
+        Case::Root => "custom-key-runtime.json",
+        Case::Activation => "custom-key-activation-runtime.json",
+        Case::NativeFirst => "custom-key-native-prefix-runtime.json",
+        Case::CustomFirst => "custom-key-native-suffix-runtime.json",
+    }), serde_json::to_vec(&json!({
+        "status":"passed","scope":if native_first || custom_first { "owned_protocol_composed_key_only_custom" } else { "owned_protocol_root_key_only_custom" },"actual_lua_callback":true,
         "source_and_readiness_modeled":true,"physical_takeover_tested":false,"kernel_input_opened":false,
         "helper_stopped":true,"generated_neutral":true,"ordinary":ordinary,
         "activation":activation,
+        "trigger":trigger,"work_admitted_at":work_admitted_at,"reply_dispatches":reply_dispatches,
         "inputs":inputs,"ticket":ticket,"proposal":proposal,"proposed_at":proposed_at,"admitted_at":admitted_at,
     })).unwrap()).unwrap();
-    let text = format!("{text}{}", if event_local { "ssa" } else { "sa" });
+    let text = format!(
+        "{text}{}",
+        if event_local || native_first {
+            "ssa"
+        } else {
+            "sa"
+        }
+    );
     phase(output, index, &text, &[]);
     text
 }

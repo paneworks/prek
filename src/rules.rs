@@ -1130,7 +1130,10 @@ impl Engine {
         }
         let mut sequence_input = None;
         let mut key_sequences_processed = false;
-        let project_sequence_input = self.sequences.iter().any(|sequence| sequence.has_custom);
+        let project_sequence_input = self
+            .sequences
+            .iter()
+            .any(|sequence| sequence.has_custom && !sequence.key_timeline);
         for observation in observations {
             match observation {
                 Observation::Input { frame } => {
@@ -1158,6 +1161,8 @@ impl Engine {
             admitted_at: self.last_at.unwrap_or_default(),
             input_watermark: self.input_watermark,
             normalized: sequence_input.as_ref(),
+            key_edge: None,
+            finish_report: true,
         };
         for sequence in &mut self.sequences {
             if key_sequences_processed
@@ -1483,7 +1488,7 @@ impl Engine {
         state.contacts = frame.contacts.clone();
         self.key_sequences_begin(&frame)?;
         let positioned_keys = edges::positioned_keys(&frame)?;
-        self.key_edges(&frame, &positioned_keys, allowed)?;
+        self.key_edges(&frame, &positioned_keys, allowed, true)?;
         let state = &self.devices[&source.device];
         for worker in &mut self.workers {
             if edges::is_key_trigger(&worker.rule.trigger) || key_only_custom(&worker.rule.trigger)
@@ -1828,6 +1833,8 @@ struct SequenceContext<'a> {
     admitted_at: Duration,
     input_watermark: u64,
     normalized: Option<&'a NormalizedFrame>,
+    key_edge: Option<(usize, u16, KeyState)>,
+    finish_report: bool,
 }
 struct SequenceGroup {
     first: usize,
@@ -1966,7 +1973,9 @@ impl Sequence {
             steps.push(engine);
         }
         Ok(Self {
-            key_timeline: triggers.iter().all(edges::is_key_trigger),
+            key_timeline: triggers
+                .iter()
+                .all(|trigger| edges::is_key_trigger(trigger) || key_only_custom(trigger)),
             condition_loss: None,
             rule,
             steps,
@@ -2791,21 +2800,31 @@ impl Sequence {
             return Ok(None);
         }
         engine.next_id = *next_id;
-        custom::frame(
-            worker,
-            state,
-            frame,
-            custom::FrameContext {
-                config: &engine.config,
-                authority: context.authority,
-                keys: &engine.conditions,
-                custom: coordinator
-                    .as_mut()
-                    .ok_or_else(|| invalid("custom sequence coordinator is unavailable"))?,
-                next_id: &mut engine.next_id,
-                events: &mut engine.events,
-            },
-        );
+        let custom_context = custom::FrameContext {
+            config: &engine.config,
+            authority: context.authority,
+            keys: &engine.conditions,
+            custom: coordinator
+                .as_mut()
+                .ok_or_else(|| invalid("custom sequence coordinator is unavailable"))?,
+            next_id: &mut engine.next_id,
+            events: &mut engine.events,
+        };
+        if self.key_timeline {
+            let Some(edge) = context.key_edge else {
+                return Ok(None);
+            };
+            custom::key_frame(
+                worker,
+                state,
+                frame,
+                edge,
+                context.finish_report,
+                custom_context,
+            );
+        } else {
+            custom::frame(worker, state, frame, custom_context);
+        }
         *next_id = engine.next_id;
         let Some(candidate) = worker.candidates.get_mut(source) else {
             return Ok(None);

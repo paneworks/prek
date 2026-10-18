@@ -42,6 +42,7 @@ impl Engine {
         frame: &NormalizedFrame,
         edges: &[(usize, u16, KeyState)],
         allowed: bool,
+        finish_report: bool,
     ) -> io::Result<()> {
         let source = &frame.raw.source;
         let at = frame.raw.at;
@@ -119,7 +120,7 @@ impl Engine {
                         state,
                         frame,
                         (event, code, key_state),
-                        edges.last().is_some_and(|edge| edge.0 == event),
+                        finish_report && edges.last().is_some_and(|edge| edge.0 == event),
                         custom::FrameContext {
                             config: &self.config,
                             authority: &self.authority,
@@ -222,7 +223,11 @@ impl Engine {
                     candidate.expires = None;
                 }
             }
-            self.key_sequences_edge(frame, (event, code, key_state))?;
+            self.key_sequences_edge(
+                frame,
+                (event, code, key_state),
+                finish_report && edges.last().is_some_and(|edge| edge.0 == event),
+            )?;
             self.custom_sync(at, crate::recognition::Retirement::Cancelled);
         }
         Ok(())

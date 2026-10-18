@@ -38,18 +38,22 @@ impl CustomRoutes<'_> {
         if owner.rule.delivery == Delivery::Observe {
             return RecognitionOwnership::default();
         }
-        if !matches!(owner.rule.trigger, Trigger::Sequence { .. }) {
-            if owner.id() != leaf.id() {
+        let sequence = matches!(owner.rule.trigger, Trigger::Sequence { .. });
+        if !sequence && owner.id() != leaf.id() {
+            return refused();
+        }
+        if self
+            .routes
+            .get(leaf.source())
+            .is_some_and(|route| route.project_keys)
+            && keys::arbitration::projected(&owner.rule.trigger)
+        {
+            if sequence && !owner.sources().contains(leaf.source()) {
                 return refused();
             }
-            if self
-                .routes
-                .get(leaf.source())
-                .is_some_and(|route| route.project_keys)
-                && keys::arbitration::custom_key(&leaf.rule.trigger)
-            {
-                return self.key_ownership(leaf);
-            }
+            return self.key_ownership(leaf, owner);
+        }
+        if !matches!(owner.rule.trigger, Trigger::Sequence { .. }) {
             let (ownership, winner) = custom_ownership(
                 self.routes,
                 self.groups,
@@ -128,7 +132,7 @@ impl CustomRoutes<'_> {
             skip_offer: false,
         }
     }
-    fn key_ownership(&self, leaf: &RouteIntent) -> RecognitionOwnership {
+    fn key_ownership(&self, leaf: &RouteIntent, parent: &RouteIntent) -> RecognitionOwnership {
         use crate::router::KeyDisposition;
         let refused = || RecognitionOwnership {
             ownership: Some(Ownership::Forwarded),
@@ -136,10 +140,15 @@ impl CustomRoutes<'_> {
             deadline: None,
             skip_offer: false,
         };
-        let evidence = leaf.key_evidence();
+        let mut evidence = leaf.key_evidence();
+        if matches!(parent.rule.trigger, Trigger::Sequence { .. })
+            && evidence.include(&parent.key_evidence()).is_err()
+        {
+            return refused();
+        }
         let owned: BTreeSet<_> = self
             .won
-            .get(&leaf.id())
+            .get(&parent.id())
             .and_then(|won| won.key_claim.as_ref())
             .into_iter()
             .flat_map(|claim| claim.presses())
@@ -162,7 +171,7 @@ impl CustomRoutes<'_> {
                     pending = true;
                     deadline = Some(deadline.map_or(bound, |old| old.min(bound)));
                 }
-                Some(KeyDisposition::Consumed { owner }) if owner == leaf.id() => any = true,
+                Some(KeyDisposition::Consumed { owner }) if owner == parent.id() => any = true,
                 None if owned.contains(press) => any = true,
                 _ => lost = true,
             }

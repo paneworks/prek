@@ -905,12 +905,20 @@ fn local_cage_scoped_key_worker() {
     assert!(generated.into_sink().is_ok());
     drop(keyboard.raw);
     drop(keyboard.other_raw);
-    let text = custom::exercise(&output, socket, 31, "bAAaAaAAAaaaaaaaaaaasaaasasab", false);
-    let text = custom::exercise(&output, socket, 32, &text, true);
-    pending::exercise(&output, socket, 33, &text);
-    phase(&output, 36, &format!("{text}a"), &[]);
-    fs::write(output.join("key-output-runtime-result.json"),serde_json::to_vec(&json!({"status":"passed","phases":37,
-        "source":"eight_owned_wayland_virtual_keyboards","production_route_tested":false,"kernel_input_tested":false,
+    let text = custom::exercise(
+        &output,
+        socket,
+        31,
+        "bAAaAaAAAaaaaaaaaaaasaaasasab",
+        custom::Case::Root,
+    );
+    let text = custom::exercise(&output, socket, 32, &text, custom::Case::Activation);
+    let text = custom::exercise(&output, socket, 33, &text, custom::Case::NativeFirst);
+    let text = custom::exercise(&output, socket, 34, &text, custom::Case::CustomFirst);
+    pending::exercise(&output, socket, 35, &text);
+    phase(&output, 38, &format!("{text}a"), &[]);
+    fs::write(output.join("key-output-runtime-result.json"),serde_json::to_vec(&json!({"status":"passed","phases":39,
+        "source":"twelve_owned_wayland_virtual_keyboards","production_route_tested":false,"kernel_input_tested":false,
         "unmodified_stock_acceptance":false,"test_backpressure":true,"scoped_worker_tested":true,
         "authority_modeled":true,"transport_readiness_modeled":true,"selective_consumption_tested":true,
         "selective_consumption_scope":"owned_protocol_native_keys","physical_takeover_tested":false,
@@ -924,5 +932,6 @@ fn local_cage_scoped_key_worker() {
         "delayed_gesture_arbitration_tested":true,"delayed_gesture_arbitration_scope":"native_key_only",
         "root_custom_key_arbitration_rendering_tested":true,
         "event_local_custom_activation_rendering_tested":true,
+        "composed_custom_key_arbitration_rendering_tested":true,
         "mixed_delayed_gesture_arbitration_tested":false})).unwrap()).unwrap();
 }

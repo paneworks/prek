@@ -81,9 +81,14 @@ pub(super) fn native(trigger: &Trigger) -> bool {
     }
 }
 pub(in crate::routing) fn custom_key(trigger: &Trigger) -> bool {
-    crate::rules::key_only_custom(trigger)
+    match trigger {
+        Trigger::Sequence { steps, .. } => {
+            steps.iter().any(custom_key) && steps.iter().all(projected)
+        }
+        _ => crate::rules::key_only_custom(trigger),
+    }
 }
-pub(super) fn projected(trigger: &Trigger) -> bool {
+pub(in crate::routing) fn projected(trigger: &Trigger) -> bool {
     native(trigger) || custom_key(trigger)
 }
 pub(in crate::routing) fn outcome_id(outcome: &RouteOutcome) -> (u64, u64) {

@@ -20,6 +20,12 @@ struct Harness {
     sequence: u64,
 }
 
+#[derive(Clone, Copy)]
+enum SequenceOrder {
+    NativeFirst,
+    CustomFirst,
+}
+
 struct CapturedSink {
     source: Source,
     pending: Option<Frame>,
@@ -206,15 +212,67 @@ fn projected_custom_keys_revoke_a_real_reply_after_transient_condition_loss() {
     harness.stop();
 }
 
+#[test]
+fn projected_custom_keys_native_prefix_delivers_only_its_original_suffix_to_lua() {
+    let mut harness = Harness::with_sequence(SequenceOrder::NativeFirst);
+    let ticket = harness.key_report(&[(31, 1), (31, 0), (30, 1)]).unwrap();
+    let proposal = harness.proposal(ticket);
+    harness.respond(proposal);
+    assert_eq!(
+        harness
+            .routing
+            .take_scoped_dispatches(monotonic().unwrap())
+            .len(),
+        1
+    );
+    harness.cleanup(Retirement::Completed);
+    harness.stop();
+}
+
+#[test]
+fn projected_custom_keys_native_suffix_waits_for_a_fresh_post_reply_press() {
+    let mut harness = Harness::with_sequence(SequenceOrder::CustomFirst);
+    let ticket = harness.key(1).unwrap();
+    let proposal = harness.proposal(ticket);
+    assert!(harness.key_report(&[(31, 1), (31, 0)]).is_some());
+    harness.respond(proposal);
+    assert!(
+        harness
+            .routing
+            .take_scoped_dispatches(monotonic().unwrap())
+            .is_empty()
+    );
+    assert!(harness.key_report(&[(31, 1)]).is_none());
+    assert_eq!(
+        harness
+            .routing
+            .take_scoped_dispatches(monotonic().unwrap())
+            .len(),
+        1
+    );
+    harness.cleanup(Retirement::Completed);
+    harness.stop();
+}
+
 impl Harness {
     fn new(body: &str, continuous: bool, delivery: &str) -> Self {
         Self::with_key_output(body, continuous, delivery, false)
     }
     fn with_key_output(body: &str, continuous: bool, delivery: &str, projected: bool) -> Self {
-        Self::configured(body, continuous, delivery, projected, "")
+        Self::configured(body, continuous, delivery, projected, "", None)
     }
     fn with_conditions(body: &str, activation: &str) -> Self {
-        Self::configured(body, false, "buffer", true, activation)
+        Self::configured(body, false, "buffer", true, activation, None)
+    }
+    fn with_sequence(order: SequenceOrder) -> Self {
+        Self::configured(
+            "assert(#ticket.input.changes==1 and ticket.input.changes[1].code==30);return {phase='discrete'}",
+            false,
+            "buffer",
+            true,
+            "",
+            Some(order),
+        )
     }
     fn configured(
         body: &str,
@@ -222,7 +280,17 @@ impl Harness {
         delivery: &str,
         projected: bool,
         activation: &str,
+        sequence: Option<SequenceOrder>,
     ) -> Self {
+        let trigger = match sequence {
+            None => "trigger",
+            Some(SequenceOrder::NativeFirst) => {
+                "p.triggers.sequence{steps={p.triggers.key{key='KEY_A'},trigger},timeout='200ms'}"
+            }
+            Some(SequenceOrder::CustomFirst) => {
+                "p.triggers.sequence{steps={trigger,p.triggers.key{key='KEY_S'}},timeout='200ms'}"
+            }
+        };
         let action = if projected {
             "p.actions.keys{keys={'KEY_LEFTSHIFT'}}"
         } else {
@@ -251,7 +319,7 @@ return p.config.new{{mode='route',
  timing={{join_window='1ms',decision_window='200ms'}},
  devices={{keyboard={{keys={{'KEY_A'}}}}}},
  rules={{p.rules.define{{id='native-route',devices={{'keyboard'}},contexts={{'desktop'}},
-  scope='everywhere',delivery='{delivery}',trigger=trigger,{activation}
+  scope='everywhere',delivery='{delivery}',trigger={trigger},{activation}
   action={action}}}}},
 }}
 "#

@@ -72,7 +72,7 @@ impl StepMatch {
 }
 
 pub(super) struct Prefix {
-    key_presses: presses::Set,
+    pub(in crate::rules) key_presses: presses::Set,
     sources: BTreeSet<Source>,
     source_inputs: BTreeMap<Source, u64>,
 }

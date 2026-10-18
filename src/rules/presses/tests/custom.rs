@@ -4,21 +4,21 @@ use crate::{
     recognition::{Definition, InputKind, Phase, Proposal, Ticket},
 };
 
-fn custom(limit: usize) -> Engine {
-    configured(
-        Trigger::Custom {
-            recognizer: Definition {
-                name: "snapshot".into(),
-                selectors: BTreeSet::from(["keys".into()]),
-                inputs: BTreeSet::from([InputKind::Key]),
-                reply_within: Millis(100),
-                continuous: false,
-            },
-            timeout: Millis(200),
-            wake: Some(Millis(50)),
+fn custom_trigger() -> Trigger {
+    Trigger::Custom {
+        recognizer: Definition {
+            name: "snapshot".into(),
+            selectors: BTreeSet::from(["keys".into()]),
+            inputs: BTreeSet::from([InputKind::Key]),
+            reply_within: Millis(100),
+            continuous: false,
         },
-        limit,
-    )
+        timeout: Millis(200),
+        wake: Some(Millis(50)),
+    }
+}
+fn custom(limit: usize) -> Engine {
+    configured(custom_trigger(), limit)
 }
 fn reply(engine: &mut Engine, ticket: &Ticket, phase: Phase, at: u64) {
     engine
@@ -42,7 +42,7 @@ fn same_edge_custom_continuations_require_the_exact_previous_native_candidate() 
                 Trigger::Key {
                     key: crate::config::Key(30),
                 },
-                custom(MAX_BYTES).config.rules[0].trigger.clone(),
+                custom_trigger(),
             ],
             timeout: Millis(200),
         },
@@ -85,6 +85,155 @@ fn same_edge_custom_continuations_require_the_exact_previous_native_candidate() 
     assert_eq!(
         positions(&completed[0].intent),
         BTreeSet::from([(1, 1, 0, 30)])
+    );
+}
+
+fn native_custom(required: Vec<crate::config::Key>) -> Engine {
+    configured_required(
+        Trigger::Sequence {
+            steps: vec![
+                Trigger::Key {
+                    key: crate::config::Key(30),
+                },
+                custom_trigger(),
+            ],
+            timeout: Millis(200),
+        },
+        MAX_BYTES,
+        required,
+    )
+}
+
+#[test]
+fn invalid_sequence_edges_neither_lose_nor_create_a_custom_coordinator() {
+    for missing in [false, true] {
+        let mut engine = native_custom(vec![]);
+        engine.capture_input = true;
+        frame(&mut engine, 1, 1, 10, &[(30, 1)]);
+        let normalized = engine.captured_input.take().unwrap();
+        let ticket = engine
+            .recognition_requests(Duration::from_millis(10))
+            .unwrap()
+            .pop()
+            .unwrap();
+        let owned = missing.then(|| engine.custom.take());
+        engine.input_watermark = 0;
+        let error = engine.key_sequences_begin(&normalized).unwrap_err();
+        if missing {
+            assert!(error.to_string().contains("coordinator is unavailable"));
+            assert!(engine.custom.is_none());
+        } else {
+            assert!(error.to_string().contains("unpositioned sequence input"));
+            assert_eq!(
+                engine.custom.as_ref().unwrap().gate.candidate(ticket.id),
+                Some(ticket.candidate)
+            );
+        }
+        assert!(
+            engine.sequences[0]
+                .steps
+                .iter()
+                .all(|step| step.custom.is_none())
+        );
+        drop(owned);
+    }
+}
+
+#[test]
+fn a_native_custom_handoff_excludes_earlier_keys_and_coalesces_only_its_original_suffix() {
+    let mut engine = native_custom(vec![]);
+    frame(
+        &mut engine,
+        1,
+        1,
+        10,
+        &[(31, 1), (31, 0), (30, 1), (32, 1), (32, 0)],
+    );
+    let tickets = engine
+        .recognition_requests(Duration::from_millis(10))
+        .unwrap();
+    assert_eq!(tickets.len(), 1);
+    let crate::input_events::Event::Frame {
+        sequence, changes, ..
+    } = &tickets[0].input
+    else {
+        panic!("missing original suffix")
+    };
+    assert_eq!(*sequence, 1);
+    assert_eq!(
+        changes,
+        &vec![
+            Change::Key {
+                code: 30,
+                state: KeyState::Press
+            },
+            Change::Key {
+                code: 32,
+                state: KeyState::Press
+            },
+            Change::Key {
+                code: 32,
+                state: KeyState::Release
+            },
+        ]
+    );
+    reply(&mut engine, &tickets[0], Phase::Discrete, 11);
+    let completed = engine.take_route_outcomes();
+    assert_eq!(completed.len(), 1);
+    assert_eq!(
+        positions(&completed[0].intent),
+        BTreeSet::from([(1, 1, 2, 30), (1, 1, 3, 32)])
+    );
+}
+
+#[test]
+fn a_native_custom_handoff_samples_activation_at_its_prefix_not_the_report_end() {
+    let mut engine = native_custom(vec![crate::config::Key(42)]);
+    frame(&mut engine, 1, 1, 10, &[(42, 1), (30, 1), (42, 0)]);
+    let tickets = engine
+        .recognition_requests(Duration::from_millis(10))
+        .unwrap();
+    assert_eq!(tickets.len(), 1);
+    let crate::input_events::Event::Frame { changes, .. } = &tickets[0].input else {
+        panic!("missing original suffix")
+    };
+    assert_eq!(
+        changes,
+        &vec![
+            Change::Key {
+                code: 30,
+                state: KeyState::Press
+            },
+            Change::Key {
+                code: 42,
+                state: KeyState::Release
+            },
+        ]
+    );
+    reply(&mut engine, &tickets[0], Phase::Discrete, 11);
+    assert_eq!(engine.take_route_outcomes().len(), 1);
+}
+
+#[test]
+fn a_native_custom_suffix_does_not_close_at_an_intermediate_same_report_key_release() {
+    let mut engine = native_custom(vec![]);
+    frame(
+        &mut engine,
+        1,
+        1,
+        10,
+        &[(31, 1), (31, 0), (30, 1), (30, 0), (32, 1)],
+    );
+    let tickets = engine
+        .recognition_requests(Duration::from_millis(10))
+        .unwrap();
+    assert_eq!(tickets.len(), 1);
+    reply(&mut engine, &tickets[0], Phase::Discrete, 11);
+    let completed = engine.take_route_outcomes();
+    assert_eq!(completed.len(), 1);
+    assert_eq!(
+        positions(&completed[0].intent),
+        BTreeSet::from([(1, 1, 2, 30), (1, 1, 4, 32)])
     );
 }
 

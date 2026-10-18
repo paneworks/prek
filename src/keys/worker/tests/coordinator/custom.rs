@@ -45,6 +45,166 @@ fn respond(routing: &mut Routing, ticket: &Ticket, phase: Phase, at: u64) -> Vec
         .collect()
 }
 
+fn native_custom(delivery: Delivery) -> Rule {
+    let mut rule = recognizer();
+    rule.trigger = Trigger::Sequence {
+        steps: vec![Trigger::Key { key: Key(30) }, rule.trigger],
+        timeout: Millis(200),
+    };
+    rule.delivery = delivery;
+    rule
+}
+
+fn cross_source_custom() -> Rule {
+    let mut rule = native_custom(Delivery::Buffer);
+    let Trigger::Sequence { steps, .. } = &mut rule.trigger else {
+        unreachable!()
+    };
+    steps[0] = Trigger::ButtonHold {
+        key: Key(30),
+        after: Millis(20),
+        repeat: None,
+    };
+    rule
+}
+
+#[test]
+fn cross_source_native_custom_admission_keeps_every_parent_transport_dependency() {
+    for retire in [None, Some(1), Some(2)] {
+        let mut routing = arbitration::routed(vec![cross_source_custom()]);
+        let (mut seat, writes) = model();
+        submit(&mut routing, packet(1, 1, 10, &[(30, 1)]));
+        submit(&mut routing, packet(2, 1, 35, &[(31, 1)]));
+        let ticket = routing.recognition_requests(ms(35)).unwrap().pop().unwrap();
+        assert_eq!(ticket.input.source().device, 2);
+        let work = respond(&mut routing, &ticket, Phase::Discrete, 40);
+        assert_eq!(work.len(), 1);
+        seat.admit(&routing, work, None, ms(40)).unwrap();
+        if let Some(id) = retire {
+            routing.recover(&source(id));
+        }
+        poll(&mut seat, &routing, 40);
+        assert_eq!(
+            key_events(&writes),
+            if retire.is_none() {
+                vec![(42, 1), (42, 0)]
+            } else {
+                vec![]
+            }
+        );
+    }
+}
+
+#[test]
+fn a_native_custom_reply_is_revoked_by_either_prefix_or_leaf_transport_loss() {
+    for retire in [1, 2] {
+        let mut routing = arbitration::routed(vec![cross_source_custom()]);
+        submit(&mut routing, packet(1, 1, 10, &[(30, 1)]));
+        submit(&mut routing, packet(2, 1, 35, &[(31, 1)]));
+        let ticket = routing.recognition_requests(ms(35)).unwrap().pop().unwrap();
+        routing.recover(&source(retire));
+        assert!(
+            routing
+                .recognition_response(
+                    Proposal {
+                        fence: ticket.fence,
+                        ticket: ticket.id,
+                        phase: Phase::Discrete,
+                        data: serde_json::json!({}),
+                    },
+                    ms(40)
+                )
+                .is_err()
+        );
+        assert!(routing.take_scoped_dispatches(ms(40)).is_empty());
+    }
+}
+
+#[test]
+fn a_native_custom_reply_does_not_inherit_later_unseen_native_competition() {
+    let mut higher = rule(
+        "higher",
+        Action::Keys {
+            keys: vec![Key(29)],
+        },
+    );
+    higher.trigger = Trigger::Key { key: Key(31) };
+    higher.delivery = Delivery::Buffer;
+    higher.priority = 20;
+    let mut routing = arbitration::routed(vec![native_custom(Delivery::Buffer), higher]);
+    let (mut seat, writes) = model();
+    submit(&mut routing, packet(1, 1, 10, &[(30, 1)]));
+    let ticket = routing.recognition_requests(ms(10)).unwrap().pop().unwrap();
+    let native = submit(&mut routing, packet(1, 2, 20, &[(31, 1)]));
+    assert_eq!(native.len(), 1);
+    seat.admit(&routing, native, None, ms(20)).unwrap();
+    poll(&mut seat, &routing, 20);
+    assert!(key_events(&writes).is_empty());
+    let work = respond(&mut routing, &ticket, Phase::Discrete, 25);
+    assert_eq!(work.len(), 1);
+    seat.admit(&routing, work, None, ms(25)).unwrap();
+    poll(&mut seat, &routing, 25);
+    assert_eq!(key_events(&writes), [(29, 1), (29, 0), (42, 1), (42, 0)]);
+}
+
+#[test]
+fn a_buffered_native_custom_sequence_preserves_earlier_and_unseen_typing() {
+    let mut routing = arbitration::routed(vec![native_custom(Delivery::Buffer)]);
+    let (mut seat, writes) = model();
+    assert!(submit(&mut routing, packet(1, 1, 10, &[(31, 1), (31, 0), (30, 1)])).is_empty());
+    assert_eq!(raw(&mut routing, &seat, 1, 10), [(31, 1), (31, 0)]);
+    let ticket = routing.recognition_requests(ms(10)).unwrap().pop().unwrap();
+    assert!(submit(&mut routing, packet(1, 2, 20, &[(31, 1), (31, 0)])).is_empty());
+    let work = respond(&mut routing, &ticket, Phase::Discrete, 25);
+    assert_eq!(work.len(), 1);
+    seat.admit(&routing, work, None, ms(25)).unwrap();
+    poll(&mut seat, &routing, 25);
+    assert!(key_events(&writes).is_empty());
+    assert_eq!(raw(&mut routing, &seat, 1, 35), [(31, 1), (31, 0)]);
+    poll(&mut seat, &routing, 35);
+    assert_eq!(key_events(&writes), [(42, 1), (42, 0)]);
+}
+
+#[test]
+fn a_reserved_native_custom_sequence_binds_its_leaf_to_the_exact_parent_press_claim() {
+    let mut routing = arbitration::routed(vec![native_custom(Delivery::Reserve)]);
+    let (mut seat, writes) = model();
+    submit(&mut routing, packet(1, 1, 10, &[(31, 1), (31, 0), (30, 1)]));
+    assert_eq!(raw(&mut routing, &seat, 1, 10), [(31, 1), (31, 0)]);
+    let ticket = routing.recognition_requests(ms(10)).unwrap().pop().unwrap();
+    let work = respond(&mut routing, &ticket, Phase::Discrete, 15);
+    assert_eq!(work.len(), 1);
+    seat.admit(&routing, work, None, ms(15)).unwrap();
+    poll(&mut seat, &routing, 15);
+    assert_eq!(key_events(&writes), [(42, 1), (42, 0)]);
+    submit(&mut routing, packet(1, 2, 20, &[(30, 0)]));
+    assert!(raw(&mut routing, &seat, 1, 20).is_empty());
+}
+
+#[test]
+fn a_custom_native_sequence_requires_fresh_suffix_input_after_the_actual_reply() {
+    let mut rule = recognizer();
+    rule.trigger = Trigger::Sequence {
+        steps: vec![rule.trigger, Trigger::Key { key: Key(31) }],
+        timeout: Millis(200),
+    };
+    let mut routing = arbitration::routed(vec![rule]);
+    let (mut seat, writes) = model();
+    submit(&mut routing, packet(1, 1, 10, &[(30, 1)]));
+    let ticket = routing.recognition_requests(ms(10)).unwrap().pop().unwrap();
+    submit(&mut routing, packet(1, 2, 20, &[(31, 1), (31, 0)]));
+    assert!(respond(&mut routing, &ticket, Phase::Discrete, 25).is_empty());
+    assert!(raw(&mut routing, &seat, 1, 35).is_empty());
+    let work = submit(&mut routing, packet(1, 3, 40, &[(31, 1)]));
+    assert_eq!(work.len(), 1);
+    seat.admit(&routing, work, None, ms(40)).unwrap();
+    poll(&mut seat, &routing, 40);
+    assert!(key_events(&writes).is_empty());
+    assert_eq!(raw(&mut routing, &seat, 1, 50), [(31, 1), (31, 0)]);
+    poll(&mut seat, &routing, 50);
+    assert_eq!(key_events(&writes), [(42, 1), (42, 0)]);
+}
+
 #[test]
 fn a_custom_reply_cannot_consume_a_later_frame_the_callback_has_not_seen() {
     for deliver_first_before_later in [false, true] {

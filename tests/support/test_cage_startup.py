@@ -19,7 +19,7 @@ quiesce_spec.loader.exec_module(quiesce)
 
 class CustomKeyArbitration(unittest.TestCase):
     def fixture(self):
-        observations = [dict(name="unused", receipt=dict(sequence=(index + 1) * 10)) for index in range(37)]
+        observations = [dict(name="unused", receipt=dict(sequence=(index + 1) * 10)) for index in range(39)]
         observations[31]["name"] = "custom-lua-unseen-key-tail"
         received = [dict(event="key", sequence=311 + index, code=code, state=state, at_ns=1000 + index)
                     for index, (code, state) in enumerate([(31, 1), (31, 0), (30, 1), (30, 0)])]
@@ -27,7 +27,7 @@ class CustomKeyArbitration(unittest.TestCase):
         def stamp(nanos):
             return dict(secs=0, nanos=nanos)
         inputs = [dict(source=source, sequence=index + 1, at=stamp(at),
-                       events=[dict(kind=1, code=code, value=value) for code, value in events])
+                       events=[dict(kind=1, code=code, value=value) for code, value in events] + [dict(kind=0, code=0, value=0)])
                   for index, (at, events) in enumerate([(100, [(202, 1)]), (120, [(31, 1), (31, 0)]), (126, [(202, 0)])])]
         ticket = dict(id=1, cause="frame", rule="rendered-custom-key", recognizer="rendered_key", fence=dict(configuration=1),
                       requested_at=stamp(100), deadline=stamp(200), input=dict(source=source, sequence=1, at=stamp(100),
@@ -36,6 +36,8 @@ class CustomKeyArbitration(unittest.TestCase):
                        source_and_readiness_modeled=True, physical_takeover_tested=False, kernel_input_opened=False,
                        helper_stopped=True, generated_neutral=True, ordinary=[[31, 1], [31, 0]], inputs=inputs, ticket=ticket,
                        activation=dict(require_keys=[], keys_throughout=False),
+                       trigger=dict(kind="custom", recognizer=dict(name="rendered_key", selectors=["custom_keys"], inputs=["key"])),
+                       work_admitted_at=stamp(125), reply_dispatches=1,
                        proposal=dict(ticket=1, fence=ticket["fence"], phase="discrete", data=dict(trigger=202)),
                        proposed_at=stamp(110), admitted_at=stamp(125))
         return observations, received, runtime
@@ -111,7 +113,7 @@ class CustomKeyActivation(unittest.TestCase):
         runtime["activation"] = dict(require_keys=[42], keys_throughout=False)
         runtime["ordinary"] *= 2
         runtime["inputs"][0]["events"] = [dict(kind=1, code=code, value=value)
-                                          for code, value in [(31, 1), (31, 0), (42, 1), (202, 1), (42, 0)]]
+                                          for code, value in [(31, 1), (31, 0), (42, 1), (202, 1), (42, 0)]] + [dict(kind=0, code=0, value=0)]
         runtime["ticket"]["input"]["changes"] = [dict(kind="key", code=code, state=state)
                                                  for code, state in [(42, "press"), (202, "press"), (42, "release")]]
         return observations, received, runtime
@@ -158,9 +160,91 @@ class CustomKeyActivation(unittest.TestCase):
                 quiesce.validate_custom_key_arbitration(observations, received, runtime, event_local=True)
 
 
+class ComposedCustomKeys(unittest.TestCase):
+    def fixture(self, composition):
+        observations, _, runtime = CustomKeyArbitration().fixture()
+        native_first = composition == "native_prefix"
+        phase = 33 if native_first else 34
+        observations[phase]["name"] = "custom-lua-native-prefix" if native_first else "custom-lua-native-suffix"
+        custom = runtime["trigger"]
+        native = dict(kind="key", key="code:202" if native_first else "code:203")
+        runtime["trigger"] = dict(kind="sequence", timeout="200ms", steps=[native, custom] if native_first else [custom, native])
+        runtime["scope"] = "owned_protocol_composed_key_only_custom"
+        def events(edges):
+            return [dict(kind=1, code=code, value=value) for code, value in edges] + [dict(kind=0, code=0, value=0)]
+        if native_first:
+            runtime["ordinary"] *= 2
+            runtime["inputs"][0]["events"] = events([(31, 1), (31, 0), (202, 1)])
+        else:
+            runtime["ordinary"] = [[203, 1], [203, 0], [31, 1], [31, 0]]
+            runtime["inputs"][1]["events"] = events(runtime["ordinary"])
+            released = runtime["inputs"][-1]
+            fresh = copy.deepcopy(released)
+            fresh["events"] = events([(203, 1), (203, 0)])
+            released["sequence"] = 4
+            released["at"] = dict(secs=0, nanos=128)
+            runtime["inputs"].insert(2, fresh)
+            runtime["work_admitted_at"] = dict(secs=0, nanos=127)
+            runtime["reply_dispatches"] = 0
+        received = [dict(event="key", sequence=phase * 10 + 1 + index, code=code, state=state, at_ns=1000 + index)
+                    for index, (code, state) in enumerate(runtime["ordinary"] + [[30, 1], [30, 0]])]
+        return observations, received, runtime
+
+    def test_actual_native_custom_and_custom_native_compositions_pass(self):
+        for composition in ("native_prefix", "native_suffix"):
+            result = quiesce.validate_custom_key_arbitration(*self.fixture(composition), composition=composition)
+            self.assertEqual(result["composition"], composition)
+            self.assertEqual(result["preserved_ordinary_edges"], 4)
+            self.assertFalse(result["physical_takeover_tested"])
+
+    def test_substituting_a_root_trigger_order_or_native_key_refuses(self):
+        for composition in ("native_prefix", "native_suffix"):
+            for change in ("root", "order", "key", "input_kind"):
+                observations, received, runtime = self.fixture(composition)
+                if change == "root":
+                    runtime["trigger"] = next(step for step in runtime["trigger"]["steps"] if step["kind"] == "custom")
+                elif change == "order":
+                    runtime["trigger"]["steps"].reverse()
+                elif change == "key":
+                    next(step for step in runtime["trigger"]["steps"] if step["kind"] == "key")["key"] = "code:31"
+                else:
+                    next(step for step in runtime["trigger"]["steps"] if step["kind"] == "custom")["recognizer"]["inputs"] = ["touch"]
+                with self.subTest(composition=composition, change=change), self.assertRaises(ValueError):
+                    quiesce.validate_custom_key_arbitration(observations, received, runtime, composition=composition)
+
+    def test_native_suffix_cannot_dispatch_at_reply_or_before_fresh_input(self):
+        for change in ("early", "bool", "clock", "missing"):
+            observations, received, runtime = self.fixture("native_suffix")
+            if change == "early":
+                runtime["reply_dispatches"] = 1
+            elif change == "bool":
+                runtime["reply_dispatches"] = False
+            elif change == "clock":
+                runtime["work_admitted_at"] = runtime["admitted_at"]
+            else:
+                runtime["inputs"].pop(2)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                quiesce.validate_custom_key_arbitration(observations, received, runtime, composition="native_suffix")
+
+    def test_earlier_typing_leaked_controls_or_hybrid_report_substitution_refuses(self):
+        for composition in ("native_prefix", "native_suffix"):
+            for change in ("typing", "control", "hybrid", "report"):
+                observations, received, runtime = self.fixture(composition)
+                if change == "typing":
+                    received.pop(0)
+                elif change == "control":
+                    received.insert(0, dict(received[0], code=202))
+                elif change == "hybrid":
+                    runtime["inputs"][0]["events"].insert(0, dict(kind=2, code=0, value=1))
+                else:
+                    runtime["inputs"][0]["events"].pop()
+                with self.subTest(composition=composition, change=change), self.assertRaises(ValueError):
+                    quiesce.validate_custom_key_arbitration(observations, received, runtime, composition=composition)
+
+
 class NativeKeyArbitration(unittest.TestCase):
     def fixture(self):
-        observations = [dict(name="unused", receipt=dict(sequence=(index + 1) * 10)) for index in range(37)]
+        observations = [dict(name="unused", receipt=dict(sequence=(index + 1) * 10)) for index in range(39)]
         cases = [
             ("buffered-tap-selective", [(31, 1), (31, 0), (30, 1), (30, 0)]),
             ("buffered-hold-priority", [(30, 1), (30, 0)]),

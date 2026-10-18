@@ -306,6 +306,16 @@ Physical-group closure remains at the original report boundary. A native-to-cust
 same-edge sequence continuation requires the exact previous native candidate and
 source; that continuation cannot make one press satisfy two fresh native steps.
 
+Sequences composed entirely of native keys and key-only custom leaves share the
+original-edge timeline and private press journal. A synchronous native prefix
+projects only its handoff edge and subsequent eligible report suffix into the
+custom callback, never earlier typing. Asynchronous custom completion does not
+replay old input into another custom step or lend pre-reply native input to a
+fresh suffix. Completed parent-prefix evidence and immutable leaf ticket evidence
+remain separate during ownership checks. Reserve/Buffer rules validate the actual
+parent press claim, every contributing transport and the leaf ticket deadline;
+an unrelated later native claim cannot revoke a valid older prefix.
+
 Only validated replies extend a custom candidate's confirmed prefix. Timer
 tickets inherit that prefix rather than later observed or queued frames. Buffer
 progress consumes only accepted non-cancel outcome members; cancellation cannot
@@ -324,7 +334,8 @@ That gate is not rendered custom-input or kernel acceptance. The separate custom
 Cage phases use real supervised Luna callbacks, original ticket/reply clocks and
 owned protocol keyboards. Its strict receiver must see unrelated typing before
 the generated action, with no consumed control leakage. This proves the exercised
-root key-only custom path, not hybrid/mixed or physical/kernel consumption.
+root and composed key-only custom paths, not non-key/hybrid/mixed or
+physical/kernel consumption.
 
 Pending input fences later raw keys in the same keyboard domain. A common bounded
 epoch offset preserves cross-source cadence without rescheduling exposed output.
@@ -414,7 +425,7 @@ Legacy and selective modes cannot be mixed within one router incarnation.
 
 Transformed reports containing nonkeyboard data or ambiguous scan metadata
 currently fail with `UnsupportedProjection` and require recovery; untouched
-hybrid reports remain intact. Eligible native and root key-only custom combinations
+hybrid reports remain intact. Eligible native and root/composed key-only custom combinations
 use the journal; non-key/mixed/hybrid modes retain their existing whole-report paths while
 their complete selective semantics remain unfinished. Hybrid/ambiguous
 transformations, native consumer acknowledgement,
@@ -432,11 +443,11 @@ sole-worker ABI writes on owned private regular files (no devices).
 cancellation, timeout and bounds regressions. `oslo make test-key-worker-cage`
 drives the actual scheduler through owned protocol keyboards and a rendered app
 with both Hyprland configuration dialects. Its authority/readiness fixtures are
-explicitly modeled. Thirty-seven phases include consumed immediate per-key
+explicitly modeled. Thirty-nine phases include consumed immediate per-key
 projection, ordinary typing, cross-source modifiers, tap-tail lifecycle,
 multiple same-report sequences, delayed tap/key completions, rejection of reversed
 steps and fresh reentry, plus explicitly decided journal fallback cadence, using
-eight owned protocol keyboards. Six native arbitration phases additionally prove
+twelve owned protocol keyboards. Six native arbitration phases additionally prove
 selective buffered tap/hold/sequence consumption, deferred action order and unmatched fallback. The strict
 receiver checks every delivered edge, the absence of consumed control keys and
 the original unmatched down/up interval within existing scheduler slack. Earlier
@@ -445,6 +456,11 @@ phase preserves a later unseen ordinary key before its generated action. A secon
 actual Luna phase requires a modifier pressed and released within the same report,
 excludes earlier input from the callback and preserves both earlier and unseen
 ordinary typing before its generated action. These
+two root phases are joined by native-to-custom and custom-to-native cases. Their
+receipts include the actual configured trigger, original reports, reply dispatch
+count and distinct reply/work admission clocks. The latter case forwards an early
+native-looking press normally and waits for a fresh post-reply press to complete.
+These
 are owned protocol-key paths, not mixed/hybrid arbitration, native takeover or
 physical/kernel selective consumption. Repeat interleaving has direct worker/file
 evidence; these rendered phases do not simulate kernel repeat.
