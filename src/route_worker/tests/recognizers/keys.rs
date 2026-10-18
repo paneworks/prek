@@ -232,6 +232,94 @@ fn raw_frame(device: &Device, sequence: u64, data: &[(u16, i32)]) -> Frame {
 }
 
 #[test]
+fn sole_worker_key_output_waits_only_for_the_explicitly_related_pointer() {
+    for required in [false, true] {
+        let mut pointer = device();
+        pointer.source.device += 1;
+        pointer.identity = "test:independent-pointer".into();
+        pointer.capabilities = BTreeMap::from([
+            (EV_SYN, vec![SYN_REPORT]),
+            (EV_KEY, vec![272]),
+            (crate::input::EV_REL, vec![0, 1]),
+        ]);
+        let mut config = profile();
+        config.rules[0].delivery = Delivery::Buffer;
+        config.devices.insert(
+            "pointer".into(),
+            Selector {
+                identity: Some(pointer.identity.clone()),
+                ..Default::default()
+            },
+        );
+        config.policy.allowed_devices.push("pointer".into());
+        let mut hold = config.rules[0].clone();
+        hold.id = "pointer".into();
+        hold.priority = 10;
+        hold.devices = vec!["pointer".into()];
+        hold.trigger = Trigger::ButtonHold {
+            key: crate::config::Key(272),
+            after: Millis(100),
+            repeat: None,
+        };
+        hold.action = Action::Event {
+            name: "pointer".into(),
+        };
+        if required {
+            hold.require_keys = vec![crate::config::Key(48)];
+        }
+        config.rules.push(hold);
+        let mut fixture = Fixture::new(config, owner());
+        fixture
+            .stream
+            .push(Record::Device {
+                device: pointer.clone(),
+                keys: BTreeSet::new(),
+                contacts: vec![],
+            })
+            .unwrap();
+        fixture.attach_device(&pointer);
+        let (slot, _, generated) = slot(&fixture);
+        fixture.stream.seats.get_mut("seat0").unwrap().keys = Some(slot);
+        fixture.stream.refresh_keys(monotonic().unwrap()).unwrap();
+        physical_file(&mut fixture, &device(), "keyboard-ordering");
+        let raw = physical_file(&mut fixture, &pointer, "pointer-ordering");
+        if required {
+            fixture
+                .stream
+                .push(Record::Frame {
+                    frame: raw_frame(&device(), 1, &[(48, 1)]),
+                })
+                .unwrap();
+            for _ in 0..4 {
+                fixture.stream.flush().unwrap();
+            }
+        }
+        fixture
+            .stream
+            .push(Record::Frame {
+                frame: raw_frame(&pointer, 1, &[(272, 1)]),
+            })
+            .unwrap();
+        assert!(events(&raw).is_empty());
+        fixture
+            .stream
+            .push(Record::Frame {
+                frame: raw_frame(&device(), if required { 2 } else { 1 }, &[(30, 1)]),
+            })
+            .unwrap();
+        for _ in 0..4 {
+            fixture.stream.flush().unwrap();
+        }
+        assert_eq!(
+            events(&generated),
+            if required { vec![] } else { vec![(42, 1)] },
+            "required={required}"
+        );
+        assert!(events(&raw).is_empty());
+    }
+}
+
+#[test]
 fn sole_worker_interleaves_mixed_input_and_generated_reports_on_owned_regular_files() {
     let mut config = profile();
     config.rules[0].delivery = crate::config::Delivery::Buffer;

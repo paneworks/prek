@@ -33,12 +33,15 @@ impl Routing {
         &self,
         position: InputPosition,
         inclusive: bool,
+        seat: &str,
     ) -> bool {
         self.ordered_keys
             && position.frame <= self.engine.input_watermark()
             && self
                 .routes
-                .values()
+                .iter()
+                .filter(|(source, route)| source.seat == seat && route.key_domain)
+                .map(|(_, route)| route)
                 .all(|route| route.router.position_prefix_delivered(position, inclusive))
     }
 

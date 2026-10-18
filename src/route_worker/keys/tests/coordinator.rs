@@ -43,6 +43,7 @@ fn raw(slot: &Slot<ModelPreparation>, routing: &mut Routing) -> Vec<(u16, i32)> 
     let mut output = Vec::new();
     while let Some(scheduled) = routing.due(&source(1), ms(10)).unwrap().cloned() {
         if slot.blocks_input(
+            routing,
             &source(1),
             scheduled.frame.sequence,
             routing.input_span(&source(1), scheduled.ticket),

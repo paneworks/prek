@@ -1,5 +1,6 @@
 use super::*;
 use crate::{config::Action, keys::SourceKey, protocol::Fence};
+mod ordering;
 mod projection;
 
 /// Linear configured key work retaining its original route and coordinator fence.
@@ -79,7 +80,7 @@ impl KeyWork {
     }
     pub fn input_prefix_ready(&self, routing: &Routing) -> bool {
         if let Some(position) = self.scheduling_position() {
-            routing.key_position_prefix_ready(position, self.observe())
+            routing.key_position_prefix_ready(position, self.observe(), &self.source().seat)
         } else {
             routing.key_prefix_ready(&self.dispatch.inputs, self.observe())
         }

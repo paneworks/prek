@@ -445,11 +445,11 @@ make.recipe{ name="test-key-projection",desc="per-press raw-key ownership and co
 
 make.recipe{ name="test-key-coordinator",desc="fenced selective routing and shared raw/generated ordering; no devices",
              run=function()
-               for _,filter in ipairs({"keys::worker::tests::coordinator","router::keyboard::tests",
+               for _,filter in ipairs({"keys::worker::tests::coordinator","keys::worker::tests::independence","routing::keys::ordering","router::keyboard::tests",
                    "route_worker::keys::tests::coordinator","route_worker::tests::recognizers::keys"}) do
                  local tested=oslo.run{"cargo","test","--locked","--lib",filter,capture=true}
                  io.stdout:write(tested.out or ""); io.stderr:write(tested.err or "")
-                 assert(tested.ok and (tested.out or ""):match("running [1-9]%d* tests"),"coordinator gate failed or selected no tests: "..filter)
+                 assert(tested.ok and (tested.out or ""):match("running [1-9]%d* tests?"),"coordinator gate failed or selected no tests: "..filter)
                end
              end }
 

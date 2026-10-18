@@ -868,6 +868,19 @@ impl<S: Sink> Seat<S> {
                 }
             })
     }
+    /// Retain key-domain ordering and seat-wide neutral cleanup for matching routes.
+    pub fn blocks_ordered_span(&self, routing: &Routing, source: &Source, span: InputSpan) -> bool {
+        if source.seat != self.output.source().seat {
+            return false;
+        }
+        if !routing.key_coordinator(self.fence) {
+            return true;
+        }
+        (routing.key_orders_source(source)
+            || self.draining.is_some()
+            || self.bindings.values().any(|binding| binding.cancelled))
+            && self.blocks_raw_span(source, span)
+    }
     pub fn blocks_raw_span(&self, source: &Source, span: InputSpan) -> bool {
         if self.draining.is_some() || self.bindings.values().any(|binding| binding.cancelled) {
             return true;
@@ -923,7 +936,13 @@ impl<S: Sink> Seat<S> {
                 ..
             } => position.map_or_else(
                 || routing.key_prefix_ready(inputs, false),
-                |position| routing.key_position_prefix_ready(position, *inclusive),
+                |position| {
+                    routing.key_position_prefix_ready(
+                        position,
+                        *inclusive,
+                        &self.output.source().seat,
+                    )
+                },
             ),
         }
     }

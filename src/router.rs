@@ -238,6 +238,10 @@ pub struct Router {
 }
 
 impl Router {
+    pub(crate) fn device(&self) -> &Device {
+        &self.device
+    }
+
     pub fn new(
         device: Device,
         ready: &Ready,

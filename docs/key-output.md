@@ -102,6 +102,7 @@ authority from a public match event. A coordinator-free observer cannot mint it.
 | `retire(at)` / `drain(at)` | Permanently reject new work and drain release-only cleanup without retaining a removed Routing. Cleanup has a 250 ms bound. |
 | `blocks_raw(source, sequence)` | Legacy source/frame barriers; never supply an allocated fragment output sequence here. |
 | `blocks_raw_span(source, span)` | Seat-wide original-position barriers for raw reports/fragments, including pending generated writes and cancellation cleanup. Not consumer-delivery acknowledgement. |
+| `blocks_ordered_span(routing, source, span)` | Apply original-position barriers to the matching coordinator's key-ordering domain. Independent routes keep forwarding; neutral cleanup still fences the seat. A mismatched coordinator fails closed. |
 | `deadline()` / `poll_fd()` | Supply queue/write/cleanup wakeups and an optional Linux sink write fd. Also poll Routing/context/consumer deadlines and lifecycle notifications. |
 
 Normal completion and cancellation are deliberately separate: a down followed
@@ -133,7 +134,7 @@ boundary (`event == usize::MAX`); timers advanced before a new input report use
 the previous frame's boundary. A due timer cannot be sorted behind the new
 report's first key merely because both have the same timestamp.
 
-`Routing::with_key_projection` coordinates original positions across all attached
+`Routing::with_key_projection` retains original positions across attached
 sources. Eligible pure-key sources with immediate consuming key actions arbitrate
 one winner per physical press by priority/rule ID. Unrelated keys remain ordinary.
 Other raw routes retain whole-report positions, including legacy buffered groups.
@@ -142,17 +143,36 @@ use whole-report boundaries rather than claiming exact cuts. The managed worker
 uses this constructor and the same `admit` implementation as the protocol fixture.
 The older constructors retain legacy source/frame behavior.
 
-Consuming work waits for the global raw prefix before its edge. Observing work
+Consuming work waits for its same-seat key-domain raw prefix before its edge. Observing work
 also waits for its own raw edge; observed repeats do likewise. Pending/in-flight
-generated writes block later raw spans on every source in the seat, not just the
+generated writes block later raw spans on every source in that domain, not just the
 triggering keyboard. Local backpressure retains barriers through full report
 acknowledgement. Closing generated slots fence raw forwarding until their owned
 cleanup finishes. A blocked or in-flight raw report wakes at its existing
 write-budget failure boundary, not continuously at an expired due timestamp.
 These are local coordinator/write guarantees. They do not prove stock-compositor
 cross-fd delivery, consumer-neutral acknowledgement or native takeover.
-Strict prefixes through pending legacy groups can delay unrelated routes; their
-latency/dependency behavior is not accepted and must be resolved before public activation.
+
+The key-ordering domain includes physical sources with any generated-keyboard
+key capability, including media-only and hybrid devices, plus sources configured
+to emit keys. Enabled rules in the active named mode connect possible same-seat source groups through
+key conditions, layers, chords, sequences and custom recognizer selectors.
+Connections are transitive. Alternative selectors on an ordinary noncompound
+rule do not connect independent sources. Disabled rules and inactive named modes
+do not create connections. Attachment and removal rebuild the cached components;
+rule/mode/reload transactions retire transports before a fresh incarnation can
+use the replacement graph. Forwarding does not rebuild a rule graph per poll.
+
+Independent buffered touch/pointer routes neither hold generated work's raw
+prefix nor wait behind a pending generated write. Their existing per-source
+buffering and complete-report FIFO rules remain unchanged. A dependent legacy
+keyboard or explicitly connected buffered group still participates in ordering
+and retains its existing timing/write budget; no timeout is extended to hide
+backpressure. Neutral cancellation/closing cleanup remains a seat-wide barrier.
+Independent delivery lanes do not promise a single raw delivery order across
+unrelated sources; recognition retains the common input timeline. Ordinary
+model/private-file evidence does not establish combined native or graphical
+key/touch latency, stock consumer interpretation, or full resource-policy acceptance.
 
 Before polling, the owning loop must forward Routing's cancellation events to
 `cancel` and its source-recovery transitions to `retire_source`. A retained

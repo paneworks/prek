@@ -37,6 +37,7 @@ struct Route {
     winner: Option<u64>,
     joined: bool,
     project_keys: bool,
+    key_domain: bool,
 }
 struct Won {
     intent: RouteIntent,
@@ -329,6 +330,7 @@ impl Routing {
             device.source,
             Route {
                 project_keys,
+                key_domain: false,
                 attached_at: at,
                 router,
                 authorization,
@@ -339,6 +341,7 @@ impl Routing {
                 joined: false,
             },
         );
+        self.refresh_key_domains();
         self.authority_generation = self.engine.authority_mut().generation();
         Ok(())
     }
@@ -1333,6 +1336,7 @@ impl Routing {
             .retain(|_, won| !won.intent.sources().contains(source));
         self.dispatches
             .retain(|dispatch| !dispatch.outcome.intent.sources().contains(source));
+        self.refresh_key_domains();
     }
     pub fn deadline(&self) -> Option<Duration> {
         self.deadline_with_barriers(|_, _, _| false)

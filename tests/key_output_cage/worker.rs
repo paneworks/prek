@@ -288,7 +288,8 @@ impl RoutedKeyboard {
                 .unwrap()
                 .cloned()
             {
-                if self.generated.blocks_raw_span(
+                if self.generated.blocks_ordered_span(
+                    &self.routing,
                     &source(id),
                     self.routing
                         .input_span(&source(id), scheduled.ticket)

@@ -1059,6 +1059,7 @@ impl InputSink for Stream {
             {
                 if seat.keys.as_ref().is_some_and(|keys| {
                     keys.blocks_input(
+                        &seat.routing,
                         &source,
                         scheduled.frame.sequence,
                         seat.routing.input_span(&source, scheduled.ticket),
@@ -1097,7 +1098,12 @@ impl InputSink for Stream {
                                 .iter()
                                 .any(|keys| keys.seat() == source.seat && !keys.closed())
                             || seat.keys.as_ref().is_some_and(|keys| {
-                                keys.blocks_input(source, scheduled.frame.sequence, span)
+                                keys.blocks_input(
+                                    &seat.routing,
+                                    source,
+                                    scheduled.frame.sequence,
+                                    span,
+                                )
                             })
                     })
                     .into_iter()

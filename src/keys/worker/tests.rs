@@ -11,6 +11,7 @@ use std::{cell::RefCell, rc::Rc};
 
 mod bounds;
 mod coordinator;
+mod independence;
 mod lifecycle;
 mod scope;
 
@@ -108,8 +109,8 @@ fn ready(device: &Device) -> crate::transport::Ready {
         device,
         KernelIdentity {
             bus: 3,
-            vendor: 1,
-            product: 1,
+            vendor: device.vendor,
+            product: device.product,
             version: 1,
         },
         None,
@@ -127,7 +128,7 @@ fn ready(device: &Device) -> crate::transport::Ready {
                 marker: descriptor.marker,
                 name: descriptor.name,
                 class: descriptor.class,
-                seat: "seat0".into(),
+                seat: device.source.seat.clone(),
                 settings: BTreeMap::new(),
                 at: ms(0),
             },

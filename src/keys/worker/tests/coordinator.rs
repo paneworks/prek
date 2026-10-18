@@ -37,7 +37,7 @@ fn raw(routing: &mut Routing, seat: &Seat<TestSink>, id: u64, at: u64) -> Vec<(u
     let mut result = Vec::new();
     while let Some(scheduled) = routing.due(&source(id), ms(at)).unwrap().cloned() {
         let span = routing.input_span(&source(id), scheduled.ticket).unwrap();
-        if seat.blocks_raw_span(&source(id), span) {
+        if seat.blocks_ordered_span(routing, &source(id), span) {
             break;
         }
         result.extend(

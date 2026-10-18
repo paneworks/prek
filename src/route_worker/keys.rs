@@ -284,6 +284,7 @@ impl<P: Preparation> Slot<P> {
     }
     pub(super) fn blocks_input(
         &self,
+        routing: &Routing,
         source: &Source,
         sequence: u64,
         span: Option<crate::router::InputSpan>,
@@ -291,7 +292,7 @@ impl<P: Preparation> Slot<P> {
         match &self.phase {
             Phase::Active(actor) | Phase::Closing(actor) => span.map_or_else(
                 || actor.blocks_raw(source, sequence),
-                |span| actor.blocks_raw_span(source, span),
+                |span| actor.blocks_ordered_span(routing, source, span),
             ),
             _ => false,
         }
