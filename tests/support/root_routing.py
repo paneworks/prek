@@ -43,6 +43,7 @@ MANAGED_INVENTORY = "PREK_MANAGED_KEY_WORKER_INVENTORY_V1"
 MANAGED_RESULT = "PREK_MANAGED_KEY_WORKER_RESULT="
 MANAGED_PHASE = "PREK_MANAGED_KEY_WORKER_PHASE="
 MANAGED_DRAIN = "PREK_MANAGED_KEY_WORKER_DRAIN="
+MANAGED_SOFTWARE = "PREK_MANAGED_KEY_WORKER_SOFTWARE="
 ALL_EXPECTED = EXPECTED | RECOVERY_EXPECTED | {REPEAT_CASE, FUZZ_CASE, KEY_OUTPUT_CASE, MANAGED_CASE}
 RECOVERY_INVENTORY = "PREK_KERNEL_RECOVERY_INVENTORY_V1"
 RECOVERY_RESULT = "PREK_KERNEL_RECOVERY_RESULT="
@@ -168,14 +169,105 @@ def managed_inventory(stdout):
         raise ValueError("managed worker executable has a different inventory")
 
 
+def managed_software(stdout, phases):
+    receipts = [json.loads(line[len(MANAGED_SOFTWARE):]) for line in stdout.splitlines() if line.startswith(MANAGED_SOFTWARE)]
+    expected = [(1, 1, "open", False), (1, 1, "open", True), (1, 2, "press", False),
+                (1, 2, "press", True), (1, 3, "repeat", True), (1, 4, "release", True),
+                (1, 5, "close", True), (1, 1, "open", False),
+                (2, 1, "open", True), (2, 2, "press", True),
+                (3, 1, "open", True), (3, 2, "press", True),
+                (2, 3, "close", True), (3, 3, "repeat", True), (3, 4, "renew", True),
+                (3, 5, "renew", False), (3, 1, "open", False),
+                (4, 1, "open", True), (4, 2, "press", True), (4, 3, "repeat", True), (4, 4, "close", True)]
+    if len(receipts) != len(expected):
+        raise ValueError("managed software admissions are incomplete")
+    scope = None
+    previous = 0
+    expires = []
+    for index, (receipt, (producer, sequence, kind, accepted)) in enumerate(zip(receipts, expected)):
+        if not isinstance(receipt, dict) or set(receipt) != {"version", "request", "accepted", "sent_at_ns", "received_at_ns"} \
+                or type(receipt["version"]) is not int or receipt["version"] != 1 \
+                or type(receipt["accepted"]) is not bool or receipt["accepted"] != accepted:
+            raise ValueError("managed software admission schema or outcome differs")
+        sent, received = receipt["sent_at_ns"], receipt["received_at_ns"]
+        if any(type(at) is not int or at <= 0 for at in (sent, received)) \
+                or not previous <= sent <= received < sent + 250_000_000:
+            raise ValueError("managed software admission clocks differ")
+        previous = received
+        request = receipt["request"]
+        if not isinstance(request, dict) or set(request) != {"fence", "source", "marker", "consumer", "producer", "sequence", "operation"} \
+                or request["producer"] != [producer, 7] or not isinstance(request["producer"], list) \
+                or any(type(word) is not int for word in request["producer"]) \
+                or type(request["sequence"]) is not int or request["sequence"] != sequence:
+            raise ValueError("managed software request identity differs")
+        fence, source, consumer, marker = (request[key] for key in ("fence", "source", "consumer", "marker"))
+        if not isinstance(fence, dict) or set(fence) != {"broker", "configuration", "session"} \
+                or any(type(fence[key]) is not int or fence[key] != 1 for key in ("configuration", "session")) \
+                or not isinstance(fence["broker"], list) or len(fence["broker"]) != 2 \
+                or any(type(word) is not int or not 0 <= word < 2**64 for word in fence["broker"]) or not any(fence["broker"]) \
+                or not isinstance(source, dict) or set(source) != {"seat", "device", "generation"} or source["seat"] != "seat0" \
+                or any(type(source[key]) is not int or not 0 < source[key] < 2**64 for key in ("device", "generation")) \
+                or not isinstance(marker, str) or not marker.startswith("prek/test/") or len(marker) > 1024 \
+                or any(ord(char) < 32 or ord(char) == 127 for char in marker) \
+                or not isinstance(consumer, dict) or set(consumer) != {"isolated_receiver"}:
+            raise ValueError("managed software request scope differs")
+        identity = consumer["isolated_receiver"]
+        if not isinstance(identity, dict) or set(identity) != {"pid", "start"} \
+                or type(identity["pid"]) is not int or not 0 < identity["pid"] < 2**32 \
+                or type(identity["start"]) is not int or not 0 < identity["start"] < 2**64:
+            raise ValueError("managed software receiver identity differs")
+        current = dict(fence=fence, source=source, marker=marker, consumer=consumer)
+        if index == 1:
+            scope = current
+            forged = receipts[0]["request"]
+            if any(forged[key] != request[key] for key in ("fence", "source", "marker", "operation")) \
+                    or forged["consumer"]["isolated_receiver"] != dict(pid=identity["pid"] + 1, start=identity["start"]):
+                raise ValueError("managed forged-consumer rejection is not correlated")
+        elif index == 2:
+            if source == scope["source"] or any(current[key] != scope[key] for key in ("fence", "marker", "consumer")):
+                raise ValueError("managed physical alias rejection is not correlated")
+        elif index > 2 and current != scope:
+            raise ValueError("managed software output incarnation changed")
+        operation = request["operation"]
+        fields = {"kind"} | ({"expires"} if kind in ("open", "renew") else {"id", "key"} if kind == "press" else {"id"} if kind in ("repeat", "release") else set())
+        if not isinstance(operation, dict) or set(operation) != fields or operation["kind"] != kind:
+            raise ValueError("managed software operation differs")
+        if "id" in fields and (type(operation["id"]) is not int or operation["id"] != 1) \
+                or "key" in fields and (type(operation["key"]) is not int or operation["key"] != 42):
+            raise ValueError("managed software press handle differs")
+        expiry = None
+        if "expires" in fields:
+            duration = operation["expires"]
+            if not isinstance(duration, dict) or set(duration) != {"secs", "nanos"} \
+                    or type(duration["secs"]) is not int or not 0 <= duration["secs"] < 2**64 \
+                    or type(duration["nanos"]) is not int or not 0 <= duration["nanos"] < 1_000_000_000:
+                raise ValueError("managed software lease is not a duration")
+            expiry = duration["secs"] * 1_000_000_000 + duration["nanos"]
+            if not received < expiry <= sent + 250_000_000:
+                raise ValueError("managed software lease exceeds admission scope")
+        expires.append(expiry)
+    release = phases[3]["generated_times_ns"][0]
+    if not expires[14] // 1000 * 1000 <= release < expires[14] + 250_000_000 \
+            or receipts[14]["received_at_ns"] > release + 999 \
+            or receipts[15]["sent_at_ns"] + 999 < release \
+            or phases[0]["generated_times_ns"][0] + 999 < receipts[3]["sent_at_ns"] \
+            or phases[0]["generated_times_ns"][-1] > receipts[6]["sent_at_ns"] \
+            or phases[6]["generated_times_ns"][0] > receipts[20]["sent_at_ns"]:
+        raise ValueError("managed software kernel reports do not match request lifetimes")
+    return receipts
+
+
 def managed_result(stdout):
     values = [json.loads(line[len(MANAGED_RESULT):]) for line in stdout.splitlines() if line.startswith(MANAGED_RESULT)]
-    expected = dict(version=2, status="passed", uid=0, physical_devices_opened=0,
+    expected = dict(version=3, status="passed", uid=0, physical_devices_opened=0,
                     worker_binding_tested=True, private_control_authenticated=True,
                     consumer_neutral_drain_tested=True, consumer_neutral_drain_acknowledgements=1,
                     raw_outputs=2, generated_outputs=1, source_readers_grabbed=2,
                     native_projection_tested=True, native_repeat_tested=True, native_cancellation_tested=True,
                     kernel_write_order_tested=True, native_partial_write_tested=False,
+                    software_producer_control_tested=True, software_producer_expiry_tested=True,
+                    software_producer_rejection_tested=True, software_physical_ownership_tested=True,
+                    software_request_acknowledgements=21, software_rejections=5, software_public_authorization_tested=False,
                     broker_grant_tested=False, context_authority_modeled=True,
                     production_input_loop_tested=False, production_route_admission_tested=False,
                     compositor_delivery_tested=False, keys_neutral=True, worker_reaped=True, owned_devices_removed=True)
@@ -185,12 +277,15 @@ def managed_result(stdout):
         if type(values[0][key]) is not type(wanted) or values[0][key] != wanted:
             raise ValueError(f"invalid managed native result: {key}")
     phases = [json.loads(line[len(MANAGED_PHASE):]) for line in stdout.splitlines() if line.startswith(MANAGED_PHASE)]
-    if len(phases) != 3 or [phase.get("phase") for phase in phases if isinstance(phase, dict)] != ["mixed", "cross_source", "revocation"]:
-        raise ValueError("managed native worker did not execute three exact phases")
-    wanted_edges = [([[31, 1], [31, 0]], [], [[42, 1], [42, 2], [42, 0]]),
+    if len(phases) != 8 or [phase.get("phase") for phase in phases if isinstance(phase, dict)] != ["software_fast", "software_overlap", "software_sibling", "software_expiry", "mixed", "cross_source", "software_physical", "revocation"]:
+        raise ValueError("managed native worker did not execute eight exact phases")
+    wanted_edges = [([], [], [[42, 1], [42, 2], [42, 0]]), ([], [], [[42, 1]]),
+                    ([], [], [[42, 2]]), ([], [], [[42, 0]]),
+                    ([[31, 1], [31, 0]], [], [[42, 1], [42, 2], [42, 0]]),
                     ([], [[31, 1], [31, 0]], [[42, 1]]),
+                    ([], [], [[42, 2]]),
                     ([[31, 1], [31, 0]], [], [[42, 0]])]
-    counts = [(2, 0, 3), (0, 1, 1), (1, 0, 1)]
+    counts = [(0, 0, 3), (0, 0, 1), (0, 0, 1), (0, 0, 1), (2, 0, 3), (0, 1, 1), (0, 0, 1), (1, 0, 1)]
     for phase, edges, frames in zip(phases, wanted_edges, counts):
         if set(phase) != {"phase", "raw0", "raw1", "generated", "raw0_times_ns", "raw1_times_ns", "generated_times_ns"}:
             raise ValueError("managed phase has a different schema")
@@ -201,12 +296,19 @@ def managed_result(stdout):
                 raise ValueError("managed phase key stream differs")
             if not isinstance(times, list) or len(times) != count or any(type(value) is not int or value <= 0 for value in times):
                 raise ValueError("managed phase kernel timestamps differ")
-    mixed, cross, cancelled = phases
+    mixed, cross, cancelled = phases[4], phases[5], phases[7]
     g, r = mixed["generated_times_ns"], mixed["raw0_times_ns"]
     if not (g[0] <= g[1] < r[0] < g[2] < r[1]) \
             or cross["generated_times_ns"][0] >= cross["raw1_times_ns"][0] \
             or cancelled["generated_times_ns"][0] >= cancelled["raw0_times_ns"][0]:
         raise ValueError("managed phase kernel write order differs")
+    previous = 0
+    for phase in phases:
+        times = phase["generated_times_ns"]
+        if times != sorted(times) or times[0] < previous:
+            raise ValueError("managed generated phases are not monotonic")
+        previous = times[-1]
+    managed_software(stdout, phases)
     drains = [json.loads(line[len(MANAGED_DRAIN):]) for line in stdout.splitlines() if line.startswith(MANAGED_DRAIN)]
     if len(drains) != 1 or not isinstance(drains[0], dict):
         raise ValueError("managed native worker did not acknowledge exactly one consumer drain")
@@ -237,7 +339,7 @@ def receipt(stdout):
     if len(values) != 1 or not isinstance(values[0], dict):
         raise ValueError("expected exactly one complete isolated kernel receipt")
     value = values[0]
-    expected = dict(version=7, status="passed", uid=0, passed=len(ALL_EXPECTED),
+    expected = dict(version=8, status="passed", uid=0, passed=len(ALL_EXPECTED),
                     routing_passed=len(EXPECTED), recovery_passed=len(RECOVERY_EXPECTED),
                     repeat_characterization_passed=1, repeat_passthrough_tested=False,
                     fuzz_characterization_passed=1, fuzz_passthrough_tested=False,
@@ -245,6 +347,8 @@ def receipt(stdout):
                     generated_key_output_compositor_tested=False, generated_key_output_partial_write_tested=False,
                     managed_key_worker_passed=1, managed_key_worker_binding_tested=True,
                     managed_key_worker_consumer_drain_tested=True,
+                    managed_key_worker_software_control_tested=True, managed_key_worker_software_expiry_tested=True,
+                    managed_key_worker_software_authorization_tested=False,
                     managed_key_worker_compositor_tested=False, managed_key_worker_partial_write_tested=False,
                     physical_devices_opened=0, model_desktop_context=True,
                     production_route_admission_tested=False, compositor_consumer_retirement_tested=False,
@@ -443,7 +547,7 @@ def run(args):
             raise RuntimeError("isolated device metadata remains; preserving it for inspection")
         if registry_snapshot(registry) != original_registry:
             raise RuntimeError("unrelated registry state changed; preserving it for inspection")
-    print(PREFIX + json.dumps(dict(version=7, status="passed", uid=0, kernel=os.uname().release,
+    print(PREFIX + json.dumps(dict(version=8, status="passed", uid=0, kernel=os.uname().release,
           tests=sorted(ALL_EXPECTED), passed=len(ALL_EXPECTED), routing_passed=len(EXPECTED), recovery_passed=8, physical_devices_opened=0,
           repeat_characterization_passed=1, repeat_passthrough_tested=False,
           fuzz_characterization_passed=1, fuzz_passthrough_tested=False,
@@ -451,6 +555,8 @@ def run(args):
           generated_key_output_compositor_tested=False, generated_key_output_partial_write_tested=False,
           managed_key_worker_passed=1, managed_key_worker_binding_tested=True,
           managed_key_worker_consumer_drain_tested=True,
+          managed_key_worker_software_control_tested=True, managed_key_worker_software_expiry_tested=True,
+          managed_key_worker_software_authorization_tested=False,
           managed_key_worker_compositor_tested=False, managed_key_worker_partial_write_tested=False,
           model_desktop_context=True, production_route_admission_tested=False,
           compositor_consumer_retirement_tested=False, rule_removed=True, registry_clean=True,

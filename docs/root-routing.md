@@ -70,11 +70,22 @@ and downstream receivers; only the child holds source grabs and output writer fd
 Producer and modeled-original source IDs are disjoint, and output metadata must
 name the exact supervising worker's PID, birth and epoch.
 
-Three logged kernel phases check mixed down/repeat/unrelated-key/up projection,
-a generated modifier before a second source's raw report, then capability
-revocation, consumed repeat/up draining and neutral ordinary reentry. Each
+Eight logged kernel phases check software down/repeat/up, overlapping producers,
+sibling survival, idle lease expiry, mixed down/repeat/unrelated-key/up projection,
+a generated modifier before a second source's raw report, software retirement
+while a physical remap remains held, then capability revocation, consumed repeat/up
+draining and neutral ordinary reentry. Each
 `PREK_MANAGED_KEY_WORKER_PHASE` line retains exact key edges and monotonic kernel
 report timestamps. Cross-output timestamp ties do not count as ordering evidence.
+Twenty-one `PREK_MANAGED_KEY_WORKER_SOFTWARE` admission records retain the exact
+private request and correlated bounded response clocks, including five required
+rejections: wrong consumer, physical-source alias, closed producer reuse, expired
+renewal and expired producer reuse. A fresh context/transport cannot revive an
+expired producer. No source frames or software requests drive the idle expiry;
+ordinary context/transport renewal keeps the independent seat authority live.
+Normal emission is settled before producer cancellation; admission alone is not
+an execution acknowledgement. This tests private control, not public software
+keyboard authentication or a Lua input service.
 Success also requires neutral receivers, output removal, actual source closure
 acknowledgements and a successful reaped worker without leftover owned metadata.
 Failure cleanup never removes unrelated registry entries.
@@ -149,7 +160,7 @@ Logs belong to your regular user under `target/root-routing/run-*`; `latest`
 points to that attempt. `console.log` records build, wrapper and cleanup output;
 `kernel.log` retains root probe stdout. `status.json` records running/passed/failed
 and the final exit code. `receipt.json` is written only after checking one complete
-version-7 root receipt, the exact fourteen routing, eight recovery, two transport
+version-8 root receipt, the exact fourteen routing, eight recovery, two transport
 characterization, one generated-keyboard and one managed-worker inventory, all twenty-six tests actually executed and passed,
 cleanup flags and the explicit scope limits. The recovery summary must match its
 eight per-case results. The repeat case must supply its complete typed observation
@@ -159,9 +170,10 @@ typed observation record and exactly one passing result, while retaining
 `fuzz_passthrough_tested=false`. The generated-keyboard case requires a complete
 typed record and one passing result, retaining false authorization, compositor,
 worker-binding and partial-native-write scope flags. The separate managed-worker
-record requires actual worker binding and three correlated typed kernel phases,
+record requires actual worker binding, eight correlated typed kernel phases and
+all twenty-one software admission records,
 while retaining its false public-grant, production-loop and compositor scope flags.
-Older version-2/3/4/5/6 receipts
+Older version-2/3/4/5/6/7 receipts
 are not current acceptance.
 Skips and zero-test runs
 cannot pass. Tell the agent when the script finishes so it can inspect these files.

@@ -1,5 +1,7 @@
 use super::*;
 
+mod software;
+
 struct Parent {
     supervisor: Supervisor,
     channel: Channel,
@@ -12,6 +14,8 @@ struct Parent {
     endpoints: BTreeMap<Source, Endpoint>,
     receivers: BTreeMap<Source, kernel::Receiver>,
     captured: BTreeMap<Source, Vec<Frame>>,
+    software: software::Control,
+    step: u64,
     neutral_drains: BTreeMap<Source, crate::keys::drain::Request>,
     released: BTreeSet<Source>,
     finishing: bool,
@@ -165,6 +169,21 @@ impl Parent {
                 Err(error) => return Err(error),
             };
             match packet.message {
+                Message::SoftwareResult {
+                    fence,
+                    producer,
+                    sequence,
+                    accepted,
+                } => {
+                    let receipt = self.software.complete(
+                        fence,
+                        producer,
+                        sequence,
+                        accepted,
+                        monotonic()?,
+                    )?;
+                    println!("{SOFTWARE}{}", serde_json::to_string(&receipt)?);
+                }
                 Message::KeyDrain { request } => self.acknowledge_drain(request)?,
                 Message::Configuration {
                     generation: 1,
@@ -233,11 +252,13 @@ impl Parent {
             thread::sleep(Duration::from_millis(1));
         }
     }
-    fn step(&mut self, id: u64, frames: usize) -> io::Result<()> {
+    fn step(&mut self, frames: usize) -> io::Result<()> {
+        let id = self.step + 1;
         control::send(&mut self.fixture, &Request::Step { id, frames })?;
         if !matches!(self.notice()?, Notice::Stepped { id: acknowledged } if acknowledged == id) {
             return Err(invalid("managed step acknowledgement differs"));
         }
+        self.step = id;
         Ok(())
     }
     fn collect(
@@ -403,6 +424,8 @@ pub(super) fn run() -> io::Result<()> {
         endpoints: BTreeMap::new(),
         receivers: BTreeMap::new(),
         captured: BTreeMap::new(),
+        software: software::Control::default(),
+        step: 0,
         neutral_drains: BTreeMap::new(),
         released: BTreeSet::new(),
         finishing: false,
@@ -465,6 +488,7 @@ pub(super) fn run() -> io::Result<()> {
             (generated.clone(), keys),
         ])
     };
+    parent.software_phases(&sources, &generated)?;
     kernel::send(
         &mut producers[0],
         1,
@@ -476,7 +500,7 @@ pub(super) fn run() -> io::Result<()> {
             (EV_KEY, 31, 0),
         ],
     );
-    parent.step(1, 1)?;
+    parent.step(1)?;
     let mixed = parent.collect(&expected(
         vec![(31, 1), (31, 0)],
         vec![],
@@ -496,7 +520,7 @@ pub(super) fn run() -> io::Result<()> {
     log_phase("mixed", &mixed, &sources, &generated);
     kernel::send(&mut producers[0], 2, &[(EV_KEY, 30, 1)]);
     kernel::send(&mut producers[1], 1, &[(EV_KEY, 31, 1), (EV_KEY, 31, 0)]);
-    parent.step(2, 2)?;
+    parent.step(2)?;
     let cross = parent.collect(&expected(vec![], vec![(31, 1), (31, 0)], vec![(42, 1)]))?;
     if cross[&generated][0].at >= cross[&sources[1]][0].at
         || parent.receivers[&generated].keys() != [42]
@@ -506,6 +530,7 @@ pub(super) fn run() -> io::Result<()> {
         ));
     }
     log_phase("cross_source", &cross, &sources, &generated);
+    parent.software_physical(&sources, &generated)?;
     parent.synthetic = false;
     parent.renew()?;
     kernel::send(
@@ -518,7 +543,7 @@ pub(super) fn run() -> io::Result<()> {
             (EV_KEY, 31, 0),
         ],
     );
-    parent.step(3, 1)?;
+    parent.step(1)?;
     let cancelled = parent.collect(&expected(vec![(31, 1), (31, 0)], vec![], vec![(42, 0)]))?;
     if cancelled[&generated][0].at >= cancelled[&sources[0]][0].at {
         return Err(invalid(
@@ -534,6 +559,7 @@ pub(super) fn run() -> io::Result<()> {
     {
         return Err(invalid("managed native receivers did not return neutral"));
     }
+    parent.software.finish()?;
     parent.finishing = true;
     control::send(&mut parent.fixture, &Request::Finish {})?;
     if !matches!(parent.notice()?, Notice::Closed {}) {
@@ -575,7 +601,7 @@ pub(super) fn run() -> io::Result<()> {
     }
     println!(
         "{RESULT}{}",
-        serde_json::json!({"version":2,"status":"passed","uid":0,"physical_devices_opened":0,"worker_binding_tested":true,"private_control_authenticated":true,"consumer_neutral_drain_tested":true,"consumer_neutral_drain_acknowledgements":1,"raw_outputs":2,"generated_outputs":1,"source_readers_grabbed":2,"native_projection_tested":true,"native_repeat_tested":true,"native_cancellation_tested":true,"kernel_write_order_tested":true,"native_partial_write_tested":false,"broker_grant_tested":false,"context_authority_modeled":true,"production_input_loop_tested":false,"production_route_admission_tested":false,"compositor_delivery_tested":false,"keys_neutral":true,"worker_reaped":true,"owned_devices_removed":true})
+        serde_json::json!({"version":3,"status":"passed","uid":0,"physical_devices_opened":0,"worker_binding_tested":true,"private_control_authenticated":true,"consumer_neutral_drain_tested":true,"consumer_neutral_drain_acknowledgements":1,"raw_outputs":2,"generated_outputs":1,"source_readers_grabbed":2,"native_projection_tested":true,"native_repeat_tested":true,"native_cancellation_tested":true,"kernel_write_order_tested":true,"software_producer_control_tested":true,"software_producer_expiry_tested":true,"software_producer_rejection_tested":true,"software_physical_ownership_tested":true,"software_request_acknowledgements":21,"software_rejections":5,"software_public_authorization_tested":false,"native_partial_write_tested":false,"broker_grant_tested":false,"context_authority_modeled":true,"production_input_loop_tested":false,"production_route_admission_tested":false,"compositor_delivery_tested":false,"keys_neutral":true,"worker_reaped":true,"owned_devices_removed":true})
     );
     Ok(())
 }

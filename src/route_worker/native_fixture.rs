@@ -31,6 +31,7 @@ pub(super) const INVENTORY: &str = "PREK_MANAGED_KEY_WORKER_INVENTORY_V1";
 pub(super) const RESULT: &str = "PREK_MANAGED_KEY_WORKER_RESULT=";
 pub(super) const PHASE: &str = "PREK_MANAGED_KEY_WORKER_PHASE=";
 pub(super) const DRAIN: &str = "PREK_MANAGED_KEY_WORKER_DRAIN=";
+pub(super) const SOFTWARE: &str = "PREK_MANAGED_KEY_WORKER_SOFTWARE=";
 const WAIT: Duration = Duration::from_secs(5);
 
 fn invalid(error: impl std::fmt::Display) -> io::Error {

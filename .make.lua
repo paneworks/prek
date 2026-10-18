@@ -485,7 +485,7 @@ make.recipe{ name="test-generated-keyboard",desc="generated keyboard role, publi
 
 make.recipe{ name="test-native-managed-model",desc="managed native fixture models, build and inventory only; no devices",
              run=function()
-               local tested=oslo.run{"cargo","test","--locked","--features","native-test-harness","--lib","route_worker::native_fixture::models",capture=true}
+               local tested=oslo.run{"cargo","test","--locked","--features","native-test-harness","--lib","route_worker::native_fixture",capture=true}
                io.stdout:write(tested.out or ""); io.stderr:write(tested.err or "")
                assert(tested.ok and (tested.out or ""):match("running [1-9]%d* tests?"),"managed fixture models failed or selected no tests")
                local built=oslo.run{"bash","-c",[[set -euo pipefail

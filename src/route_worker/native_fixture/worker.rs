@@ -272,7 +272,7 @@ pub(super) fn run() -> io::Result<()> {
     let mut step = 0;
     loop {
         match control::request(&mut fixture, stream, &mut health)? {
-            Request::Step { id, frames } if id == step + 1 && (1..=4).contains(&frames) => {
+            Request::Step { id, frames } if id == step + 1 && frames <= 4 => {
                 let deadline = Instant::now() + Duration::from_millis(200);
                 let mut batch = Vec::new();
                 while batch.len() < frames {
@@ -299,7 +299,7 @@ pub(super) fn run() -> io::Result<()> {
                 step = id;
                 control::send(&mut fixture, &Notice::Stepped { id })?;
             }
-            Request::Finish {} if step == 3 => {
+            Request::Finish {} if step == 9 => {
                 stream.shutdown();
                 for (reader, source) in readers.drain(..).zip(&sources) {
                     drop(reader);

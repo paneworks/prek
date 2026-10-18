@@ -59,40 +59,85 @@ def key_output(**changes):
 
 
 def managed_phases():
-    return [dict(phase="mixed", raw0=[[31, 1], [31, 0]], raw1=[], generated=[[42, 1], [42, 2], [42, 0]],
-                 raw0_times_ns=[3, 5], raw1_times_ns=[], generated_times_ns=[1, 2, 4]),
+    return [dict(phase="software_fast", raw0=[], raw1=[], generated=[[42, 1], [42, 2], [42, 0]],
+                 raw0_times_ns=[], raw1_times_ns=[], generated_times_ns=[10_000, 11_000, 12_000]),
+            dict(phase="software_overlap", raw0=[], raw1=[], generated=[[42, 1]],
+                 raw0_times_ns=[], raw1_times_ns=[], generated_times_ns=[30_000]),
+            dict(phase="software_sibling", raw0=[], raw1=[], generated=[[42, 2]],
+                 raw0_times_ns=[], raw1_times_ns=[], generated_times_ns=[40_000]),
+            dict(phase="software_expiry", raw0=[], raw1=[], generated=[[42, 0]],
+                 raw0_times_ns=[], raw1_times_ns=[], generated_times_ns=[100_000_000]),
+            dict(phase="mixed", raw0=[[31, 1], [31, 0]], raw1=[], generated=[[42, 1], [42, 2], [42, 0]],
+                 raw0_times_ns=[200_000_003, 200_000_005], raw1_times_ns=[], generated_times_ns=[200_000_001, 200_000_002, 200_000_004]),
             dict(phase="cross_source", raw0=[], raw1=[[31, 1], [31, 0]], generated=[[42, 1]],
-                 raw0_times_ns=[], raw1_times_ns=[11], generated_times_ns=[10]),
+                 raw0_times_ns=[], raw1_times_ns=[200_000_011], generated_times_ns=[200_000_010]),
+            dict(phase="software_physical", raw0=[], raw1=[], generated=[[42, 2]],
+                 raw0_times_ns=[], raw1_times_ns=[], generated_times_ns=[200_005_000]),
             dict(phase="revocation", raw0=[[31, 1], [31, 0]], raw1=[], generated=[[42, 0]],
-                 raw0_times_ns=[21], raw1_times_ns=[], generated_times_ns=[20])]
+                 raw0_times_ns=[200_010_001], raw1_times_ns=[], generated_times_ns=[200_010_000])]
+
+
+def managed_software():
+    entries = [(1, 1, "open", False, 1000), (1, 1, "open", True, 2000), (1, 2, "press", False, 3000),
+               (1, 2, "press", True, 4000), (1, 3, "repeat", True, 5000), (1, 4, "release", True, 6000),
+               (1, 5, "close", True, 13000), (1, 1, "open", False, 14000),
+               (2, 1, "open", True, 15000), (2, 2, "press", True, 16000),
+               (3, 1, "open", True, 17000), (3, 2, "press", True, 18000),
+               (2, 3, "close", True, 31000), (3, 3, "repeat", True, 32000), (3, 4, "renew", True, 33000),
+               (3, 5, "renew", False, 100_001_000), (3, 1, "open", False, 100_002_000),
+               (4, 1, "open", True, 200_001_000), (4, 2, "press", True, 200_002_000),
+               (4, 3, "repeat", True, 200_003_000), (4, 4, "close", True, 200_006_000)]
+    receipts = []
+    for index, (producer, sequence, kind, accepted, at) in enumerate(entries):
+        operation = dict(kind=kind)
+        if kind in ("open", "renew"):
+            expiry = 100_000_000 if index == 14 else at + 200_000_000
+            operation["expires"] = dict(secs=0, nanos=expiry)
+        if kind in ("press", "repeat", "release"):
+            operation["id"] = 1
+        if kind == "press":
+            operation["key"] = 42
+        request = dict(fence=dict(broker=[1, 2], configuration=1, session=1),
+                       source=dict(seat="seat0", device=100 if index != 2 else 1, generation=1),
+                       marker="prek/test/seat0/100/1/keyboard/pub/1/2",
+                       consumer=dict(isolated_receiver=dict(pid=2 if index == 0 else 1, start=1)),
+                       producer=[producer, 7], sequence=sequence, operation=operation)
+        receipts.append(dict(version=1, request=request, accepted=accepted, sent_at_ns=at, received_at_ns=at + 10))
+    receipts[0]["request"]["operation"] = dict(receipts[1]["request"]["operation"])
+    return receipts
 
 
 def managed_drain():
-    return dict(version=1, nonce=[1, 2], requested_at_ns=20, neutral_at_ns=20,
-                deadline_ns=250_000_020, last_report_at_ns=20, keys_down=[], generated=[[42, 0]], reports=1)
+    return dict(version=1, nonce=[1, 2], requested_at_ns=200_010_000, neutral_at_ns=200_010_000,
+                deadline_ns=450_010_000, last_report_at_ns=200_010_000, keys_down=[], generated=[[42, 0]], reports=1)
 
 
-def managed_output(phases=None, drains=None, **changes):
-    value = dict(version=2, status="passed", uid=0, physical_devices_opened=0,
+def managed_output(phases=None, drains=None, software=None, **changes):
+    value = dict(version=3, status="passed", uid=0, physical_devices_opened=0,
                  worker_binding_tested=True, private_control_authenticated=True,
                  consumer_neutral_drain_tested=True, consumer_neutral_drain_acknowledgements=1,
                  raw_outputs=2, generated_outputs=1, source_readers_grabbed=2,
                  native_projection_tested=True, native_repeat_tested=True, native_cancellation_tested=True,
                  kernel_write_order_tested=True, native_partial_write_tested=False,
+                 software_producer_control_tested=True, software_producer_expiry_tested=True,
+                 software_producer_rejection_tested=True, software_physical_ownership_tested=True,
+                 software_request_acknowledgements=21, software_rejections=5, software_public_authorization_tested=False,
                  broker_grant_tested=False, context_authority_modeled=True,
                  production_input_loop_tested=False, production_route_admission_tested=False,
                  compositor_delivery_tested=False, keys_neutral=True, worker_reaped=True, owned_devices_removed=True)
     value.update(changes)
     phases = managed_phases() if phases is None else phases
     drains = [managed_drain()] if drains is None else drains
+    software = managed_software() if software is None else software
     return ("".join(root.MANAGED_PHASE + json.dumps(phase) + "\n" for phase in phases)
             + "".join(root.MANAGED_DRAIN + json.dumps(drain) + "\n" for drain in drains)
+            + "".join(root.MANAGED_SOFTWARE + json.dumps(receipt) + "\n" for receipt in software)
             + root.MANAGED_RESULT + json.dumps(value) + "\n")
 
 
 class KernelReceipt(unittest.TestCase):
     def value(self):
-        return dict(version=7, status="passed", uid=0, kernel=os.uname().release,
+        return dict(version=8, status="passed", uid=0, kernel=os.uname().release,
                     tests=sorted(root.ALL_EXPECTED), passed=len(root.ALL_EXPECTED),
                     routing_passed=len(root.EXPECTED), recovery_passed=8, physical_devices_opened=0,
                     repeat_characterization_passed=1, repeat_passthrough_tested=False,
@@ -101,6 +146,8 @@ class KernelReceipt(unittest.TestCase):
                     generated_key_output_compositor_tested=False, generated_key_output_partial_write_tested=False,
                     managed_key_worker_passed=1, managed_key_worker_binding_tested=True,
                     managed_key_worker_consumer_drain_tested=True,
+                    managed_key_worker_software_control_tested=True, managed_key_worker_software_expiry_tested=True,
+                    managed_key_worker_software_authorization_tested=False,
                     managed_key_worker_compositor_tested=False, managed_key_worker_partial_write_tested=False,
                     model_desktop_context=True, production_route_admission_tested=False,
                     compositor_consumer_retirement_tested=False, rule_removed=True, registry_clean=True,
@@ -138,15 +185,73 @@ class KernelReceipt(unittest.TestCase):
         for phases in [[], managed_phases()[:2], managed_phases()[::-1], managed_phases() + managed_phases()[:1], [None] * 3]:
             with self.subTest(phases=phases), self.assertRaises(ValueError):
                 root.managed_result(managed_output(phases=phases))
-        for index, field, changed in [(0, "generated", [[42, 1], [42, 0]]), (0, "raw0", [[30, 1], [31, 0]]),
-                                      (0, "raw0_times_ns", [2, 5]), (1, "generated_times_ns", [12]),
-                                      (2, "generated_times_ns", [21]), (0, "generated_times_ns", [True, 2, 4]),
-                                      (0, "raw1_times_ns", [3]), (2, "raw0", [[31, True], [31, 0]]),
-                                      (0, "raw0_times_ns", [3.0, 5]), (1, "extra", True)]:
+        for index, field, changed in [(4, "generated", [[42, 1], [42, 0]]), (4, "raw0", [[30, 1], [31, 0]]),
+                                      (4, "raw0_times_ns", [200_000_002, 200_000_005]), (5, "generated_times_ns", [200_000_012]),
+                                      (7, "generated_times_ns", [200_010_001]), (0, "generated_times_ns", [True, 2, 4]),
+                                      (0, "raw1_times_ns", [3]), (7, "raw0", [[31, True], [31, 0]]),
+                                      (4, "raw0_times_ns", [200_000_003.0, 200_000_005]), (1, "extra", True),
+                                      (2, "generated", [[42, 0]]), (6, "generated", [[42, 2], [42, 0]])]:
             phases = managed_phases()
             phases[index][field] = changed
             with self.subTest(index=index, field=field), self.assertRaises(ValueError):
                 root.managed_result(managed_output(phases=phases))
+
+    def test_software_admissions_require_the_exact_complete_correlated_stream(self):
+        for receipts in [[], managed_software()[:-1], managed_software()[::-1], managed_software() * 2, [None] * 21]:
+            with self.subTest(receipts=receipts), self.assertRaises(ValueError):
+                root.managed_result(managed_output(software=receipts))
+        for index in range(21):
+            for key in managed_software()[index]:
+                receipts = managed_software()
+                del receipts[index][key]
+                with self.subTest(index=index, missing=key), self.assertRaises(ValueError):
+                    root.managed_result(managed_output(software=receipts))
+
+    def test_software_scope_sequence_operation_and_clock_changes_are_rejected(self):
+        mutations = [("producer", [True, 7]), ("producer", [2, 7]), ("sequence", 2), ("sequence", True),
+                     ("source", dict(seat="seat1", device=100, generation=1)),
+                     ("source", dict(seat="seat0", device=True, generation=1)),
+                     ("marker", "unbound"), ("consumer", dict(isolated_receiver=dict(pid=2, start=1))),
+                     ("consumer", dict(isolated_receiver=dict(pid=True, start=1))),
+                     ("fence", dict(broker=[True, 2], configuration=1, session=1)),
+                     ("operation", dict(kind="open", expires=dict(secs=0, nanos=True))),
+                     ("operation", dict(kind="open", expires=dict(secs=1, nanos=0))),
+                     ("operation", dict(kind="open", expires=dict(secs=0, nanos=2000))),
+                     ("extra", True)]
+        for key, value in mutations:
+            receipts = managed_software()
+            receipts[1]["request"][key] = value
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                root.managed_result(managed_output(software=receipts))
+        for index, key, value in [(0, "accepted", True), (1, "accepted", 1), (1, "version", True),
+                                  (1, "received_at_ns", 1000), (1, "received_at_ns", 250_002_000),
+                                  (1, "sent_at_ns", True), (1, "extra", True),
+                                  (15, "sent_at_ns", 99_999_000)]:
+            receipts = managed_software()
+            receipts[index][key] = value
+            with self.subTest(index=index, key=key), self.assertRaises(ValueError):
+                root.managed_result(managed_output(software=receipts))
+
+    def test_software_expiry_and_settled_before_close_are_correlated_to_kernel_reports(self):
+        for index, at in [(0, 3000), (3, 99_998_000), (3, 350_000_000), (6, 200_007_000)]:
+            phases = managed_phases()
+            phases[index]["generated_times_ns"][0] = at
+            with self.subTest(index=index, at=at), self.assertRaises(ValueError):
+                root.managed_result(managed_output(phases=phases))
+        receipts = managed_software()
+        receipts[14]["request"]["operation"]["expires"]["nanos"] = 100_000_999
+        root.managed_result(managed_output(software=receipts))
+
+    def test_v7_receipt_cannot_claim_software_control_and_v2_managed_cannot_pass(self):
+        old = self.value()
+        old.update(version=7)
+        for key in list(old):
+            if key.startswith("managed_key_worker_software_"):
+                del old[key]
+        with self.assertRaises(ValueError):
+            root.receipt(self.line(old))
+        with self.assertRaises(ValueError):
+            root.managed_result(managed_output(version=2))
 
     def test_v5_receipt_cannot_claim_the_new_managed_worker_gate(self):
         old = self.value()
@@ -174,7 +279,7 @@ class KernelReceipt(unittest.TestCase):
         wrong = [dict(keys_down=[42]), dict(generated=[[42, False]]), dict(reports=True),
                  dict(reports=0), dict(last_report_at_ns=19), dict(requested_at_ns=19),
                  dict(neutral_at_ns=21), dict(neutral_at_ns=19), dict(deadline_ns=20),
-                 dict(deadline_ns=250_000_021), dict(nonce=[0, 0]), dict(nonce=[True, 2]),
+                 dict(deadline_ns=450_010_001), dict(nonce=[0, 0]), dict(nonce=[True, 2]),
                  dict(nonce=[-1, 2]), dict(nonce=[2**64, 2]), dict(nonce="foreign"), dict(extra=True)]
         for key in ("requested_at_ns", "neutral_at_ns", "deadline_ns", "last_report_at_ns"):
             wrong.extend({key: value} for value in (True, 20.0, None, 0))
