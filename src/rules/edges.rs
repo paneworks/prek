@@ -92,7 +92,8 @@ impl Engine {
                 }
             }
             for worker in &mut self.workers {
-                if !is_key_trigger(&worker.rule.trigger) {
+                let custom_key = key_only_custom(&worker.rule.trigger);
+                if !is_key_trigger(&worker.rule.trigger) && !custom_key {
                     continue;
                 }
                 let finish = matches!(worker.rule.trigger, Trigger::Key { key } if key.0 == code && key_state == KeyState::Release).then_some((source, code));
@@ -107,6 +108,27 @@ impl Engine {
                 );
                 let state = &self.devices[&source.device];
                 if !selected(&self.config, &worker.rule, &state.device) {
+                    continue;
+                }
+                if custom_key {
+                    if self.coordinated_step && !self.custom_seats.contains(&source.seat) {
+                        continue;
+                    }
+                    custom::key_frame(
+                        worker,
+                        state,
+                        frame,
+                        (event, code, key_state),
+                        edges.last().is_some_and(|edge| edge.0 == event),
+                        custom::FrameContext {
+                            config: &self.config,
+                            authority: &self.authority,
+                            keys: &self.conditions,
+                            custom: self.custom.as_mut().unwrap(),
+                            next_id: &mut self.next_id,
+                            events: &mut self.events,
+                        },
+                    );
                     continue;
                 }
                 let Trigger::Key { key } = worker.rule.trigger else {
@@ -201,6 +223,7 @@ impl Engine {
                 }
             }
             self.key_sequences_edge(frame, (event, code, key_state))?;
+            self.custom_sync(at, crate::recognition::Retirement::Cancelled);
         }
         Ok(())
     }

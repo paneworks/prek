@@ -19,7 +19,7 @@ quiesce_spec.loader.exec_module(quiesce)
 
 class CustomKeyArbitration(unittest.TestCase):
     def fixture(self):
-        observations = [dict(name="unused", receipt=dict(sequence=(index + 1) * 10)) for index in range(36)]
+        observations = [dict(name="unused", receipt=dict(sequence=(index + 1) * 10)) for index in range(37)]
         observations[31]["name"] = "custom-lua-unseen-key-tail"
         received = [dict(event="key", sequence=311 + index, code=code, state=state, at_ns=1000 + index)
                     for index, (code, state) in enumerate([(31, 1), (31, 0), (30, 1), (30, 0)])]
@@ -35,6 +35,7 @@ class CustomKeyArbitration(unittest.TestCase):
         runtime = dict(status="passed", scope="owned_protocol_root_key_only_custom", actual_lua_callback=True,
                        source_and_readiness_modeled=True, physical_takeover_tested=False, kernel_input_opened=False,
                        helper_stopped=True, generated_neutral=True, ordinary=[[31, 1], [31, 0]], inputs=inputs, ticket=ticket,
+                       activation=dict(require_keys=[], keys_throughout=False),
                        proposal=dict(ticket=1, fence=ticket["fence"], phase="discrete", data=dict(trigger=202)),
                        proposed_at=stamp(110), admitted_at=stamp(125))
         return observations, received, runtime
@@ -101,9 +102,65 @@ class CustomKeyArbitration(unittest.TestCase):
                 quiesce.validate_custom_key_arbitration(observations, received, runtime)
 
 
+class CustomKeyActivation(unittest.TestCase):
+    def fixture(self):
+        observations, _, runtime = CustomKeyArbitration().fixture()
+        observations[32]["name"] = "custom-lua-event-local-activation"
+        received = [dict(event="key", sequence=321 + index, code=code, state=state, at_ns=1000 + index)
+                    for index, (code, state) in enumerate([(31, 1), (31, 0), (31, 1), (31, 0), (30, 1), (30, 0)])]
+        runtime["activation"] = dict(require_keys=[42], keys_throughout=False)
+        runtime["ordinary"] *= 2
+        runtime["inputs"][0]["events"] = [dict(kind=1, code=code, value=value)
+                                          for code, value in [(31, 1), (31, 0), (42, 1), (202, 1), (42, 0)]]
+        runtime["ticket"]["input"]["changes"] = [dict(kind="key", code=code, state=state)
+                                                 for code, state in [(42, "press"), (202, "press"), (42, "release")]]
+        return observations, received, runtime
+
+    def test_same_report_activation_and_later_release_preserve_earlier_and_unseen_typing(self):
+        result = quiesce.validate_custom_key_arbitration(*self.fixture(), event_local=True)
+        self.assertEqual((result["consumed_control_edges"], result["preserved_ordinary_edges"]), (4, 4))
+        self.assertTrue(result["event_local_activation_tested"])
+        self.assertFalse(result["physical_takeover_tested"])
+
+    def test_including_pre_activation_input_or_losing_the_modifier_release_refuses(self):
+        for change in ("earlier", "release", "reorder", "frame"):
+            observations, received, runtime = self.fixture()
+            changes = runtime["ticket"]["input"]["changes"]
+            if change == "earlier":
+                changes.insert(0, dict(kind="key", code=31, state="press"))
+            elif change == "release":
+                changes.pop()
+            elif change == "reorder":
+                changes.reverse()
+            else:
+                runtime["ticket"]["input"]["sequence"] = 2
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                quiesce.validate_custom_key_arbitration(observations, received, runtime, event_local=True)
+
+    def test_unconfigured_or_substituted_activation_policy_refuses(self):
+        for policy in (dict(require_keys=[], keys_throughout=False), dict(require_keys=[42], keys_throughout=True),
+                       dict(require_keys=[42.0], keys_throughout=False), dict(require_keys=[42], keys_throughout=0)):
+            observations, received, runtime = self.fixture()
+            runtime["activation"] = policy
+            with self.subTest(policy=policy), self.assertRaises(ValueError):
+                quiesce.validate_custom_key_arbitration(observations, received, runtime, event_local=True)
+
+    def test_leaked_controls_lost_typing_or_early_generated_action_refuse(self):
+        for change in ("modifier", "trigger", "missing", "reorder"):
+            observations, received, runtime = self.fixture()
+            if change in ("modifier", "trigger"):
+                received.insert(0, dict(received[0], code=42 if change == "modifier" else 202))
+            elif change == "missing":
+                received.pop(0)
+            else:
+                received[0]["code"] = 30
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                quiesce.validate_custom_key_arbitration(observations, received, runtime, event_local=True)
+
+
 class NativeKeyArbitration(unittest.TestCase):
     def fixture(self):
-        observations = [dict(name="unused", receipt=dict(sequence=(index + 1) * 10)) for index in range(36)]
+        observations = [dict(name="unused", receipt=dict(sequence=(index + 1) * 10)) for index in range(37)]
         cases = [
             ("buffered-tap-selective", [(31, 1), (31, 0), (30, 1), (30, 0)]),
             ("buffered-hold-priority", [(30, 1), (30, 0)]),

@@ -292,6 +292,20 @@ later does not widen that snapshot. Current context, rule and transport authorit
 are still checked when the ticket is issued, the reply is admitted and the action
 executes. Callback data is not a consumption footprint or an input grant.
 
+Key-only custom admission evaluates activation conditions at each original key
+edge. Earlier keys in the same report cannot borrow a later modifier; begin-only
+admission survives a later modifier release. Throughout conditions revoke the
+candidate and its outstanding tickets on any original release edge, including
+release/repress within one report or a change on another keyboard in the seat.
+Eligible changes coalesce into one callback input per candidate and original
+frame, retaining original offsets and the latest private press snapshot. Frame
+identity includes source generation, sequence, physical timestamp and selectors.
+The 64-offer, 1 MiB aggregate and 64 KiB frame bounds apply before mutation;
+coalescing charges shared frame metadata once and retains the original deadline.
+Physical-group closure remains at the original report boundary. A native-to-custom
+same-edge sequence continuation requires the exact previous native candidate and
+source; that continuation cannot make one press satisfy two fresh native steps.
+
 Only validated replies extend a custom candidate's confirmed prefix. Timer
 tickets inherit that prefix rather than later observed or queued frames. Buffer
 progress consumes only accepted non-cancel outcome members; cancellation cannot
@@ -303,10 +317,11 @@ remain protected, while new unowned input still competes by priority.
 Private pending-ticket and confirmed snapshots use charged shared press storage
 under the existing 64-ticket/candidate limits. Terminal/lifecycle cleanup retires
 them. `oslo make test-custom-key-arbitration` covers native competition, original
-offer versus delivery time, continuous cancellation, timer isolation and actual
+offer versus delivery time, event-local activation, atomic queue bounds,
+continuous cancellation, timer isolation and actual
 supervised Luna callbacks feeding the acknowledged device-free output actor.
 That gate is not rendered custom-input or kernel acceptance. The separate custom
-Cage phase uses a real supervised Luna callback, original ticket/reply clocks and
+Cage phases use real supervised Luna callbacks, original ticket/reply clocks and
 owned protocol keyboards. Its strict receiver must see unrelated typing before
 the generated action, with no consumed control leakage. This proves the exercised
 root key-only custom path, not hybrid/mixed or physical/kernel consumption.
@@ -399,8 +414,8 @@ Legacy and selective modes cannot be mixed within one router incarnation.
 
 Transformed reports containing nonkeyboard data or ambiguous scan metadata
 currently fail with `UnsupportedProjection` and require recovery; untouched
-hybrid reports remain intact. Native pure-key combinations use the journal;
-custom/non-key/mixed/hybrid modes retain their existing whole-report paths while
+hybrid reports remain intact. Eligible native and root key-only custom combinations
+use the journal; non-key/mixed/hybrid modes retain their existing whole-report paths while
 their complete selective semantics remain unfinished. Hybrid/ambiguous
 transformations, native consumer acknowledgement,
 neutral reentry and the full original acceptance matrix remain required. The
@@ -417,16 +432,19 @@ sole-worker ABI writes on owned private regular files (no devices).
 cancellation, timeout and bounds regressions. `oslo make test-key-worker-cage`
 drives the actual scheduler through owned protocol keyboards and a rendered app
 with both Hyprland configuration dialects. Its authority/readiness fixtures are
-explicitly modeled. Thirty-six phases include consumed immediate per-key
+explicitly modeled. Thirty-seven phases include consumed immediate per-key
 projection, ordinary typing, cross-source modifiers, tap-tail lifecycle,
 multiple same-report sequences, delayed tap/key completions, rejection of reversed
 steps and fresh reentry, plus explicitly decided journal fallback cadence, using
-six owned protocol keyboards. Six native arbitration phases additionally prove
+eight owned protocol keyboards. Six native arbitration phases additionally prove
 selective buffered tap/hold/sequence consumption, deferred action order and unmatched fallback. The strict
 receiver checks every delivered edge, the absence of consumed control keys and
 the original unmatched down/up interval within existing scheduler slack. Earlier
 sequence phases remain observational. A separate actual Luna root key-only custom
-phase preserves a later unseen ordinary key before its generated action. These
+phase preserves a later unseen ordinary key before its generated action. A second
+actual Luna phase requires a modifier pressed and released within the same report,
+excludes earlier input from the callback and preserves both earlier and unseen
+ordinary typing before its generated action. These
 are owned protocol-key paths, not mixed/hybrid arbitration, native takeover or
 physical/kernel selective consumption. Repeat interleaving has direct worker/file
 evidence; these rendered phases do not simulate kernel repeat.

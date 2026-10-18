@@ -158,11 +158,71 @@ fn projected_custom_keys_preserve_unseen_typing_through_the_real_lua_helper() {
     harness.cleanup(Retirement::Completed);
     harness.stop();
 }
+#[test]
+fn projected_custom_keys_admit_only_original_edges_after_activation() {
+    let mut harness = Harness::with_conditions(
+        "assert(#ticket.input.changes==3);assert(ticket.input.changes[1].code==42 and ticket.input.changes[1].state=='press');assert(ticket.input.changes[2].code==30);assert(ticket.input.changes[3].code==42 and ticket.input.changes[3].state=='release');return {phase='discrete',data={original=ticket.input.sequence}}",
+        "require_keys={'KEY_LEFTSHIFT'},",
+    );
+    let ticket = harness
+        .key_report(&[(31, 1), (31, 0), (42, 1), (30, 1), (42, 0)])
+        .unwrap();
+    let proposal = harness.proposal(ticket);
+    assert_eq!(proposal.data, serde_json::json!({"original":"1"}));
+    harness.respond(proposal);
+    assert_eq!(
+        harness
+            .routing
+            .take_scoped_dispatches(monotonic().unwrap())
+            .len(),
+        1
+    );
+    harness.cleanup(Retirement::Completed);
+    harness.stop();
+}
+
+#[test]
+fn projected_custom_keys_revoke_a_real_reply_after_transient_condition_loss() {
+    let mut harness = Harness::with_conditions(
+        "return {phase='discrete',data={original=ticket.input.sequence}}",
+        "require_keys={'KEY_LEFTSHIFT'},keys_throughout=true,",
+    );
+    let ticket = harness.key_report(&[(42, 1), (30, 1)]).unwrap();
+    let proposal = harness.proposal(ticket);
+    assert!(harness.key_report(&[(42, 0), (42, 1)]).is_none());
+    assert!(
+        harness
+            .routing
+            .recognition_response(proposal, monotonic().unwrap())
+            .is_err()
+    );
+    assert!(
+        harness
+            .routing
+            .take_scoped_dispatches(monotonic().unwrap())
+            .is_empty()
+    );
+    harness.cleanup(Retirement::Cancelled);
+    harness.stop();
+}
+
 impl Harness {
     fn new(body: &str, continuous: bool, delivery: &str) -> Self {
         Self::with_key_output(body, continuous, delivery, false)
     }
     fn with_key_output(body: &str, continuous: bool, delivery: &str, projected: bool) -> Self {
+        Self::configured(body, continuous, delivery, projected, "")
+    }
+    fn with_conditions(body: &str, activation: &str) -> Self {
+        Self::configured(body, false, "buffer", true, activation)
+    }
+    fn configured(
+        body: &str,
+        continuous: bool,
+        delivery: &str,
+        projected: bool,
+        activation: &str,
+    ) -> Self {
         let action = if projected {
             "p.actions.keys{keys={'KEY_LEFTSHIFT'}}"
         } else {
@@ -191,7 +251,7 @@ return p.config.new{{mode='route',
  timing={{join_window='1ms',decision_window='200ms'}},
  devices={{keyboard={{keys={{'KEY_A'}}}}}},
  rules={{p.rules.define{{id='native-route',devices={{'keyboard'}},contexts={{'desktop'}},
-  scope='everywhere',delivery='{delivery}',trigger=trigger,
+  scope='everywhere',delivery='{delivery}',trigger=trigger,{activation}
   action={action}}}}},
 }}
 "#
@@ -259,7 +319,14 @@ return p.config.new{{mode='route',
             axes: BTreeMap::new(),
             capabilities: BTreeMap::from([
                 (EV_SYN, vec![SYN_REPORT]),
-                (EV_KEY, if projected { vec![30, 31] } else { vec![30] }),
+                (
+                    EV_KEY,
+                    if projected {
+                        vec![30, 31, 42]
+                    } else {
+                        vec![30]
+                    },
+                ),
             ]),
             virtual_device: false,
         };
@@ -319,6 +386,9 @@ return p.config.new{{mode='route',
         }
     }
     fn key(&mut self, value: i32) -> Option<Ticket> {
+        self.key_report(&[(30, value)])
+    }
+    fn key_report(&mut self, changes: &[(u16, i32)]) -> Option<Ticket> {
         self.sequence += 1;
         self.routing
             .push(Record::Frame {
@@ -326,18 +396,19 @@ return p.config.new{{mode='route',
                     source: self.device.source.clone(),
                     at: monotonic().unwrap(),
                     sequence: self.sequence,
-                    events: vec![
-                        RawEvent {
+                    events: changes
+                        .iter()
+                        .map(|&(code, value)| RawEvent {
                             kind: EV_KEY,
-                            code: 30,
+                            code,
                             value,
-                        },
-                        RawEvent {
+                        })
+                        .chain([RawEvent {
                             kind: EV_SYN,
                             code: SYN_REPORT,
                             value: 0,
-                        },
-                    ],
+                        }])
+                        .collect(),
                 },
             })
             .unwrap();

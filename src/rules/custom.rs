@@ -9,6 +9,9 @@ use crate::{
 };
 use std::collections::VecDeque;
 
+#[cfg(test)]
+mod tests;
+
 pub(super) struct State {
     pub fence: Fence,
     pub gate: Gate,
@@ -34,6 +37,7 @@ struct Proof {
 }
 enum OfferedInput {
     Frame(Input),
+    KeyFrame(Input),
     Wake,
     TouchContinuation(Input),
 }
@@ -83,8 +87,30 @@ impl State {
         input: OfferedInput,
         at: Duration,
     ) -> io::Result<()> {
+        if let OfferedInput::KeyFrame(Input::Frame { source, sequence, at: physical_at, selectors, changes, .. }) = &input
+            && let Some(offer) = self.offers.iter_mut().find(|offer| offer.candidate == candidate
+                && matches!(&offer.input, OfferedInput::KeyFrame(Input::Frame {
+                    source: previous_source, sequence: previous_sequence, at: previous_at, selectors: previous_selectors, ..
+                }) if previous_source == source && previous_sequence == sequence && previous_at == physical_at && previous_selectors == selectors))
+        {
+            let OfferedInput::KeyFrame(Input::Frame { changes: previous, .. }) = &mut offer.input else { unreachable!() };
+            let additional = recognition::encoded_size(changes, recognition::MAX_FRAME_BYTES - 1024)? - 2
+                + usize::from(!previous.is_empty() && !changes.is_empty());
+            if self.bytes + additional > recognition::MAX_BYTES
+                || offer.bytes + additional > recognition::MAX_FRAME_BYTES - 1024 + 128
+            {
+                return Err(invalid("custom recognizer frame queue full"));
+            }
+            previous.extend(changes.iter().cloned());
+            offer.key_presses = key_presses;
+            offer.bytes += additional;
+            self.bytes += additional;
+            return Ok(());
+        }
         let bytes = match &input {
-            OfferedInput::Frame(input) | OfferedInput::TouchContinuation(input) => {
+            OfferedInput::Frame(input)
+            | OfferedInput::KeyFrame(input)
+            | OfferedInput::TouchContinuation(input) => {
                 recognition::encoded_size(input, recognition::MAX_FRAME_BYTES - 1024)? + 128
             }
             OfferedInput::Wake => 128,
@@ -119,6 +145,26 @@ pub(super) fn frame(
     frame: &NormalizedFrame,
     context: FrameContext<'_>,
 ) {
+    frame_at(worker, state, frame, context, None, true);
+}
+pub(super) fn key_frame(
+    worker: &mut Worker,
+    state: &DeviceState,
+    frame: &NormalizedFrame,
+    edge: (usize, u16, KeyState),
+    finish_report: bool,
+    context: FrameContext<'_>,
+) {
+    frame_at(worker, state, frame, context, Some(edge), finish_report);
+}
+fn frame_at(
+    worker: &mut Worker,
+    state: &DeviceState,
+    frame: &NormalizedFrame,
+    context: FrameContext<'_>,
+    edge: Option<(usize, u16, KeyState)>,
+    finish_report: bool,
+) {
     if !context.custom.ready || frame.raw.at < context.custom.ready_at {
         if let Recognizer::Custom { blocked, .. } = &mut worker.recognizer {
             if !state.keys.is_empty() || !state.contacts.is_empty() {
@@ -137,7 +183,9 @@ pub(super) fn frame(
     else {
         unreachable!()
     };
-    let definition = recognizer.clone();
+    let definition = recognizer;
+    let key_inputs = definition.inputs.contains(&InputKind::Key);
+    let touch_inputs = definition.inputs.contains(&InputKind::Touch);
     let (timeout, wake) = (timeout.duration(), wake.map(|wake| wake.duration()));
     let source = &state.device.source;
     let at = frame.raw.at;
@@ -150,9 +198,24 @@ pub(super) fn frame(
         }
         return;
     }
-    let Some(input) = Input::frame(context.config, &state.device, frame.clone())
-        .filter(|input| definition.interested(input))
-    else {
+    let offered = match edge {
+        Some((_, code, key_state)) => Some(Input::Frame {
+            source: frame.raw.source.clone(),
+            at: frame.raw.at,
+            sequence: frame.raw.sequence,
+            selectors: Input::selected(context.config, &state.device),
+            changes: vec![Change::Key {
+                code,
+                state: key_state,
+            }],
+            contacts: vec![],
+            contacts_started: vec![],
+            contacts_ended: vec![],
+            ended_contacts: vec![],
+        }),
+        None => Input::frame(context.config, &state.device, frame.clone()),
+    };
+    let Some(input) = offered.filter(|input| definition.interested(input)) else {
         return;
     };
     let input = match definition.project(&input, true) {
@@ -168,7 +231,10 @@ pub(super) fn frame(
             return;
         }
     };
-    let mut starts = frame.changes.iter().any(|change| match change {
+    let Input::Frame { changes, .. } = &input else {
+        unreachable!()
+    };
+    let mut starts = changes.iter().any(|change| match change {
         Change::Key {
             state: KeyState::Press,
             ..
@@ -189,7 +255,7 @@ pub(super) fn frame(
             .any(|contact| contact.fresh && frame.contacts_started.contains(&contact.id));
     if definition.continuous && worker.rule.delivery != crate::config::Delivery::Observe {
         starts = definition.inputs.contains(&InputKind::Key)
-            && frame.changes.iter().any(|change| {
+            && changes.iter().any(|change| {
                 matches!(
                     change,
                     Change::Key {
@@ -236,7 +302,7 @@ pub(super) fn frame(
         {
             return;
         }
-        let positions = if definition.inputs.contains(&InputKind::Touch) {
+        let positions = if touch_inputs {
             match state
                 .mapping
                 .as_ref()
@@ -307,21 +373,36 @@ pub(super) fn frame(
             }
         }
     }
-    if definition.inputs.contains(&InputKind::Key) && worker.routing {
-        let positions = match edges::positioned_keys(frame) {
-            Ok(positions) => positions,
-            Err(_) => {
-                cancel_candidate(
-                    worker,
-                    source,
-                    at,
-                    "custom key press position differs",
-                    context.events,
-                );
-                return;
-            }
-        };
+    if key_inputs && (worker.routing || edge.is_some()) {
+        let positions =
+            match edge.map_or_else(|| edges::positioned_keys(frame), |edge| Ok(vec![edge])) {
+                Ok(positions) => positions,
+                Err(_) => {
+                    cancel_candidate(
+                        worker,
+                        source,
+                        at,
+                        "custom key press position differs",
+                        context.events,
+                    );
+                    return;
+                }
+            };
         for (event, code, edge) in positions {
+            if let Some(candidate) = worker.candidates.get_mut(source) {
+                candidate.key_edge(
+                    InputPosition {
+                        frame: state.input_watermark,
+                        event,
+                    },
+                    edge,
+                );
+                if edge == KeyState::Press {
+                    candidate
+                        .source_inputs
+                        .insert(source.clone(), state.input_watermark);
+                }
+            }
             if edge == KeyState::Press
                 && !presses::record(
                     worker,
@@ -342,7 +423,8 @@ pub(super) fn frame(
             }
         }
     }
-    if worker.rule.delivery != crate::config::Delivery::Observe
+    if finish_report
+        && worker.rule.delivery != crate::config::Delivery::Observe
         && state.keys.is_empty()
         && state.contacts.is_empty()
         && let Recognizer::Custom { closed, .. } = &mut worker.recognizer
@@ -361,7 +443,11 @@ pub(super) fn frame(
             .offer(
                 candidate.id,
                 candidate.key_presses.clone(),
-                OfferedInput::Frame(input),
+                if edge.is_some() {
+                    OfferedInput::KeyFrame(input)
+                } else {
+                    OfferedInput::Frame(input)
+                },
                 at,
             )
             .is_err()
@@ -881,7 +967,9 @@ impl Engine {
             let charge = offer.key_presses.reserve(128).map_err(invalid)?;
             let gate = &mut self.custom.as_mut().unwrap().gate;
             let result = match offer.input {
-                OfferedInput::Frame(input) => gate.offer(&recognizer.name, &current, &input, at),
+                OfferedInput::Frame(input) | OfferedInput::KeyFrame(input) => {
+                    gate.offer(&recognizer.name, &current, &input, at)
+                }
                 OfferedInput::Wake => gate.offer_timer_at(&recognizer.name, &current, offer.at, at),
                 OfferedInput::TouchContinuation(input) => {
                     gate.offer_touch_continuation(&recognizer.name, &current, &input, offer.at, at)

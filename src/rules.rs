@@ -174,6 +174,10 @@ pub(crate) struct RecognitionOwnership {
     pub deadline: Option<Duration>,
     pub skip_offer: bool,
 }
+pub(crate) fn key_only_custom(trigger: &Trigger) -> bool {
+    matches!(trigger, Trigger::Custom { recognizer, .. }
+        if recognizer.inputs.len() == 1 && recognizer.inputs.contains(&crate::recognition::InputKind::Key))
+}
 impl RouteIntent {
     pub(crate) fn has_key_press(
         &self,
@@ -1482,7 +1486,8 @@ impl Engine {
         self.key_edges(&frame, &positioned_keys, allowed)?;
         let state = &self.devices[&source.device];
         for worker in &mut self.workers {
-            if edges::is_key_trigger(&worker.rule.trigger) {
+            if edges::is_key_trigger(&worker.rule.trigger) || key_only_custom(&worker.rule.trigger)
+            {
                 continue;
             }
             let finish = match worker.rule.trigger {
@@ -1850,6 +1855,11 @@ struct PendingSequence {
     cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 impl PendingSequence {
+    fn continues_previous(&self, candidate: &Candidate) -> bool {
+        self.previous.as_ref().is_some_and(|previous| {
+            candidate.continued_from == Some(previous.id) && candidate.source == previous.source
+        })
+    }
     fn route_intent(&self, rule: &Rule) -> RouteIntent {
         let mut candidate = self.first.clone();
         candidate.id = self.id;
@@ -1865,11 +1875,7 @@ impl PendingSequence {
     fn admits_input(&self, candidate: &Candidate) -> bool {
         self.after_input.is_none_or(|watermark| {
             candidate.started_input > watermark
-                || candidate.started_input == watermark
-                    && self.previous.as_ref().is_some_and(|previous| {
-                        candidate.continued_from == Some(previous.id)
-                            && candidate.source == previous.source
-                    })
+                || candidate.started_input == watermark && self.continues_previous(candidate)
         }) && self
             .after_key
             .zip(candidate.key_start)
@@ -2801,7 +2807,7 @@ impl Sequence {
             },
         );
         *next_id = engine.next_id;
-        let Some(candidate) = worker.candidates.get(source) else {
+        let Some(candidate) = worker.candidates.get_mut(source) else {
             return Ok(None);
         };
         let same = match (&pending.first.permit, &candidate.permit) {
@@ -2811,6 +2817,11 @@ impl Sequence {
         };
         if !same {
             return Ok(Some("sequence target changed"));
+        }
+        if let Some(previous) = pending.previous.as_ref()
+            && previous.source == candidate.source
+        {
+            candidate.continued_from = Some(previous.id);
         }
         let pending = self.pending.get_mut(&source.seat).unwrap();
         pending

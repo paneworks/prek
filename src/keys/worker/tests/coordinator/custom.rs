@@ -163,3 +163,102 @@ fn a_custom_timer_cannot_acquire_input_without_a_validated_frame_reply() {
     poll(&mut seat, &routing, 71);
     assert_eq!(key_events(&writes), [(42, 1), (42, 0)]);
 }
+
+#[test]
+fn custom_admission_does_not_include_keys_before_its_original_activation_edge() {
+    let mut conditional = recognizer();
+    conditional.require_keys = vec![Key(42)];
+    let mut routing = arbitration::routed(vec![conditional]);
+    let (mut seat, writes) = model();
+    submit(
+        &mut routing,
+        packet(1, 1, 10, &[(30, 1), (30, 0), (42, 1), (31, 1)]),
+    );
+    assert_eq!(raw(&mut routing, &seat, 1, 10), [(30, 1), (30, 0)]);
+    let tickets = routing.recognition_requests(ms(10)).unwrap();
+    assert_eq!(tickets.len(), 1);
+    let ticket = &tickets[0];
+    let crate::input_events::Event::Frame {
+        changes, sequence, ..
+    } = &ticket.input
+    else {
+        unreachable!()
+    };
+    assert_eq!(*sequence, 1);
+    assert_eq!(
+        changes,
+        &[
+            crate::input::Change::Key {
+                code: 42,
+                state: crate::input::KeyState::Press
+            },
+            crate::input::Change::Key {
+                code: 31,
+                state: crate::input::KeyState::Press
+            },
+        ]
+    );
+    let work = respond(&mut routing, ticket, Phase::Discrete, 15);
+    seat.admit(&routing, work, None, ms(15)).unwrap();
+    poll(&mut seat, &routing, 15);
+    assert_eq!(key_events(&writes), [(42, 1), (42, 0)]);
+}
+
+#[test]
+fn begin_only_custom_admission_survives_a_later_modifier_release_in_the_report() {
+    let mut conditional = recognizer();
+    conditional.require_keys = vec![Key(42)];
+    let mut routing = arbitration::routed(vec![conditional]);
+    submit(&mut routing, packet(1, 1, 10, &[(42, 1), (30, 1), (42, 0)]));
+    let tickets = routing.recognition_requests(ms(10)).unwrap();
+    assert_eq!(tickets.len(), 1);
+    assert_eq!(
+        respond(&mut routing, &tickets[0], Phase::Discrete, 15).len(),
+        1
+    );
+}
+
+#[test]
+fn a_transient_same_report_condition_loss_revokes_custom_tickets_on_every_source() {
+    for modifier_source in [1, 2] {
+        let mut conditional = recognizer();
+        conditional.require_keys = vec![Key(42)];
+        conditional.keys_throughout = true;
+        let mut routing = arbitration::routed(vec![conditional]);
+        submit(&mut routing, packet(modifier_source, 1, 5, &[(42, 1)]));
+        submit(
+            &mut routing,
+            packet(1, if modifier_source == 1 { 2 } else { 1 }, 10, &[(30, 1)]),
+        );
+        let first = routing
+            .recognition_requests(ms(10))
+            .unwrap()
+            .into_iter()
+            .find(|ticket| ticket.input.source().device == 1)
+            .unwrap();
+        submit(
+            &mut routing,
+            packet(
+                modifier_source,
+                if modifier_source == 1 { 3 } else { 2 },
+                15,
+                &[(42, 0), (42, 1)],
+            ),
+        );
+        assert!(
+            routing
+                .recognition_response(
+                    Proposal {
+                        fence: first.fence,
+                        ticket: first.id,
+                        phase: Phase::Discrete,
+                        data: serde_json::json!({}),
+                    },
+                    ms(16)
+                )
+                .is_err(),
+            "modifier source {modifier_source}"
+        );
+        assert!(routing.take_scoped_dispatches(ms(16)).is_empty());
+    }
+}

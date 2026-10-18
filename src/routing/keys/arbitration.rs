@@ -81,8 +81,7 @@ pub(super) fn native(trigger: &Trigger) -> bool {
     }
 }
 pub(in crate::routing) fn custom_key(trigger: &Trigger) -> bool {
-    matches!(trigger, Trigger::Custom { recognizer, .. }
-        if recognizer.inputs.len() == 1 && recognizer.inputs.contains(&crate::recognition::InputKind::Key))
+    crate::rules::key_only_custom(trigger)
 }
 pub(super) fn projected(trigger: &Trigger) -> bool {
     native(trigger) || custom_key(trigger)

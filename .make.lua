@@ -525,8 +525,9 @@ make.recipe{ name="test-native-key-worker",desc="managed generated-output slots,
 
 make.recipe{ name="test-custom-key-arbitration",desc="exact custom key ticket ownership and real supervised Lua output; no devices",
              run=function()
-               for _,args in ipairs({{"cargo","test","--locked","--lib","keys::worker::tests::coordinator::custom"},
-                 {"cargo","test","--locked","--test","lua_session","native_routing::projected_custom_keys_preserve_unseen_typing_through_the_real_lua_helper","--","--exact"}}) do
+               for _,args in ipairs({{"cargo","test","--locked","--lib","rules::custom::tests"},
+                 {"cargo","test","--locked","--lib","keys::worker::tests::coordinator::custom"},
+                 {"cargo","test","--locked","--test","lua_session","native_routing::projected_custom_keys_"}}) do
                  args.capture=true
                  local tested=oslo.run(args)
                  io.stdout:write(tested.out or ""); io.stderr:write(tested.err or "")

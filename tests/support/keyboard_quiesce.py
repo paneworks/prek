@@ -505,7 +505,7 @@ def validate_native_key_arbitration(observations, received, inputs):
         ("buffered-unmatched-tap-fallback", [(31, 1), (31, 0)]),
         ("buffered-deferred-action-order", [(30, 1), (30, 0), (48, 1), (48, 0)]),
     ]
-    if len(observations) != 36:
+    if len(observations) != 37:
         raise ValueError("missing native key arbitration captures")
     keys = [row for row in received if row.get("event") == "key"]
     if any(any(type(row.get(field)) is not int for field in ("sequence", "code", "state", "at_ns")) for row in keys):
@@ -552,25 +552,32 @@ def validate_native_key_arbitration(observations, received, inputs):
                 source_and_readiness_modeled=True, physical_takeover_tested=False)
 
 
-def validate_custom_key_arbitration(observations, received, runtime):
+def validate_custom_key_arbitration(observations, received, runtime, event_local=False):
     flags = dict(status="passed", scope="owned_protocol_root_key_only_custom", actual_lua_callback=True,
                  source_and_readiness_modeled=True, physical_takeover_tested=False, kernel_input_opened=False,
                  helper_stopped=True, generated_neutral=True)
     if not isinstance(runtime, dict) or set(runtime) != set(flags) | {
-            "ordinary", "inputs", "ticket", "proposal", "proposed_at", "admitted_at"}:
+            "ordinary", "inputs", "ticket", "proposal", "proposed_at", "admitted_at", "activation"}:
         raise ValueError("invalid custom key runtime fields")
     for field, wanted in flags.items():
         if type(runtime.get(field)) is not type(wanted) or runtime[field] != wanted:
             raise ValueError("invalid custom key runtime scope")
-    if len(observations) != 36 or observations[31]["name"] != "custom-lua-unseen-key-tail":
+    phase = 32 if event_local else 31
+    name = "custom-lua-event-local-activation" if event_local else "custom-lua-unseen-key-tail"
+    activation = dict(require_keys=[42] if event_local else [], keys_throughout=False)
+    if (runtime["activation"] != activation or type(runtime["activation"].get("keys_throughout")) is not bool
+            or any(type(code) is not int for code in runtime["activation"]["require_keys"])):
+        raise ValueError("invalid custom key activation policy")
+    if len(observations) != 37 or observations[phase]["name"] != name:
         raise ValueError("missing custom key rendered phase")
-    lower, upper = (observations[index]["receipt"]["sequence"] for index in (30, 31))
+    lower, upper = (observations[index]["receipt"]["sequence"] for index in (phase - 1, phase))
     if type(lower) is not int or type(upper) is not int or lower >= upper:
         raise ValueError("invalid custom key rendered boundary")
     events = [row for row in received if row.get("event") == "key" and lower < row["sequence"] <= upper]
     if any(any(type(row.get(field)) is not int for field in ("sequence", "code", "state", "at_ns")) for row in events):
         raise ValueError("invalid custom key app event fields")
-    if [(row["code"], row["state"]) for row in events] != [(31, 1), (31, 0), (30, 1), (30, 0)]:
+    ordinary = [(31, 1), (31, 0)] * (2 if event_local else 1)
+    if [(row["code"], row["state"]) for row in events] != ordinary + [(30, 1), (30, 0)]:
         raise ValueError("custom reply consumed unrelated input or reordered its action")
     def stamp(value):
         if not isinstance(value, dict) or set(value) != {"secs", "nanos"} or any(type(value[key]) is not int for key in value):
@@ -582,7 +589,8 @@ def validate_custom_key_arbitration(observations, received, runtime):
     if not isinstance(inputs, list) or len(inputs) != 3:
         raise ValueError("missing original custom key input")
     edges = [[(event["code"], event["value"]) for event in frame["events"] if event["kind"] == 1] for frame in inputs]
-    if edges != [[(202, 1)], [(31, 1), (31, 0)], [(202, 0)]] or runtime["ordinary"] != [[31, 1], [31, 0]]:
+    first_edges = [(31, 1), (31, 0), (42, 1), (202, 1), (42, 0)] if event_local else [(202, 1)]
+    if edges != [first_edges, [(31, 1), (31, 0)], [(202, 0)]] or runtime["ordinary"] != [list(edge) for edge in ordinary]:
         raise ValueError("invalid original custom key consumption")
     if any(any(type(event.get(field)) is not int for field in ("kind", "code", "value"))
            for frame in inputs for event in frame["events"]):
@@ -590,11 +598,14 @@ def validate_custom_key_arbitration(observations, received, runtime):
     if [frame["sequence"] for frame in inputs] != [1, 2, 3] or any(frame["source"] != inputs[0]["source"] for frame in inputs):
         raise ValueError("invalid custom key original source or order")
     original = ticket.get("input", {})
+    changes = [dict(kind="key", code=202, state="press")]
+    if event_local:
+        changes = [dict(kind="key", code=42, state="press")] + changes + [dict(kind="key", code=42, state="release")]
     if (type(ticket.get("id")) is not int or ticket["id"] <= 0 or ticket.get("cause") != "frame"
             or ticket.get("rule") != "rendered-custom-key" or ticket.get("recognizer") != "rendered_key"
             or original.get("source") != inputs[0]["source"] or original.get("sequence") != 1
             or original.get("at") != inputs[0]["at"]
-            or original.get("changes") != [dict(kind="key", code=202, state="press")]):
+            or original.get("changes") != changes):
         raise ValueError("custom key ticket was not the original callback input")
     if (proposal.get("ticket") != ticket["id"] or proposal.get("fence") != ticket.get("fence")
             or proposal.get("phase") != "discrete" or proposal.get("data") != dict(trigger=202)):
@@ -604,7 +615,8 @@ def validate_custom_key_arbitration(observations, received, runtime):
     if not first <= proposed < later < admitted <= released or stamp(ticket["requested_at"]) != first or admitted >= stamp(ticket["deadline"]):
         raise ValueError("custom key reply did not cross a real unseen-input boundary")
     return dict(status="passed", scope=flags["scope"], cases=1, actual_lua_callback=True,
-                consumed_control_edges=2, leaked_control_edges=0, preserved_ordinary_edges=2,
+                consumed_control_edges=4 if event_local else 2, leaked_control_edges=0, preserved_ordinary_edges=len(ordinary),
+                event_local_activation_tested=event_local,
                 source_and_readiness_modeled=True, physical_takeover_tested=False, kernel_input_opened=False,
                 unseen_input_gap_ns=later - proposed)
 
@@ -660,10 +672,11 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
                     ("buffered-unmatched-tap-fallback", "bAAaAaAAAaaaaaaaaaaasaaasas", []),
                     ("buffered-deferred-action-order", "bAAaAaAAAaaaaaaaaaaasaaasasab", []),
                     ("custom-lua-unseen-key-tail", "bAAaAaAAAaaaaaaaaaaasaaasasabsa", []),
-                    ("journal-pending-withheld", "bAAaAaAAAaaaaaaaaaaasaaasasabsa", []),
-                    ("journal-decided-consumed", "bAAaAaAAAaaaaaaaaaaasaaasasabsa", []),
-                    ("journal-fallback-cadence", "bAAaAaAAAaaaaaaaaaaasaaasasabsaa", []),
-                    ("software-scoped-shutdown", "bAAaAaAAAaaaaaaaaaaasaaasasabsaa", [])]
+                    ("custom-lua-event-local-activation", "bAAaAaAAAaaaaaaaaaaasaaasasabsassa", []),
+                    ("journal-pending-withheld", "bAAaAaAAAaaaaaaaaaaasaaasasabsassa", []),
+                    ("journal-decided-consumed", "bAAaAaAAAaaaaaaaaaaasaaasasabsassa", []),
+                    ("journal-fallback-cadence", "bAAaAaAAAaaaaaaaaaaasaaasasabsassaa", []),
+                    ("software-scoped-shutdown", "bAAaAaAAAaaaaaaaaaaasaaasasabsassaa", [])]
     fixture_env = dict(env, PREK_LOCAL_CAGE="1", PREK_CAGE_OUTPUT=str(output), PREK_CAGE_KEYBOARD=args.keyboard,
                        PREK_CAGE_KEY_SOCKET=str(socket))
     if args.key_worker:
@@ -704,7 +717,7 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
     wanted = dict(status="passed", phases=15, source="two_owned_wayland_virtual_keyboards", production_route_tested=False,
                   kernel_input_tested=False, unmodified_stock_acceptance=False, test_backpressure=True)
     if args.key_worker:
-        wanted.update(phases=36, source="six_owned_wayland_virtual_keyboards", scoped_worker_tested=True, authority_modeled=True,
+        wanted.update(phases=37, source="eight_owned_wayland_virtual_keyboards", scoped_worker_tested=True, authority_modeled=True,
                       transport_readiness_modeled=True, selective_consumption_tested=True,
                       selective_consumption_scope="owned_protocol_native_keys", physical_takeover_tested=False,
                       selective_projection_tested=True, within_frame_order_tested=True, cross_source_order_tested=True,
@@ -716,6 +729,7 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
                       pending_journal_protocol_tested=True, pending_fallback_cadence_tested=True,
                       delayed_gesture_arbitration_tested=True, delayed_gesture_arbitration_scope="native_key_only",
                       root_custom_key_arbitration_rendering_tested=True,
+                      event_local_custom_activation_rendering_tested=True,
                       mixed_delayed_gesture_arbitration_tested=False)
         journal = json.loads((output / "pending-journal-receipt.json").read_text())
         if (journal.get("status") != "passed" or journal.get("consumed_reports_written") != 0
@@ -734,6 +748,8 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
         (output / "native-key-arbitration-receipt.json").write_text(json.dumps(native_arbitration, indent=2) + "\n")
         custom_arbitration = validate_custom_key_arbitration(phases, rows(), json.loads((output / "custom-key-runtime.json").read_text()))
         (output / "custom-key-arbitration-receipt.json").write_text(json.dumps(custom_arbitration, indent=2) + "\n")
+        activation = validate_custom_key_arbitration(phases, rows(), json.loads((output / "custom-key-activation-runtime.json").read_text()), event_local=True)
+        (output / "custom-key-activation-receipt.json").write_text(json.dumps(activation, indent=2) + "\n")
     else:
         wanted.update(software_owner_tested=True, software_authorization_tested=False, software_repeat_rendering_tested=False)
     if json.dumps(result, sort_keys=True) != json.dumps(wanted, sort_keys=True):
@@ -743,7 +759,7 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
     name = "key-worker" if args.key_worker else "key-output"
     (output / f"{name}-result.json").write_text(json.dumps(result, indent=2) + "\n")
     if args.key_worker:
-        print("PASS: native key arbitration and actual Luna root key-only custom replies preserved unrelated typing, deferred action order and fallback cadence; thirty-six rendered protocol-sink phases. Authority/readiness modeled; mixed/hybrid arbitration, native takeover, software authorization and repeat rendering are not tested.")
+        print("PASS: native key arbitration and actual Luna root key-only custom replies preserved event-local activation, unrelated typing, deferred action order and fallback cadence; thirty-seven rendered protocol-sink phases. Authority/readiness modeled; mixed/hybrid arbitration, native takeover, software authorization and repeat rendering are not tested.")
     else:
         print("PASS: actual key-output driver preserved overlapping owners, software producer isolation, exact cancellation and context reentry; fifteen rendered app phases. Software authorization and repeat rendering are not tested.")
     return result

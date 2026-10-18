@@ -154,11 +154,13 @@ impl PendingSequence {
                     start > after
                         || start == after
                             && self.step > 0
-                            && matches!(triggers[self.step], Trigger::ButtonHold { .. })
-                            && matches!(
-                                triggers[self.step - 1],
-                                Trigger::Key { .. } | Trigger::Chord { .. }
-                            )
+                            && (matches!(triggers[self.step], Trigger::ButtonHold { .. })
+                                && matches!(
+                                    triggers[self.step - 1],
+                                    Trigger::Key { .. } | Trigger::Chord { .. }
+                                )
+                                || matches!(triggers[self.step], Trigger::Custom { .. })
+                                    && self.continues_previous(candidate))
                 })
     }
 }

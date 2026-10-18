@@ -43,16 +43,22 @@ fn feed(routing: &mut Routing, sequence: u64, events: &[(u16, i32)], inputs: &mu
     routing.push(Record::Frame { frame }).unwrap();
 }
 
-pub(super) fn exercise(output: &Path, socket: &Path, index: usize, text: &str) -> String {
+pub(super) fn exercise(
+    output: &Path,
+    socket: &Path,
+    index: usize,
+    text: &str,
+    event_local: bool,
+) -> String {
     let definition = Definition::compile(
-        r#"
+        &r#"
 local p=require('prek')
 local trigger=p.recognizers.define('rendered_key',{
  selectors={'custom_keys'},inputs={'key'},reply_within='250ms',
 },function(ticket)
  if ticket.cause=='cancel' then p.log.info('custom-key-cleanup');return nil end
- assert(ticket.cause=='frame' and #ticket.input.changes==1)
- assert(ticket.input.changes[1].code==202)
+ assert(ticket.cause=='frame')
+ @changes@
  return {phase='discrete',data={trigger=202}}
 end)
 return p.config.new{mode='route',
@@ -60,13 +66,20 @@ return p.config.new{mode='route',
  timing={join_window='1ms',decision_window='200ms'},
  devices={custom_keys={keys={'KEY_PROG3'}}},
  rules={p.rules.define{id='rendered-custom-key',devices={'custom_keys'},contexts={'desktop'},
-  scope='everywhere',delivery='buffer',trigger=trigger,action=p.actions.keys{keys={'KEY_A'}}}},
+  scope='everywhere',delivery='buffer',trigger=trigger,@activation@action=p.actions.keys{keys={'KEY_A'}}}},
 }
-"#,
+"#.replace("@changes@", if event_local {
+            "assert(#ticket.input.changes==3);assert(ticket.input.changes[1].code==42 and ticket.input.changes[1].state=='press');assert(ticket.input.changes[2].code==202 and ticket.input.changes[2].state=='press');assert(ticket.input.changes[3].code==42 and ticket.input.changes[3].state=='release')"
+        } else { "assert(#ticket.input.changes==1 and ticket.input.changes[1].code==202)" })
+        .replace("@activation@", if event_local { "require_keys={'KEY_LEFTSHIFT'}," } else { "" }),
         "cage-custom-key.lua",
     )
     .unwrap();
     let config = definition.validate().unwrap();
+    let activation = json!({
+        "require_keys":config.rules[0].require_keys.iter().map(|key| key.0).collect::<Vec<_>>(),
+        "keys_throughout":config.rules[0].keys_throughout,
+    });
     let fence = Fence {
         broker: Epoch([1, 2]),
         configuration: 1,
@@ -131,7 +144,7 @@ return p.config.new{mode='route',
         vendor: 1,
         product: 1,
         properties: vec![],
-        capabilities: BTreeMap::from([(EV_KEY, vec![31, 202])]),
+        capabilities: BTreeMap::from([(EV_KEY, vec![31, 42, 202])]),
         axes: BTreeMap::new(),
         virtual_device: false,
     };
@@ -169,7 +182,16 @@ return p.config.new{mode='route',
     )
     .unwrap();
     let mut inputs = Vec::new();
-    feed(&mut routing, 1, &[(202, 1)], &mut inputs);
+    feed(
+        &mut routing,
+        1,
+        if event_local {
+            &[(31, 1), (31, 0), (42, 1), (202, 1), (42, 0)]
+        } else {
+            &[(202, 1)]
+        },
+        &mut inputs,
+    );
     let tickets = routing.recognition_requests(monotonic().unwrap()).unwrap();
     assert_eq!(tickets.len(), 1);
     let ticket = tickets.into_iter().next().unwrap();
@@ -231,7 +253,14 @@ return p.config.new{mode='route',
         );
         std::thread::sleep(Duration::from_millis(1));
     }
-    assert_eq!(ordinary, [(31, 1), (31, 0)]);
+    assert_eq!(
+        ordinary,
+        if event_local {
+            vec![(31, 1), (31, 0), (31, 1), (31, 0)]
+        } else {
+            vec![(31, 1), (31, 0)]
+        }
+    );
     let cancellations = routing.take_recognition_cancellations();
     assert_eq!(cancellations.len(), 1);
     session
@@ -250,13 +279,14 @@ return p.config.new{mode='route',
     assert!(generated.settled());
     assert!(generated.into_output().unwrap().into_sink().is_ok());
     drop(raw);
-    fs::write(output.join("custom-key-runtime.json"), serde_json::to_vec(&json!({
+    fs::write(output.join(if event_local { "custom-key-activation-runtime.json" } else { "custom-key-runtime.json" }), serde_json::to_vec(&json!({
         "status":"passed","scope":"owned_protocol_root_key_only_custom","actual_lua_callback":true,
         "source_and_readiness_modeled":true,"physical_takeover_tested":false,"kernel_input_opened":false,
         "helper_stopped":true,"generated_neutral":true,"ordinary":ordinary,
+        "activation":activation,
         "inputs":inputs,"ticket":ticket,"proposal":proposal,"proposed_at":proposed_at,"admitted_at":admitted_at,
     })).unwrap()).unwrap();
-    let text = format!("{text}sa");
+    let text = format!("{text}{}", if event_local { "ssa" } else { "sa" });
     phase(output, index, &text, &[]);
     text
 }
