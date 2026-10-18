@@ -190,9 +190,33 @@ Press evidence records candidate observations, not exclusive consumption claims.
 A tap candidate can observe a following held down before its earlier taps settle;
 completed participating presses still need to be separated from unfinished or
 invalid tails. Timed, chord, sequence, custom,
-mixed and hybrid selective buffering still need the bounded pending-key journal,
+mixed and hybrid selective buffering still need exact participant arbitration,
 non-key/mixed event-local admission and native/rendered acceptance. This prerequisite
 does not expand projectable triggers, public grants or production takeover.
+
+`Router::stage_key_frame` retains bounded original pure-key reports and enrolls
+fresh downs with explicit authorization and decision deadlines. It does not advance
+time or expose output. `decide_key_presses` atomically settles exact original
+positions; ordinary presses cannot be reclaimed and consumed ownership cannot be
+transferred. A trusted caller settles a match before calling `advance` at the same
+deadline. Advancing expires unresolved presses to ordinary at their deadline,
+not at a later polling time. Drain older physical records before advancing.
+
+The journal retains repeats, releases and scan metadata with their original down
+incarnation, including closed presses waiting for a decision. Ordinary prefixes
+may leave before unresolved suffixes, but prefix readiness still requires a full
+write acknowledgement. Per-report release clocks preserve earlier timeout
+deadlines; a later decision cannot hide missed delivery. Ordinary fallback uses
+the maximum required epoch offset, not accumulated delays, and preserves original
+inter-report cadence. Buffered and scheduled input share capacity limits. Recovery
+discards unwritten input and neutralizes only acknowledged output.
+
+The live immediate projection uses this journal with decisions made at the input
+edge. The direct `push_key_frame` ledger retains its original contract and cannot
+be mixed with journal staging. Delayed consumption and fallback are also exercised
+through an owned protocol keyboard into the rendered Cage app; the fixture supplies
+the decisions and models readiness. This is not delayed recognizer arbitration,
+cross-source deferred-input admission, hybrid support or a public broker grant.
 
 `Routing::with_key_projection` retains original positions across attached
 sources. Eligible pure-key sources with immediate consuming key actions arbitrate

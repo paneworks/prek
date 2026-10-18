@@ -2,6 +2,8 @@
 use super::*;
 use crate::input::{InputPosition, KeyState};
 
+pub(super) mod pending;
+
 const EV_MSC: u16 = 4;
 const MSC_SCAN: u16 = 4;
 
@@ -303,6 +305,9 @@ impl Router {
         if self.stopped {
             return Err(Fault::Stopped);
         }
+        if self.pending_keyboard.is_some() {
+            return self.fail(Fault::TooLate);
+        }
         if self.keyboard.is_none()
             && (self.last_sequence.is_some() || self.group.is_some() || !self.queue.is_empty())
         {
@@ -396,6 +401,11 @@ impl Router {
 
     pub fn position_prefix_delivered(&self, position: InputPosition, inclusive: bool) -> bool {
         !self.stopped
+            && self
+                .pending_keyboard
+                .as_ref()
+                .and_then(|journal| journal.first())
+                .is_none_or(|first| first > position || !inclusive && first == position)
             && self.queue.iter().all(|entry| {
                 self.positions.get(&entry.ticket).is_some_and(|span| {
                     span.first > position || !inclusive && span.first == position
@@ -423,6 +433,7 @@ impl Router {
         }
         if watermark == 0
             || self.keyboard.is_some()
+            || self.pending_keyboard.is_some()
             || self.last_sequence.is_some_and(|last| sequence <= last)
             || self.input_marks.contains_key(&sequence)
         {

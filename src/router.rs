@@ -20,6 +20,7 @@ mod chain;
 mod keyboard;
 use chain::Retention;
 pub use chain::{ChainAdmission, ChainToken, ClaimedChain};
+pub use keyboard::pending::{KeyDecision, KeyDisposition, PendingKey};
 pub use keyboard::{ConsumedKey, InputSpan, KeyClaim, KeyProjection};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -233,6 +234,7 @@ pub struct Router {
     stopped: bool,
     recovered: bool,
     keyboard: Option<keyboard::Ledger>,
+    pending_keyboard: Option<keyboard::pending::Journal>,
     positions: BTreeMap<u64, InputSpan>,
     input_marks: BTreeMap<u64, u64>,
 }
@@ -282,6 +284,7 @@ impl Router {
             stopped: false,
             recovered: false,
             keyboard: None,
+            pending_keyboard: None,
             positions: BTreeMap::new(),
             input_marks: BTreeMap::new(),
         })
@@ -344,6 +347,11 @@ impl Router {
             })
             .into_iter()
             .chain(decision)
+            .chain(
+                self.pending_keyboard
+                    .as_ref()
+                    .and_then(|journal| journal.deadline()),
+            )
             .min()
     }
 
@@ -371,13 +379,17 @@ impl Router {
     }
 
     fn storage(&self) -> (usize, usize) {
+        let journal = self
+            .pending_keyboard
+            .as_ref()
+            .map_or((0, 0), |journal| journal.storage());
         let pending = self
             .group
             .as_ref()
             .map(|group| group.pending.as_slice())
             .unwrap_or_default();
         (
-            self.queue.len() + pending.len(),
+            self.queue.len() + pending.len() + journal.0,
             self.queue
                 .iter()
                 .map(|entry| entry.frame.events.len())
@@ -385,7 +397,8 @@ impl Router {
                 + pending
                     .iter()
                     .map(|frame| frame.events.len())
-                    .sum::<usize>(),
+                    .sum::<usize>()
+                + journal.1,
         )
     }
 
@@ -435,6 +448,10 @@ impl Router {
             && self.delivered.neutral()
             && self.queue.is_empty()
             && self.group.is_none()
+            && self
+                .pending_keyboard
+                .as_ref()
+                .is_none_or(|journal| journal.first().is_none())
         {
             self.offset = Duration::ZERO;
         }
@@ -476,6 +493,7 @@ impl Router {
         if at < self.last_at {
             return self.fail(Fault::BackwardTime);
         }
+        self.advance_key_journal(at)?;
         if let Some(group) = &self.group
             && group.ownership == Ownership::Pending
             && let Some(Candidate {
@@ -533,7 +551,7 @@ impl Router {
         if self.stopped {
             return Err(Fault::Stopped);
         }
-        if self.keyboard.is_some() {
+        if self.keyboard.is_some() || self.pending_keyboard.is_some() {
             return self.fail(Fault::InvalidCandidate);
         }
         if frame.at > at
@@ -864,7 +882,10 @@ impl Router {
             )
         }) && !self.group.as_ref().is_some_and(|group| {
             group.ownership == Ownership::Pending && group.pending.iter().any(before)
-        })
+        }) && self
+            .pending_keyboard
+            .as_ref()
+            .is_none_or(|journal| journal.prefix_delivered(sequence, inclusive))
     }
     pub(crate) fn due_after_input(&mut self, at: Duration) -> Result<Option<&Scheduled>, Fault> {
         self.delivery_clock(at)?;
@@ -927,6 +948,7 @@ impl Router {
         self.queue.clear();
         self.positions.clear();
         self.input_marks.clear();
+        self.pending_keyboard = None;
         Some(Recovery {
             source: self.device.source.clone(),
             neutral_events: self.delivered.releases(),

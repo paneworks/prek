@@ -196,7 +196,7 @@ impl Routing {
         let input_at = frame.at;
         if let Err(error) = route
             .router
-            .push_key_frame(frame, watermark, &claims, &cuts, input_at)
+            .push_decided_key_frame(frame, watermark, &claims, &cuts, input_at)
         {
             self.recover(source);
             return Err(fault(error));

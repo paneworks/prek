@@ -487,6 +487,15 @@ make.recipe{ name="test-key-projection",desc="per-press raw-key ownership and co
                sh.cargo("test","--locked","--lib","router::keyboard::tests")
              end }
 
+make.recipe{ name="test-key-journal",desc="pending press decisions, bounded raw FIFO and fallback cadence; no devices",
+             run=function()
+               for _,filter in ipairs({"router::keyboard::tests::pending","routing::keys::projection::tests","keys::worker::tests::coordinator","routing::keys::ordering"}) do
+                 local tested=oslo.run{"cargo","test","--locked","--lib",filter,capture=true}
+                 io.stdout:write(tested.out or ""); io.stderr:write(tested.err or "")
+                 assert(tested.ok and (tested.out or ""):match("running [1-9]%d* tests?"),"key journal gate failed or selected no tests: "..filter)
+               end
+             end }
+
 make.recipe{ name="test-key-coordinator",desc="fenced selective routing and shared raw/generated ordering; no devices",
              run=function()
                for _,filter in ipairs({"keys::worker::tests::coordinator","keys::worker::tests::independence","routing::keys::ordering","router::keyboard::tests",
@@ -779,6 +788,6 @@ make.alias("c", "compile")
 make.recipe{
   name = "verify",
   desc = "the whole local gate",
-  deps = { "fmt-check", "check-all", "test-all", "test-lua-lifetimes", "test-lua-tasks", "test-key-provenance", "test-key-admission", "test-software-worker", "test-routing-helper", "test-composition-helper", "test-chain-helper", "test-composed-worker-helper", "test-root-session", "test-root-routing", "test-native-managed-model", "test-cage-startup", "test-distribution", "clippy", "rustdoc" },
+  deps = { "fmt-check", "check-all", "test-all", "test-lua-lifetimes", "test-lua-tasks", "test-key-provenance", "test-key-admission", "test-key-journal", "test-software-worker", "test-routing-helper", "test-composition-helper", "test-chain-helper", "test-composed-worker-helper", "test-root-session", "test-root-routing", "test-native-managed-model", "test-cage-startup", "test-distribution", "clippy", "rustdoc" },
 }
 make.alias("v", "verify")

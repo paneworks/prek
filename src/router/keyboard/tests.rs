@@ -1,6 +1,8 @@
 use super::*;
 use crate::transport::{Consumer, ConsumerEvidence, Descriptor, KernelIdentity, Readiness};
 
+mod pending;
+
 fn ms(n: u64) -> Duration {
     Duration::from_millis(n)
 }

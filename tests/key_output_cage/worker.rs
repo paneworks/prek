@@ -14,6 +14,9 @@ use prek::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+#[path = "worker/pending.rs"]
+mod pending;
+
 fn rule(id: &str, key: u16, action: Action) -> Rule {
     Rule {
         id: id.into(),
@@ -699,13 +702,16 @@ fn local_cage_scoped_key_worker() {
     assert!(generated.into_sink().is_ok());
     drop(keyboard.raw);
     drop(keyboard.other_raw);
-    phase(&output, 17, "bAAaAaAAAaaaa", &[]);
-    fs::write(output.join("key-output-runtime-result.json"),serde_json::to_vec(&json!({"status":"passed","phases":18,
-        "source":"three_owned_wayland_virtual_keyboards","production_route_tested":false,"kernel_input_tested":false,
+    pending::exercise(&output, socket);
+    phase(&output, 20, "bAAaAaAAAaaaaa", &[]);
+    fs::write(output.join("key-output-runtime-result.json"),serde_json::to_vec(&json!({"status":"passed","phases":21,
+        "source":"four_owned_wayland_virtual_keyboards","production_route_tested":false,"kernel_input_tested":false,
         "unmodified_stock_acceptance":false,"test_backpressure":true,"scoped_worker_tested":true,
         "authority_modeled":true,"transport_readiness_modeled":true,"selective_consumption_tested":false,
         "selective_projection_tested":true,"within_frame_order_tested":true,"cross_source_order_tested":true,
         "software_actor_tested":true,"software_lease_tested":true,"software_private_control_tested":false,
         "software_authorization_tested":false,"software_repeat_rendering_tested":false,
-        "timed_condition_rendering_tested":true,"chord_condition_rendering_tested":true})).unwrap()).unwrap();
+        "timed_condition_rendering_tested":true,"chord_condition_rendering_tested":true,
+        "pending_journal_protocol_tested":true,"pending_fallback_cadence_tested":true,
+        "delayed_gesture_arbitration_tested":false})).unwrap()).unwrap();
 }
