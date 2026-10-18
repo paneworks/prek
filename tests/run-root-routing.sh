@@ -7,9 +7,11 @@ if [[ ${1:-} == --help ]]; then
 Usage: ./tests/run-root-routing.sh
 Launch as your regular user, without sudo. The built runner prompts when ready.
 Runs fourteen routing, eight recovery, two transport-characterization, one
-generated-keyboard and one managed-worker gate (version-8 receipt, 26 cases).
-The managed gate logs eight kernel phases, software admission, idle lease expiry,
-consumer neutral drain and worker cleanup.
+generated-keyboard and one managed-worker gate (version-9 receipt, 26 cases).
+The managed gate logs nine kernel phases, single-counterpart keyboard/relative
+projection and cadence-preserving fallback, software admission, idle lease expiry,
+consumer neutral drain and worker cleanup. Native hybrid MT/compositor and
+production authorization are not tested.
 Repeat/fuzz probes check kernel behavior, not transparent passthrough support.
 No physical input devices are opened and no production routing is enabled.
 Temporarily installs a test-only runtime udev rule, reloads rules without a trigger,

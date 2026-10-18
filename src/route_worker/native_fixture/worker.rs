@@ -292,14 +292,31 @@ pub(super) fn run() -> io::Result<()> {
                 batch.sort_by(|a, b| {
                     (a.at, &a.source, a.sequence).cmp(&(b.at, &b.source, b.sequence))
                 });
-                for frame in batch {
-                    stream.push(Record::Frame { frame })?;
+                for frame in &batch {
+                    stream.push(Record::Frame {
+                        frame: frame.clone(),
+                    })?;
                 }
                 pump(stream, &mut health, &sources)?;
                 step = id;
-                control::send(&mut fixture, &Notice::Stepped { id })?;
+                control::send(&mut fixture, &Notice::Stepped { id, inputs: batch })?;
             }
-            Request::Finish {} if step == 9 => {
+            Request::Idle { id } if id == step + 1 => {
+                let until = Instant::now() + Duration::from_millis(120);
+                while Instant::now() < until {
+                    for reader in readers.iter_mut() {
+                        if !reader.drain_complete()?.is_empty() {
+                            return Err(invalid("managed idle advanced before input was drained"));
+                        }
+                    }
+                    stream.push(Record::Tick { at: monotonic()? })?;
+                    pump(stream, &mut health, &sources)?;
+                    thread::sleep(Duration::from_millis(1));
+                }
+                step = id;
+                control::send(&mut fixture, &Notice::Stepped { id, inputs: vec![] })?;
+            }
+            Request::Finish {} if step == 12 => {
                 stream.shutdown();
                 for (reader, source) in readers.drain(..).zip(&sources) {
                     drop(reader);

@@ -68,13 +68,15 @@ def managed_phases():
             dict(phase="software_expiry", raw0=[], raw1=[], generated=[[42, 0]],
                  raw0_times_ns=[], raw1_times_ns=[], generated_times_ns=[100_000_000]),
             dict(phase="mixed", raw0=[[31, 1], [31, 0]], raw1=[], generated=[[42, 1], [42, 2], [42, 0]],
-                 raw0_times_ns=[200_000_003, 200_000_005], raw1_times_ns=[], generated_times_ns=[200_000_001, 200_000_002, 200_000_004]),
+                 raw0_times_ns=[200_000_003, 200_000_005, 200_000_006], raw1_times_ns=[], generated_times_ns=[200_000_001, 200_000_002, 200_000_004]),
+            dict(phase="hybrid_fallback", raw0=[[32, 1], [32, 0]], raw1=[], generated=[],
+                 raw0_times_ns=[310_000_000, 390_000_000], raw1_times_ns=[], generated_times_ns=[]),
             dict(phase="cross_source", raw0=[], raw1=[[31, 1], [31, 0]], generated=[[42, 1]],
-                 raw0_times_ns=[], raw1_times_ns=[200_000_011], generated_times_ns=[200_000_010]),
+                 raw0_times_ns=[], raw1_times_ns=[500_000_011], generated_times_ns=[500_000_010]),
             dict(phase="software_physical", raw0=[], raw1=[], generated=[[42, 2]],
-                 raw0_times_ns=[], raw1_times_ns=[], generated_times_ns=[200_005_000]),
+                 raw0_times_ns=[], raw1_times_ns=[], generated_times_ns=[500_005_000]),
             dict(phase="revocation", raw0=[[31, 1], [31, 0]], raw1=[], generated=[[42, 0]],
-                 raw0_times_ns=[200_010_001], raw1_times_ns=[], generated_times_ns=[200_010_000])]
+                 raw0_times_ns=[500_010_001], raw1_times_ns=[], generated_times_ns=[500_010_000])]
 
 
 def managed_software():
@@ -85,8 +87,8 @@ def managed_software():
                (3, 1, "open", True, 17000), (3, 2, "press", True, 18000),
                (2, 3, "close", True, 31000), (3, 3, "repeat", True, 32000), (3, 4, "renew", True, 33000),
                (3, 5, "renew", False, 100_001_000), (3, 1, "open", False, 100_002_000),
-               (4, 1, "open", True, 200_001_000), (4, 2, "press", True, 200_002_000),
-               (4, 3, "repeat", True, 200_003_000), (4, 4, "close", True, 200_006_000)]
+               (4, 1, "open", True, 500_001_000), (4, 2, "press", True, 500_002_000),
+               (4, 3, "repeat", True, 500_003_000), (4, 4, "close", True, 500_006_000)]
     receipts = []
     for index, (producer, sequence, kind, accepted, at) in enumerate(entries):
         operation = dict(kind=kind)
@@ -108,17 +110,38 @@ def managed_software():
 
 
 def managed_drain():
-    return dict(version=1, nonce=[1, 2], requested_at_ns=200_010_000, neutral_at_ns=200_010_000,
-                deadline_ns=450_010_000, last_report_at_ns=200_010_000, keys_down=[], generated=[[42, 0]], reports=1)
+    return dict(version=1, nonce=[1, 2], requested_at_ns=500_010_000, neutral_at_ns=500_010_000,
+                deadline_ns=750_010_000, last_report_at_ns=500_010_000, keys_down=[], generated=[[42, 0]], reports=1)
 
 
-def managed_output(phases=None, drains=None, software=None, **changes):
-    value = dict(version=3, status="passed", uid=0, physical_devices_opened=0,
+def managed_hybrid():
+    source = dict(device=1, generation=1, seat="seat0")
+    generated = dict(device=100, generation=1, seat="seat0")
+    capabilities = {"0": [0], "1": [30, 31, 32], "2": [0]}
+    def frame(sequence, at, values, identity=source):
+        return dict(source=identity, sequence=sequence, at=dict(secs=0, nanos=at),
+                    events=[dict(kind=kind, code=code, value=value) for kind, code, value in values] + [dict(kind=0, code=0, value=0)])
+    mixed_input = frame(1, 199_000_000, [(2, 0, 7), (1, 30, 1), (1, 30, 2), (1, 31, 1), (2, 0, 9), (1, 30, 0), (1, 31, 0)])
+    mixed_raw = [frame(1, 200_000_003, [(1, 31, 1)]), frame(2, 200_000_005, [(1, 31, 0)]), frame(3, 200_000_006, [(2, 0, 7), (2, 0, 9)])]
+    mixed_generated = [frame(7 + index, at, [(1, 42, state)], generated)
+                       for index, (at, state) in enumerate(zip((200_000_001, 200_000_002, 200_000_004), (1, 2, 0)))]
+    return dict(version=1, source=source, generated_source=generated, counterpart_event_nodes=1,
+                counterpart=dict(path="/dev/input/event101", descriptor=dict(source=source, capabilities=capabilities,
+                    isolated=True, marker="prek/test/0000000000000001/0000000000000001/00000000000000000000000000000001", **{"class": "mouse"})),
+                observed_capabilities=capabilities, mixed_input=mixed_input, mixed_raw=mixed_raw, mixed_generated=mixed_generated,
+                fallback_inputs=[frame(2, 210_000_000, [(2, 0, 7), (1, 32, 1)]), frame(3, 290_000_000, [(2, 0, 9), (1, 32, 0)])],
+                fallback_raw=[frame(4, 310_000_000, [(2, 0, 7), (1, 32, 1)]), frame(5, 390_000_000, [(2, 0, 9), (1, 32, 0)])],
+                fallback_generated=[], scheduler_slack_ns=20_000_000, physical_devices_opened=0, compositor_delivery_tested=False, mt_tested=False)
+
+
+def managed_output(phases=None, drains=None, software=None, hybrid=None, **changes):
+    value = dict(version=4, status="passed", uid=0, physical_devices_opened=0,
                  worker_binding_tested=True, private_control_authenticated=True,
                  consumer_neutral_drain_tested=True, consumer_neutral_drain_acknowledgements=1,
                  raw_outputs=2, generated_outputs=1, source_readers_grabbed=2,
                  native_projection_tested=True, native_repeat_tested=True, native_cancellation_tested=True,
                  kernel_write_order_tested=True, native_partial_write_tested=False,
+                 hybrid_relative_tested=True, hybrid_counterpart_tested=True, hybrid_fallback_cadence_tested=True, hybrid_mt_tested=False,
                  software_producer_control_tested=True, software_producer_expiry_tested=True,
                  software_producer_rejection_tested=True, software_physical_ownership_tested=True,
                  software_request_acknowledgements=21, software_rejections=5, software_public_authorization_tested=False,
@@ -129,15 +152,17 @@ def managed_output(phases=None, drains=None, software=None, **changes):
     phases = managed_phases() if phases is None else phases
     drains = [managed_drain()] if drains is None else drains
     software = managed_software() if software is None else software
+    hybrid = [managed_hybrid()] if hybrid is None else hybrid
     return ("".join(root.MANAGED_PHASE + json.dumps(phase) + "\n" for phase in phases)
             + "".join(root.MANAGED_DRAIN + json.dumps(drain) + "\n" for drain in drains)
             + "".join(root.MANAGED_SOFTWARE + json.dumps(receipt) + "\n" for receipt in software)
+            + "".join(root.MANAGED_HYBRID + json.dumps(receipt) + "\n" for receipt in hybrid)
             + root.MANAGED_RESULT + json.dumps(value) + "\n")
 
 
 class KernelReceipt(unittest.TestCase):
     def value(self):
-        return dict(version=8, status="passed", uid=0, kernel=os.uname().release,
+        return dict(version=9, status="passed", uid=0, kernel=os.uname().release,
                     tests=sorted(root.ALL_EXPECTED), passed=len(root.ALL_EXPECTED),
                     routing_passed=len(root.EXPECTED), recovery_passed=8, physical_devices_opened=0,
                     repeat_characterization_passed=1, repeat_passthrough_tested=False,
@@ -148,6 +173,8 @@ class KernelReceipt(unittest.TestCase):
                     managed_key_worker_consumer_drain_tested=True,
                     managed_key_worker_software_control_tested=True, managed_key_worker_software_expiry_tested=True,
                     managed_key_worker_software_authorization_tested=False,
+                    managed_key_worker_hybrid_relative_tested=True, managed_key_worker_hybrid_counterpart_tested=True,
+                    managed_key_worker_hybrid_fallback_cadence_tested=True, managed_key_worker_hybrid_mt_tested=False,
                     managed_key_worker_compositor_tested=False, managed_key_worker_partial_write_tested=False,
                     model_desktop_context=True, production_route_admission_tested=False,
                     compositor_consumer_retirement_tested=False, rule_removed=True, registry_clean=True,
@@ -162,6 +189,69 @@ class KernelReceipt(unittest.TestCase):
         for value in ["", "skipped\n", valid * 2, valid + "extra\n", valid.replace(root.MANAGED_CASE, "foreign")]:
             with self.subTest(value=value), self.assertRaises(ValueError):
                 root.managed_inventory(value)
+
+    def test_hybrid_evidence_requires_one_counterpart_and_every_original_report(self):
+        value = root.managed_hybrid(managed_output(), managed_phases())
+        self.assertEqual(value["counterpart_event_nodes"], 1)
+        self.assertFalse(value["mt_tested"])
+        for evidence in ([], [managed_hybrid(), managed_hybrid()], [{}]):
+            with self.subTest(evidence=evidence), self.assertRaises(ValueError):
+                root.managed_result(managed_output(hybrid=evidence))
+        for field in value:
+            incomplete = managed_hybrid()
+            del incomplete[field]
+            with self.subTest(missing=field), self.assertRaises(ValueError):
+                root.managed_result(managed_output(hybrid=[incomplete]))
+
+    def test_hybrid_projection_metadata_clocks_and_kernel_correlation_are_strict(self):
+        for change in ("node-count", "path", "observed", "declared", "source", "generated-alias", "mixed-input", "mixed-tail",
+                       "mixed-timing", "input-gap", "output-gap", "output-payload", "extra-generated", "bool", "compositor", "mt"):
+            value = managed_hybrid()
+            if change == "node-count":
+                value["counterpart_event_nodes"] = 2
+            elif change == "path":
+                value["counterpart"]["path"] = "/tmp/event101"
+            elif change == "observed":
+                value["observed_capabilities"] = {"0": [0], "1": [30, 31, 32]}
+            elif change == "declared":
+                value["counterpart"]["descriptor"]["class"] = "keyboard"
+            elif change == "source":
+                value["mixed_raw"][0]["source"] = dict(device=2, generation=1, seat="seat0")
+            elif change == "generated-alias":
+                value["generated_source"] = value["source"]
+            elif change == "mixed-input":
+                value["mixed_input"]["events"].pop(0)
+            elif change == "mixed-tail":
+                value["mixed_raw"][-1]["events"].reverse()
+            elif change == "mixed-timing":
+                value["mixed_raw"][-1]["at"]["nanos"] += 1
+            elif change == "input-gap":
+                value["fallback_inputs"][1]["at"]["nanos"] = 211_000_000
+            elif change == "output-gap":
+                value["fallback_raw"][1]["at"]["nanos"] = 311_000_000
+            elif change == "output-payload":
+                value["fallback_raw"][0]["events"][0]["value"] = 8
+            elif change == "extra-generated":
+                value["fallback_generated"] = value["mixed_generated"]
+            elif change == "bool":
+                value["mixed_input"]["events"][1]["value"] = True
+            elif change == "compositor":
+                value["compositor_delivery_tested"] = True
+            else:
+                value["mt_tested"] = True
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                root.managed_result(managed_output(hybrid=[value]))
+
+    def test_old_managed_and_root_receipts_cannot_claim_native_hybrid_evidence(self):
+        with self.assertRaises(ValueError):
+            root.managed_result(managed_output(version=3))
+        old = self.value()
+        old["version"] = 8
+        for field in list(old):
+            if field.startswith("managed_key_worker_hybrid_"):
+                del old[field]
+        with self.assertRaises(ValueError):
+            root.receipt(self.line(old))
 
     def test_managed_scope_is_exact_typed_and_cannot_promote_unproven_gates(self):
         valid = managed_output()
@@ -233,7 +323,7 @@ class KernelReceipt(unittest.TestCase):
                 root.managed_result(managed_output(software=receipts))
 
     def test_software_expiry_and_settled_before_close_are_correlated_to_kernel_reports(self):
-        for index, at in [(0, 3000), (3, 99_998_000), (3, 350_000_000), (6, 200_007_000)]:
+        for index, at in [(0, 3000), (3, 99_998_000), (3, 350_000_000), (7, 500_007_000)]:
             phases = managed_phases()
             phases[index]["generated_times_ns"][0] = at
             with self.subTest(index=index, at=at), self.assertRaises(ValueError):

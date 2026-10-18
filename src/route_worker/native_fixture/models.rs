@@ -1,7 +1,11 @@
 use super::*;
 
 fn fixtures() -> (Vec<Device>, Vec<Endpoint>) {
-    let devices = vec![kernel::fixture(false), kernel::fixture(false)];
+    let mut devices = vec![kernel::fixture(false), kernel::fixture(false)];
+    for device in &mut devices {
+        device.capabilities.insert(EV_KEY, vec![30, 31, 32]);
+    }
+    devices[0].capabilities.insert(EV_REL, vec![0]);
     let endpoints = devices
         .iter()
         .enumerate()
@@ -22,16 +26,52 @@ fn fixtures() -> (Vec<Device>, Vec<Endpoint>) {
 }
 
 #[test]
-fn configuration_is_an_exact_two_source_consuming_remap() {
+fn configuration_is_a_two_source_hybrid_remap_with_bounded_tap_fallback() {
     let (devices, endpoints) = fixtures();
     worker::validate_setup(&devices, &endpoints).unwrap();
     let config = configuration(&devices).unwrap();
-    assert_eq!(config.rules.len(), 1);
+    assert_eq!(config.rules.len(), 2);
     assert_eq!(config.rules[0].delivery, Delivery::Buffer);
     assert_eq!(config.rules[0].trigger, Trigger::Key { key: Key(30) });
     assert_eq!(config.rules[0].action, Action::Remap { key: Key(42) });
     assert!(config.devices["source0"].matches(&devices[0]));
     assert!(!config.devices["source0"].matches(&devices[1]));
+    assert_eq!(
+        config.rules[1].trigger,
+        Trigger::ButtonTaps {
+            key: Key(32),
+            count: 2
+        }
+    );
+    assert_eq!(config.timing.tap_gap, Millis(20));
+    assert_eq!(config.timing.decision_window, Millis(200));
+    assert!(config.rules[0].priority > config.rules[1].priority);
+}
+
+#[test]
+fn hybrid_publication_serializes_one_full_capability_counterpart() {
+    let (devices, _) = fixtures();
+    let descriptor = kernel::descriptor(&devices[0])
+        .for_isolated()
+        .unwrap()
+        .bind_publication(Epoch([3, 4]))
+        .unwrap();
+    let endpoint = Endpoint {
+        path: "/dev/input/event101".into(),
+        descriptor,
+    };
+    endpoint.validate().unwrap();
+    assert_eq!(endpoint.descriptor.fixture_source(), Some(&devices[0]));
+    let value = serde_json::to_value(endpoint).unwrap();
+    assert_eq!(value["descriptor"]["class"], "mouse");
+    assert_eq!(
+        value["descriptor"]["capabilities"],
+        serde_json::json!({"0":[0],"1":[30,31,32],"2":[0]})
+    );
+    assert_eq!(
+        value["descriptor"]["source"],
+        serde_json::to_value(&devices[0].source).unwrap()
+    );
 }
 
 #[test]
@@ -135,6 +175,7 @@ fn fixture_protocol_rejects_extra_fields_and_unknown_messages() {
         serde_json::json!({"fixture":"step","id":1,"frames":1,"extra":true}),
         serde_json::json!({"fixture":"foreign"}),
         serde_json::json!({"fixture":"arm","command":["sh"]}),
+        serde_json::json!({"fixture":"idle","id":1,"until":999}),
     ] {
         assert!(serde_json::from_value::<Request>(value).is_err());
     }

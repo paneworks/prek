@@ -32,7 +32,7 @@ use std::{
 
 nix::ioctl_write_ptr!(set_clock, b'E', 0xa0, libc::c_int);
 
-fn capability_bits(raw: &RawDevice, kind: u16) -> Vec<u16> {
+pub(crate) fn capability_bits(raw: &RawDevice, kind: u16) -> Vec<u16> {
     let mut bytes = [0u8; 128];
     let request = nix::request_code_read!(b'E', 0x20 + u32::from(kind), bytes.len());
     // SAFETY: a live owned evdev fd; the kernel receives exactly the writable

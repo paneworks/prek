@@ -160,7 +160,7 @@ Logs belong to your regular user under `target/root-routing/run-*`; `latest`
 points to that attempt. `console.log` records build, wrapper and cleanup output;
 `kernel.log` retains root probe stdout. `status.json` records running/passed/failed
 and the final exit code. `receipt.json` is written only after checking one complete
-version-8 root receipt, the exact fourteen routing, eight recovery, two transport
+version-9 root receipt, the exact fourteen routing, eight recovery, two transport
 characterization, one generated-keyboard and one managed-worker inventory, all twenty-six tests actually executed and passed,
 cleanup flags and the explicit scope limits. The recovery summary must match its
 eight per-case results. The repeat case must supply its complete typed observation
@@ -170,10 +170,17 @@ typed observation record and exactly one passing result, while retaining
 `fuzz_passthrough_tested=false`. The generated-keyboard case requires a complete
 typed record and one passing result, retaining false authorization, compositor,
 worker-binding and partial-native-write scope flags. The separate managed-worker
-record requires actual worker binding, eight correlated typed kernel phases and
-all twenty-one software admission records,
-while retaining its false public-grant, production-loop and compositor scope flags.
-Older version-2/3/4/5/6/7 receipts
+record requires actual worker binding, nine correlated typed kernel phases,
+all twenty-one software admission records and a complete hybrid report receipt.
+The latter correlates the actual grabbed keyboard/relative source, one counterpart
+event node and exact observed kernel capabilities, generated remap/repeat/release
+ordering, an indivisible relative tail and unmatched whole-report fallback within
+the original 20 ms scheduler slack. Its input clocks come from the worker's real
+source reader, not requested injection timestamps. No native hybrid MT or
+compositor delivery is claimed. This is still a user-run acceptance gate: a
+build or parser-model pass does not establish the new kernel behavior.
+The managed record retains false public-grant, production-loop and compositor scope flags.
+Older version-2/3/4/5/6/7/8 receipts
 are not current acceptance.
 Skips and zero-test runs
 cannot pass. Tell the agent when the script finishes so it can inspect these files.

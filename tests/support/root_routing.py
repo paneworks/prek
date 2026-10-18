@@ -44,6 +44,7 @@ MANAGED_RESULT = "PREK_MANAGED_KEY_WORKER_RESULT="
 MANAGED_PHASE = "PREK_MANAGED_KEY_WORKER_PHASE="
 MANAGED_DRAIN = "PREK_MANAGED_KEY_WORKER_DRAIN="
 MANAGED_SOFTWARE = "PREK_MANAGED_KEY_WORKER_SOFTWARE="
+MANAGED_HYBRID = "PREK_MANAGED_KEY_WORKER_HYBRID="
 ALL_EXPECTED = EXPECTED | RECOVERY_EXPECTED | {REPEAT_CASE, FUZZ_CASE, KEY_OUTPUT_CASE, MANAGED_CASE}
 RECOVERY_INVENTORY = "PREK_KERNEL_RECOVERY_INVENTORY_V1"
 RECOVERY_RESULT = "PREK_KERNEL_RECOVERY_RESULT="
@@ -252,19 +253,95 @@ def managed_software(stdout, phases):
             or receipts[15]["sent_at_ns"] + 999 < release \
             or phases[0]["generated_times_ns"][0] + 999 < receipts[3]["sent_at_ns"] \
             or phases[0]["generated_times_ns"][-1] > receipts[6]["sent_at_ns"] \
-            or phases[6]["generated_times_ns"][0] > receipts[20]["sent_at_ns"]:
+            or phases[7]["generated_times_ns"][0] > receipts[20]["sent_at_ns"]:
         raise ValueError("managed software kernel reports do not match request lifetimes")
     return receipts
 
 
+def managed_hybrid(stdout, phases):
+    values = [json.loads(line[len(MANAGED_HYBRID):]) for line in stdout.splitlines() if line.startswith(MANAGED_HYBRID)]
+    fields = {"version", "source", "generated_source", "counterpart_event_nodes", "counterpart", "observed_capabilities",
+              "mixed_input", "mixed_raw", "mixed_generated", "fallback_inputs", "fallback_raw", "fallback_generated",
+              "scheduler_slack_ns", "physical_devices_opened", "compositor_delivery_tested", "mt_tested"}
+    if len(values) != 1 or not isinstance(values[0], dict) or set(values[0]) != fields:
+        raise ValueError("managed hybrid evidence is missing or has a different schema")
+    value = values[0]
+    for key, expected in dict(version=1, counterpart_event_nodes=1, scheduler_slack_ns=20_000_000,
+                              physical_devices_opened=0, compositor_delivery_tested=False, mt_tested=False).items():
+        if type(value[key]) is not type(expected) or value[key] != expected:
+            raise ValueError("managed hybrid scope differs")
+    def equal(left, right):
+        return json.dumps(left, sort_keys=True) == json.dumps(right, sort_keys=True)
+    def source(identity):
+        if (not isinstance(identity, dict) or set(identity) != {"seat", "device", "generation"} or identity["seat"] != "seat0"
+                or any(type(identity[key]) is not int or not 0 < identity[key] < 2**64 for key in ("device", "generation"))):
+            raise ValueError("managed hybrid source incarnation differs")
+    def stamp(time):
+        if (not isinstance(time, dict) or set(time) != {"secs", "nanos"}
+                or any(type(time[key]) is not int for key in time) or not 0 <= time["secs"] < 2**64
+                or not 0 <= time["nanos"] < 1_000_000_000):
+            raise ValueError("managed hybrid clock differs")
+        return time["secs"] * 1_000_000_000 + time["nanos"]
+    def events(values):
+        return [dict(kind=kind, code=code, value=value) for kind, code, value in values] + [dict(kind=0, code=0, value=0)]
+    def frames(reports, identity, payloads):
+        if not isinstance(reports, list) or len(reports) != len(payloads):
+            raise ValueError("managed hybrid report count differs")
+        previous = 0
+        times = []
+        for frame, payload in zip(reports, payloads):
+            if (not isinstance(frame, dict) or set(frame) != {"source", "sequence", "at", "events"}
+                    or not equal(frame["source"], identity) or type(frame["sequence"]) is not int
+                    or not previous < frame["sequence"] < 2**64 or not equal(frame["events"], payload)):
+                raise ValueError("managed hybrid report identity or payload differs")
+            previous = frame["sequence"]
+            times.append(stamp(frame["at"]))
+        if times != sorted(times):
+            raise ValueError("managed hybrid reports are not monotonic")
+        return times
+    source(value["source"])
+    source(value["generated_source"])
+    if value["source"]["device"] == value["generated_source"]["device"]:
+        raise ValueError("managed hybrid counterpart aliases its generated keyboard")
+    counterpart = value["counterpart"]
+    capabilities = {"0": [0], "1": [30, 31, 32], "2": [0]}
+    if (not isinstance(counterpart, dict) or set(counterpart) != {"path", "descriptor"}
+            or not isinstance(counterpart["path"], str) or not re.fullmatch(r"/dev/input/event[0-9]+", counterpart["path"])):
+        raise ValueError("managed hybrid counterpart is not one event node")
+    descriptor = counterpart["descriptor"]
+    if (not isinstance(descriptor, dict) or descriptor.get("isolated") is not True or descriptor.get("class") != "mouse"
+            or not equal(descriptor.get("source"), value["source"]) or not equal(descriptor.get("capabilities"), capabilities)
+            or not equal(value["observed_capabilities"], capabilities) or not isinstance(descriptor.get("marker"), str)
+            or not descriptor["marker"].startswith("prek/test/") or len(descriptor["marker"]) > 1024
+            or any(ord(char) < 32 or ord(char) == 127 for char in descriptor["marker"])):
+        raise ValueError("managed hybrid published and kernel capabilities differ")
+    mixed_input = frames([value["mixed_input"]], value["source"], [events([
+        (2, 0, 7), (1, 30, 1), (1, 30, 2), (1, 31, 1), (2, 0, 9), (1, 30, 0), (1, 31, 0)])])
+    mixed_raw = frames(value["mixed_raw"], value["source"], [events([(1, 31, 1)]), events([(1, 31, 0)]), events([(2, 0, 7), (2, 0, 9)])])
+    mixed_generated = frames(value["mixed_generated"], value["generated_source"], [events([(1, 42, state)]) for state in (1, 2, 0)])
+    fallback_payloads = [events([(2, 0, 7), (1, 32, 1)]), events([(2, 0, 9), (1, 32, 0)])]
+    inputs = frames(value["fallback_inputs"], value["source"], fallback_payloads)
+    outputs = frames(value["fallback_raw"], value["source"], fallback_payloads)
+    if (value["fallback_generated"] != [] or mixed_input[0] > min(mixed_raw + mixed_generated)
+            or inputs[0] <= max(mixed_raw + mixed_generated) or inputs[1] - inputs[0] < 80_000_000
+            or outputs[0] < inputs[1] or outputs[0] - inputs[0] > 220_000_000
+            or abs((outputs[1] - outputs[0]) - (inputs[1] - inputs[0])) > value["scheduler_slack_ns"]
+            or not mixed_generated[0] <= mixed_generated[1] < mixed_raw[0] < mixed_generated[2] < mixed_raw[1] <= mixed_raw[2]
+            or mixed_raw != phases[4]["raw0_times_ns"] or mixed_generated != phases[4]["generated_times_ns"]
+            or outputs != phases[5]["raw0_times_ns"]):
+        raise ValueError("managed hybrid kernel evidence differs from its chronology or phase receipts")
+    return value
+
+
 def managed_result(stdout):
     values = [json.loads(line[len(MANAGED_RESULT):]) for line in stdout.splitlines() if line.startswith(MANAGED_RESULT)]
-    expected = dict(version=3, status="passed", uid=0, physical_devices_opened=0,
+    expected = dict(version=4, status="passed", uid=0, physical_devices_opened=0,
                     worker_binding_tested=True, private_control_authenticated=True,
                     consumer_neutral_drain_tested=True, consumer_neutral_drain_acknowledgements=1,
                     raw_outputs=2, generated_outputs=1, source_readers_grabbed=2,
                     native_projection_tested=True, native_repeat_tested=True, native_cancellation_tested=True,
                     kernel_write_order_tested=True, native_partial_write_tested=False,
+                    hybrid_relative_tested=True, hybrid_counterpart_tested=True, hybrid_fallback_cadence_tested=True, hybrid_mt_tested=False,
                     software_producer_control_tested=True, software_producer_expiry_tested=True,
                     software_producer_rejection_tested=True, software_physical_ownership_tested=True,
                     software_request_acknowledgements=21, software_rejections=5, software_public_authorization_tested=False,
@@ -277,15 +354,16 @@ def managed_result(stdout):
         if type(values[0][key]) is not type(wanted) or values[0][key] != wanted:
             raise ValueError(f"invalid managed native result: {key}")
     phases = [json.loads(line[len(MANAGED_PHASE):]) for line in stdout.splitlines() if line.startswith(MANAGED_PHASE)]
-    if len(phases) != 8 or [phase.get("phase") for phase in phases if isinstance(phase, dict)] != ["software_fast", "software_overlap", "software_sibling", "software_expiry", "mixed", "cross_source", "software_physical", "revocation"]:
-        raise ValueError("managed native worker did not execute eight exact phases")
+    if len(phases) != 9 or [phase.get("phase") for phase in phases if isinstance(phase, dict)] != ["software_fast", "software_overlap", "software_sibling", "software_expiry", "mixed", "hybrid_fallback", "cross_source", "software_physical", "revocation"]:
+        raise ValueError("managed native worker did not execute nine exact phases")
     wanted_edges = [([], [], [[42, 1], [42, 2], [42, 0]]), ([], [], [[42, 1]]),
                     ([], [], [[42, 2]]), ([], [], [[42, 0]]),
                     ([[31, 1], [31, 0]], [], [[42, 1], [42, 2], [42, 0]]),
+                    ([[32, 1], [32, 0]], [], []),
                     ([], [[31, 1], [31, 0]], [[42, 1]]),
                     ([], [], [[42, 2]]),
                     ([[31, 1], [31, 0]], [], [[42, 0]])]
-    counts = [(0, 0, 3), (0, 0, 1), (0, 0, 1), (0, 0, 1), (2, 0, 3), (0, 1, 1), (0, 0, 1), (1, 0, 1)]
+    counts = [(0, 0, 3), (0, 0, 1), (0, 0, 1), (0, 0, 1), (3, 0, 3), (2, 0, 0), (0, 1, 1), (0, 0, 1), (1, 0, 1)]
     for phase, edges, frames in zip(phases, wanted_edges, counts):
         if set(phase) != {"phase", "raw0", "raw1", "generated", "raw0_times_ns", "raw1_times_ns", "generated_times_ns"}:
             raise ValueError("managed phase has a different schema")
@@ -296,7 +374,7 @@ def managed_result(stdout):
                 raise ValueError("managed phase key stream differs")
             if not isinstance(times, list) or len(times) != count or any(type(value) is not int or value <= 0 for value in times):
                 raise ValueError("managed phase kernel timestamps differ")
-    mixed, cross, cancelled = phases[4], phases[5], phases[7]
+    mixed, cross, cancelled = phases[4], phases[6], phases[8]
     g, r = mixed["generated_times_ns"], mixed["raw0_times_ns"]
     if not (g[0] <= g[1] < r[0] < g[2] < r[1]) \
             or cross["generated_times_ns"][0] >= cross["raw1_times_ns"][0] \
@@ -305,10 +383,12 @@ def managed_result(stdout):
     previous = 0
     for phase in phases:
         times = phase["generated_times_ns"]
-        if times != sorted(times) or times[0] < previous:
+        if times != sorted(times) or times and times[0] < previous:
             raise ValueError("managed generated phases are not monotonic")
-        previous = times[-1]
+        if times:
+            previous = times[-1]
     managed_software(stdout, phases)
+    managed_hybrid(stdout, phases)
     drains = [json.loads(line[len(MANAGED_DRAIN):]) for line in stdout.splitlines() if line.startswith(MANAGED_DRAIN)]
     if len(drains) != 1 or not isinstance(drains[0], dict):
         raise ValueError("managed native worker did not acknowledge exactly one consumer drain")
@@ -339,7 +419,7 @@ def receipt(stdout):
     if len(values) != 1 or not isinstance(values[0], dict):
         raise ValueError("expected exactly one complete isolated kernel receipt")
     value = values[0]
-    expected = dict(version=8, status="passed", uid=0, passed=len(ALL_EXPECTED),
+    expected = dict(version=9, status="passed", uid=0, passed=len(ALL_EXPECTED),
                     routing_passed=len(EXPECTED), recovery_passed=len(RECOVERY_EXPECTED),
                     repeat_characterization_passed=1, repeat_passthrough_tested=False,
                     fuzz_characterization_passed=1, fuzz_passthrough_tested=False,
@@ -349,6 +429,8 @@ def receipt(stdout):
                     managed_key_worker_consumer_drain_tested=True,
                     managed_key_worker_software_control_tested=True, managed_key_worker_software_expiry_tested=True,
                     managed_key_worker_software_authorization_tested=False,
+                    managed_key_worker_hybrid_relative_tested=True, managed_key_worker_hybrid_counterpart_tested=True,
+                    managed_key_worker_hybrid_fallback_cadence_tested=True, managed_key_worker_hybrid_mt_tested=False,
                     managed_key_worker_compositor_tested=False, managed_key_worker_partial_write_tested=False,
                     physical_devices_opened=0, model_desktop_context=True,
                     production_route_admission_tested=False, compositor_consumer_retirement_tested=False,
@@ -547,7 +629,7 @@ def run(args):
             raise RuntimeError("isolated device metadata remains; preserving it for inspection")
         if registry_snapshot(registry) != original_registry:
             raise RuntimeError("unrelated registry state changed; preserving it for inspection")
-    print(PREFIX + json.dumps(dict(version=8, status="passed", uid=0, kernel=os.uname().release,
+    print(PREFIX + json.dumps(dict(version=9, status="passed", uid=0, kernel=os.uname().release,
           tests=sorted(ALL_EXPECTED), passed=len(ALL_EXPECTED), routing_passed=len(EXPECTED), recovery_passed=8, physical_devices_opened=0,
           repeat_characterization_passed=1, repeat_passthrough_tested=False,
           fuzz_characterization_passed=1, fuzz_passthrough_tested=False,
@@ -557,6 +639,8 @@ def run(args):
           managed_key_worker_consumer_drain_tested=True,
           managed_key_worker_software_control_tested=True, managed_key_worker_software_expiry_tested=True,
           managed_key_worker_software_authorization_tested=False,
+          managed_key_worker_hybrid_relative_tested=True, managed_key_worker_hybrid_counterpart_tested=True,
+          managed_key_worker_hybrid_fallback_cadence_tested=True, managed_key_worker_hybrid_mt_tested=False,
           managed_key_worker_compositor_tested=False, managed_key_worker_partial_write_tested=False,
           model_desktop_context=True, production_route_admission_tested=False,
           compositor_consumer_retirement_tested=False, rule_removed=True, registry_clean=True,

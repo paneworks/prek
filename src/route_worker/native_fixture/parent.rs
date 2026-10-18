@@ -1,5 +1,6 @@
 use super::*;
 
+mod hybrid;
 mod software;
 
 struct Parent {
@@ -16,6 +17,7 @@ struct Parent {
     captured: BTreeMap<Source, Vec<Frame>>,
     software: software::Control,
     step: u64,
+    last_inputs: Vec<Frame>,
     neutral_drains: BTreeMap<Source, crate::keys::drain::Request>,
     released: BTreeSet<Source>,
     finishing: bool,
@@ -35,12 +37,17 @@ impl Parent {
                         code: SYN_REPORT,
                         value: 0,
                     })
-                    || frame.events[..frame.events.len() - 1]
-                        .iter()
-                        .any(|event| event.kind != EV_KEY)
+                    || frame.events[..frame.events.len() - 1].iter().any(|event| {
+                        !self.endpoints[source]
+                            .descriptor
+                            .capabilities
+                            .get(&event.kind)
+                            .is_some_and(|codes| codes.contains(&event.code))
+                            || !matches!(event.kind, EV_KEY | EV_REL)
+                    })
                 {
                     return Err(invalid(
-                        "managed kernel output is not a complete key report",
+                        "managed kernel output is not a complete supported report",
                     ));
                 }
             }
@@ -255,15 +262,55 @@ impl Parent {
     fn step(&mut self, frames: usize) -> io::Result<()> {
         let id = self.step + 1;
         control::send(&mut self.fixture, &Request::Step { id, frames })?;
-        if !matches!(self.notice()?, Notice::Stepped { id: acknowledged } if acknowledged == id) {
+        self.stepped(id, frames)
+    }
+    fn stepped(&mut self, id: u64, frames: usize) -> io::Result<()> {
+        let Notice::Stepped {
+            id: acknowledged,
+            inputs,
+        } = self.notice()?
+        else {
+            return Err(invalid("managed step has no input acknowledgement"));
+        };
+        if acknowledged != id
+            || inputs.len() != frames
+            || inputs.iter().any(|frame| {
+                !self.endpoints.contains_key(&frame.source)
+                    || self.endpoints[&frame.source]
+                        .descriptor
+                        .is_generated_keyboard()
+            })
+        {
             return Err(invalid("managed step acknowledgement differs"));
         }
+        self.last_inputs = inputs;
         self.step = id;
         Ok(())
     }
     fn collect(
         &mut self,
         expected: &BTreeMap<Source, Vec<(u16, i32)>>,
+    ) -> io::Result<BTreeMap<Source, Vec<Frame>>> {
+        let expected = expected
+            .iter()
+            .map(|(source, keys)| {
+                (
+                    source.clone(),
+                    keys.iter()
+                        .map(|&(code, value)| RawEvent {
+                            kind: EV_KEY,
+                            code,
+                            value,
+                        })
+                        .collect(),
+                )
+            })
+            .collect();
+        self.collect_events(&expected)
+    }
+    fn collect_events(
+        &mut self,
+        expected: &BTreeMap<Source, Vec<RawEvent>>,
     ) -> io::Result<BTreeMap<Source, Vec<Frame>>> {
         let deadline = Instant::now() + Duration::from_millis(250);
         let mut frames: BTreeMap<Source, Vec<Frame>> = self
@@ -282,7 +329,7 @@ impl Parent {
             }
             let actual: BTreeMap<_, _> = frames
                 .iter()
-                .map(|(source, frames)| (source.clone(), edges(frames)))
+                .map(|(source, frames)| (source.clone(), payload(frames)))
                 .collect();
             if actual.iter().any(|(source, events)| {
                 !expected
@@ -327,6 +374,14 @@ fn edges(frames: &[Frame]) -> Vec<(u16, i32)> {
         .flat_map(|frame| &frame.events)
         .filter(|event| event.kind == EV_KEY)
         .map(|event| (event.code, event.value))
+        .collect()
+}
+fn payload(frames: &[Frame]) -> Vec<RawEvent> {
+    frames
+        .iter()
+        .flat_map(|frame| &frame.events)
+        .filter(|event| event.kind != EV_SYN)
+        .copied()
         .collect()
 }
 fn log_phase(
@@ -382,8 +437,9 @@ pub(super) fn run() -> io::Result<()> {
     let registry = kernel::authorized();
     let mut devices = vec![kernel::fixture(false), kernel::fixture(false)];
     for device in &mut devices {
-        device.capabilities.insert(EV_KEY, vec![30, 31]);
+        device.capabilities.insert(EV_KEY, vec![30, 31, 32]);
     }
+    devices[0].capabilities.insert(EV_REL, vec![0]);
     let mut producers: Vec<_> = devices
         .iter()
         .map(|device| {
@@ -426,6 +482,7 @@ pub(super) fn run() -> io::Result<()> {
         captured: BTreeMap::new(),
         software: software::Control::default(),
         step: 0,
+        last_inputs: vec![],
         neutral_drains: BTreeMap::new(),
         released: BTreeSet::new(),
         finishing: false,
@@ -461,7 +518,7 @@ pub(super) fn run() -> io::Result<()> {
             }
         } else if !devices
             .iter()
-            .any(|device| device.source == endpoint.descriptor.source)
+            .any(|device| endpoint.descriptor.fixture_source() == Some(device))
         {
             return Err(invalid("managed raw output is not an enrolled source"));
         }
@@ -493,23 +550,53 @@ pub(super) fn run() -> io::Result<()> {
         &mut producers[0],
         1,
         &[
+            (EV_REL, 0, 7),
             (EV_KEY, 30, 1),
             (EV_KEY, 30, 2),
             (EV_KEY, 31, 1),
+            (EV_REL, 0, 9),
             (EV_KEY, 30, 0),
             (EV_KEY, 31, 0),
         ],
     );
     parent.step(1)?;
-    let mixed = parent.collect(&expected(
+    let mut mixed_expected: BTreeMap<_, Vec<_>> = expected(
         vec![(31, 1), (31, 0)],
         vec![],
         vec![(42, 1), (42, 2), (42, 0)],
-    ))?;
+    )
+    .into_iter()
+    .map(|(source, keys)| {
+        (
+            source,
+            keys.into_iter()
+                .map(|(code, value)| RawEvent {
+                    kind: EV_KEY,
+                    code,
+                    value,
+                })
+                .collect(),
+        )
+    })
+    .collect();
+    mixed_expected.get_mut(&sources[0]).unwrap().extend([
+        RawEvent {
+            kind: EV_REL,
+            code: 0,
+            value: 7,
+        },
+        RawEvent {
+            kind: EV_REL,
+            code: 0,
+            value: 9,
+        },
+    ]);
+    let mixed_input = parent.last_inputs.clone();
+    let mixed = parent.collect_events(&mixed_expected)?;
     let keys = &mixed[&generated];
     let raw = &mixed[&sources[0]];
     if keys.len() != 3
-        || raw.len() != 2
+        || raw.len() != 3
         || !(keys[0].at <= keys[1].at
             && keys[1].at < raw[0].at
             && raw[0].at < keys[2].at
@@ -518,7 +605,14 @@ pub(super) fn run() -> io::Result<()> {
         return Err(invalid("managed native within-report write order differs"));
     }
     log_phase("mixed", &mixed, &sources, &generated);
-    kernel::send(&mut producers[0], 2, &[(EV_KEY, 30, 1)]);
+    parent.hybrid(
+        &mut producers[0],
+        &sources,
+        &generated,
+        &mixed_input,
+        &mixed,
+    )?;
+    kernel::send(&mut producers[0], 4, &[(EV_KEY, 30, 1)]);
     kernel::send(&mut producers[1], 1, &[(EV_KEY, 31, 1), (EV_KEY, 31, 0)]);
     parent.step(2)?;
     let cross = parent.collect(&expected(vec![], vec![(31, 1), (31, 0)], vec![(42, 1)]))?;
@@ -535,7 +629,7 @@ pub(super) fn run() -> io::Result<()> {
     parent.renew()?;
     kernel::send(
         &mut producers[0],
-        3,
+        5,
         &[
             (EV_KEY, 30, 2),
             (EV_KEY, 30, 0),
@@ -601,7 +695,7 @@ pub(super) fn run() -> io::Result<()> {
     }
     println!(
         "{RESULT}{}",
-        serde_json::json!({"version":3,"status":"passed","uid":0,"physical_devices_opened":0,"worker_binding_tested":true,"private_control_authenticated":true,"consumer_neutral_drain_tested":true,"consumer_neutral_drain_acknowledgements":1,"raw_outputs":2,"generated_outputs":1,"source_readers_grabbed":2,"native_projection_tested":true,"native_repeat_tested":true,"native_cancellation_tested":true,"kernel_write_order_tested":true,"software_producer_control_tested":true,"software_producer_expiry_tested":true,"software_producer_rejection_tested":true,"software_physical_ownership_tested":true,"software_request_acknowledgements":21,"software_rejections":5,"software_public_authorization_tested":false,"native_partial_write_tested":false,"broker_grant_tested":false,"context_authority_modeled":true,"production_input_loop_tested":false,"production_route_admission_tested":false,"compositor_delivery_tested":false,"keys_neutral":true,"worker_reaped":true,"owned_devices_removed":true})
+        serde_json::json!({"version":4,"status":"passed","uid":0,"physical_devices_opened":0,"worker_binding_tested":true,"private_control_authenticated":true,"consumer_neutral_drain_tested":true,"consumer_neutral_drain_acknowledgements":1,"raw_outputs":2,"generated_outputs":1,"source_readers_grabbed":2,"native_projection_tested":true,"native_repeat_tested":true,"native_cancellation_tested":true,"kernel_write_order_tested":true,"hybrid_relative_tested":true,"hybrid_counterpart_tested":true,"hybrid_fallback_cadence_tested":true,"hybrid_mt_tested":false,"software_producer_control_tested":true,"software_producer_expiry_tested":true,"software_producer_rejection_tested":true,"software_physical_ownership_tested":true,"software_request_acknowledgements":21,"software_rejections":5,"software_public_authorization_tested":false,"native_partial_write_tested":false,"broker_grant_tested":false,"context_authority_modeled":true,"production_input_loop_tested":false,"production_route_admission_tested":false,"compositor_delivery_tested":false,"keys_neutral":true,"worker_reaped":true,"owned_devices_removed":true})
     );
     Ok(())
 }

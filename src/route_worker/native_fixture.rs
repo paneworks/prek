@@ -1,8 +1,8 @@
 use super::*;
 use crate::{
-    config::{Action, Context, Delivery, Key, Scope, Selector, Trigger},
+    config::{Action, Context, Delivery, Key, Millis, Scope, Selector, Trigger},
     context::{Binding, SessionKind, Snapshot, State},
-    input::{EV_KEY, EV_SYN, Frame, RawEvent, SYN_REPORT},
+    input::{EV_KEY, EV_REL, EV_SYN, Frame, RawEvent, SYN_REPORT},
     protocol::{Capability, Epoch},
     supervisor::{Supervisor, WorkerIdentity},
     transport::{Consumer, ConsumerEvidence},
@@ -32,6 +32,7 @@ pub(super) const RESULT: &str = "PREK_MANAGED_KEY_WORKER_RESULT=";
 pub(super) const PHASE: &str = "PREK_MANAGED_KEY_WORKER_PHASE=";
 pub(super) const DRAIN: &str = "PREK_MANAGED_KEY_WORKER_DRAIN=";
 pub(super) const SOFTWARE: &str = "PREK_MANAGED_KEY_WORKER_SOFTWARE=";
+pub(super) const HYBRID: &str = "PREK_MANAGED_KEY_WORKER_HYBRID=";
 const WAIT: Duration = Duration::from_secs(5);
 
 fn invalid(error: impl std::fmt::Display) -> io::Error {
@@ -79,11 +80,29 @@ impl Endpoint {
                 "managed fixture endpoint is not its owned virtual node",
             ));
         }
-        Ok(kernel::Receiver::from_test_node(
-            &self.path,
-            source,
-            &self.descriptor.marker,
-        ))
+        let receiver =
+            kernel::Receiver::from_test_node(&self.path, source, &self.descriptor.marker);
+        if receiver
+            .raw
+            .supported_events()
+            .iter()
+            .map(|kind| kind.0)
+            .collect::<Vec<_>>()
+            != self
+                .descriptor
+                .capabilities
+                .keys()
+                .copied()
+                .collect::<Vec<_>>()
+            || self.descriptor.capabilities.iter().any(|(&kind, codes)| {
+                kind != EV_SYN && kernel::capability_bits(&receiver.raw, kind) != *codes
+            })
+        {
+            return Err(invalid(
+                "managed kernel capabilities differ from their publication",
+            ));
+        }
+        Ok(receiver)
     }
 }
 
@@ -101,6 +120,9 @@ enum Request {
         id: u64,
         frames: usize,
     },
+    Idle {
+        id: u64,
+    },
     Finish {},
 }
 #[derive(Serialize, Deserialize)]
@@ -113,6 +135,7 @@ enum Notice {
     Armed {},
     Stepped {
         id: u64,
+        inputs: Vec<Frame>,
     },
     Closed {},
 }
@@ -155,8 +178,23 @@ fn configuration(devices: &[Device]) -> io::Result<Config> {
     rule.layer = None;
     rule.when_mode = None;
     rule.delivery = Delivery::Buffer;
+    rule.priority = 10;
     rule.trigger = Trigger::Key { key: Key(30) };
     rule.action = Action::Remap { key: Key(42) };
+    let mut fallback = rule.clone();
+    fallback.id = "hybrid-double".into();
+    fallback.priority = 0;
+    fallback.trigger = Trigger::ButtonTaps {
+        key: Key(32),
+        count: 2,
+    };
+    fallback.action = Action::Keys {
+        keys: vec![Key(30)],
+    };
+    config.rules.push(fallback);
+    config.timing.join_window = Millis(1);
+    config.timing.decision_window = Millis(200);
+    config.timing.tap_gap = Millis(20);
     config.validate().map_err(invalid)?;
     Ok(config)
 }

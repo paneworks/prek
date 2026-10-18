@@ -31,12 +31,17 @@ production compositor/console acknowledgement.
 `Registry::prepare_generated_isolated_for_worker` retains the same authenticated
 worker binding for an explicitly isolated generated publication. The nondefault
 managed native test harness uses it with the actual Slot/Stream, owned kernel
-receivers and eight correlated key/timestamp phases, including the private
-software producer protocol, shared physical ownership and idle lease expiry.
+receivers and nine correlated kernel phases, including the private software
+producer protocol, shared physical ownership, idle lease expiry and hybrid
+keyboard/relative projection through one counterpart event node. The hybrid
+record retains the actual source reports, counterpart publication and observed
+kernel capabilities, generated/raw report boundaries and fallback cadence.
+Idle advancement first refuses unread source input; it does not fast-forward
+the clock. Native hybrid MT and compositor delivery are not exercised.
 Twenty-one bounded admission records distinguish acceptance from emission and
 require stale/forged scope rejection. Public software authentication remains
 untested. Its desktop context and
-source normalization are modeled; it does not open public grants or production
+device identities are modeled; it does not open public grants or production
 consumer admission. Build/inventory evidence is not kernel execution; only the
 user-launched [root runner](root-routing.md) can supply that receipt.
 
