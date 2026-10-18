@@ -155,8 +155,48 @@ permit structures. Broader resource-policy acceptance remains open. Callers must
 retire/recover on acceptance errors instead of silently dropping required input
 releases, and must never pass untrusted JSON frames as source-repeat evidence.
 
+### Raw projection queue (not yet connected to the sole worker)
+
+`Router::push_key_frame` is the per-press alternative to the router's existing
+whole-device ownership model. Its `KeyClaim` inputs must come from a trusted
+arbitrator that already validated the original fenced route work. The router
+checks its authorization counter, fresh-down position and increasing owner IDs;
+this is not a new broker permission or authority reconstructed from match JSON.
+`ConsumedKey` is an ownership receipt, not executable action work.
+
+Owned repeat/up edges drain even if later frames supply no claims. Duplicate
+owned releases remain suppressed until a genuinely fresh down chooses a new
+owner or the ordinary path. Other pressed keys stay independent. Effect-bearing
+consumption cuts precede omitted edges; observing cuts follow their original key.
+Drained duplicate edges create no automatic cut; explicit observing cuts still apply.
+Each nonempty fragment ends with `SYN_REPORT`. Unaffected reports keep their
+events intact. Only a single immediately adjacent `MSC_SCAN`/key pair can be
+transformed; the scan paired with an ordinary key stays with that key.
+
+Queued fragments have separate increasing output sequences. `input_span(ticket)`
+retains their original source sequence and coordinator event bounds until the
+full report is acknowledged. Original-sequence prefix queries use those input
+sequences, never the allocated fragment sequence. Position-prefix queries cover
+this router only; neither query proves delivery to a compositor consumer.
+
+All report/claim/cut validation and total fragment capacity checks happen before
+physical/ownership/queue mutation. Queue exhaustion includes inserted report
+boundaries. Output-sequence exhaustion cannot publish a prefix of a multi-report
+plan. The existing scheduler/write deadlines and fatal recovery rules remain.
+Legacy and selective modes cannot be mixed within one router incarnation.
+
+Transformed reports containing nonkeyboard data or ambiguous scan metadata
+currently fail with `UnsupportedProjection` and require recovery; untouched
+hybrid reports remain intact. These transformations, shared cross-source/raw-
+generated scheduling, fenced arbitration in `Routing`, managed-worker binding,
+repeat interleaving and native consumer acknowledgement are still required.
+The public synthetic capability remains closed. Existing Cage screenshots do
+not prove this new queue path.
+
 `oslo make test-key-positions` runs device-free original-position, edge-ordered
 activation, retained-cancellation and held-touch continuation regressions.
+`oslo make test-key-projection` runs per-press raw queue, scan association,
+complete-report cut, original-position, capacity and recovery models.
 `oslo make test-key-worker` runs device-free scope, ordering, ownership,
 cancellation, timeout and bounds regressions. `oslo make test-key-worker-cage`
 drives the actual scheduler through owned protocol keyboards and a rendered app

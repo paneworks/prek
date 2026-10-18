@@ -438,6 +438,11 @@ make.recipe{ name="test-key-positions",desc="ordered key edges, original positio
                sh.cargo("test","--locked","--lib","rules::tests::composition::motion")
              end }
 
+make.recipe{ name="test-key-projection",desc="per-press raw-key ownership and complete report projection; no devices",
+             run=function()
+               sh.cargo("test","--locked","--lib","router::keyboard::tests")
+             end }
+
 make.recipe{ name="test-native-key-worker",desc="managed generated-output slots, publication replies and native worker policy; no devices",
              run=function()
                sh.cargo("test","--locked","--lib","route_worker::keys::tests")

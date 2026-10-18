@@ -17,8 +17,10 @@ use std::{
     time::Duration,
 };
 mod chain;
+mod keyboard;
 use chain::Retention;
 pub use chain::{ChainAdmission, ChainToken, ClaimedChain};
+pub use keyboard::{ConsumedKey, InputSpan, KeyClaim, KeyProjection};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Policy {
@@ -85,6 +87,7 @@ pub enum Fault {
     Unauthorized,
     TooLate,
     WrongTicket,
+    UnsupportedProjection,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -229,6 +232,8 @@ pub struct Router {
     next_segment: u64,
     stopped: bool,
     recovered: bool,
+    keyboard: Option<keyboard::Ledger>,
+    positions: BTreeMap<u64, InputSpan>,
 }
 
 impl Router {
@@ -271,6 +276,8 @@ impl Router {
             next_segment: 0,
             stopped: false,
             recovered: false,
+            keyboard: None,
+            positions: BTreeMap::new(),
         })
     }
 
@@ -489,6 +496,9 @@ impl Router {
         }
         if self.stopped {
             return Err(Fault::Stopped);
+        }
+        if self.keyboard.is_some() {
+            return self.fail(Fault::InvalidCandidate);
         }
         if frame.at > at
             || frame.at < self.last_at
@@ -809,10 +819,14 @@ impl Router {
     pub(crate) fn prefix_delivered(&self, sequence: u64, inclusive: bool) -> bool {
         let before =
             |frame: &Frame| frame.sequence < sequence || inclusive && frame.sequence == sequence;
-        !self.queue.iter().any(|entry| before(&entry.frame))
-            && !self.group.as_ref().is_some_and(|group| {
-                group.ownership == Ownership::Pending && group.pending.iter().any(before)
-            })
+        !self.queue.iter().any(|entry| {
+            self.positions.get(&entry.ticket).map_or_else(
+                || before(&entry.frame),
+                |span| span.sequence < sequence || inclusive && span.sequence == sequence,
+            )
+        }) && !self.group.as_ref().is_some_and(|group| {
+            group.ownership == Ownership::Pending && group.pending.iter().any(before)
+        })
     }
     pub(crate) fn due_after_input(&mut self, at: Duration) -> Result<Option<&Scheduled>, Fault> {
         self.delivery_clock(at)?;
@@ -853,6 +867,7 @@ impl Router {
             return self.fail(error);
         }
         self.delivered = state;
+        self.positions.remove(&ticket);
         self.queue.pop_front();
         self.reset_epoch();
         Ok(())
@@ -872,6 +887,7 @@ impl Router {
         self.stopped = true;
         self.group = None;
         self.queue.clear();
+        self.positions.clear();
         Some(Recovery {
             source: self.device.source.clone(),
             neutral_events: self.delivered.releases(),
