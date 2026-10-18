@@ -1,5 +1,67 @@
 use super::*;
 
+fn repeat_at(frame: Option<u64>) -> Operation {
+    Operation::Repeat {
+        members: vec![],
+        inputs: BTreeMap::new(),
+        emitted: BTreeSet::new(),
+        position: frame.map(InputPosition::after_frame),
+        inclusive: false,
+    }
+}
+
+#[test]
+fn unexposed_work_sorts_stably_without_crossing_a_legacy_fence() {
+    let (mut seat, _) = model();
+    for (frame, at) in [
+        (Some(30), 10),
+        (None, 11),
+        (Some(20), 12),
+        (Some(10), 13),
+        (Some(20), 14),
+    ] {
+        seat.queue(repeat_at(frame), 1, ms(at));
+    }
+    assert_eq!(
+        seat.pending
+            .iter()
+            .map(|pending| (
+                pending.position.map(|position| position.frame),
+                pending.received
+            ))
+            .collect::<Vec<_>>(),
+        [
+            (Some(30), ms(10)),
+            (None, ms(11)),
+            (Some(10), ms(13)),
+            (Some(20), ms(12)),
+            (Some(20), ms(14))
+        ]
+    );
+    assert_eq!(seat.bytes, 5);
+}
+
+#[test]
+fn reordered_pending_work_cannot_hide_an_older_arrival_deadline() {
+    let mut routing = routing(vec![]);
+    let (mut seat, writes) = model();
+    seat.queue(repeat_at(Some(2)), 1, ms(20));
+    seat.queue(repeat_at(Some(1)), 1, ms(31));
+    assert_eq!(seat.pending.front().unwrap().received, ms(31));
+    assert_eq!(seat.deadline(), Some(ms(1020)));
+    for (revision, at) in [(2, 200), (3, 400), (4, 600), (5, 800), (6, 900)] {
+        context(&mut routing, at, revision, ContextState::Desktop);
+    }
+    routing.actions_available(1, BTreeSet::from([Capability::SyntheticInput]), ms(900));
+    assert_eq!(
+        seat.poll(&routing, ms(1020)).unwrap_err().kind(),
+        io::ErrorKind::TimedOut
+    );
+    assert!(seat.failed());
+    assert!(writes.borrow().frames.is_empty());
+    assert_eq!(seat.bytes, 2);
+}
+
 #[test]
 fn queue_rejection_does_not_partially_accept_the_next_action() {
     let mut routing = routing(vec![rule(

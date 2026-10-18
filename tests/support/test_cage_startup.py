@@ -17,6 +17,96 @@ quiesce = importlib.util.module_from_spec(quiesce_spec)
 quiesce_spec.loader.exec_module(quiesce)
 
 
+class NativeKeyArbitration(unittest.TestCase):
+    def fixture(self):
+        observations = [dict(name="unused", receipt=dict(sequence=(index + 1) * 10)) for index in range(35)]
+        cases = [
+            ("buffered-tap-selective", [(31, 1), (31, 0), (30, 1), (30, 0)]),
+            ("buffered-hold-priority", [(30, 1), (30, 0)]),
+            ("buffered-sequence-selective", [(30, 1), (30, 0), (31, 1), (31, 0)]),
+            ("buffered-deferred-key-sequence", [(30, 1), (30, 0)]),
+            ("buffered-unmatched-tap-fallback", [(31, 1), (31, 0)]),
+            ("buffered-deferred-action-order", [(30, 1), (30, 0), (48, 1), (48, 0)]),
+        ]
+        received = []
+        for index, (name, edges) in enumerate(cases, 25):
+            observations[index]["name"] = name
+            for offset, (code, state) in enumerate(edges, 1):
+                sequence = index * 10 + offset
+                received.append(dict(event="key", sequence=sequence, code=code, state=state, at_ns=sequence * 1_000_000))
+        received[-6]["at_ns"], received[-5]["at_ns"] = 500_000_000, 540_000_000
+        controls = [(195, 1), (195, 0), (195, 1), (195, 0), (197, 1), (197, 0),
+                    (198, 1), (198, 0), (199, 1), (199, 0), (200, 1), (200, 0),
+                    (199, 1), (199, 0), (200, 1), (200, 0), (201, 1), (201, 0)]
+        inputs = [dict(at=dict(secs=0, nanos=100_000_000), events=[dict(kind=1, code=code, value=value) for code, value in controls[:12]])]
+        inputs.extend(dict(at=dict(secs=0, nanos=at), events=[dict(kind=1, code=31, value=value)])
+                      for at, value in [(200_000_000, 1), (240_000_000, 0)])
+        for index in range(3):
+            inputs.append(dict(at=dict(secs=0, nanos=300_000_000 + index * 1_000_000),
+                               events=[dict(kind=1, code=code, value=value) for code, value in controls[12 + index * 2:14 + index * 2]]))
+        return observations, received, inputs
+
+    def test_exact_owned_edges_and_original_cadence_pass(self):
+        result = quiesce.validate_native_key_arbitration(*self.fixture())
+        self.assertEqual((result["cases"], result["consumed_control_edges"], result["leaked_control_edges"]), (6, 18, 0))
+        self.assertFalse(result["physical_takeover_tested"])
+
+    def test_leaked_missing_duplicated_and_reordered_events_refuse(self):
+        for change in ("leak", "missing", "duplicate", "reorder"):
+            observations, received, inputs = self.fixture()
+            if change == "leak":
+                received.insert(0, dict(received[0], code=195))
+            elif change == "missing":
+                received.pop(0)
+            elif change == "duplicate":
+                received.insert(0, dict(received[0]))
+            else:
+                received[0], received[2] = received[2], received[0]
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                quiesce.validate_native_key_arbitration(observations, received, inputs)
+
+    def test_bool_key_fields_refuse(self):
+        for field in ("sequence", "code", "state", "at_ns"):
+            observations, received, inputs = self.fixture()
+            received[0][field] = True
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                quiesce.validate_native_key_arbitration(observations, received, inputs)
+
+    def test_deferred_order_requires_a_real_overlap_before_settlement(self):
+        for change in ("late", "same_report", "reordered"):
+            observations, received, inputs = self.fixture()
+            if change == "late":
+                inputs[-1]["at"]["nanos"] = 321_000_000
+            elif change == "same_report":
+                inputs[-2]["events"].extend(inputs.pop()["events"])
+            else:
+                received[-4], received[-2] = received[-2], received[-4]
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                quiesce.validate_native_key_arbitration(observations, received, inputs)
+
+    def test_missing_original_control_edges_refuse(self):
+        observations, received, inputs = self.fixture()
+        inputs[0]["events"].pop()
+        with self.assertRaises(ValueError):
+            quiesce.validate_native_key_arbitration(observations, received, inputs)
+
+    def test_burst_fallback_refuses(self):
+        observations, received, inputs = self.fixture()
+        received[-5]["at_ns"] = received[-6]["at_ns"] + 1
+        with self.assertRaises(ValueError):
+            quiesce.validate_native_key_arbitration(observations, received, inputs)
+
+    def test_missing_and_reversed_capture_boundaries_refuse(self):
+        for missing in (False, True):
+            observations, received, inputs = self.fixture()
+            if missing:
+                observations.pop()
+            else:
+                observations[25]["receipt"]["sequence"] = 1
+            with self.subTest(missing=missing), self.assertRaises(ValueError):
+                quiesce.validate_native_key_arbitration(observations, received, inputs)
+
+
 class KeyboardOwnership(unittest.TestCase):
     def receipt(self):
         names = ["persistent-held", "second-owner-first-release-one-owner", "first-owner-first-release-one-owner",

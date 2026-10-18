@@ -1,5 +1,7 @@
 use super::*;
 
+mod arbitration;
+
 fn packet(id: u64, sequence: u64, at: u64, events: &[(u16, i32)]) -> Frame {
     let mut frame = frame(id, sequence, at, 30, 1);
     frame.events = events

@@ -117,6 +117,12 @@ authority from a public match event. A coordinator-free observer cannot mint it.
 | `blocks_ordered_span(routing, source, span)` | Apply original-position barriers to the matching coordinator's key-ordering domain. Independent routes keep forwarding; neutral cleanup still fences the seat. A mismatched coordinator fails closed. |
 | `deadline()` / `poll_fd()` | Supply queue/write/cleanup wakeups and an optional Linux sink write fd. Also poll Routing/context/consumer deadlines and lifecycle notifications. |
 
+Unstarted positioned work is ordered by its scheduling boundary across admission
+batches, with stable ties. Legacy work without a position remains an ordering
+fence. Deferred completions cannot cross an operation already started on the
+sink, including a zero-byte accepted write or a partially emitted repeat.
+Reordering preserves every original arrival time, byte charge and queue deadline.
+
 Normal completion and cancellation are deliberately separate: a down followed
 quickly by an up must still emit the pair, whereas lost authority must not
 finish an unwritten chord. Submission serials and the output clock survive an
@@ -230,10 +236,10 @@ into it. Returning from step advancement includes an already-active next candida
 and abandoning an unfinished step removes its observations from the projection.
 The existing private cancellation and held-contact continuation rules still apply.
 
-Timed, chord, sequence, custom,
-mixed and hybrid selective buffering still need exact participant arbitration,
-non-key/mixed event-local admission and native/rendered acceptance. This prerequisite
-does not expand projectable triggers, public grants or production takeover.
+Pure-key native key/tap/hold/chord/key-only-sequence rules with typed key actions
+use exact participant arbitration. Custom, mixed and hybrid selective buffering,
+non-key/mixed event-local admission and native kernel acceptance remain required.
+This does not create public grants or production takeover authority.
 
 `Router::stage_key_frame` retains bounded original pure-key reports and enrolls
 fresh downs with explicit authorization and decision deadlines. It does not advance
@@ -252,16 +258,39 @@ the maximum required epoch offset, not accumulated delays, and preserves origina
 inter-report cadence. Buffered and scheduled input share capacity limits. Recovery
 discards unwritten input and neutralizes only acknowledged output.
 
-The live immediate projection uses this journal with decisions made at the input
-edge. The direct `push_key_frame` ledger retains its original contract and cannot
-be mixed with journal staging. Delayed consumption and fallback are also exercised
-through an owned protocol keyboard into the rendered Cage app; the fixture supplies
-the decisions and models readiness. This is not delayed recognizer arbitration,
-cross-source deferred-input admission, hybrid support or a public broker grant.
+Live native key arbitration uses this journal for immediate and delayed decisions.
+The direct `push_key_frame` ledger retains its original contract and cannot be
+mixed with journal staging. The old private immediate adapter remains a test
+oracle, not a second live arbitrator. The standalone journal protocol fixture
+still supplies explicit modeled decisions; the separate native-key Cage phases
+use actual recognizer outcomes instead. Neither grants broker authorization.
 
 `Routing::with_key_projection` retains original positions across attached
-sources. Eligible pure-key sources with immediate consuming key actions arbitrate
-one winner per physical press by priority/rule ID. Unrelated keys remain ordinary.
+sources. Eligible pure-key sources with native key/tap/hold/chord/key-only-sequence
+triggers and typed key actions arbitrate exact participants. Unrelated keys remain
+ordinary. Existing claims retain ownership; otherwise priority/rule ID determines
+overlapping candidates. Completed lower-priority outcomes wait under count/byte
+bounds until a higher candidate settles or its original decision deadline closes.
+At that deadline a completed eligible alternative can win before ordinary expiry.
+Reserve owns admitted input immediately and drains rejected tails; Buffer requires
+the whole completed footprint to remain pending or already owned by the same
+gesture. All source decisions preflight before any source mutates. Ordinary input
+cannot be reclaimed, and compound consumption never succeeds on only some members.
+
+Private key claim receipts retain exact original evidence and every participating
+route authorization, including the original admission owner even when a chord
+selects fresher members from other sources. Receipts survive normal journal
+pruning but not transport/configuration/session/availability loss. Prospective
+future key evidence controls pending enrollment without widening admitted prefixes.
+Waiting entries and held outcomes have hard caps of 4096 and 128 respectively;
+their conservative metadata reservations share the existing press-evidence budget.
+
+Pending input fences later raw keys in the same keyboard domain. A common bounded
+epoch offset preserves cross-source cadence without rescheduling exposed output.
+The epoch resets only when all relevant physical/delivered/queued input is neutral.
+Recovery releases surviving raw barriers and publishes a flush wakeup. Scan metadata
+associated with a pending key is not mistaken for writable input or a busy-poll
+deadline. Original input and actual admission clocks remain distinct.
 Other raw routes retain whole-report positions, including legacy buffered groups.
 `KeyWork::scheduling_position()` retains the coordinator cut; legacy source modes
 use whole-report boundaries rather than claiming exact cuts. The managed worker
@@ -344,9 +373,10 @@ Legacy and selective modes cannot be mixed within one router incarnation.
 
 Transformed reports containing nonkeyboard data or ambiguous scan metadata
 currently fail with `UnsupportedProjection` and require recovery; untouched
-hybrid reports remain intact. Timed/chord/sequence and mixed-source modes still
-use legacy whole-report ownership; their selective per-key behavior is not
-complete. Hybrid/ambiguous transformations, native consumer acknowledgement,
+hybrid reports remain intact. Native pure-key combinations use the journal;
+custom/non-key/mixed/hybrid modes retain their existing whole-report paths while
+their complete selective semantics remain unfinished. Hybrid/ambiguous
+transformations, native consumer acknowledgement,
 neutral reentry and the full original acceptance matrix remain required. The
 public synthetic capability stays closed.
 
@@ -361,13 +391,17 @@ sole-worker ABI writes on owned private regular files (no devices).
 cancellation, timeout and bounds regressions. `oslo make test-key-worker-cage`
 drives the actual scheduler through owned protocol keyboards and a rendered app
 with both Hyprland configuration dialects. Its authority/readiness fixtures are
-explicitly modeled. Twenty-nine phases include consumed immediate per-key
+explicitly modeled. Thirty-five phases include consumed immediate per-key
 projection, ordinary typing, cross-source modifiers, tap-tail lifecycle,
 multiple same-report sequences, delayed tap/key completions, rejection of reversed
 steps and fresh reentry, plus explicitly decided journal fallback cadence, using
-four owned protocol keyboards. Sequence actions are observational; these phases
-do not enable delayed recognizer arbitration, grant native takeover or prove
-physical/kernel selective consumption. Repeat interleaving has direct worker/file
+four owned protocol keyboards. Six native arbitration phases additionally prove
+selective buffered tap/hold/sequence consumption, deferred action order and unmatched fallback. The strict
+receiver checks every delivered edge, the absence of consumed control keys and
+the original unmatched down/up interval within existing scheduler slack. Earlier
+sequence phases remain observational. This is owned protocol/native-key evidence,
+not mixed/custom arbitration, native takeover or physical/kernel selective
+consumption. Repeat interleaving has direct worker/file
 evidence; these rendered phases do not simulate kernel repeat.
 
 For fixture development, `test-key-worker-cage-dev --runner=/nix/store/.../bin/prek-cage-host-test`

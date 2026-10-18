@@ -496,6 +496,62 @@ def run_ownership(args, env, output, socket, rows, wait_rendered, capture):
             keyboard["log"].close()
 
 
+def validate_native_key_arbitration(observations, received, inputs):
+    expected = [
+        ("buffered-tap-selective", [(31, 1), (31, 0), (30, 1), (30, 0)]),
+        ("buffered-hold-priority", [(30, 1), (30, 0)]),
+        ("buffered-sequence-selective", [(30, 1), (30, 0), (31, 1), (31, 0)]),
+        ("buffered-deferred-key-sequence", [(30, 1), (30, 0)]),
+        ("buffered-unmatched-tap-fallback", [(31, 1), (31, 0)]),
+        ("buffered-deferred-action-order", [(30, 1), (30, 0), (48, 1), (48, 0)]),
+    ]
+    if len(observations) != 35:
+        raise ValueError("missing native key arbitration captures")
+    keys = [row for row in received if row.get("event") == "key"]
+    if any(any(type(row.get(field)) is not int for field in ("sequence", "code", "state", "at_ns")) for row in keys):
+        raise ValueError("invalid native key event fields")
+    fallback = []
+    for index, (name, wanted) in enumerate(expected, 25):
+        lower, upper = observations[index - 1]["receipt"]["sequence"], observations[index]["receipt"]["sequence"]
+        if observations[index]["name"] != name or type(lower) is not int or type(upper) is not int or lower >= upper:
+            raise ValueError("invalid native key capture boundary")
+        events = [row for row in keys if lower < row["sequence"] <= upper]
+        if [(row["code"], row["state"]) for row in events] != wanted:
+            raise ValueError("native key arbitration leaked, duplicated or reordered app input")
+        if name == "buffered-unmatched-tap-fallback":
+            fallback = events
+    controls = {195, 197, 198, 199, 200, 201}
+    actual = [(event["code"], event["value"]) for frame in inputs for event in frame["events"]
+              if event["kind"] == 1 and event["code"] in controls]
+    wanted = [(195, 1), (195, 0), (195, 1), (195, 0), (197, 1), (197, 0),
+              (198, 1), (198, 0), (199, 1), (199, 0), (200, 1), (200, 0),
+              (199, 1), (199, 0), (200, 1), (200, 0), (201, 1), (201, 0)]
+    if actual != wanted:
+        raise ValueError("missing original consumed key evidence")
+    deferred = [(index, frame["at"]["secs"] * 1_000_000_000 + frame["at"]["nanos"])
+                for index, frame in enumerate(inputs) for event in frame["events"]
+                if event["kind"] == 1 and event["code"] in {199, 200, 201}][-6:]
+    frames = [index for index, _ in deferred]
+    if len(deferred) != 6 or not (frames[0] == frames[1] < frames[2] == frames[3] < frames[4] == frames[5]):
+        raise ValueError("deferred actions did not arrive in separate ordered reports")
+    arrival_gap = deferred[-1][1] - deferred[0][1]
+    if not 0 <= arrival_gap < 20_000_000:
+        raise ValueError("later action did not arrive inside the original tap settlement window")
+    original = [(frame["at"]["secs"] * 1_000_000_000 + frame["at"]["nanos"], event["value"])
+                for frame in inputs for event in frame["events"] if event["kind"] == 1 and event["code"] == 31][-2:]
+    if len(original) != 2 or [value for _, value in original] != [1, 0]:
+        raise ValueError("missing unmatched tap input interval")
+    gap = original[1][0] - original[0][0]
+    delivery = fallback[1]["at_ns"] - fallback[0]["at_ns"]
+    if gap < 40_000_000 or delivery < gap - 20_000_000:
+        raise ValueError("native unmatched key fallback burst its original interval")
+    return dict(status="passed", scope="owned_protocol_native_keys", cases=6,
+                consumed_control_edges=18, leaked_control_edges=0,
+                deferred_arrival_gap_ns=arrival_gap, deferred_arrival_window_ns=20_000_000,
+                input_gap_ns=gap, delivery_gap_ns=delivery, slack_ns=20_000_000,
+                source_and_readiness_modeled=True, physical_takeover_tested=False)
+
+
 def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
     if not args.key_output_fixture:
         raise RuntimeError("key-output test requires its explicitly built Rust fixture")
@@ -540,10 +596,16 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
                     ("deferred-same-report-key", "bAAaAaAAAaaaaaaaaaa", []),
                     ("reversed-deferred-key-rejected", "bAAaAaAAAaaaaaaaaaa", []),
                     ("deferred-key-fresh-reentry", "bAAaAaAAAaaaaaaaaaaa", []),
-                    ("journal-pending-withheld", "bAAaAaAAAaaaaaaaaaaa", []),
-                    ("journal-decided-consumed", "bAAaAaAAAaaaaaaaaaaa", []),
-                    ("journal-fallback-cadence", "bAAaAaAAAaaaaaaaaaaaa", []),
-                    ("software-scoped-shutdown", "bAAaAaAAAaaaaaaaaaaaa", [])]
+                    ("buffered-tap-selective", "bAAaAaAAAaaaaaaaaaaasa", []),
+                    ("buffered-hold-priority", "bAAaAaAAAaaaaaaaaaaasaa", []),
+                    ("buffered-sequence-selective", "bAAaAaAAAaaaaaaaaaaasaaas", []),
+                    ("buffered-deferred-key-sequence", "bAAaAaAAAaaaaaaaaaaasaaasa", []),
+                    ("buffered-unmatched-tap-fallback", "bAAaAaAAAaaaaaaaaaaasaaasas", []),
+                    ("buffered-deferred-action-order", "bAAaAaAAAaaaaaaaaaaasaaasasab", []),
+                    ("journal-pending-withheld", "bAAaAaAAAaaaaaaaaaaasaaasasab", []),
+                    ("journal-decided-consumed", "bAAaAaAAAaaaaaaaaaaasaaasasab", []),
+                    ("journal-fallback-cadence", "bAAaAaAAAaaaaaaaaaaasaaasasaba", []),
+                    ("software-scoped-shutdown", "bAAaAaAAAaaaaaaaaaaasaaasasaba", [])]
     fixture_env = dict(env, PREK_LOCAL_CAGE="1", PREK_CAGE_OUTPUT=str(output), PREK_CAGE_KEYBOARD=args.keyboard,
                        PREK_CAGE_KEY_SOCKET=str(socket))
     before = {device["address"] for device in json.loads(command(["-j", "devices"]))["keyboards"]}
@@ -580,8 +642,9 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
     wanted = dict(status="passed", phases=15, source="two_owned_wayland_virtual_keyboards", production_route_tested=False,
                   kernel_input_tested=False, unmodified_stock_acceptance=False, test_backpressure=True)
     if args.key_worker:
-        wanted.update(phases=29, source="four_owned_wayland_virtual_keyboards", scoped_worker_tested=True, authority_modeled=True,
-                      transport_readiness_modeled=True, selective_consumption_tested=False,
+        wanted.update(phases=35, source="four_owned_wayland_virtual_keyboards", scoped_worker_tested=True, authority_modeled=True,
+                      transport_readiness_modeled=True, selective_consumption_tested=True,
+                      selective_consumption_scope="owned_protocol_native_keys", physical_takeover_tested=False,
                       selective_projection_tested=True, within_frame_order_tested=True, cross_source_order_tested=True,
                       software_actor_tested=True, software_lease_tested=True, software_private_control_tested=False,
                       software_authorization_tested=False, software_repeat_rendering_tested=False,
@@ -589,7 +652,8 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
                       tap_tail_lifecycle_rendering_tested=True, tap_invalid_activation_rendering_tested=True,
                       event_local_sequence_rendering_tested=True, deferred_key_completion_rendering_tested=True,
                       pending_journal_protocol_tested=True, pending_fallback_cadence_tested=True,
-                      delayed_gesture_arbitration_tested=False)
+                      delayed_gesture_arbitration_tested=True, delayed_gesture_arbitration_scope="native_key_only",
+                      mixed_delayed_gesture_arbitration_tested=False)
         journal = json.loads((output / "pending-journal-receipt.json").read_text())
         if (journal.get("status") != "passed" or journal.get("consumed_reports_written") != 0
                 or journal.get("fallback_reports_written") != 2
@@ -602,6 +666,9 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
                 or journal["scheduled_gap_ns"] != journal["input_gap_ns"]
                 or journal["delivery_gap_ns"] < journal["input_gap_ns"] - journal["slack_ns"]):
             raise RuntimeError("invalid pending-key protocol cadence receipt")
+        inputs = [json.loads(line) for line in (output / "key-worker-input.jsonl").read_text().splitlines()]
+        native_arbitration = validate_native_key_arbitration(phases, rows(), inputs)
+        (output / "native-key-arbitration-receipt.json").write_text(json.dumps(native_arbitration, indent=2) + "\n")
     else:
         wanted.update(software_owner_tested=True, software_authorization_tested=False, software_repeat_rendering_tested=False)
     if json.dumps(result, sort_keys=True) != json.dumps(wanted, sort_keys=True):
@@ -611,7 +678,7 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
     name = "key-worker" if args.key_worker else "key-output"
     (output / f"{name}-result.json").write_text(json.dumps(result, indent=2) + "\n")
     if args.key_worker:
-        print("PASS: shared scheduler preserved event-local and deferred key sequences, conditions, tap-tail lifecycle and journal fallback cadence; twenty-nine rendered protocol-sink phases. Authority/readiness modeled; no delayed gesture arbitration, private software control, authorization, repeat rendering or native takeover.")
+        print("PASS: native key tap/hold/sequence arbitration selectively consumed exact presses, ordered deferred actions and preserved fallback cadence; thirty-five rendered protocol-sink phases. Authority/readiness modeled; mixed/custom arbitration, native takeover, software authorization and repeat rendering are not tested.")
     else:
         print("PASS: actual key-output driver preserved overlapping owners, software producer isolation, exact cancellation and context reentry; fifteen rendered app phases. Software authorization and repeat rendering are not tested.")
     return result

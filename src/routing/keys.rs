@@ -1,5 +1,6 @@
 use super::*;
 use crate::{config::Action, keys::SourceKey, protocol::Fence};
+pub(super) mod arbitration;
 mod ordering;
 mod projection;
 
@@ -80,6 +81,11 @@ impl KeyWork {
                 .chain
                 .as_ref()
                 .is_none_or(|chain| routing.chain_receipt_valid(chain))
+            && self
+                .dispatch
+                .key_claim
+                .as_ref()
+                .is_none_or(|claim| routing.key_claim_valid(claim, &self.dispatch.outcome.intent))
     }
     pub fn input_prefix_ready(&self, routing: &Routing) -> bool {
         if let Some(position) = self.scheduling_position() {
@@ -132,7 +138,7 @@ pub(super) fn projectable(config: &Config, device: &Device) -> bool {
                 })
         })
         .all(|rule| {
-            matches!(rule.trigger, Trigger::Key { .. })
+            arbitration::native(&rule.trigger)
                 && matches!(rule.action, Action::Keys { .. } | Action::Remap { .. })
         })
 }

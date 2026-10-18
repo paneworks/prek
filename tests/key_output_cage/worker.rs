@@ -72,6 +72,7 @@ fn ready(device: &Device, at: Duration) -> prek::transport::Ready {
     gate.finish(at).unwrap()
 }
 struct RoutedKeyboard {
+    input_trace: fs::File,
     fence: Fence,
     routing: Routing,
     generated: Seat<Keyboard>,
@@ -184,6 +185,80 @@ impl RoutedKeyboard {
             };
             config.rules.push(sequence);
         }
+        for (id, trigger, priority) in [
+            (
+                "buffered-tap",
+                Trigger::ButtonTaps {
+                    key: Key(195),
+                    count: 1,
+                },
+                60,
+            ),
+            (
+                "buffered-hold",
+                Trigger::ButtonHold {
+                    key: Key(195),
+                    after: Millis(80),
+                    repeat: None,
+                },
+                70,
+            ),
+            (
+                "buffered-unmatched",
+                Trigger::ButtonTaps {
+                    key: Key(31),
+                    count: 2,
+                },
+                50,
+            ),
+            (
+                "buffered-sequence",
+                Trigger::Sequence {
+                    steps: vec![
+                        Trigger::Key { key: Key(197) },
+                        Trigger::Key { key: Key(198) },
+                    ],
+                    timeout: Millis(200),
+                },
+                40,
+            ),
+            (
+                "buffered-delayed-sequence",
+                Trigger::Sequence {
+                    steps: vec![
+                        Trigger::ButtonTaps {
+                            key: Key(199),
+                            count: 1,
+                        },
+                        Trigger::Key { key: Key(200) },
+                    ],
+                    timeout: Millis(200),
+                },
+                30,
+            ),
+        ] {
+            let mut native = rule(
+                id,
+                195,
+                Action::Keys {
+                    keys: vec![Key(30)],
+                },
+            );
+            native.trigger = trigger;
+            native.delivery = Delivery::Buffer;
+            native.priority = priority;
+            config.rules.push(native);
+        }
+        let mut later = rule(
+            "buffered-later-action",
+            201,
+            Action::Keys {
+                keys: vec![Key(48)],
+            },
+        );
+        later.delivery = Delivery::Buffer;
+        later.priority = 20;
+        config.rules.push(later);
         let fence = Fence {
             broker: Epoch([1, 2]),
             configuration: 1,
@@ -241,7 +316,10 @@ impl RoutedKeyboard {
             properties: vec![],
             capabilities: BTreeMap::from([(
                 EV_KEY,
-                vec![30, 183, 184, 185, 187, 188, 189, 190, 191, 192, 193, 194],
+                vec![
+                    30, 31, 183, 184, 185, 187, 188, 189, 190, 191, 192, 193, 194, 195, 197, 198,
+                    199, 200, 201,
+                ],
             )]),
             axes: BTreeMap::new(),
             virtual_device: false,
@@ -257,6 +335,7 @@ impl RoutedKeyboard {
             .unwrap();
         routing.actions_available(1, BTreeSet::from([Capability::SyntheticInput]), at);
         Self {
+            input_trace: fs::File::create(output.join("key-worker-input.jsonl")).unwrap(),
             fence,
             routing,
             generated,
@@ -328,6 +407,8 @@ impl RoutedKeyboard {
             at,
             events,
         };
+        serde_json::to_writer(&mut self.input_trace, &input).unwrap();
+        writeln!(self.input_trace).unwrap();
         self.routing
             .push(Record::Frame {
                 frame: input.clone(),
@@ -767,6 +848,38 @@ fn local_cage_scoped_key_worker() {
     keyboard.advance(Duration::from_millis(60));
     keyboard.drain();
     keyboard.capture(&output, 24, "bAAaAaAAAaaaaaaaaaaa", &[]);
+    keyboard.feed_from(2, &[(195, 1), (195, 0), (31, 1), (31, 0)]);
+    keyboard.advance(Duration::from_millis(60));
+    keyboard.drain();
+    keyboard.capture(&output, 25, "bAAaAaAAAaaaaaaaaaaasa", &[]);
+    keyboard.feed_from(2, &[(195, 1)]);
+    keyboard.advance(Duration::from_millis(120));
+    keyboard.feed_from(2, &[(195, 0)]);
+    keyboard.drain();
+    keyboard.capture(&output, 26, "bAAaAaAAAaaaaaaaaaaasaa", &[]);
+    keyboard.feed_from(
+        2,
+        &[(197, 1), (197, 0), (198, 1), (198, 0), (31, 1), (31, 0)],
+    );
+    keyboard.advance(Duration::from_millis(60));
+    keyboard.drain();
+    keyboard.capture(&output, 27, "bAAaAaAAAaaaaaaaaaaasaaas", &[]);
+    keyboard.feed_from(2, &[(199, 1), (199, 0), (200, 1), (200, 0)]);
+    keyboard.advance(Duration::from_millis(60));
+    keyboard.drain();
+    keyboard.capture(&output, 28, "bAAaAaAAAaaaaaaaaaaasaaasa", &[]);
+    keyboard.feed_from(2, &[(31, 1)]);
+    keyboard.advance(Duration::from_millis(40));
+    keyboard.feed_from(2, &[(31, 0)]);
+    keyboard.advance(Duration::from_millis(80));
+    keyboard.drain();
+    keyboard.capture(&output, 29, "bAAaAaAAAaaaaaaaaaaasaaasas", &[]);
+    keyboard.feed_from(2, &[(199, 1), (199, 0)]);
+    keyboard.feed_from(2, &[(200, 1), (200, 0)]);
+    keyboard.feed_from(2, &[(201, 1), (201, 0)]);
+    keyboard.advance(Duration::from_millis(60));
+    keyboard.drain();
+    keyboard.capture(&output, 30, "bAAaAaAAAaaaaaaaaaaasaaasasab", &[]);
     keyboard.generated.retire(monotonic().unwrap()).unwrap();
     for _ in 0..8 {
         if keyboard.generated.drain(monotonic().unwrap()).unwrap() == Progress::Complete {
@@ -781,12 +894,13 @@ fn local_cage_scoped_key_worker() {
     assert!(generated.into_sink().is_ok());
     drop(keyboard.raw);
     drop(keyboard.other_raw);
-    pending::exercise(&output, socket, 25, "bAAaAaAAAaaaaaaaaaaa");
-    phase(&output, 28, "bAAaAaAAAaaaaaaaaaaaa", &[]);
-    fs::write(output.join("key-output-runtime-result.json"),serde_json::to_vec(&json!({"status":"passed","phases":29,
+    pending::exercise(&output, socket, 31, "bAAaAaAAAaaaaaaaaaaasaaasasab");
+    phase(&output, 34, "bAAaAaAAAaaaaaaaaaaasaaasasaba", &[]);
+    fs::write(output.join("key-output-runtime-result.json"),serde_json::to_vec(&json!({"status":"passed","phases":35,
         "source":"four_owned_wayland_virtual_keyboards","production_route_tested":false,"kernel_input_tested":false,
         "unmodified_stock_acceptance":false,"test_backpressure":true,"scoped_worker_tested":true,
-        "authority_modeled":true,"transport_readiness_modeled":true,"selective_consumption_tested":false,
+        "authority_modeled":true,"transport_readiness_modeled":true,"selective_consumption_tested":true,
+        "selective_consumption_scope":"owned_protocol_native_keys","physical_takeover_tested":false,
         "selective_projection_tested":true,"within_frame_order_tested":true,"cross_source_order_tested":true,
         "software_actor_tested":true,"software_lease_tested":true,"software_private_control_tested":false,
         "software_authorization_tested":false,"software_repeat_rendering_tested":false,
@@ -794,5 +908,6 @@ fn local_cage_scoped_key_worker() {
         "tap_tail_lifecycle_rendering_tested":true,"tap_invalid_activation_rendering_tested":true,
         "event_local_sequence_rendering_tested":true,"deferred_key_completion_rendering_tested":true,
         "pending_journal_protocol_tested":true,"pending_fallback_cadence_tested":true,
-        "delayed_gesture_arbitration_tested":false})).unwrap()).unwrap();
+        "delayed_gesture_arbitration_tested":true,"delayed_gesture_arbitration_scope":"native_key_only",
+        "mixed_delayed_gesture_arbitration_tested":false})).unwrap()).unwrap();
 }

@@ -69,6 +69,7 @@ enum Operation {
 }
 struct Pending {
     operation: Operation,
+    position: Option<InputPosition>,
     received: Duration,
     bytes: usize,
 }
@@ -110,6 +111,7 @@ pub struct Seat<S: Sink> {
     pending: VecDeque<Pending>,
     bytes: usize,
     flight: Option<Flight>,
+    started_position: Option<InputPosition>,
     serial: u64,
     repeats: BTreeMap<SourceKey, (u64, usize)>,
     paused: bool,
@@ -162,6 +164,7 @@ impl<S: Sink> Seat<S> {
             pending: VecDeque::new(),
             bytes: 0,
             flight: None,
+            started_position: None,
             serial,
             repeats: BTreeMap::new(),
             paused: false,
@@ -188,6 +191,7 @@ impl<S: Sink> Seat<S> {
         {
             return Err(denied("key work refers to a retired source incarnation"));
         }
+        self.check_position(work.scheduling_position())?;
         let (gesture, stage) = identity(work.event())?;
         let bytes = work.encoded_bytes()?;
         match work.event() {
@@ -220,12 +224,7 @@ impl<S: Sink> Seat<S> {
                             bytes,
                         },
                     );
-                    self.pending.push_back(Pending {
-                        operation: Operation::Begin(gesture.clone()),
-                        received: at,
-                        bytes: 0,
-                    });
-                    self.at = at;
+                    self.queue(Operation::Begin(gesture.clone()), 0, at);
                     Ok(Submission::Remap(Remap {
                         sink: self.output.source().clone(),
                         fence: self.fence,
@@ -424,6 +423,7 @@ impl<S: Sink> Seat<S> {
             return Err(invalid("repeat requires at least one active remap"));
         }
         let bytes = members.len().saturating_mul(512);
+        self.check_position(position)?;
         self.capacity(bytes, 1)?;
         self.repeats.insert(key, (frame.sequence, index));
         self.queue(
@@ -672,8 +672,8 @@ impl<S: Sink> Seat<S> {
                     .is_some_and(|flight| at >= flight.deadline)
             || self
                 .pending
-                .front()
-                .is_some_and(|pending| at.saturating_sub(pending.received) >= MAX_AGE)
+                .iter()
+                .any(|pending| at.saturating_sub(pending.received) >= MAX_AGE)
         {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -707,10 +707,15 @@ impl<S: Sink> Seat<S> {
             }
             let pending = self.pending.pop_front().unwrap();
             self.bytes -= pending.bytes;
+            self.check_position(pending.position)?;
+            if pending.position.is_some() {
+                self.started_position = pending.position;
+            }
             if let Some(operation) = self.execute(pending.operation, routing, at)? {
                 self.bytes += pending.bytes;
                 self.pending.push_front(Pending {
                     operation,
+                    position: pending.position,
                     received: pending.received,
                     bytes: pending.bytes,
                 });
@@ -1079,13 +1084,41 @@ impl<S: Sink> Seat<S> {
         });
     }
     fn queue(&mut self, operation: Operation, bytes: usize, at: Duration) {
-        self.pending.push_back(Pending {
-            operation,
-            received: at,
-            bytes,
+        let position = match &operation {
+            Operation::Software(work) => Some(work.position),
+            Operation::Begin(gesture) => self
+                .bindings
+                .get(gesture)
+                .and_then(|binding| binding.work.scheduling_position()),
+            Operation::End(_, work) | Operation::Tap(work) => work.scheduling_position(),
+            Operation::Repeat { position, .. } => *position,
+        };
+        let index = position.map_or(self.pending.len(), |position| {
+            self.pending
+                .iter()
+                .rposition(|pending| pending.position.is_none_or(|prior| prior <= position))
+                .map_or(0, |index| index + 1)
         });
+        self.pending.insert(
+            index,
+            Pending {
+                operation,
+                position,
+                received: at,
+                bytes,
+            },
+        );
         self.bytes += bytes;
         self.at = at;
+    }
+    fn check_position(&self, position: Option<InputPosition>) -> io::Result<()> {
+        if position
+            .zip(self.started_position)
+            .is_some_and(|(position, started)| position < started)
+        {
+            return Err(invalid("key work precedes an already started operation"));
+        }
+        Ok(())
     }
     fn capacity(&self, bytes: usize, count: usize) -> io::Result<()> {
         if self.pending.len().saturating_add(count) > MAX_PENDING
@@ -1161,7 +1194,7 @@ impl<S: Sink> Seat<S> {
             .chain(self.flight.as_ref().map(|flight| flight.deadline))
             .chain(
                 self.pending
-                    .front()
+                    .iter()
                     .map(|pending| pending.received.saturating_add(MAX_AGE)),
             )
             .min()

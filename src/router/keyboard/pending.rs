@@ -53,10 +53,12 @@ pub(in crate::router) struct Journal {
     watermark: u64,
     clock: Duration,
     pub(super) output_sequence: u64,
+    #[cfg(test)]
     pub(super) last_claim: u64,
 }
 pub(super) struct Released {
     pub(super) reports: Vec<ReadyReport>,
+    #[cfg(test)]
     pub(super) consumed: Vec<ConsumedKey>,
 }
 pub(super) struct ReadyReport {
@@ -103,6 +105,24 @@ impl Journal {
                 _ => None,
             })
             .min()
+    }
+    pub(super) fn can_release_before(&self, barrier: Option<InputPosition>) -> bool {
+        let Some(input) = self.frames.front() else {
+            return false;
+        };
+        let first = InputPosition {
+            frame: input.watermark,
+            event: input.cursor,
+        };
+        barrier.is_none_or(|barrier| first < barrier)
+            && input
+                .positions
+                .get(input.cursor)
+                .and_then(|position| *position)
+                .and_then(|position| self.presses.get(&position))
+                .is_none_or(|press| {
+                    !matches!(press.choice.disposition, KeyDisposition::Pending { .. })
+                })
     }
     pub(super) fn disposition(&self, code: u16, position: InputPosition) -> Option<KeyDisposition> {
         self.presses
@@ -256,7 +276,11 @@ impl Journal {
         Ok(())
     }
 
-    pub(super) fn decide(&mut self, decisions: &[KeyDecision], at: Duration) -> Result<(), Fault> {
+    pub(super) fn validate_decisions(
+        &self,
+        decisions: &[KeyDecision],
+        at: Duration,
+    ) -> Result<(), Fault> {
         let mut seen = BTreeSet::new();
         for decision in decisions {
             if !seen.insert(decision.position) || decision.owner == Some(0) {
@@ -278,6 +302,10 @@ impl Journal {
                 return Err(Fault::BackwardTime);
             }
         }
+        Ok(())
+    }
+    pub(super) fn decide(&mut self, decisions: &[KeyDecision], at: Duration) -> Result<(), Fault> {
+        self.validate_decisions(decisions, at)?;
         for decision in decisions {
             let press = self.presses.get_mut(&decision.position).unwrap();
             if let KeyDisposition::Pending { deadline } = press.choice.disposition {
@@ -304,16 +332,37 @@ impl Journal {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn release(&mut self) -> Released {
+        self.release_before(None)
+    }
+    pub(super) fn release_before(&mut self, barrier: Option<InputPosition>) -> Released {
         let mut reports = Vec::new();
+        #[cfg(test)]
         let mut consumed = Vec::new();
         while let Some(input) = self.frames.front_mut() {
+            if barrier.is_some_and(|barrier| {
+                InputPosition {
+                    frame: input.watermark,
+                    event: input.cursor,
+                } >= barrier
+            }) {
+                break;
+            }
             let mut events = Vec::new();
             let mut first = None;
             let mut last = input.cursor;
             let start = input.cursor;
             let mut changed = start != 0 || !input.cuts.is_empty();
             while input.cursor + 1 < input.frame.events.len() {
+                if barrier.is_some_and(|barrier| {
+                    InputPosition {
+                        frame: input.watermark,
+                        event: input.cursor,
+                    } >= barrier
+                }) {
+                    break;
+                }
                 let index = input.cursor;
                 let choice = input.positions[index]
                     .and_then(|position| self.presses.get(&position))
@@ -328,7 +377,7 @@ impl Journal {
                     .max(input.frame.at)
                     .max(choice.map_or(Duration::ZERO, |choice| choice.at));
                 let dropped = if let Some(Choice {
-                    disposition: KeyDisposition::Consumed { owner },
+                    disposition: KeyDisposition::Consumed { owner: _owner },
                     ..
                 }) = choice
                 {
@@ -347,9 +396,10 @@ impl Journal {
                             &mut reports,
                         );
                     }
+                    #[cfg(test)]
                     if event.kind == EV_KEY && input.edges.contains(&index) {
                         consumed.push(ConsumedKey {
-                            owner,
+                            owner: _owner,
                             code: event.code,
                             state: match event.value {
                                 0 => KeyState::Release,
@@ -445,7 +495,11 @@ impl Journal {
         if self.frames.is_empty() && self.held.values().all(|binding| !binding.down) {
             self.clock = Duration::ZERO;
         }
-        Released { reports, consumed }
+        Released {
+            reports,
+            #[cfg(test)]
+            consumed,
+        }
     }
 
     fn report(
@@ -562,6 +616,70 @@ impl Router {
         Ok(())
     }
 
+    pub(crate) fn validate_key_decisions(
+        &self,
+        decisions: &[KeyDecision],
+        input_at: Duration,
+        admitted_at: Duration,
+    ) -> Result<(), Fault> {
+        if self.stopped {
+            return Err(Fault::Stopped);
+        }
+        if decisions
+            .iter()
+            .any(|decision| decision.authorization != self.authorization)
+        {
+            return Err(Fault::Unauthorized);
+        }
+        if admitted_at < input_at || input_at < self.last_at {
+            return Err(Fault::BackwardTime);
+        }
+        self.pending_keyboard
+            .as_ref()
+            .ok_or(Fault::WrongTicket)?
+            .validate_decisions(decisions, admitted_at)
+    }
+    pub(crate) fn decide_keys_clocked(
+        &mut self,
+        decisions: &[KeyDecision],
+        input_at: Duration,
+        admitted_at: Duration,
+    ) -> Result<(), Fault> {
+        self.validate_key_decisions(decisions, input_at, admitted_at)?;
+        self.pending_keyboard
+            .as_mut()
+            .unwrap()
+            .decide(decisions, admitted_at)?;
+        self.last_at = input_at;
+        Ok(())
+    }
+    pub(crate) fn key_journal_barrier(
+        &mut self,
+        barrier: Option<InputPosition>,
+        offset: Duration,
+    ) -> Result<(), Fault> {
+        if offset > self.limits.offset {
+            return Err(Fault::MissedDelivery);
+        }
+        self.key_barrier = barrier;
+        self.key_offset_floor = offset;
+        Ok(())
+    }
+    pub(crate) fn key_journal_neutral(&self) -> bool {
+        self.physical.neutral()
+            && self.delivered.neutral()
+            && self.queue.is_empty()
+            && self
+                .pending_keyboard
+                .as_ref()
+                .is_none_or(|journal| journal.first().is_none())
+    }
+
+    pub(crate) fn key_journal_ready(&self) -> bool {
+        self.pending_keyboard
+            .as_ref()
+            .is_some_and(|journal| journal.can_release_before(self.key_barrier))
+    }
     pub fn key_disposition(&self, code: u16, position: InputPosition) -> Option<KeyDisposition> {
         if self.stopped {
             return None;
@@ -578,7 +696,7 @@ impl Router {
             return Ok(());
         };
         journal.expire(at);
-        let released = journal.release();
+        let released = journal.release_before(self.key_barrier);
         self.publish_released_keys(released.reports)
     }
 
@@ -587,7 +705,7 @@ impl Router {
             return Ok(());
         }
         let mut sequence = self.pending_keyboard.as_ref().unwrap().output_sequence;
-        let mut offset = self.offset;
+        let mut offset = self.offset.max(self.key_offset_floor);
         for ready in &mut reports {
             let report = &mut ready.report;
             sequence = match sequence.checked_add(1) {
@@ -621,13 +739,17 @@ impl Router {
         self.pending_keyboard.as_mut().unwrap().output_sequence = sequence;
         for ready in reports {
             let report = ready.report;
-            self.offset = self.offset.max(ready.ready.saturating_sub(report.frame.at));
+            self.offset = self
+                .offset
+                .max(self.key_offset_floor)
+                .max(ready.ready.saturating_sub(report.frame.at));
             self.schedule(report.frame)?;
             self.positions.insert(self.next_ticket, report.span);
         }
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn push_decided_key_frame(
         &mut self,
         frame: Frame,

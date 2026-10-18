@@ -235,6 +235,8 @@ pub struct Router {
     recovered: bool,
     keyboard: Option<keyboard::Ledger>,
     pending_keyboard: Option<keyboard::pending::Journal>,
+    key_barrier: Option<crate::input::InputPosition>,
+    key_offset_floor: Duration,
     positions: BTreeMap<u64, InputSpan>,
     input_marks: BTreeMap<u64, u64>,
 }
@@ -286,6 +288,8 @@ impl Router {
             keyboard: None,
             pending_keyboard: None,
             positions: BTreeMap::new(),
+            key_barrier: None,
+            key_offset_floor: Duration::ZERO,
             input_marks: BTreeMap::new(),
         })
     }

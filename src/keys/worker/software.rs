@@ -58,6 +58,9 @@ impl<S: Sink> Seat<S> {
         {
             return Ok(false);
         }
+        if !close && self.check_position(Some(scope.unwrap().1)).is_err() {
+            return Ok(false);
+        }
         if let RequestOp::Open { expires } = request.operation {
             if request.sequence != 1
                 || self.software.contains_key(&producer)

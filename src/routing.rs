@@ -43,12 +43,14 @@ struct Won {
     intent: RouteIntent,
     emitted: bool,
     chain: Option<Arc<Vec<ClaimedChain>>>,
+    key_claim: Option<Arc<keys::arbitration::Claim>>,
 }
 struct Dispatch {
     outcome: RouteOutcome,
     configuration: u64,
     rule_revision: u64,
     chain: Option<Arc<Vec<ClaimedChain>>>,
+    key_claim: Option<Arc<keys::arbitration::Claim>>,
     reorder_scope: Option<crate::protocol::ReorderScope>,
     key_epoch: u64,
     inputs: BTreeMap<Source, u64>,
@@ -65,6 +67,7 @@ mod keys;
 pub use keys::KeyWork;
 
 pub struct Routing {
+    key_journal: keys::arbitration::State,
     ordered_keys: bool,
     last_key_input: Option<(u64, crate::input::Frame)>,
     native_claims: BTreeMap<u64, native::Claim>,
@@ -184,6 +187,7 @@ impl Routing {
         engine.push(Record::Header { version: 1 })?;
         engine.enable_routing();
         Ok(Self {
+            key_journal: keys::arbitration::State::default(),
             ordered_keys: false,
             last_key_input: None,
             native_claims: BTreeMap::new(),
@@ -388,6 +392,7 @@ impl Routing {
         self.push_clocked(record, Some(now))
     }
     fn push_clocked(&mut self, record: Record, now: Option<Duration>) -> io::Result<()> {
+        self.reset_key_epochs();
         let at = match &record {
             Record::Frame { frame } => frame.at,
             Record::Tick { at }
@@ -469,6 +474,12 @@ impl Routing {
             self.recover(source);
         }
         let mut outcomes = self.engine.take_route_outcomes();
+        let held = std::mem::take(&mut self.key_journal.held);
+        let mut key_outcome_charges = BTreeMap::new();
+        for held in held {
+            key_outcome_charges.insert(keys::arbitration::outcome_id(&held.outcome), held.charge);
+            outcomes.push(held.outcome);
+        }
         let deferred = std::mem::take(&mut self.deferred_custom);
         self.deferred_bytes = 0;
         for outcome in deferred {
@@ -662,12 +673,14 @@ impl Routing {
                                 intent: intent.clone(),
                                 emitted: false,
                                 chain: None,
+                                key_claim: None,
                             },
                         );
                     }
                 }
             }
         }
+        self.arbitrate_keys(&active, &outcomes, at, now)?;
         let mut invalid = self.prune_chains(at, now);
         invalid.extend(
             active
@@ -675,6 +688,7 @@ impl Routing {
                 .chain(outcomes.iter().map(|outcome| &outcome.intent))
                 .filter(|intent| {
                     intent.rule.delivery != Delivery::Observe
+                        && !self.projected_key_intent(intent)
                         && matches!(intent.rule.trigger, Trigger::Sequence { .. })
                         && !self.chain_scope_valid(intent, at)
                 })
@@ -720,6 +734,7 @@ impl Routing {
             if self.available(&outcome.intent, now) && (observe || self.won.contains_key(&id)) {
                 let chain = if !observe
                     && matches!(outcome.intent.rule.trigger, Trigger::Sequence { .. })
+                    && !self.projected_key_intent(&outcome.intent)
                 {
                     let Some(chain) = self.sealed_chain(&outcome.intent, at) else {
                         continue;
@@ -752,6 +767,7 @@ impl Routing {
                     })
                     .collect();
                 self.dispatches.push_back(Dispatch {
+                    key_claim: self.won.get(&id).and_then(|won| won.key_claim.clone()),
                     position: self.ordered_position(&outcome.intent),
                     outcome,
                     configuration: self.engine.generation(),
@@ -761,6 +777,12 @@ impl Routing {
                     inputs,
                     key_epoch: self.key_epoch,
                 });
+            } else if self.projected_key_intent(&outcome.intent)
+                && outcome.intent.rule.delivery != Delivery::Observe
+                && self.available(&outcome.intent, now)
+            {
+                let charge = key_outcome_charges.remove(&keys::arbitration::outcome_id(&outcome));
+                self.hold_key_outcome(outcome, now, charge)?;
             } else if matches!(
                 outcome.intent.rule.trigger,
                 Trigger::Custom { .. } | Trigger::Sequence { .. }
@@ -991,6 +1013,7 @@ impl Routing {
                             intent,
                             emitted: false,
                             chain: None,
+                            key_claim: None,
                         },
                     );
                 }
@@ -1120,8 +1143,13 @@ impl Routing {
                 && (!native::required(&dispatch.outcome.intent.rule.action)
                     || dispatch.reorder_scope.is_some())
                 && dispatch.outcome.expires.is_none_or(|expiry| at < expiry)
+                && dispatch
+                    .key_claim
+                    .as_ref()
+                    .is_none_or(|claim| self.key_claim_valid(claim, &dispatch.outcome.intent))
                 && dispatch.chain.as_ref().map_or(
-                    dispatch.outcome.intent.rule.delivery == Delivery::Observe
+                    dispatch.key_claim.is_some()
+                        || dispatch.outcome.intent.rule.delivery == Delivery::Observe
                         || !matches!(
                             dispatch.outcome.intent.rule.trigger,
                             Trigger::Sequence { .. }
@@ -1298,6 +1326,15 @@ impl Routing {
         self.routes.contains_key(source)
     }
     pub fn recover(&mut self, source: &Source) {
+        self.key_journal
+            .waiting_remove(source, self.engine.input_at());
+        if self
+            .routes
+            .get(source)
+            .is_some_and(|route| route.project_keys)
+        {
+            self.engine.retire_key_transport(source);
+        }
         self.remove_native(source);
         let ids: Vec<_> = self
             .chains
@@ -1337,6 +1374,17 @@ impl Routing {
         self.dispatches
             .retain(|dispatch| !dispatch.outcome.intent.sources().contains(source));
         self.refresh_key_domains();
+        if self.refresh_key_barriers().is_err() {
+            let sources: Vec<_> = self
+                .routes
+                .iter()
+                .filter(|(_, route)| route.project_keys)
+                .map(|(source, _)| source.clone())
+                .collect();
+            for source in sources {
+                self.recover(&source);
+            }
+        }
     }
     pub fn deadline(&self) -> Option<Duration> {
         self.deadline_with_barriers(|_, _, _| false)
@@ -1356,6 +1404,12 @@ impl Routing {
                 self.deferred_custom
                     .iter()
                     .filter_map(|outcome| outcome.expires),
+            )
+            .chain(
+                self.routes
+                    .values()
+                    .filter(|route| route.project_keys && route.router.key_journal_ready())
+                    .map(|_| self.engine.input_at()),
             )
             .chain(self.routes.iter().flat_map(|(source, route)| {
                 route

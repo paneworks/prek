@@ -44,7 +44,7 @@ impl Budget {
         })
     }
 }
-pub(super) struct Reservation {
+pub(crate) struct Reservation {
     budget: Arc<Budget>,
     bytes: usize,
 }

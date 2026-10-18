@@ -255,6 +255,25 @@ struct StepMatch {
     after_input: Option<u64>,
     retention: Option<sequence::Retention>,
 }
+pub(crate) use presses::{Press as KeyPress, Reservation as KeyReservation};
+#[derive(Clone)]
+pub(crate) struct KeyEvidence(presses::Set);
+impl KeyEvidence {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &KeyPress> {
+        self.0.iter()
+    }
+    pub(crate) fn reserve(&self, bytes: usize) -> Result<KeyReservation, &'static str> {
+        self.0.reserve(bytes)
+    }
+    pub(crate) fn include(&mut self, other: &Self) -> Result<(), &'static str> {
+        self.0.merge(&other.0)
+    }
+}
+impl RouteIntent {
+    pub(crate) fn key_evidence(&self) -> KeyEvidence {
+        KeyEvidence(self.candidate.key_presses.clone())
+    }
+}
 enum Recognizer {
     Custom {
         blocked: BTreeSet<Source>,
@@ -684,6 +703,97 @@ impl Engine {
             );
         }
         result
+    }
+    pub(crate) fn pending_key_evidence(
+        &self,
+        intent: &RouteIntent,
+    ) -> Result<KeyEvidence, &'static str> {
+        let mut evidence = intent.key_evidence();
+        for sequence in &self.sequences {
+            if !sequence.key_timeline {
+                continue;
+            }
+            let Some(pending) = sequence
+                .pending
+                .values()
+                .find(|pending| pending.id == intent.id())
+            else {
+                continue;
+            };
+            for (_, trace) in &pending.deferred {
+                evidence.0.merge(&trace.candidate.key_presses)?;
+            }
+            for step in &sequence.steps[pending.step..] {
+                for candidate in step.workers[0].candidates.values() {
+                    if candidate.source.seat == pending.first.source.seat
+                        && candidate.started >= pending.first.started
+                        && !candidate
+                            .cancelled
+                            .load(std::sync::atomic::Ordering::Acquire)
+                        && pending
+                            .first
+                            .key_start
+                            .zip(candidate.key_start)
+                            .is_none_or(|(first, later)| later >= first)
+                    {
+                        evidence.0.merge(&candidate.key_presses)?;
+                    }
+                }
+            }
+        }
+        Ok(evidence)
+    }
+    pub(crate) fn cancel_key_candidate(&mut self, id: u64, at: Duration, reason: &str) {
+        for worker in &mut self.workers {
+            let sources: Vec<_> = worker
+                .candidates
+                .iter()
+                .filter(|(_, candidate)| candidate.id == id)
+                .map(|(source, _)| source.clone())
+                .collect();
+            for source in sources {
+                cancel_candidate(worker, &source, at, reason, &mut self.events);
+            }
+        }
+        self.cancel_sequence(id, at, reason);
+    }
+    pub(crate) fn retire_key_transport(&mut self, source: &Source) {
+        let at = self.input_at();
+        let ids: Vec<_> = self
+            .route_intents()
+            .into_iter()
+            .filter(|intent| {
+                (edges::is_key_trigger(&intent.rule.trigger)
+                    || self.sequences.iter().any(|sequence| {
+                        sequence.key_timeline && sequence.rule.id == intent.rule.id
+                    }))
+                    && (intent.sources().contains(source)
+                        || self
+                            .pending_key_evidence(intent)
+                            .map_or(intent.source().seat == source.seat, |evidence| {
+                                evidence.iter().any(|press| press.source == *source)
+                            }))
+            })
+            .map(|intent| intent.id())
+            .collect();
+        for id in ids {
+            self.cancel_key_candidate(id, at, "key transport retired");
+        }
+        self.conditions.cancel_source(source);
+        for worker in &mut self.workers {
+            match &mut worker.recognizer {
+                Recognizer::Keys(keys) => {
+                    keys.cancel_source(source);
+                }
+                Recognizer::Taps(buttons) => buttons.cancel_device(source.device),
+                _ => {}
+            }
+        }
+        for sequence in &mut self.sequences {
+            for engine in &mut sequence.steps {
+                engine.retire_key_transport(source);
+            }
+        }
     }
     pub(crate) fn validate_route(
         &self,
