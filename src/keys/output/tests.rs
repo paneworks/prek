@@ -2,6 +2,8 @@ use super::*;
 use crate::keys::SourceKey;
 use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
+mod software;
+
 enum Step {
     Prefix(usize),
     Complete,

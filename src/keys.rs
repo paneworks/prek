@@ -453,18 +453,24 @@ pub enum Owner {
         generation: u64,
         id: u64,
     },
+    Software {
+        seat: String,
+        producer: [u64; 2],
+        generation: u64,
+        id: u64,
+    },
 }
 impl Owner {
     fn seat(&self) -> &str {
         match self {
             Self::Physical(key) | Self::Remap { key, .. } => &key.source.seat,
-            Self::Synthetic { seat, .. } => seat,
+            Self::Synthetic { seat, .. } | Self::Software { seat, .. } => seat,
         }
     }
     fn remap_key(&self) -> Option<&SourceKey> {
         match self {
             Self::Physical(key) | Self::Remap { key, .. } => Some(key),
-            Self::Synthetic { .. } => None,
+            Self::Synthetic { .. } | Self::Software { .. } => None,
         }
     }
 }
@@ -559,6 +565,11 @@ impl LogicalKeys {
             .keys()
             .filter(|owner| match owner {
                 Owner::Synthetic {
+                    seat: owned_seat,
+                    generation: owned_generation,
+                    ..
+                }
+                | Owner::Software {
                     seat: owned_seat,
                     generation: owned_generation,
                     ..

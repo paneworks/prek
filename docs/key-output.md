@@ -308,14 +308,15 @@ injection, authenticated broker registration or physical consumer behavior.
 
 | Operation | Behavior |
 | --- | --- |
-| `hold(claim, keys, at)` | Own 1–32 distinct supported keys; physical remaps own one target. Emit a down only for the first owner of each output code. |
+| `hold(claim, keys, at)` | Own 1–32 distinct supported keys; physical remaps and software presses own one target. Emit a down only for the first owner of each output code. |
 | `tap(claim, keys, at)` | Synthetic-only chord. Press in supplied order, then release in reverse order after the press frame completes. |
 | `release(claim, at)` | Release only the exact stored claim. A stale configuration/origin cannot release a rebound owner. Emit an up only for the last owner. |
-| `repeat(claim, at)` | Forward value `2` for an owned physical remap without adding an owner or another press. Ignore an unowned repeat. |
+| `repeat(claim, at)` | Emit value `2` for a held remap or software press without adding an owner. Ignore an unowned remap repeat; reject an unheld/retired software repeat. |
 | `cancel(claim, at)` | Cancel only this exact accepted held/pending claim, discarding its unwritten press tail. Preserve other claims, including those from the same source. |
 | `cancel_all(at)` | Cancel all currently accepted claims without permanently retiring their source/configuration. New work still requires the caller's current authority. |
 | `retire_source(source, at)` | Permanently retire that device's source generations through the specified incarnation, including origin-bound generated input. Other sources remain independent. |
-| `retire_generation(through, at)` | Retire all remap and generated claims through that configuration and reclaim its serial receipts. |
+| `retire_generation(through, at)` | Retire all key claims through that configuration and reclaim its serial receipts. |
+| `retire_producer(nonce, at)` | Permanently retire this software producer's presses, including partial writes; preserve other owners. |
 | `retire(at)` | Seal the entire output and release its state. New holds/chords are denied. |
 | `flush()` | Advance at most one enqueued frame; return `Pending` while work remains. |
 
@@ -352,11 +353,35 @@ frame is pending and the driver has not failed; neither is consumer-neutral
 evidence. `into_sink()` succeeds only after all local ownership is released.
 Descriptor removal does not prove downstream cleanup.
 
+## Software-keyboard ownership
+
+`Owner::Software` identifies a provider nonce and a generation-scoped press,
+without a physical `SourceKey`. Its claim must have `origin=None`; borrowing a
+physical identity is rejected. Each press holds one supported key. An explicit
+`repeat` emits value 2 only while that exact press remains held; it does not
+create another owner, simulate down/up or enable device autorepeat. Existing
+remap repeat semantics are unchanged.
+
+`retire_producer(nonce, at)` cancels only that provider's accepted or partially
+written presses. Other software providers, remaps and physical modifiers retain
+their reference counts. Producer retirement is permanent across configurations
+within this output incarnation. At 4096 retained producer identities, a further
+retirement seals and drains the entire output rather than recycling a nonce.
+
+These are emission/ownership primitives, not authentication. The nonce alone
+grants nothing. Managed-worker producer admission, authenticated software-keyboard
+registration and Lua held-key handles still require their full broker/consumer
+contract. Public `SyntheticInput` remains disabled. Model tests cover explicit
+repeat and byte-prefix cancellation; the owned Cage fixture renders provider
+isolation and physical-modifier overlap, but does not render repeat or establish
+software authorization or native consumer delivery.
+
 ## Bounds and verification
 
 There are at most 4096 active owners, 32 keys per generated owner, 1024 unretired
-configuration receipt entries, and 4096 retired source identities. Individual
-cancellation tracking is bounded by accepted held/pending claims and reclaimed
+configuration receipt entries, 4096 retired source identities and 4096 retired
+software-producer identities. Individual cancellation tracking is bounded by
+accepted held/pending claims and reclaimed
 after cleanup. Serial receipt storage does not grow with the number of completed
 remaps or actions. Exhausting source retirement capacity seals and drains the
 whole output; `retiring()`
@@ -365,7 +390,7 @@ reports that state. After capacity exhaustion, new holds/chords are denied.
 - `oslo make test-key-output`: device-free ownership, prefix, backpressure,
   cancellation, fencing, bounds and native-byte-prefix tests.
 - `oslo make test-key-output-cage`: the actual driver, two independently owned
-  protocol keyboards, causal app receipts and eleven rendered phases in each
+  protocol keyboards, causal app receipts and fifteen rendered phases in each
   config dialect, including same-source task isolation, context cancellation/
   reentry and delayed old-press rejection. The explicit test-only Aquamarine
   startup override remains separate from unmodified-stock/native/physical acceptance.

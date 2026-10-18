@@ -13,6 +13,7 @@ use std::{
 const MAX_OWNERS: usize = 4096;
 const MAX_KEYS: usize = 32;
 const MAX_SOURCES: usize = 4096;
+const MAX_PRODUCERS: usize = 4096;
 const MAX_RECEIPT_GENERATIONS: usize = 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -65,6 +66,7 @@ pub struct Output<S: Sink> {
     receipts: BTreeMap<u64, u64>,
     cancelled_claims: BTreeMap<Owner, Claim>,
     retired_sources: BTreeMap<u64, u64>,
+    retired_producers: BTreeSet<[u64; 2]>,
     retired_generation: u64,
     closing: bool,
     failed: bool,
@@ -85,6 +87,7 @@ impl<S: Sink> Output<S> {
             receipts: BTreeMap::new(),
             cancelled_claims: BTreeMap::new(),
             retired_sources: BTreeMap::new(),
+            retired_producers: BTreeSet::new(),
             retired_generation: 0,
             closing: false,
             failed: false,
@@ -119,7 +122,8 @@ impl<S: Sink> Output<S> {
         if keys.is_empty()
             || keys.len() > MAX_KEYS
             || keys.iter().collect::<BTreeSet<_>>().len() != keys.len()
-            || claim.owner.remap_key().is_some() && keys.len() != 1
+            || (claim.owner.remap_key().is_some() || matches!(claim.owner, Owner::Software { .. }))
+                && keys.len() != 1
             || keys.iter().any(|&key| {
                 !(1..768).contains(&key) || !self.sink.as_ref().unwrap().supports_key(key)
             })
@@ -175,12 +179,21 @@ impl<S: Sink> Output<S> {
         self.remove(vec![claim.owner.clone()])
     }
 
-    /// Forward a held remap's repeat without creating another owner or press.
+    /// Emit a held remap or software key's repeat without creating another press.
     pub fn repeat(&mut self, claim: &Claim, at: Duration) -> io::Result<Progress> {
         self.ready(at)?;
         self.validate_binding(claim)?;
-        if claim.owner.remap_key().is_none() {
-            return Err(invalid("repeat requires a same-seat remap owner"));
+        let software = matches!(claim.owner, Owner::Software { .. });
+        if claim.owner.remap_key().is_none() && !software {
+            return Err(invalid(
+                "repeat requires a held remap or software key owner",
+            ));
+        }
+        if software && (self.cancelled(claim) || !self.held.contains_key(&claim.owner)) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "software key press is no longer held",
+            ));
         }
         self.at = at;
         let Some(held) = self.held.get(&claim.owner) else {
@@ -256,7 +269,7 @@ impl<S: Sink> Output<S> {
         self.cleanup()
     }
 
-    /// Permanently retire remap and synthetic claims through the supplied configuration.
+    /// Permanently retire every key claim through the supplied configuration.
     pub fn retire_generation(&mut self, through: u64, at: Duration) -> io::Result<Progress> {
         self.live(self.at)?;
         if through == 0 {
@@ -266,6 +279,23 @@ impl<S: Sink> Output<S> {
         self.at = self.at.max(at);
         let through = self.retired_generation;
         self.receipts.retain(|generation, _| *generation > through);
+        self.cleanup()
+    }
+
+    /// Permanently retire every press owned by this software producer.
+    pub fn retire_producer(&mut self, producer: [u64; 2], at: Duration) -> io::Result<Progress> {
+        self.live(self.at)?;
+        if producer == [0, 0] {
+            return Err(invalid("software producer identity must be nonzero"));
+        }
+        if !self.retired_producers.contains(&producer)
+            && self.retired_producers.len() >= MAX_PRODUCERS
+        {
+            self.closing = true;
+        } else {
+            self.retired_producers.insert(producer);
+        }
+        self.at = self.at.max(at);
         self.cleanup()
     }
 
@@ -424,8 +454,17 @@ impl<S: Sink> Output<S> {
                 return Err(invalid("remap owner requires its exact physical origin"));
             }
         }
+        if let Owner::Software { producer, .. } = &claim.owner
+            && (*producer == [0, 0] || claim.origin.is_some())
+        {
+            return Err(invalid(
+                "software keys require a producer identity and no physical origin",
+            ));
+        }
         match &claim.owner {
-            Owner::Synthetic { generation, id, .. } | Owner::Remap { generation, id, .. }
+            Owner::Synthetic { generation, id, .. }
+            | Owner::Remap { generation, id, .. }
+            | Owner::Software { generation, id, .. }
                 if *generation != claim.configuration || *id != claim.serial =>
             {
                 return Err(invalid(
@@ -439,6 +478,7 @@ impl<S: Sink> Output<S> {
 
     fn cancelled(&self, claim: &Claim) -> bool {
         self.closing
+            || matches!(&claim.owner, Owner::Software { producer, .. } if self.retired_producers.contains(producer))
             || self.cancelled_claims.get(&claim.owner) == Some(claim)
             || claim.origin.as_ref().is_some_and(|source| {
                 self.retired_sources

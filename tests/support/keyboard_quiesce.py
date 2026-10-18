@@ -513,7 +513,11 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
                 ("cancelled-unwritten-chord", "bAAAa", []), ("retired-remap-one-owner", "bAAAa", [42]),
                 ("source-retired-neutral", "bAAAaA", []), ("task-cancelled-sibling-held", "bAAAaA", [42]),
                 ("context-cancelled-neutral", "bAAAaA", []), ("rebound-press-kept", "bAAAaAA", [42]),
-                ("context-reentered-neutral", "bAAAaAAa", [])]
+                ("context-reentered-neutral", "bAAAaAAa", []),
+                ("software-owners-held", "bAAAaAAaA", [42]),
+                ("software-one-producer-retired", "bAAAaAAaAA", [42]),
+                ("software-retired-physical-held", "bAAAaAAaAAA", [42]),
+                ("software-retired-neutral", "bAAAaAAaAAAa", [])]
     if args.key_worker:
         expected = [("ordered-fast-remap", "bAA", []), ("scoped-remap-held", "bAA", [42]),
                     ("cancelled-one-sibling-held", "bAA", [42]), ("scoped-unwritten-chord", "bAA", []),
@@ -553,12 +557,14 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
     if after != before:
         raise RuntimeError("owned key-output producer did not retire")
     result = json.loads((output / "key-output-runtime-result.json").read_text())
-    wanted = dict(status="passed", phases=11, source="two_owned_wayland_virtual_keyboards", production_route_tested=False,
+    wanted = dict(status="passed", phases=15, source="two_owned_wayland_virtual_keyboards", production_route_tested=False,
                   kernel_input_tested=False, unmodified_stock_acceptance=False, test_backpressure=True)
     if args.key_worker:
         wanted.update(phases=9, source="three_owned_wayland_virtual_keyboards", scoped_worker_tested=True, authority_modeled=True,
                       transport_readiness_modeled=True, selective_consumption_tested=False,
                       selective_projection_tested=True, within_frame_order_tested=True, cross_source_order_tested=True)
+    else:
+        wanted.update(software_owner_tested=True, software_authorization_tested=False, software_repeat_rendering_tested=False)
     if json.dumps(result, sort_keys=True) != json.dumps(wanted, sort_keys=True):
         raise RuntimeError("invalid key-output runtime receipt")
     result.update(captures=pictures, observations=phases, config_provider=args.hyprland_config,
@@ -568,5 +574,5 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
     if args.key_worker:
         print("PASS: selective routing and shared scheduler preserved within-report/cross-source order, sibling ownership, cancellation and reentry; nine rendered protocol-sink phases. Authority/readiness modeled; no kernel consumption or native takeover.")
     else:
-        print("PASS: actual key-output driver preserved overlapping owners, exact task cancellation, stale-press fencing and context reentry; eleven rendered app phases.")
+        print("PASS: actual key-output driver preserved overlapping owners, software producer isolation, exact cancellation and context reentry; fifteen rendered app phases. Software authorization and repeat rendering are not tested.")
     return result

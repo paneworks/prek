@@ -410,13 +410,51 @@ fn local_cage_generated_key_output() {
         .tap(chord(13, 4), &[30], monotonic().unwrap())
         .unwrap();
     drain(&mut generated);
+    phase(&output, 10, "bAAAaAAa", &[]);
+    for (id, producer) in [(14, 7), (15, 8)] {
+        generated
+            .hold(
+                Claim {
+                    owner: Owner::Software {
+                        seat: "seat0".into(),
+                        producer: [producer, 1],
+                        generation: 4,
+                        id,
+                    },
+                    origin: None,
+                    configuration: 4,
+                    serial: id,
+                },
+                &[42],
+                monotonic().unwrap(),
+            )
+            .unwrap();
+        drain(&mut generated);
+    }
+    physical.send(5, &[(30, 1), (30, 0)]);
+    phase(&output, 11, "bAAAaAAaA", &[42]);
+    generated
+        .retire_producer([7, 1], monotonic().unwrap())
+        .unwrap();
+    drain(&mut generated);
+    physical.send(6, &[(30, 1), (30, 0)]);
+    phase(&output, 12, "bAAAaAAaAA", &[42]);
+    physical.send(7, &[(42, 1)]);
+    generated
+        .retire_producer([8, 1], monotonic().unwrap())
+        .unwrap();
+    drain(&mut generated);
+    physical.send(8, &[(30, 1), (30, 0)]);
+    phase(&output, 13, "bAAAaAAaAAA", &[42]);
+    physical.send(9, &[(42, 0), (30, 1), (30, 0)]);
     generated.retire(monotonic().unwrap()).unwrap();
     drain(&mut generated);
     assert!(generated.settled());
     assert!(generated.into_sink().is_ok());
     drop(physical);
-    phase(&output, 10, "bAAAaAAa", &[]);
-    fs::write(output.join("key-output-runtime-result.json"), serde_json::to_vec(&json!({"status":"passed","phases":11,
+    phase(&output, 14, "bAAAaAAaAAAa", &[]);
+    fs::write(output.join("key-output-runtime-result.json"), serde_json::to_vec(&json!({"status":"passed","phases":15,
         "source":"two_owned_wayland_virtual_keyboards","production_route_tested":false,"kernel_input_tested":false,
-        "unmodified_stock_acceptance":false,"test_backpressure":true})).unwrap()).unwrap();
+        "unmodified_stock_acceptance":false,"test_backpressure":true,"software_owner_tested":true,
+        "software_authorization_tested":false,"software_repeat_rendering_tested":false})).unwrap()).unwrap();
 }
