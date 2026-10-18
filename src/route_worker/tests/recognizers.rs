@@ -31,7 +31,7 @@ fn profile() -> Config {
     config.devices = BTreeMap::from([(
         "keyboard".into(),
         Selector {
-            identity: Some("bridge-model".into()),
+            identity: Some("test:bridge-model".into()),
             ..Selector::default()
         },
     )]);
@@ -64,7 +64,7 @@ fn device() -> Device {
             generation: (1 << 54) + 3,
             seat: "seat0".into(),
         },
-        identity: "bridge-model".into(),
+        identity: "test:bridge-model".into(),
         name: "Prek test bridge model".into(),
         path: String::new(),
         physical: "fixture/bridge".into(),

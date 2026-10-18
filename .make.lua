@@ -443,6 +443,16 @@ make.recipe{ name="test-key-projection",desc="per-press raw-key ownership and co
                sh.cargo("test","--locked","--lib","router::keyboard::tests")
              end }
 
+make.recipe{ name="test-key-coordinator",desc="fenced selective routing and shared raw/generated ordering; no devices",
+             run=function()
+               for _,filter in ipairs({"keys::worker::tests::coordinator","router::keyboard::tests",
+                   "route_worker::keys::tests::coordinator","route_worker::tests::recognizers::keys"}) do
+                 local tested=oslo.run{"cargo","test","--locked","--lib",filter,capture=true}
+                 io.stdout:write(tested.out or ""); io.stderr:write(tested.err or "")
+                 assert(tested.ok and (tested.out or ""):match("running [1-9]%d* tests"),"coordinator gate failed or selected no tests: "..filter)
+               end
+             end }
+
 make.recipe{ name="test-native-key-worker",desc="managed generated-output slots, publication replies and native worker policy; no devices",
              run=function()
                sh.cargo("test","--locked","--lib","route_worker::keys::tests")
@@ -485,9 +495,11 @@ cargo test --locked --test key_output_cage --no-run --message-format=json | jq -
                assert(fixture and fixture:sub(1,1)=="/","missing current Cargo test executable")
                print("DEV: current Cargo fixture; explicitly pinned compositor runner: "..a.runner)
                assert(oslo.run{"sha256sum",fixture}.ok,"could not identify scheduler fixture")
+               local helper=project_root().."/tests/support/keyboard_quiesce.py"
+               assert(oslo.run{"sha256sum",helper}.ok,"could not identify scheduler helper")
                for _,provider in ipairs{"lua","hyprlang"} do
                  assert(oslo.run{a.runner,"--hardware-rendering","--key-output","--key-worker",
-                   "--key-output-fixture",fixture,"--hyprland-config",provider}.ok,"local debug scheduler fixture failed")
+                   "--key-output-fixture",fixture,"--keyboard-quiesce-check",helper,"--hyprland-config",provider}.ok,"local debug scheduler fixture failed")
                end
              end }
 

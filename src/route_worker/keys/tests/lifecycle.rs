@@ -93,10 +93,11 @@ fn consumer_revocation_masks_key_authority_before_any_pending_write() {
 }
 
 #[test]
-fn mixed_repeat_frames_are_refused_until_the_position_projector_exists() {
+fn mixed_repeat_entry_requires_the_original_coordinator_frame() {
     let (mut slot, state) = model();
     activate(&mut slot, &state, 0);
-    let mut routing = routing(vec![rule("shift", Action::Remap { key: Key(42) })]);
+    let mut routing =
+        crate::keys::worker::tests::projected(vec![rule("shift", Action::Remap { key: Key(42) })]);
     submit(&mut slot, &mut routing, 1, 10, 1);
     drain(&mut slot, &mut routing, 10);
     let mut pulse = frame(1, 2, 20, 30, 2);
@@ -109,8 +110,10 @@ fn mixed_repeat_frames_are_refused_until_the_position_projector_exists() {
         },
     );
     assert_eq!(
-        slot.repeat(&pulse, ms(20)).unwrap_err().kind(),
-        io::ErrorKind::Unsupported
+        slot.admit(&routing, vec![], Some(&pulse), ms(20))
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidInput
     );
     assert_eq!(keys(&state), [(42, 1)]);
 }

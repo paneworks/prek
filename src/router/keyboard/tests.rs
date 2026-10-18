@@ -687,6 +687,72 @@ fn claim_and_cut_counts_are_bounded_before_planning() {
 }
 
 #[test]
+fn legacy_buffered_prefixes_keep_global_positions_through_timeout_forwarding() {
+    let mut router = model(Limits::default(), false);
+    router.mark_input(1, 7).unwrap();
+    router
+        .push(
+            keys(1, &[(30, 1)]),
+            Some(Candidate {
+                id: 1,
+                authorization: 1,
+                policy: Policy::Buffer {
+                    join: ms(0),
+                    decision: ms(10),
+                },
+            }),
+            ms(1),
+        )
+        .unwrap();
+    assert!(!router.position_prefix_delivered(InputPosition::after_frame(7), true));
+    assert_eq!(router.input_marks.len(), 1);
+    router.advance(ms(11)).unwrap();
+    assert!(router.input_marks.is_empty());
+    let scheduled = router.due(ms(11)).unwrap().unwrap().clone();
+    let span = router.input_span(scheduled.ticket).unwrap();
+    assert_eq!(span.first.frame, 7);
+    assert_eq!(span.last, InputPosition::after_frame(7));
+    assert!(!router.position_prefix_delivered(InputPosition::after_frame(7), true));
+    router.delivered(scheduled.ticket, ms(11)).unwrap();
+    assert!(router.position_prefix_delivered(InputPosition::after_frame(7), true));
+}
+
+#[test]
+fn claiming_a_legacy_group_discards_pending_position_marks_not_other_queues() {
+    let mut router = model(Limits::default(), false);
+    router.mark_input(1, 7).unwrap();
+    router
+        .push(
+            keys(1, &[(30, 1)]),
+            Some(Candidate {
+                id: 1,
+                authorization: 1,
+                policy: Policy::Buffer {
+                    join: ms(0),
+                    decision: ms(10),
+                },
+            }),
+            ms(1),
+        )
+        .unwrap();
+    router.claim(1, 1, ms(1)).unwrap();
+    assert!(router.input_marks.is_empty());
+    assert!(router.positions.is_empty());
+    assert!(router.position_prefix_delivered(InputPosition::after_frame(7), true));
+    assert!(router.physical.keys.contains(&30));
+}
+
+#[test]
+fn blocked_deadlines_do_not_extend_the_original_delivery_budget() {
+    let mut router = model(Limits::default(), false);
+    push(&mut router, keys(1, &[(30, 1)]), &[], &[]);
+    assert_eq!(router.next_deadline(), Some(ms(1)));
+    let failure = ms(21) + Duration::from_nanos(1);
+    assert_eq!(router.next_deadline_with_write(|_| true), Some(failure));
+    assert_eq!(router.due_after_input(failure), Err(Fault::MissedDelivery));
+}
+
+#[test]
 fn a_stale_legacy_call_cannot_stop_a_current_selective_source() {
     let mut router = model(Limits::default(), false);
     push(&mut router, keys(1, &[(30, 1)]), &[claim(1, 0)], &[]);

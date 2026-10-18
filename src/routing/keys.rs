@@ -1,5 +1,6 @@
 use super::*;
 use crate::{config::Action, keys::SourceKey, protocol::Fence};
+mod projection;
 
 /// Linear configured key work retaining its original route and coordinator fence.
 pub struct KeyWork {
@@ -77,7 +78,18 @@ impl KeyWork {
                 .is_none_or(|chain| routing.chain_receipt_valid(chain))
     }
     pub fn input_prefix_ready(&self, routing: &Routing) -> bool {
-        routing.key_prefix_ready(&self.dispatch.inputs, self.observe())
+        if let Some(position) = self.scheduling_position() {
+            routing.key_position_prefix_ready(position, self.observe())
+        } else {
+            routing.key_prefix_ready(&self.dispatch.inputs, self.observe())
+        }
+    }
+    pub fn scheduling_position(&self) -> Option<crate::input::InputPosition> {
+        self.dispatch.position
+    }
+    pub fn blocks_raw_span(&self, span: crate::router::InputSpan) -> bool {
+        self.scheduling_position()
+            .is_some_and(|position| span.last > position)
     }
     pub fn blocks_raw(&self, source: &Source, sequence: u64) -> bool {
         self.dispatch
@@ -85,7 +97,7 @@ impl KeyWork {
             .get(source)
             .is_some_and(|bound| sequence > *bound || sequence == *bound && !self.observe())
     }
-    fn observe(&self) -> bool {
+    pub(crate) fn observe(&self) -> bool {
         self.dispatch.outcome.intent.rule.delivery == crate::config::Delivery::Observe
     }
     pub(crate) fn inputs(&self) -> &BTreeMap<Source, u64> {
@@ -96,6 +108,29 @@ impl KeyWork {
             .map(|bytes| bytes.len())
             .map_err(io::Error::other)
     }
+}
+
+pub(super) fn projectable(config: &Config, device: &Device) -> bool {
+    !device.capabilities.keys().any(|kind| {
+        matches!(
+            *kind,
+            crate::input::EV_REL | crate::input::EV_ABS | crate::input::EV_SW
+        )
+    }) && config
+        .rules
+        .iter()
+        .filter(|rule| rule.enabled && rule.delivery != crate::config::Delivery::Observe)
+        .filter(|rule| {
+            (rule.seats.is_empty() || rule.seats.contains(&device.source.seat))
+                && config.devices.iter().any(|(id, selector)| {
+                    (rule.devices.is_empty() || rule.devices.contains(id))
+                        && selector.matches(device)
+                })
+        })
+        .all(|rule| {
+            matches!(rule.trigger, Trigger::Key { .. })
+                && matches!(rule.action, Action::Keys { .. } | Action::Remap { .. })
+        })
 }
 
 impl Routing {

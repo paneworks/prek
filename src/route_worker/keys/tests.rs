@@ -7,6 +7,7 @@ use crate::{
 };
 use std::{cell::RefCell, collections::BTreeMap, os::unix::net::UnixStream, rc::Rc};
 
+mod coordinator;
 mod lifecycle;
 
 #[derive(Default)]
@@ -321,7 +322,8 @@ fn a_slot_requires_its_published_generated_role_and_matching_consumer_isolation(
 fn actual_key_work_uses_the_managed_output_and_exposes_its_write_fd() {
     let (mut slot, state) = model();
     activate(&mut slot, &state, 0);
-    let mut routing = routing(vec![rule("shift", Action::Remap { key: Key(42) })]);
+    let mut routing =
+        crate::keys::worker::tests::projected(vec![rule("shift", Action::Remap { key: Key(42) })]);
     submit(&mut slot, &mut routing, 1, 10, 1);
     slot.poll(&mut routing, ms(10)).unwrap();
     assert!(slot.poll_fd().is_some());
@@ -332,7 +334,7 @@ fn actual_key_work_uses_the_managed_output_and_exposes_its_write_fd() {
     let pulse = frame(1, 2, 20, 30, 2);
     assert!(push(&mut routing, 1, 2, 20, 2).is_empty());
     ack(&mut routing, 20);
-    slot.repeat(&pulse, ms(20)).unwrap();
+    slot.admit(&routing, vec![], Some(&pulse), ms(20)).unwrap();
     drain(&mut slot, &mut routing, 20);
     submit(&mut slot, &mut routing, 3, 30, 0);
     drain(&mut slot, &mut routing, 30);

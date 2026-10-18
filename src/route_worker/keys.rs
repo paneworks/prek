@@ -3,7 +3,7 @@ use crate::{
     keys::{
         native::Prepared,
         output::{Output, Progress, Sink},
-        worker::{Seat as Actor, Submission},
+        worker::Seat as Actor,
     },
     protocol::Fence,
     routing::{KeyWork, Routing},
@@ -17,6 +17,8 @@ use std::{
 };
 
 const OFFER: Duration = Duration::from_millis(100);
+#[cfg(test)]
+use crate::keys::worker::Submission;
 
 pub(super) trait Preparation {
     type Sink: Sink;
@@ -226,6 +228,7 @@ impl<P: Preparation> Slot<P> {
         }
         Ok(())
     }
+    #[cfg(test)]
     pub(super) fn enqueue(&mut self, work: KeyWork, at: Duration) -> io::Result<()> {
         if !self.available(at) {
             return Err(invalid("key dispatch has no live generated output"));
@@ -237,39 +240,28 @@ impl<P: Preparation> Slot<P> {
             Submission::Ignored | Submission::Queued | Submission::Remap(_) => Ok(()),
         }
     }
-    pub(super) fn repeat(&mut self, frame: &Frame, at: Duration) -> io::Result<()> {
+    pub(super) fn admit(
+        &mut self,
+        routing: &Routing,
+        work: Vec<KeyWork>,
+        input: Option<&Frame>,
+        at: Duration,
+    ) -> io::Result<()> {
         if !self.available(at) {
-            return Ok(());
-        }
-        if frame
-            .events
-            .iter()
-            .any(|event| event.kind == crate::input::EV_KEY && event.value == 2)
-            && frame
-                .events
-                .iter()
-                .any(|event| event.kind == crate::input::EV_KEY && matches!(event.value, 0 | 1))
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "mixed key/repeat input requires the shared input-position projector",
-            ));
+            return if work.is_empty() {
+                Ok(())
+            } else {
+                Err(invalid("key dispatch has no live generated output"))
+            };
         }
         let Phase::Active(actor) = &mut self.phase else {
             unreachable!()
         };
-        for (index, event) in frame
-            .events
-            .iter()
-            .enumerate()
-            .filter(|(_, event)| event.kind == crate::input::EV_KEY && event.value == 2)
-        {
-            let handles = actor.repeat_handles(&frame.source, event.code);
-            if !handles.is_empty() {
-                actor.repeat(&handles, frame, index, at)?;
-            }
-        }
+        actor.admit(routing, work, input, at)?;
         Ok(())
+    }
+    pub(super) fn seat(&self) -> &str {
+        &self.descriptor.source.seat
     }
     pub(super) fn cancel(&mut self, event: &Event, at: Duration) -> io::Result<()> {
         if let Phase::Active(actor) | Phase::Closing(actor) = &mut self.phase {
@@ -283,9 +275,24 @@ impl<P: Preparation> Slot<P> {
         }
         Ok(())
     }
+    #[cfg(test)]
     pub(super) fn blocks_raw(&self, source: &Source, sequence: u64) -> bool {
         match &self.phase {
             Phase::Active(actor) | Phase::Closing(actor) => actor.blocks_raw(source, sequence),
+            _ => false,
+        }
+    }
+    pub(super) fn blocks_input(
+        &self,
+        source: &Source,
+        sequence: u64,
+        span: Option<crate::router::InputSpan>,
+    ) -> bool {
+        match &self.phase {
+            Phase::Active(actor) | Phase::Closing(actor) => span.map_or_else(
+                || actor.blocks_raw(source, sequence),
+                |span| actor.blocks_raw_span(source, span),
+            ),
             _ => false,
         }
     }

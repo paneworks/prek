@@ -91,14 +91,17 @@ authority from a public match event. A coordinator-free observer cannot mint it.
 | Operation | Behavior |
 | --- | --- |
 | `enqueue(work, at)` | Queue one canonical action. A remap begin returns an opaque `Remap` handle. A normal end queues a release behind its pending press, preserving fast taps. |
+| `admit(routing, work, input, at)` | Merge canonical work and original repeats in input order before admitting an end that closes a repeat binding. Used by the managed worker and protocol fixture. |
 | `poll(routing, at)` | Revalidate live work before writing or flushing; cancel stale scopes, advance one pending frame, and process at most eight immediately completed queue operations. |
 | `repeat(handles, frame, index, at)` | Accept the exact value-2 event supplied by the trusted input coordinator. Deduplicate its source/sequence/event position and emit once per distinct mapped target, with no new owner or value-1 press. |
+| `repeat_positioned(routing, handles, frame, index, at)` | Require the exact current original frame and matching live coordinator; retain its scheduling position and observer raw-prefix requirement. |
 | `cancel(fence, event, at)` | Cancel the exact recognized gesture in this coordinator. Discard unwritten tails and compensate only written prefixes; preserve sibling owners. |
 | `retire_source(source, at)` | Cancel work whose retained scope depends on this source, then tombstone its incarnation. Preserve unrelated sources. |
 | `pause(routing, at)` | Revoke this coordinator's synthetic-grant epoch and cancel accepted work. A different coordinator is rejected before mutation. |
 | `resume(routing, at)` | Require drained local output and fresh matching authority. This does not replace native consumer/neutral checks by the caller. |
 | `retire(at)` / `drain(at)` | Permanently reject new work and drain release-only cleanup without retaining a removed Routing. Cleanup has a 250 ms bound. |
-| `blocks_raw(source, sequence)` | Report local write barriers for this raw input position. It is not a consumer-delivery acknowledgement. |
+| `blocks_raw(source, sequence)` | Legacy source/frame barriers; never supply an allocated fragment output sequence here. |
+| `blocks_raw_span(source, span)` | Seat-wide original-position barriers for raw reports/fragments, including pending generated writes and cancellation cleanup. Not consumer-delivery acknowledgement. |
 | `deadline()` / `poll_fd()` | Supply queue/write/cleanup wakeups and an optional Linux sink write fd. Also poll Routing/context/consumer deadlines and lifecycle notifications. |
 
 Normal completion and cancellation are deliberately separate: a down followed
@@ -130,17 +133,26 @@ boundary (`event == usize::MAX`); timers advanced before a new input report use
 the previous frame's boundary. A due timer cannot be sorted behind the new
 report's first key merely because both have the same timestamp.
 
-The forwarding loop must interleave raw and generated writes, not drain every
-generated action before forwarding ordinary input. For consuming work, prior raw
-sequences must be acknowledged first and the action blocks its own and later
-cutpoints. Observing work also waits for its own raw frame and blocks later ones.
-An in-flight write retains the barrier until full local completion. This
-preserves separate-frame, same-source down / ordinary typing / up order under
-local backpressure. It does **not** establish within-frame or cross-source
-ordering, stock-compositor cross-fd ordering, or selective consumption.
-Whole-device raw gesture groups still cannot selectively remap a held key while
-preserving every unrelated key. Per-key projection and the native consumer
-boundary remain required before production capability negotiation is enabled.
+`Routing::with_key_projection` coordinates original positions across all attached
+sources. Eligible pure-key sources with immediate consuming key actions arbitrate
+one winner per physical press by priority/rule ID. Unrelated keys remain ordinary.
+Other raw routes retain whole-report positions, including legacy buffered groups.
+`KeyWork::scheduling_position()` retains the coordinator cut; legacy source modes
+use whole-report boundaries rather than claiming exact cuts. The managed worker
+uses this constructor and the same `admit` implementation as the protocol fixture.
+The older constructors retain legacy source/frame behavior.
+
+Consuming work waits for the global raw prefix before its edge. Observing work
+also waits for its own raw edge; observed repeats do likewise. Pending/in-flight
+generated writes block later raw spans on every source in the seat, not just the
+triggering keyboard. Local backpressure retains barriers through full report
+acknowledgement. Closing generated slots fence raw forwarding until their owned
+cleanup finishes. A blocked or in-flight raw report wakes at its existing
+write-budget failure boundary, not continuously at an expired due timestamp.
+These are local coordinator/write guarantees. They do not prove stock-compositor
+cross-fd delivery, consumer-neutral acknowledgement or native takeover.
+Strict prefixes through pending legacy groups can delay unrelated routes; their
+latency/dependency behavior is not accepted and must be resolved before public activation.
 
 Before polling, the owning loop must forward Routing's cancellation events to
 `cancel` and its source-recovery transitions to `retire_source`. A retained
@@ -155,7 +167,7 @@ permit structures. Broader resource-policy acceptance remains open. Callers must
 retire/recover on acceptance errors instead of silently dropping required input
 releases, and must never pass untrusted JSON frames as source-repeat evidence.
 
-### Raw projection queue (not yet connected to the sole worker)
+### Raw projection queue
 
 `Router::push_key_frame` is the per-press alternative to the router's existing
 whole-device ownership model. Its `KeyClaim` inputs must come from a trusted
@@ -187,27 +199,33 @@ Legacy and selective modes cannot be mixed within one router incarnation.
 
 Transformed reports containing nonkeyboard data or ambiguous scan metadata
 currently fail with `UnsupportedProjection` and require recovery; untouched
-hybrid reports remain intact. These transformations, shared cross-source/raw-
-generated scheduling, fenced arbitration in `Routing`, managed-worker binding,
-repeat interleaving and native consumer acknowledgement are still required.
-The public synthetic capability remains closed. Existing Cage screenshots do
-not prove this new queue path.
+hybrid reports remain intact. Timed/chord/sequence and mixed-source modes still
+use legacy whole-report ownership; their selective per-key behavior is not
+complete. Hybrid/ambiguous transformations, native consumer acknowledgement,
+neutral reentry and the full original acceptance matrix remain required. The
+public synthetic capability stays closed.
 
 `oslo make test-key-positions` runs device-free original-position, edge-ordered
 activation, retained-cancellation and held-touch continuation regressions.
 `oslo make test-key-projection` runs per-press raw queue, scan association,
 complete-report cut, original-position, capacity and recovery models.
+`oslo make test-key-coordinator` checks nonempty selections for fenced arbitration,
+global actor barriers, legacy buffered positions, merged repeats and actual
+sole-worker ABI writes on owned private regular files (no devices).
 `oslo make test-key-worker` runs device-free scope, ordering, ownership,
 cancellation, timeout and bounds regressions. `oslo make test-key-worker-cage`
 drives the actual scheduler through owned protocol keyboards and a rendered app
 with both Hyprland configuration dialects. Its authority/readiness fixtures are
-explicitly modeled and its rules observe raw input; neither test grants native
-takeover or establishes selective-consuming remapping.
+explicitly modeled. Nine phases include consumed per-key projection, ordinary
+typing within one report and a separate source behind a pending modifier, using
+three owned protocol keyboards. They do not grant native takeover or prove
+physical/kernel selective consumption. Repeat interleaving has direct worker/file
+evidence; these rendered phases do not simulate kernel repeat.
 
 For fixture development, `test-key-worker-cage-dev --runner=/nix/store/.../bin/prek-cage-host-test`
 requires an explicitly supplied, already built immutable compositor runner. It
-builds and selects the current Cargo test executable, prints its SHA-256, and
-runs both configuration dialects without rebuilding the unrelated release
+builds and selects the current Cargo test executable, prints its and the current
+helper's SHA-256, and runs both configuration dialects without rebuilding the release
 application. This is development-binary evidence, not packaged-release evidence.
 
 ## Private native worker binding
@@ -241,8 +259,9 @@ a retired native slot in its old coordinator.
 
 This binding does not complete native acceptance. The stock consumer boundary
 still refuses takeover, public `SyntheticInput` negotiation stays disabled, and
-the shared per-key/input-position projector remains missing. Mixed press/release
-and repeat frames are explicitly refused rather than silently reordered.
+the complete native consumer prefix/drain/neutral boundary remains unproven.
+Mixed press/release/repeat reports use canonical merged admission, which rejects
+unrecorded or modified repeat frames before admitting new work.
 Provider-owned repeat, neutral reentry and the complete Lua input-effect APIs
 also remain open.
 

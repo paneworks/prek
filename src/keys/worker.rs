@@ -6,8 +6,9 @@ use super::{
 };
 use crate::{
     config::Action,
-    input::{EV_KEY, Frame, Source},
+    input::{EV_KEY, Frame, InputPosition, Source},
     protocol::Fence,
+    router::InputSpan,
     routing::{KeyWork, Routing},
     rules::{Event, Stage},
 };
@@ -59,6 +60,8 @@ enum Operation {
         members: Vec<Gesture>,
         inputs: BTreeMap<Source, u64>,
         emitted: BTreeSet<u16>,
+        position: Option<InputPosition>,
+        inclusive: bool,
     },
 }
 struct Pending {
@@ -73,6 +76,7 @@ enum FlightKind {
     Repeat,
 }
 struct Flight {
+    position: Option<InputPosition>,
     kind: FlightKind,
     inputs: BTreeMap<Source, u64>,
     deadline: Duration,
@@ -245,6 +249,56 @@ impl<S: Sink> Seat<S> {
         }
     }
 
+    /// Admit scoped work and original repeats in input order.
+    pub fn admit(
+        &mut self,
+        routing: &Routing,
+        work: Vec<KeyWork>,
+        input: Option<&Frame>,
+        at: Duration,
+    ) -> io::Result<Vec<Submission>> {
+        enum Admission {
+            Work(Box<KeyWork>),
+            Repeat(usize),
+        }
+        let mut jobs = Vec::new();
+        for work in work {
+            let position = work
+                .position()
+                .or(work.scheduling_position())
+                .ok_or_else(|| invalid("key work has no original input position"))?;
+            jobs.push((position, Admission::Work(Box::new(work))));
+        }
+        if let Some(frame) = input {
+            for (index, _) in frame
+                .events
+                .iter()
+                .enumerate()
+                .filter(|(_, event)| event.kind == EV_KEY && event.value == 2)
+            {
+                let position = routing
+                    .key_input_position(frame, index)
+                    .ok_or_else(|| invalid("repeat input has no canonical coordinator position"))?;
+                jobs.push((position, Admission::Repeat(index)));
+            }
+        }
+        jobs.sort_by_key(|(position, _)| *position);
+        let mut submitted = Vec::new();
+        for (_, job) in jobs {
+            match job {
+                Admission::Work(work) => submitted.push(self.enqueue(*work, at)?),
+                Admission::Repeat(index) => {
+                    let frame = input.unwrap();
+                    let handles = self.repeat_handles(&frame.source, frame.events[index].code);
+                    if !handles.is_empty() {
+                        self.repeat_positioned(routing, &handles, frame, index, at)?;
+                    }
+                }
+            }
+        }
+        Ok(submitted)
+    }
+
     /// List live remap instances for one physical source key.
     pub(crate) fn repeat_handles(&self, source: &Source, code: u16) -> Vec<Remap> {
         self.bindings
@@ -273,6 +327,34 @@ impl<S: Sink> Seat<S> {
         index: usize,
         at: Duration,
     ) -> io::Result<()> {
+        self.repeat_inner(handles, frame, index, at, None)
+    }
+
+    pub fn repeat_positioned(
+        &mut self,
+        routing: &Routing,
+        handles: &[Remap],
+        frame: &Frame,
+        index: usize,
+        at: Duration,
+    ) -> io::Result<()> {
+        if !routing.key_lane(self.fence, at) {
+            return Err(denied("repeat coordinator is unavailable"));
+        }
+        let position = routing
+            .key_repeat_position(frame, index)
+            .ok_or_else(|| invalid("repeat has no original coordinator input"))?;
+        self.repeat_inner(handles, frame, index, at, Some(position))
+    }
+
+    fn repeat_inner(
+        &mut self,
+        handles: &[Remap],
+        frame: &Frame,
+        index: usize,
+        at: Duration,
+        position: Option<InputPosition>,
+    ) -> io::Result<()> {
         self.live(at)?;
         if self.paused || self.retiring.is_some() {
             return Err(denied("key worker is not accepting repeats"));
@@ -294,11 +376,13 @@ impl<S: Sink> Seat<S> {
             return Err(invalid("source repeat was already accepted or reordered"));
         }
         let mut members = BTreeSet::new();
+        let mut inclusive = false;
         for handle in handles {
             if handle.sink != *self.output.source() || handle.fence != self.fence {
                 return Err(denied("repeat handle belongs to another output"));
             }
-            self.bindings
+            let binding = self
+                .bindings
                 .get(&handle.gesture)
                 .filter(|binding| {
                     !binding.ended
@@ -311,6 +395,7 @@ impl<S: Sink> Seat<S> {
                             .is_none_or(|sequence| *sequence <= frame.sequence)
                 })
                 .ok_or_else(|| denied("repeat handle has no live matching press"))?;
+            inclusive |= binding.work.observe();
             if !members.insert(handle.gesture.clone()) {
                 return Err(invalid("duplicate repeat handle"));
             }
@@ -326,6 +411,8 @@ impl<S: Sink> Seat<S> {
                 members: members.into_iter().collect(),
                 inputs: BTreeMap::from([(frame.source.clone(), frame.sequence)]),
                 emitted: BTreeSet::new(),
+                position,
+                inclusive,
             },
             bytes,
             at,
@@ -640,6 +727,7 @@ impl<S: Sink> Seat<S> {
                 };
                 let target = target.0;
                 let inputs = binding.work.inputs().clone();
+                let position = binding.work.scheduling_position();
                 let serial = self.next_serial()?;
                 let claim = Claim {
                     owner: Owner::Remap {
@@ -655,6 +743,7 @@ impl<S: Sink> Seat<S> {
                 self.bindings.get_mut(&gesture).unwrap().claim = Some(claim);
                 if !self.output.settled() {
                     self.flight = Some(Flight {
+                        position,
                         kind: FlightKind::Begin,
                         inputs,
                         deadline: at.saturating_add(MAX_AGE),
@@ -671,6 +760,7 @@ impl<S: Sink> Seat<S> {
                     self.output.release(claim, at)?;
                     if !self.output.settled() {
                         self.flight = Some(Flight {
+                            position: work.scheduling_position(),
                             kind: FlightKind::End(gesture),
                             inputs: work.inputs().clone(),
                             deadline: at.saturating_add(MAX_AGE),
@@ -705,6 +795,7 @@ impl<S: Sink> Seat<S> {
                 self.output.tap(claim.clone(), &keys, at)?;
                 if !self.output.settled() {
                     self.flight = Some(Flight {
+                        position: work.scheduling_position(),
                         inputs: work.inputs().clone(),
                         kind: FlightKind::Tap(work, claim),
                         deadline: at.saturating_add(MAX_AGE),
@@ -716,6 +807,8 @@ impl<S: Sink> Seat<S> {
                 members,
                 inputs,
                 mut emitted,
+                position,
+                inclusive,
             } => {
                 let claim = members
                     .iter()
@@ -734,6 +827,7 @@ impl<S: Sink> Seat<S> {
                     emitted.insert(code);
                     if !self.output.settled() {
                         self.flight = Some(Flight {
+                            position,
                             kind: FlightKind::Repeat,
                             inputs: inputs.clone(),
                             deadline: at.saturating_add(MAX_AGE),
@@ -744,6 +838,8 @@ impl<S: Sink> Seat<S> {
                         members,
                         inputs,
                         emitted,
+                        position,
+                        inclusive,
                     }));
                 }
             }
@@ -772,6 +868,47 @@ impl<S: Sink> Seat<S> {
                 }
             })
     }
+    pub fn blocks_raw_span(&self, source: &Source, span: InputSpan) -> bool {
+        if self.draining.is_some() || self.bindings.values().any(|binding| binding.cancelled) {
+            return true;
+        }
+        self.flight.as_ref().is_some_and(|flight| {
+            flight.position.map_or_else(
+                || {
+                    flight
+                        .inputs
+                        .get(source)
+                        .is_some_and(|sequence| span.sequence >= *sequence)
+                },
+                |position| span.last > position,
+            )
+        }) || self.pending.iter().any(|pending| match &pending.operation {
+            Operation::Begin(gesture) => self
+                .bindings
+                .get(gesture)
+                .is_some_and(|binding| Self::work_blocks_span(&binding.work, source, span)),
+            Operation::End(_, work) | Operation::Tap(work) => {
+                Self::work_blocks_span(work, source, span)
+            }
+            Operation::Repeat {
+                position, inputs, ..
+            } => position.map_or_else(
+                || {
+                    inputs
+                        .get(source)
+                        .is_some_and(|sequence| span.sequence >= *sequence)
+                },
+                |position| span.last > position,
+            ),
+        })
+    }
+    fn work_blocks_span(work: &KeyWork, source: &Source, span: InputSpan) -> bool {
+        if work.scheduling_position().is_some() {
+            work.blocks_raw_span(span)
+        } else {
+            work.blocks_raw(source, span.sequence)
+        }
+    }
     fn prefix_ready(&self, operation: &Operation, routing: &Routing) -> bool {
         match operation {
             Operation::Begin(gesture) => self
@@ -779,7 +916,15 @@ impl<S: Sink> Seat<S> {
                 .get(gesture)
                 .is_none_or(|binding| binding.work.input_prefix_ready(routing)),
             Operation::End(_, work) | Operation::Tap(work) => work.input_prefix_ready(routing),
-            Operation::Repeat { inputs, .. } => routing.key_prefix_ready(inputs, false),
+            Operation::Repeat {
+                inputs,
+                position,
+                inclusive,
+                ..
+            } => position.map_or_else(
+                || routing.key_prefix_ready(inputs, false),
+                |position| routing.key_position_prefix_ready(position, *inclusive),
+            ),
         }
     }
     fn flight_claim(&self) -> Option<Claim> {

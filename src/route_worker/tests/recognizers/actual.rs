@@ -48,7 +48,7 @@ end)
 return p.config.new{mode='route',
  policy={allow_input_events=true,allowed_devices={'keyboard'}},
  timing={join_window='1ms',decision_window='200ms'},
- devices={keyboard={identity='bridge-model'}},
+ devices={keyboard={identity='test:bridge-model'}},
  rules={p.rules.define{id='actual-bridge',devices={'keyboard'},contexts={'desktop'},
   scope='everywhere',delivery='reserve',trigger=trigger,action=p.actions.event{name='actual-bridge'}}},
 }

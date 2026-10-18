@@ -155,6 +155,174 @@ fn events(path: &std::path::Path) -> Vec<(u16, i32)> {
         .collect()
 }
 
+fn physical_file(fixture: &mut Fixture, original: &Device, name: &str) -> PathBuf {
+    let descriptor = Descriptor::mirror(
+        original,
+        KernelIdentity {
+            bus: 3,
+            vendor: 1,
+            product: 1,
+            version: 1,
+        },
+        None,
+        &BTreeMap::new(),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let publication = fixture
+        .stream
+        .registry
+        .prepare_isolated(descriptor)
+        .unwrap();
+    let path = fixture.directory.join(name);
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .unwrap();
+    let virtual_device = Virtual::ordinary_file_fixture(publication, file).unwrap();
+    let worker =
+        serde_json::from_value(serde_json::json!({"pid":std::process::id(),"birth":1,"epoch":1}))
+            .unwrap();
+    let now = monotonic().unwrap();
+    let mut admission =
+        crate::morf::admission::Gate::new(worker, fixture.owner.fence, original.source.clone());
+    admission.update(None, now).unwrap();
+    fixture.stream.outputs.insert(
+        original.source.clone(),
+        Output {
+            fence: fixture.owner.fence,
+            admission,
+            virtual_device,
+            state_probe: None,
+            feedback: None,
+            readiness: None,
+            consumer: None,
+            offered: now,
+            started: now,
+            in_flight: None,
+            sequence: 0,
+        },
+    );
+    path
+}
+
+fn raw_frame(device: &Device, sequence: u64, data: &[(u16, i32)]) -> Frame {
+    let mut events: Vec<_> = data
+        .iter()
+        .map(|&(code, value)| RawEvent {
+            kind: EV_KEY,
+            code,
+            value,
+        })
+        .collect();
+    events.push(RawEvent {
+        kind: EV_SYN,
+        code: SYN_REPORT,
+        value: 0,
+    });
+    Frame {
+        source: device.source.clone(),
+        at: monotonic().unwrap(),
+        sequence,
+        events,
+    }
+}
+
+#[test]
+fn sole_worker_interleaves_mixed_input_and_generated_reports_on_owned_regular_files() {
+    let mut config = profile();
+    config.rules[0].delivery = crate::config::Delivery::Buffer;
+    let mut fixture = Fixture::new(config, owner());
+    let (slot, _, generated) = slot(&fixture);
+    fixture.stream.seats.get_mut("seat0").unwrap().keys = Some(slot);
+    fixture.stream.refresh_keys(monotonic().unwrap()).unwrap();
+    let physical = physical_file(&mut fixture, &device(), "physical-ordered");
+    fixture
+        .stream
+        .push(Record::Frame {
+            frame: raw_frame(&device(), 1, &[(30, 1), (30, 2), (48, 1), (30, 0), (48, 0)]),
+        })
+        .unwrap();
+    for _ in 0..12 {
+        fixture.stream.flush().unwrap();
+        let keys = events(&generated);
+        let raw = events(&physical);
+        if raw.contains(&(48, 1)) {
+            assert!(keys.starts_with(&[(42, 1), (42, 2)]));
+        }
+        if keys.contains(&(42, 0)) {
+            assert!(raw.starts_with(&[(48, 1)]));
+        }
+        if raw.contains(&(48, 0)) {
+            assert_eq!(keys, [(42, 1), (42, 2), (42, 0)]);
+        }
+    }
+    assert_eq!(events(&generated), [(42, 1), (42, 2), (42, 0)]);
+    assert_eq!(events(&physical), [(48, 1), (48, 0)]);
+}
+
+#[test]
+fn sole_worker_pending_modifier_fences_an_unrelated_physical_source_file() {
+    let mut config = profile();
+    config.rules[0].delivery = crate::config::Delivery::Buffer;
+    config.devices.get_mut("keyboard").unwrap().identity = None;
+    config.devices.get_mut("keyboard").unwrap().keys = vec![crate::config::Key(30)];
+    let mut fixture = Fixture::new(config, owner());
+    let (slot, _, generated) = slot(&fixture);
+    fixture.stream.seats.get_mut("seat0").unwrap().keys = Some(slot);
+    fixture.stream.refresh_keys(monotonic().unwrap()).unwrap();
+    let mut second = device();
+    second.source.device += 1;
+    second.identity.push_str("-second");
+    fixture
+        .stream
+        .push(Record::Device {
+            device: second.clone(),
+            keys: BTreeSet::new(),
+            contacts: vec![],
+        })
+        .unwrap();
+    fixture.attach_device(&second);
+    let physical = physical_file(&mut fixture, &second, "physical-second");
+    fixture
+        .stream
+        .push(Record::Frame {
+            frame: raw_frame(&device(), 1, &[(30, 1)]),
+        })
+        .unwrap();
+    fixture
+        .stream
+        .push(Record::Frame {
+            frame: raw_frame(&second, 1, &[(48, 1), (48, 0)]),
+        })
+        .unwrap();
+    for _ in 0..8 {
+        fixture.stream.flush().unwrap();
+        if !events(&physical).is_empty() {
+            assert_eq!(events(&generated), [(42, 1)]);
+        }
+    }
+    assert_eq!(events(&physical), [(48, 1), (48, 0)]);
+}
+
+#[test]
+fn blocked_raw_reports_wait_for_progress_or_the_write_budget_not_an_expired_due_time() {
+    let mut config = profile();
+    config.rules[0].delivery = crate::config::Delivery::Buffer;
+    let mut fixture = Fixture::new(config, owner());
+    let (slot, _, _) = slot(&fixture);
+    fixture.stream.seats.get_mut("seat0").unwrap().keys = Some(slot);
+    fixture.stream.refresh_keys(monotonic().unwrap()).unwrap();
+    physical_file(&mut fixture, &device(), "physical-deadline");
+    let input = raw_frame(&device(), 1, &[(30, 1), (48, 1), (48, 0)]);
+    let at = input.at;
+    fixture.stream.push(Record::Frame { frame: input }).unwrap();
+    assert!(fixture.stream.deadline().unwrap() > at);
+}
+
 #[test]
 fn subscription_permission_is_not_execution_availability_without_a_ready_output() {
     let mut fixture = Fixture::new(profile(), owner());

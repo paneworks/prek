@@ -146,15 +146,4 @@ impl Stream {
         }
         self.closing_keys.clear();
     }
-    pub(super) fn repeat_keys(
-        &mut self,
-        name: &str,
-        frame: &Frame,
-        now: Duration,
-    ) -> io::Result<()> {
-        if let Some(keys) = self.seats.get_mut(name).and_then(|seat| seat.keys.as_mut()) {
-            keys.repeat(frame, now)?;
-        }
-        Ok(())
-    }
 }

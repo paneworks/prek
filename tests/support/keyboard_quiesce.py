@@ -515,10 +515,11 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
                 ("context-cancelled-neutral", "bAAAaA", []), ("rebound-press-kept", "bAAAaAA", [42]),
                 ("context-reentered-neutral", "bAAAaAAa", [])]
     if args.key_worker:
-        expected = [("ordered-fast-remap", "bAA", []), ("scoped-remap-held", "bAA", [42, 183]),
-                    ("cancelled-one-sibling-held", "bAA", [42, 183]), ("scoped-unwritten-chord", "bAA", []),
+        expected = [("ordered-fast-remap", "bAA", []), ("scoped-remap-held", "bAA", [42]),
+                    ("cancelled-one-sibling-held", "bAA", [42]), ("scoped-unwritten-chord", "bAA", []),
                     ("grant-revoked-neutral", "bAA", []), ("fresh-scoped-chord", "bAAa", []),
-                    ("scoped-source-retired", "bAAa", [])]
+                    ("within-report-selective", "bAAaAa", []), ("cross-source-modifier", "bAAaAaA", []),
+                    ("scoped-source-retired", "bAAaAaA", [])]
     fixture_env = dict(env, PREK_LOCAL_CAGE="1", PREK_CAGE_OUTPUT=str(output), PREK_CAGE_KEYBOARD=args.keyboard,
                        PREK_CAGE_KEY_SOCKET=str(socket))
     before = {device["address"] for device in json.loads(command(["-j", "devices"]))["keyboards"]}
@@ -555,8 +556,9 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
     wanted = dict(status="passed", phases=11, source="two_owned_wayland_virtual_keyboards", production_route_tested=False,
                   kernel_input_tested=False, unmodified_stock_acceptance=False, test_backpressure=True)
     if args.key_worker:
-        wanted.update(phases=7, scoped_worker_tested=True, authority_modeled=True,
-                      transport_readiness_modeled=True, selective_consumption_tested=False)
+        wanted.update(phases=9, source="three_owned_wayland_virtual_keyboards", scoped_worker_tested=True, authority_modeled=True,
+                      transport_readiness_modeled=True, selective_consumption_tested=False,
+                      selective_projection_tested=True, within_frame_order_tested=True, cross_source_order_tested=True)
     if json.dumps(result, sort_keys=True) != json.dumps(wanted, sort_keys=True):
         raise RuntimeError("invalid key-output runtime receipt")
     result.update(captures=pictures, observations=phases, config_provider=args.hyprland_config,
@@ -564,7 +566,7 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
     name = "key-worker" if args.key_worker else "key-output"
     (output / f"{name}-result.json").write_text(json.dumps(result, indent=2) + "\n")
     if args.key_worker:
-        print("PASS: scoped scheduler preserved down/ordinary/up order, sibling ownership, cancellation and reentry; seven rendered protocol-sink phases. Authority/readiness modeled; no selective consumption or native takeover.")
+        print("PASS: selective routing and shared scheduler preserved within-report/cross-source order, sibling ownership, cancellation and reentry; nine rendered protocol-sink phases. Authority/readiness modeled; no kernel consumption or native takeover.")
     else:
         print("PASS: actual key-output driver preserved overlapping owners, exact task cancellation, stale-press fencing and context reentry; eleven rendered app phases.")
     return result

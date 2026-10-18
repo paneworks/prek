@@ -36,6 +36,7 @@ struct Route {
     choices: Vec<RouteIntent>,
     winner: Option<u64>,
     joined: bool,
+    project_keys: bool,
 }
 struct Won {
     intent: RouteIntent,
@@ -50,6 +51,7 @@ struct Dispatch {
     reorder_scope: Option<crate::protocol::ReorderScope>,
     key_epoch: u64,
     inputs: BTreeMap<Source, u64>,
+    position: Option<crate::input::InputPosition>,
 }
 
 pub struct ScopedDispatch {
@@ -62,6 +64,8 @@ mod keys;
 pub use keys::KeyWork;
 
 pub struct Routing {
+    ordered_keys: bool,
+    last_key_input: Option<(u64, crate::input::Frame)>,
     native_claims: BTreeMap<u64, native::Claim>,
     chains: BTreeMap<u64, BTreeMap<Source, ChainToken>>,
     custom_groups: BTreeMap<u64, (Source, u64, u64)>,
@@ -145,6 +149,12 @@ impl Routing {
     pub fn with_recognition(config: Config, fence: crate::protocol::Fence) -> io::Result<Self> {
         Self::build(config, Some(fence))
     }
+    /// Coordinate raw reports and generated keys under original input positions.
+    pub fn with_key_projection(config: Config, fence: crate::protocol::Fence) -> io::Result<Self> {
+        let mut routing = Self::build(config, Some(fence))?;
+        routing.ordered_keys = true;
+        Ok(routing)
+    }
     pub(crate) fn validate_profile(config: &Config) -> io::Result<()> {
         if config.mode != crate::config::Mode::Route {
             return Err(io::Error::other(
@@ -173,6 +183,8 @@ impl Routing {
         engine.push(Record::Header { version: 1 })?;
         engine.enable_routing();
         Ok(Self {
+            ordered_keys: false,
+            last_key_input: None,
             native_claims: BTreeMap::new(),
             chains: BTreeMap::new(),
             custom_groups: BTreeMap::new(),
@@ -312,9 +324,11 @@ impl Routing {
                 mapping,
             })?;
         }
+        let project_keys = self.ordered_keys && keys::projectable(self.engine.config(), &device);
         self.routes.insert(
             device.source,
             Route {
+                project_keys,
                 attached_at: at,
                 router,
                 authorization,
@@ -425,7 +439,19 @@ impl Routing {
                 );
             }
         }
+        let previous = if self.ordered_keys {
+            self.engine.route_intents()
+        } else {
+            Vec::new()
+        };
         self.engine.push(record.clone())?;
+        self.last_key_input = frame
+            .as_ref()
+            .filter(|frame| {
+                self.ordered_keys
+                    && self.engine.source_input_sequence(&frame.source) == Some(frame.sequence)
+            })
+            .map(|frame| (self.engine.input_watermark(), frame.clone()));
         if self.engine.authority_mut().generation() != self.authority_generation {
             let sources: Vec<_> = self.routes.keys().cloned().collect();
             for source in sources {
@@ -491,130 +517,151 @@ impl Routing {
         intents.extend(outcomes.iter().map(|outcome| outcome.intent.clone()));
         self.capture_native(intents.iter().chain(claims.iter()), now);
         if let (Some(source), Some(frame)) = (source, frame) {
-            let mut choices: Vec<_> = intents
-                .into_iter()
-                .filter(|intent| {
-                    intent.sources().contains(&source)
-                        && intent.rule.delivery != Delivery::Observe
-                        && self.available(intent, now)
-                        && self.chain_existing_valid(intent.id(), at)
-                        && (!fresh_group
-                            || !matches!(intent.rule.trigger, Trigger::Sequence { .. })
-                            || intent.admits_input(&source, self.engine.input_watermark()))
-                })
-                .collect();
-            choices.sort_by(|a, b| {
-                b.rule
-                    .priority
-                    .cmp(&a.rule.priority)
-                    .then_with(|| a.rule.id.cmp(&b.rule.id))
-            });
-            if let Some(route) = self.routes.get_mut(&source) {
-                let starts = route.router.physical_neutral()
-                    && frame.events.iter().any(|event| {
-                        event.kind == crate::input::EV_KEY && event.value == 1
-                            || event.kind == crate::input::EV_ABS
-                                && event.code == crate::input::ABS_MT_TRACKING_ID
-                                && event.value >= 0
-                            || event.kind == crate::input::EV_REL && event.value != 0
-                    });
-                let mut candidate = None;
-                let sequence = choices
-                    .first()
-                    .filter(|intent| matches!(intent.rule.trigger, Trigger::Sequence { .. }))
-                    .map(RouteIntent::id);
-                let continuation = sequence
-                    .and_then(|id| self.chains.get(&id)?.get(&source))
-                    .cloned();
-                if starts && continuation.is_none() {
-                    self.next_ticket = self
-                        .next_ticket
-                        .checked_add(1)
-                        .ok_or_else(|| fault(Fault::Overflow))?;
-                    route.ticket = self.next_ticket;
-                    route.first = at;
-                    route.winner = None;
-                    route.joined = false;
-                    route.choices = choices.clone();
-                    if let Some(intent) = choices.first() {
-                        let policy = match intent.rule.delivery {
-                            Delivery::Reserve => Policy::Reserve,
-                            _ => Policy::Buffer {
-                                join: if intent.rule.trigger.contains_touch() {
-                                    self.engine.config().timing.join_window.duration()
-                                } else {
-                                    Duration::ZERO
-                                },
-                                decision: self.engine.config().timing.decision_window.duration(),
-                            },
-                        };
-                        candidate = Some(Candidate {
-                            id: route.ticket,
-                            authorization: route.authorization,
-                            policy,
+            if self
+                .routes
+                .get(&source)
+                .is_some_and(|route| route.project_keys)
+            {
+                self.project_key_frame(&source, frame, &previous, &outcomes, now)?;
+            } else {
+                if self.ordered_keys
+                    && let Some(route) = self.routes.get_mut(&source)
+                    && let Err(error) = route
+                        .router
+                        .mark_input(frame.sequence, self.engine.input_watermark())
+                {
+                    self.recover(&source);
+                    return Err(fault(error));
+                }
+                let mut choices: Vec<_> = intents
+                    .into_iter()
+                    .filter(|intent| {
+                        intent.sources().contains(&source)
+                            && intent.rule.delivery != Delivery::Observe
+                            && self.available(intent, now)
+                            && self.chain_existing_valid(intent.id(), at)
+                            && (!fresh_group
+                                || !matches!(intent.rule.trigger, Trigger::Sequence { .. })
+                                || intent.admits_input(&source, self.engine.input_watermark()))
+                    })
+                    .collect();
+                choices.sort_by(|a, b| {
+                    b.rule
+                        .priority
+                        .cmp(&a.rule.priority)
+                        .then_with(|| a.rule.id.cmp(&b.rule.id))
+                });
+                if let Some(route) = self.routes.get_mut(&source) {
+                    let starts = route.router.physical_neutral()
+                        && frame.events.iter().any(|event| {
+                            event.kind == crate::input::EV_KEY && event.value == 1
+                                || event.kind == crate::input::EV_ABS
+                                    && event.code == crate::input::ABS_MT_TRACKING_ID
+                                    && event.value >= 0
+                                || event.kind == crate::input::EV_REL && event.value != 0
                         });
+                    let mut candidate = None;
+                    let sequence = choices
+                        .first()
+                        .filter(|intent| matches!(intent.rule.trigger, Trigger::Sequence { .. }))
+                        .map(RouteIntent::id);
+                    let continuation = sequence
+                        .and_then(|id| self.chains.get(&id)?.get(&source))
+                        .cloned();
+                    if starts && continuation.is_none() {
+                        self.next_ticket = self
+                            .next_ticket
+                            .checked_add(1)
+                            .ok_or_else(|| fault(Fault::Overflow))?;
+                        route.ticket = self.next_ticket;
+                        route.first = at;
+                        route.winner = None;
+                        route.joined = false;
+                        route.choices = choices.clone();
+                        if let Some(intent) = choices.first() {
+                            let policy = match intent.rule.delivery {
+                                Delivery::Reserve => Policy::Reserve,
+                                _ => Policy::Buffer {
+                                    join: if intent.rule.trigger.contains_touch() {
+                                        self.engine.config().timing.join_window.duration()
+                                    } else {
+                                        Duration::ZERO
+                                    },
+                                    decision: self
+                                        .engine
+                                        .config()
+                                        .timing
+                                        .decision_window
+                                        .duration(),
+                                },
+                            };
+                            candidate = Some(Candidate {
+                                id: route.ticket,
+                                authorization: route.authorization,
+                                policy,
+                            });
+                        }
+                    } else if route.router.ownership() == Some(Ownership::Pending) {
+                        route.choices = choices.clone();
                     }
-                } else if route.router.ownership() == Some(Ownership::Pending) {
-                    route.choices = choices.clone();
-                }
-                if starts && continuation.is_some() {
-                    route.choices = choices;
-                }
-                let completion = route
-                    .choices
-                    .first()
-                    .is_some_and(|intent| matches!(intent.rule.trigger, Trigger::Custom { .. }));
-                let pushed = match (starts, sequence, continuation.as_ref(), candidate) {
-                    (true, Some(id), Some(token), _) => route
-                        .router
-                        .continue_chain(frame, token, at)
-                        .map(|admission| Some((id, admission))),
-                    (true, Some(id), None, Some(candidate)) => route
-                        .router
-                        .start_chain(frame, candidate, at)
-                        .map(|admission| Some((id, admission))),
-                    _ => route
-                        .router
-                        .push_with_completion(frame, candidate, at, completion)
-                        .map(|()| None),
-                };
-                let pushed = match pushed {
-                    Ok(pushed) => pushed,
-                    Err(error) => {
-                        self.recover(&source);
-                        return Err(fault(error));
+                    if starts && continuation.is_some() {
+                        route.choices = choices;
                     }
-                };
-                if let Some((id, ChainAdmission::Held(token))) = pushed {
-                    self.chains
-                        .entry(id)
-                        .or_default()
-                        .insert(source.clone(), token);
-                }
-                if starts {
-                    for intent in &route.choices {
-                        if matches!(intent.rule.trigger, Trigger::Custom { .. }) {
-                            self.custom_groups.entry(intent.id()).or_insert((
-                                source.clone(),
-                                route.ticket,
-                                route.authorization,
-                            ));
+                    let completion = route.choices.first().is_some_and(|intent| {
+                        matches!(intent.rule.trigger, Trigger::Custom { .. })
+                    });
+                    let pushed = match (starts, sequence, continuation.as_ref(), candidate) {
+                        (true, Some(id), Some(token), _) => route
+                            .router
+                            .continue_chain(frame, token, at)
+                            .map(|admission| Some((id, admission))),
+                        (true, Some(id), None, Some(candidate)) => route
+                            .router
+                            .start_chain(frame, candidate, at)
+                            .map(|admission| Some((id, admission))),
+                        _ => route
+                            .router
+                            .push_with_completion(frame, candidate, at, completion)
+                            .map(|()| None),
+                    };
+                    let pushed = match pushed {
+                        Ok(pushed) => pushed,
+                        Err(error) => {
+                            self.recover(&source);
+                            return Err(fault(error));
+                        }
+                    };
+                    if let Some((id, ChainAdmission::Held(token))) = pushed {
+                        self.chains
+                            .entry(id)
+                            .or_default()
+                            .insert(source.clone(), token);
+                    }
+                    if starts {
+                        for intent in &route.choices {
+                            if matches!(intent.rule.trigger, Trigger::Custom { .. }) {
+                                self.custom_groups.entry(intent.id()).or_insert((
+                                    source.clone(),
+                                    route.ticket,
+                                    route.authorization,
+                                ));
+                            }
                         }
                     }
-                }
-                if starts
-                    && candidate.is_some_and(|candidate| candidate.policy == Policy::Reserve)
-                    && let Some(intent) = route.choices.first()
-                {
-                    route.winner = Some(intent.id());
-                    self.won.insert(
-                        intent.id(),
-                        Won {
-                            intent: intent.clone(),
-                            emitted: false,
-                            chain: None,
-                        },
-                    );
+                    if starts
+                        && candidate.is_some_and(|candidate| candidate.policy == Policy::Reserve)
+                        && let Some(intent) = route.choices.first()
+                    {
+                        route.winner = Some(intent.id());
+                        self.won.insert(
+                            intent.id(),
+                            Won {
+                                intent: intent.clone(),
+                                emitted: false,
+                                chain: None,
+                            },
+                        );
+                    }
                 }
             }
         }
@@ -702,6 +749,7 @@ impl Routing {
                     })
                     .collect();
                 self.dispatches.push_back(Dispatch {
+                    position: self.ordered_position(&outcome.intent),
                     outcome,
                     configuration: self.engine.generation(),
                     rule_revision: self.engine.rule_revision(),
@@ -816,6 +864,9 @@ impl Routing {
             if let Err(error) = self.routes.get_mut(&source).unwrap().router.advance(at) {
                 self.recover(&source);
                 return Err(fault(error));
+            }
+            if self.routes[&source].project_keys {
+                continue;
             }
             let mut choices: Vec<_> = active
                 .iter()
@@ -1284,6 +1335,12 @@ impl Routing {
             .retain(|dispatch| !dispatch.outcome.intent.sources().contains(source));
     }
     pub fn deadline(&self) -> Option<Duration> {
+        self.deadline_with_barriers(|_, _, _| false)
+    }
+    pub(crate) fn deadline_with_barriers(
+        &self,
+        mut blocked: impl FnMut(&Source, &Scheduled, Option<crate::router::InputSpan>) -> bool,
+    ) -> Option<Duration> {
         self.engine
             .deadline()
             .into_iter()
@@ -1296,13 +1353,19 @@ impl Routing {
                     .iter()
                     .filter_map(|outcome| outcome.expires),
             )
-            .chain(self.routes.values().flat_map(|route| {
-                route.router.next_deadline().into_iter().chain(
-                    (route.router.ownership() == Some(Ownership::Pending) && !route.joined)
-                        .then_some(
-                            route.first + self.engine.config().timing.join_window.duration(),
-                        ),
-                )
+            .chain(self.routes.iter().flat_map(|(source, route)| {
+                route
+                    .router
+                    .next_deadline_with_write(|scheduled| {
+                        blocked(source, scheduled, route.router.input_span(scheduled.ticket))
+                    })
+                    .into_iter()
+                    .chain(
+                        (route.router.ownership() == Some(Ownership::Pending) && !route.joined)
+                            .then_some(
+                                route.first + self.engine.config().timing.join_window.duration(),
+                            ),
+                    )
             }))
             .min()
     }

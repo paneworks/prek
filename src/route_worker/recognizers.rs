@@ -340,14 +340,20 @@ impl Stream {
                     },
                 })?;
             }
-            self.collect(
+            self.collect_input(
                 &name,
                 now,
                 matches!(record, Record::Tick { .. }).then_some(at),
+                if owned {
+                    if let Record::Frame { frame } = record {
+                        Some(frame)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                },
             )?;
-            if owned && let Record::Frame { frame } = record {
-                self.repeat_keys(&name, frame, now)?;
-            }
         }
         Ok(())
     }

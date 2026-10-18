@@ -10,6 +10,7 @@ use crate::{
 use std::{cell::RefCell, rc::Rc};
 
 mod bounds;
+mod coordinator;
 mod lifecycle;
 mod scope;
 
@@ -210,8 +211,18 @@ pub(crate) fn routing(rules: Vec<Rule>) -> Routing {
     with_fence(rules, Some(fence()))
 }
 pub(crate) fn with_fence(rules: Vec<Rule>, fence: Option<Fence>) -> Routing {
+    with_order(rules, fence, false)
+}
+pub(crate) fn projected(rules: Vec<Rule>) -> Routing {
+    with_order(rules, Some(fence()), true)
+}
+fn with_order(rules: Vec<Rule>, fence: Option<Fence>, ordered: bool) -> Routing {
     let mut routing = if let Some(fence) = fence {
-        Routing::with_recognition(config(rules), fence)
+        if ordered {
+            Routing::with_key_projection(config(rules), fence)
+        } else {
+            Routing::with_recognition(config(rules), fence)
+        }
     } else {
         Routing::new(config(rules))
     }

@@ -234,6 +234,7 @@ pub struct Router {
     recovered: bool,
     keyboard: Option<keyboard::Ledger>,
     positions: BTreeMap<u64, InputSpan>,
+    input_marks: BTreeMap<u64, u64>,
 }
 
 impl Router {
@@ -278,6 +279,7 @@ impl Router {
             recovered: false,
             keyboard: None,
             positions: BTreeMap::new(),
+            input_marks: BTreeMap::new(),
         })
     }
 
@@ -308,6 +310,12 @@ impl Router {
     }
 
     pub fn next_deadline(&self) -> Option<Duration> {
+        self.next_deadline_with_write(|_| false)
+    }
+    pub(crate) fn next_deadline_with_write(
+        &self,
+        blocked: impl FnOnce(&Scheduled) -> bool,
+    ) -> Option<Duration> {
         let decision = self.group.as_ref().and_then(|group| {
             if group.ownership != Ownership::Pending {
                 return None;
@@ -319,7 +327,17 @@ impl Router {
         });
         self.queue
             .front()
-            .map(|entry| entry.due)
+            .map(|entry| {
+                if blocked(entry) {
+                    entry
+                        .due
+                        .checked_add(self.limits.scheduler_slack)
+                        .and_then(|at| at.checked_add(Duration::from_nanos(1)))
+                        .unwrap_or(entry.due)
+                } else {
+                    entry.due
+                }
+            })
             .into_iter()
             .chain(decision)
             .min()
@@ -388,6 +406,19 @@ impl Router {
             return self.fail(Fault::Overflow);
         };
         self.next_ticket = ticket;
+        if let Some(&watermark) = self.input_marks.get(&frame.sequence) {
+            self.positions.insert(
+                ticket,
+                InputSpan {
+                    sequence: frame.sequence,
+                    first: crate::input::InputPosition {
+                        frame: watermark,
+                        event: 0,
+                    },
+                    last: crate::input::InputPosition::after_frame(watermark),
+                },
+            );
+        }
         for event in &frame.events {
             self.planned_absolute.update(*event);
         }
@@ -428,6 +459,7 @@ impl Router {
         if self.physical.neutral() {
             self.group = None;
         }
+        self.prune_input_marks();
         Ok(())
     }
 
@@ -669,6 +701,7 @@ impl Router {
         {
             self.group = None;
         }
+        self.prune_input_marks();
         self.advance(at)
     }
 
@@ -735,6 +768,7 @@ impl Router {
             self.group = None;
         }
         self.reset_epoch();
+        self.prune_input_marks();
         Ok(())
     }
 
@@ -888,6 +922,7 @@ impl Router {
         self.group = None;
         self.queue.clear();
         self.positions.clear();
+        self.input_marks.clear();
         Some(Recovery {
             source: self.device.source.clone(),
             neutral_events: self.delivered.releases(),

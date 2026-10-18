@@ -571,7 +571,7 @@ impl Stream {
         for subscription in update.seats {
             if !self.seats.contains_key(&subscription.seat) {
                 let mut routing =
-                    Routing::with_recognition(self.config.clone(), subscription.fence)?;
+                    Routing::with_key_projection(self.config.clone(), subscription.fence)?;
                 routing.configuration_generation(self.generation)?;
                 routing.recognition_ready(false, now)?;
                 self.seats.insert(
@@ -609,6 +609,15 @@ impl Stream {
         Ok(())
     }
     fn collect(&mut self, name: &str, now: Duration, input_at: Option<Duration>) -> io::Result<()> {
+        self.collect_input(name, now, input_at, None)
+    }
+    fn collect_input(
+        &mut self,
+        name: &str,
+        now: Duration,
+        input_at: Option<Duration>,
+        input: Option<&crate::input::Frame>,
+    ) -> io::Result<()> {
         let Some(seat) = self.seats.get_mut(name) else {
             return Ok(());
         };
@@ -667,6 +676,7 @@ impl Stream {
                 },
             })?;
         }
+        let mut key_work = Vec::new();
         for dispatch in dispatches {
             if matches!(
                 &dispatch.event,
@@ -679,11 +689,7 @@ impl Stream {
                 let work = dispatch
                     .into_key_work()
                     .map_err(|_| invalid("native key dispatch lost its original scope"))?;
-                self.seats
-                    .get_mut(name)
-                    .and_then(|seat| seat.keys.as_mut())
-                    .ok_or_else(|| invalid("native key dispatch has no generated output"))?
-                    .enqueue(work, now)?;
+                key_work.push(work);
                 continue;
             }
             self.queue(Message::Outcome {
@@ -693,6 +699,12 @@ impl Stream {
                     reorder_scope: dispatch.reorder_scope,
                 },
             })?;
+        }
+        let seat = self.seats.get_mut(name).unwrap();
+        if let Some(keys) = seat.keys.as_mut() {
+            keys.admit(&seat.routing, key_work, input, now)?;
+        } else if !key_work.is_empty() {
+            return Err(invalid("native key dispatch has no generated output"));
         }
         Ok(())
     }
@@ -1031,18 +1043,27 @@ impl InputSink for Stream {
             .cloned()
             .collect();
         for source in sources {
+            if self
+                .closing_keys
+                .iter()
+                .any(|keys| keys.seat() == source.seat && !keys.closed())
+            {
+                continue;
+            }
             let Some(seat) = self.seats.get_mut(&source.seat) else {
                 continue;
             };
             let output = self.outputs.get_mut(&source).unwrap();
             if output.in_flight.is_none()
-                && let Some(scheduled) = seat.routing.due_after_input(&source, now)?
+                && let Some(scheduled) = seat.routing.due_after_input(&source, now)?.cloned()
             {
-                if seat
-                    .keys
-                    .as_ref()
-                    .is_some_and(|keys| keys.blocks_raw(&source, scheduled.frame.sequence))
-                {
+                if seat.keys.as_ref().is_some_and(|keys| {
+                    keys.blocks_input(
+                        &source,
+                        scheduled.frame.sequence,
+                        seat.routing.input_span(&source, scheduled.ticket),
+                    )
+                }) {
                     continue;
                 }
                 output.sequence = scheduled.frame.sequence;
@@ -1066,17 +1087,31 @@ impl InputSink for Stream {
         self.seats
             .values()
             .flat_map(|seat| {
-                seat.routing.deadline().into_iter().chain([
-                    seat.expires,
-                    seat.subscription
-                        .context
-                        .as_ref()
-                        .unwrap()
-                        .snapshot
-                        .captured_at
-                        + crate::context::SNAPSHOT_MAX_AGE
-                        + Duration::from_nanos(1),
-                ])
+                seat.routing
+                    .deadline_with_barriers(|source, scheduled, span| {
+                        self.outputs
+                            .get(source)
+                            .is_some_and(|output| output.in_flight.is_some())
+                            || self
+                                .closing_keys
+                                .iter()
+                                .any(|keys| keys.seat() == source.seat && !keys.closed())
+                            || seat.keys.as_ref().is_some_and(|keys| {
+                                keys.blocks_input(source, scheduled.frame.sequence, span)
+                            })
+                    })
+                    .into_iter()
+                    .chain([
+                        seat.expires,
+                        seat.subscription
+                            .context
+                            .as_ref()
+                            .unwrap()
+                            .snapshot
+                            .captured_at
+                            + crate::context::SNAPSHOT_MAX_AGE
+                            + Duration::from_nanos(1),
+                    ])
             })
             .chain(self.assembly.deadline())
             .chain(

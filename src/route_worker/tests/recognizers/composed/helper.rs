@@ -44,7 +44,7 @@ end
 local first=p.recognizers.define('first',{selectors={'keyboard'},inputs={'key'},reply_within='250ms'},recognize)
 local last=p.recognizers.define('last',{selectors={'keyboard'},inputs={'key'},reply_within='250ms'},recognize)
 return p.config.new{mode='route',policy={allow_input_events=true,allow_runtime_rules=true,allowed_devices={'keyboard'}},
- timing={join_window='1ms',decision_window='300ms'},devices={keyboard={identity='bridge-model'}},
+ timing={join_window='1ms',decision_window='300ms'},devices={keyboard={identity='test:bridge-model'}},
  rules={{id='chain',devices={'keyboard'},contexts={'desktop'},scope='everywhere',delivery='reserve',
  trigger=p.triggers.sequence{steps={first,last},timeout='1s'},action=p.actions.event{name='bridge-match'}}}}
 "#;

@@ -396,12 +396,54 @@ impl Router {
 
     pub fn position_prefix_delivered(&self, position: InputPosition, inclusive: bool) -> bool {
         !self.stopped
-            && self.group.is_none()
             && self.queue.iter().all(|entry| {
                 self.positions.get(&entry.ticket).is_some_and(|span| {
                     span.first > position || !inclusive && span.first == position
                 })
             })
+            && self.group.as_ref().is_none_or(|group| {
+                group.ownership != Ownership::Pending
+                    || group.pending.iter().all(|frame| {
+                        self.input_marks
+                            .get(&frame.sequence)
+                            .is_some_and(|&watermark| {
+                                let first = InputPosition {
+                                    frame: watermark,
+                                    event: 0,
+                                };
+                                first > position || !inclusive && first == position
+                            })
+                    })
+            })
+    }
+
+    pub(crate) fn mark_input(&mut self, sequence: u64, watermark: u64) -> Result<(), Fault> {
+        if self.stopped {
+            return Err(Fault::Stopped);
+        }
+        if watermark == 0
+            || self.keyboard.is_some()
+            || self.last_sequence.is_some_and(|last| sequence <= last)
+            || self.input_marks.contains_key(&sequence)
+        {
+            return self.fail(Fault::InvalidCandidate);
+        }
+        if self.input_marks.len() > self.limits.frames {
+            return self.fail(Fault::Overflow);
+        }
+        self.input_marks.insert(sequence, watermark);
+        Ok(())
+    }
+
+    pub(super) fn prune_input_marks(&mut self) {
+        self.input_marks.retain(|sequence, _| {
+            self.group.as_ref().is_some_and(|group| {
+                group
+                    .pending
+                    .iter()
+                    .any(|frame| frame.sequence == *sequence)
+            })
+        });
     }
 }
 
