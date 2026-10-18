@@ -1,14 +1,14 @@
 use super::*;
 use crate::{input::*, input_events::Event as Input, recognition::InputKind};
 
-const RELATIVE: u8 = 1;
-const WHEEL: u8 = 2;
-const ABSOLUTE: u8 = 4;
-const SWITCH: u8 = 8;
-const TOUCH: u8 = 16;
-const HWHEEL: u8 = 32;
-const OTHER_RELATIVE: u8 = 64;
-const OPAQUE: u8 = 128;
+const RELATIVE: u8 = TailDomain::Relative as u8;
+const WHEEL: u8 = TailDomain::Wheel as u8;
+const ABSOLUTE: u8 = TailDomain::Absolute as u8;
+const SWITCH: u8 = TailDomain::Switch as u8;
+const TOUCH: u8 = TailDomain::Touch as u8;
+const HWHEEL: u8 = TailDomain::HorizontalWheel as u8;
+const OTHER_RELATIVE: u8 = TailDomain::RelativeOther as u8;
+const OPAQUE: u8 = TailDomain::Opaque as u8;
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct Report {
@@ -98,29 +98,9 @@ impl Report {
         {
             return Err("non-key provenance differs from original frame");
         }
-        let mut domains = 0;
-        for (index, event) in frame
-            .raw
-            .events
-            .iter()
-            .enumerate()
-            .take(frame.raw.events.len() - 1)
-        {
-            if independent_event(&frame.raw.events, index) {
-                continue;
-            }
-            domains |= match event.kind {
-                EV_REL if matches!(event.code, REL_WHEEL | REL_WHEEL_HI_RES) => WHEEL,
-                EV_REL if matches!(event.code, REL_HWHEEL | REL_HWHEEL_HI_RES) => HWHEEL,
-                EV_REL if matches!(event.code, 0 | 1) => RELATIVE,
-                EV_REL => OTHER_RELATIVE,
-                EV_ABS if event.code == ABS_MT_SLOT || (0x30..=0x3d).contains(&event.code) => TOUCH,
-                EV_ABS => ABSOLUTE,
-                EV_SW => SWITCH,
-                EV_KEY if matches!(event.code, 0x145 | 0x14a | 0x14d..=0x14f) => TOUCH,
-                _ => OPAQUE,
-            };
-        }
+        let domains = (0..frame.raw.events.len())
+            .filter_map(|index| TailDomain::at(&frame.raw.events, index))
+            .fold(0, |mask, domain| mask | domain.mask());
         let mut observed = 0;
         let mut covered = 0;
         for change in changes {

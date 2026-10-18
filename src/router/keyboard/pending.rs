@@ -1,12 +1,17 @@
 use super::*;
+use crate::input::TailDomain;
+mod domains;
 mod tails;
+pub use domains::{DomainDecision, DomainRoot, PendingDomain};
 pub use tails::{PendingTail, TailDecision, TailDisposition};
 
 #[derive(Default)]
 struct TailFrame {
     pending: Option<PendingTail>,
+    domains: Option<Vec<PendingDomain>>,
     active: bool,
     absolute_before: Option<Arc<crate::input::AbsoluteState>>,
+    capacity: Option<usize>,
 }
 
 fn absolute_storage(state: &crate::input::AbsoluteState) -> usize {
@@ -95,6 +100,8 @@ struct Binding {
 struct Input {
     frame: Frame,
     tail: Option<InputPosition>,
+    domains: Vec<DomainRoot>,
+    split_tail: bool,
     absolute_before: Option<Arc<crate::input::AbsoluteState>>,
     storage: usize,
     watermark: u64,
@@ -118,16 +125,40 @@ impl Input {
     fn key_event(frame: &Frame, index: usize) -> bool {
         crate::input::independent_event(&frame.events, index)
     }
-    fn tail(&mut self, ready: Duration, reports: &mut Vec<ReadyReport>) {
+    fn tail(
+        &mut self,
+        ready: Duration,
+        reports: &mut Vec<ReadyReport>,
+        domains: &domains::Domains,
+    ) {
         let end = self.frame.events.len() - 1;
-        let events = self
+        let events: Vec<_> = self
             .frame
             .events
             .iter()
             .enumerate()
             .filter(|(index, _)| *index == end || !Self::key_event(&self.frame, *index))
+            .filter(|(index, _)| {
+                !self.split_tail
+                    || TailDomain::at(&self.frame.events, *index)
+                        .and_then(|domain| self.domains.iter().find(|root| root.domain == domain))
+                        .and_then(|root| domains.choice(*root))
+                        .is_none_or(|choice| {
+                            !matches!(choice.disposition, TailDisposition::Consumed { .. })
+                        })
+            })
             .map(|(_, event)| *event)
             .collect();
+        if self.split_tail
+            && events.len() == 1
+            && self.domains.iter().any(|root| {
+                domains.choice(*root).is_some_and(|choice| {
+                    matches!(choice.disposition, TailDisposition::Consumed { .. })
+                })
+            })
+        {
+            return;
+        }
         let position = InputPosition {
             frame: self.watermark,
             event: end,
@@ -135,6 +166,7 @@ impl Input {
         reports.push(ReadyReport {
             ready,
             absolute_before: self.absolute_before.take(),
+            split_tail: self.split_tail,
             report: Report {
                 frame: Frame {
                     source: self.frame.source.clone(),
@@ -154,6 +186,8 @@ impl Input {
 #[derive(Default)]
 pub(in crate::router) struct Journal {
     tails: tails::Tails,
+    domains: domains::Domains,
+    split_tail: Option<bool>,
     held: BTreeMap<u16, Binding>,
     presses: BTreeMap<InputPosition, PendingPress>,
     frames: VecDeque<Input>,
@@ -172,6 +206,7 @@ pub(super) struct ReadyReport {
     report: Report,
     ready: Duration,
     absolute_before: Option<Arc<crate::input::AbsoluteState>>,
+    split_tail: bool,
 }
 
 impl std::fmt::Debug for Journal {
@@ -185,6 +220,9 @@ impl std::fmt::Debug for Journal {
 }
 
 impl Journal {
+    pub(in crate::router) fn neutral(&self) -> bool {
+        self.frames.is_empty() && self.tails.current().is_none() && self.domains.neutral()
+    }
     pub(in crate::router) fn storage(&self) -> (usize, usize) {
         (
             self.frames.len(),
@@ -210,6 +248,7 @@ impl Journal {
                 _ => None,
             })
             .chain(self.tails.deadline())
+            .chain(self.domains.deadline())
             .min()
     }
     pub(super) fn can_release_before(&self, barrier: Option<InputPosition>) -> bool {
@@ -227,12 +266,19 @@ impl Journal {
                 .and_then(|position| *position)
                 .and_then(|position| self.presses.get(&position))
                 .map(|press| press.choice)
-                .or_else(|| {
-                    (input.index() == input.frame.events.len() - 1)
-                        .then(|| input.tail.and_then(|root| self.tails.choice(root)))
-                        .flatten()
-                })
                 .is_none_or(|choice| !matches!(choice.disposition, KeyDisposition::Pending { .. }))
+            && (input.index() != input.frame.events.len() - 1
+                || input
+                    .tail
+                    .and_then(|root| self.tails.choice(root))
+                    .into_iter()
+                    .chain(
+                        input
+                            .domains
+                            .iter()
+                            .filter_map(|root| self.domains.choice(*root)),
+                    )
+                    .all(|choice| !matches!(choice.disposition, TailDisposition::Pending { .. })))
     }
     pub(super) fn disposition(&self, code: u16, position: InputPosition) -> Option<KeyDisposition> {
         self.presses
@@ -257,6 +303,7 @@ impl Journal {
             offset,
             TailFrame::default(),
         )
+        .map(|_| ())
     }
 
     fn stage_with_tail(
@@ -267,7 +314,7 @@ impl Journal {
         cuts: &BTreeSet<usize>,
         offset: Duration,
         tail_frame: TailFrame,
-    ) -> Result<(), Fault> {
+    ) -> Result<Vec<DomainRoot>, Fault> {
         if frame.events.is_empty()
             || frame
                 .events
@@ -281,6 +328,13 @@ impl Journal {
         }
         if watermark == 0 || watermark <= self.watermark {
             return Err(Fault::BackwardTime);
+        }
+        let split_tail = tail_frame.domains.is_some();
+        if self
+            .split_tail
+            .is_some_and(|previous| previous != split_tail)
+        {
+            return Err(Fault::UnsupportedProjection);
         }
         if frame
             .events
@@ -378,19 +432,46 @@ impl Journal {
             .iter()
             .enumerate()
             .any(|(index, _)| !Input::key_event(&frame, index));
-        let tail = self.tails.prepare(
-            has_tail.then_some(InputPosition {
-                frame: watermark,
-                event: end,
-            }),
-            tail_frame.pending,
-            tail_frame.active,
-            frame.at,
-            offset,
-        )?;
+        let tail = (!split_tail)
+            .then(|| {
+                self.tails.prepare(
+                    has_tail.then_some(InputPosition {
+                        frame: watermark,
+                        event: end,
+                    }),
+                    tail_frame.pending,
+                    tail_frame.active,
+                    frame.at,
+                    offset,
+                )
+            })
+            .transpose()?;
+        let domain_plan = tail_frame
+            .domains
+            .as_ref()
+            .map(|pending| {
+                self.domains
+                    .prepare(&frame, watermark, pending, tail_frame.active, offset)
+            })
+            .transpose()?;
+        let storage = frame.events.len()
+            + tail_frame
+                .absolute_before
+                .as_ref()
+                .map_or(0, |state| absolute_storage(state))
+            + domain_plan
+                .as_ref()
+                .map_or(0, |plan| plan.bindings.len() * domains::STORAGE_PER_ROOT);
+        if tail_frame
+            .capacity
+            .is_some_and(|capacity| storage > capacity)
+        {
+            return Err(Fault::Overflow);
+        }
         let transformed = !pending.is_empty()
             || !cuts.is_empty()
-            || tail.transformed()
+            || tail.as_ref().is_some_and(tails::Plan::transformed)
+            || domain_plan.as_ref().is_some_and(domains::Plan::transformed)
             || positions.iter().flatten().any(|position| {
                 self.presses
                     .get(position)
@@ -405,7 +486,10 @@ impl Journal {
                     .is_some_and(|next| next.kind == EV_KEY)
             {
                 positions[index] = positions[index + 1];
-            } else if transformed && !matches!(event.kind, EV_KEY | EV_REL | EV_ABS | EV_SW) {
+            } else if transformed
+                && !split_tail
+                && !matches!(event.kind, EV_KEY | EV_REL | EV_ABS | EV_SW)
+            {
                 return Err(Fault::UnsupportedProjection);
             }
         }
@@ -426,16 +510,23 @@ impl Journal {
         }
         self.held = held;
         self.watermark = watermark;
-        let input_tail = tail.input();
-        self.tails.commit(tail);
-        let storage = frame.events.len()
-            + tail_frame
-                .absolute_before
-                .as_ref()
-                .map_or(0, |state| absolute_storage(state));
+        self.split_tail = Some(split_tail);
+        let input_tail = tail.as_ref().and_then(tails::Plan::input);
+        if let Some(tail) = tail {
+            self.tails.commit(tail);
+        }
+        let (domain_bindings, domain_inputs) = domain_plan
+            .as_ref()
+            .map(|plan| (plan.bindings.clone(), plan.inputs.clone()))
+            .unwrap_or_default();
+        if let Some(plan) = domain_plan {
+            self.domains.commit(plan);
+        }
         self.frames.push_back(Input {
             frame,
             tail: input_tail,
+            domains: domain_bindings,
+            split_tail,
             absolute_before: tail_frame.absolute_before,
             storage,
             watermark,
@@ -445,7 +536,7 @@ impl Journal {
             cuts: cuts.clone(),
             order,
         });
-        Ok(())
+        Ok(domain_inputs)
     }
 
     pub(super) fn validate_decisions(
@@ -479,6 +570,7 @@ impl Journal {
             press.choice = press.choice.expired(at);
         }
         self.tails.expire(at);
+        self.domains.expire(at);
     }
 
     #[cfg(test)]
@@ -503,12 +595,26 @@ impl Journal {
             let mut last = input.index();
             let start = input.cursor;
             let tail_choice = input.tail.and_then(|root| self.tails.choice(root));
-            let tail_pending = tail_choice.is_some_and(|choice| {
-                matches!(choice.disposition, TailDisposition::Pending { .. })
-            });
-            let tail_consumed = tail_choice.is_some_and(|choice| {
-                matches!(choice.disposition, TailDisposition::Consumed { .. })
-            });
+            let (tail_pending, tail_consumed, tail_at) = tail_choice
+                .into_iter()
+                .chain(
+                    input
+                        .domains
+                        .iter()
+                        .filter_map(|root| self.domains.choice(*root)),
+                )
+                .fold(
+                    (false, false, Duration::ZERO),
+                    |(pending, consumed, at), choice| {
+                        (
+                            pending
+                                || matches!(choice.disposition, TailDisposition::Pending { .. }),
+                            consumed
+                                || matches!(choice.disposition, TailDisposition::Consumed { .. }),
+                            at.max(choice.at),
+                        )
+                    },
+                );
             let mut changed = start != 0 || !input.cuts.is_empty() || tail_consumed;
             while input.cursor + 1 < input.len() {
                 if barrier.is_some_and(|barrier| {
@@ -614,13 +720,11 @@ impl Journal {
                         } < barrier
                     }));
             if finished && !changed && start == 0 {
-                self.clock = self
-                    .clock
-                    .max(input.frame.at)
-                    .max(tail_choice.map_or(Duration::ZERO, |choice| choice.at));
+                self.clock = self.clock.max(input.frame.at).max(tail_at);
                 reports.push(ReadyReport {
                     ready: self.clock,
                     absolute_before: input.absolute_before.take(),
+                    split_tail: input.split_tail,
                     report: Report {
                         frame: input.frame.clone(),
                         span: InputSpan {
@@ -646,17 +750,15 @@ impl Journal {
                     &mut reports,
                 );
                 if finished && input.order.is_some() {
-                    self.clock = self
-                        .clock
-                        .max(input.frame.at)
-                        .max(tail_choice.map_or(Duration::ZERO, |choice| choice.at));
-                    if !tail_consumed {
-                        input.tail(self.clock, &mut reports);
+                    self.clock = self.clock.max(input.frame.at).max(tail_at);
+                    if input.split_tail || !tail_consumed {
+                        input.tail(self.clock, &mut reports, &self.domains);
                     }
                 }
             }
             if finished {
                 self.tails.released(input.tail);
+                self.domains.released(&input.domains);
                 self.frames.pop_front();
             } else {
                 break;
@@ -672,9 +774,11 @@ impl Journal {
         self.presses
             .retain(|position, press| press.references != 0 || retained.contains(position));
         self.tails.prune();
+        self.domains.prune();
         if self.frames.is_empty()
             && self.held.values().all(|binding| !binding.down)
             && self.tails.current().is_none()
+            && self.domains.neutral()
         {
             self.clock = Duration::ZERO;
         }
@@ -699,6 +803,7 @@ impl Journal {
             report,
             ready,
             absolute_before: None,
+            split_tail: false,
         }));
     }
 }
@@ -728,6 +833,63 @@ impl Router {
         cuts: &BTreeSet<usize>,
         at: Duration,
     ) -> Result<(), Fault> {
+        self.stage_scoped_frame(
+            frame,
+            watermark,
+            pending,
+            cuts,
+            at,
+            TailFrame {
+                pending: tail,
+                ..TailFrame::default()
+            },
+        )
+        .map(|_| ())
+    }
+
+    /// Retain independent non-key domains at their original terminal SYN cutpoint.
+    pub fn stage_domain_frame(
+        &mut self,
+        frame: Frame,
+        watermark: u64,
+        keys: &[PendingKey],
+        domains: &[PendingDomain],
+        cuts: &BTreeSet<usize>,
+        at: Duration,
+    ) -> Result<Vec<DomainRoot>, Fault> {
+        if frame.source != self.device.source {
+            return Err(Fault::StaleSource);
+        }
+        if self.stopped {
+            return Err(Fault::Stopped);
+        }
+        if domains.len() > TailDomain::ALL.len() {
+            return self.fail(Fault::InvalidCandidate);
+        }
+        self.stage_scoped_frame(
+            frame,
+            watermark,
+            keys,
+            cuts,
+            at,
+            TailFrame {
+                domains: Some(domains.to_vec()),
+                ..TailFrame::default()
+            },
+        )
+    }
+
+    fn stage_scoped_frame(
+        &mut self,
+        frame: Frame,
+        watermark: u64,
+        pending: &[PendingKey],
+        cuts: &BTreeSet<usize>,
+        at: Duration,
+        mut tail_frame: TailFrame,
+    ) -> Result<Vec<DomainRoot>, Fault> {
+        let tail = tail_frame.pending;
+        let split_tail = tail_frame.domains.is_some();
         if frame.source != self.device.source {
             return Err(Fault::StaleSource);
         }
@@ -744,6 +906,11 @@ impl Router {
             .iter()
             .any(|entry| entry.authorization != self.authorization)
             || tail.is_some_and(|entry| entry.authorization != self.authorization)
+            || tail_frame.domains.as_ref().is_some_and(|domains| {
+                domains
+                    .iter()
+                    .any(|entry| entry.authorization != self.authorization)
+            })
         {
             return self.fail(Fault::Unauthorized);
         }
@@ -772,10 +939,14 @@ impl Router {
         }
         let absolute_before = (frame.events.iter().any(|event| event.kind == EV_ABS)
             && (tail.is_some()
-                || self
-                    .pending_keyboard
-                    .as_ref()
-                    .is_some_and(|journal| journal.tails.enabled())))
+                || tail_frame.domains.as_ref().is_some_and(|domains| {
+                    domains.iter().any(|entry| {
+                        matches!(entry.domain, TailDomain::Absolute | TailDomain::Touch)
+                    })
+                })
+                || self.pending_keyboard.as_ref().is_some_and(|journal| {
+                    journal.tails.enabled() || journal.domains.absolute_enabled()
+                })))
         .then(|| self.physical_absolute.clone());
         if absolute_before
             .as_ref()
@@ -790,15 +961,26 @@ impl Router {
                     .map_or(0, |state| absolute_storage(state)),
             ),
         )?;
+        tail_frame.capacity = Some(self.limits.events.saturating_sub(self.storage().1));
         let mut physical = self.physical.clone();
         if let Err(error) = physical.apply(&frame, &self.device) {
             return self.fail(error);
         }
         let tail_active = !physical.contacts.is_empty()
-            || physical
-                .keys
-                .iter()
-                .any(|code| !crate::input::independent_key(*code));
+            || physical.keys.iter().any(|code| {
+                if split_tail {
+                    TailDomain::at(
+                        &[RawEvent {
+                            kind: EV_KEY,
+                            code: *code,
+                            value: 1,
+                        }],
+                        0,
+                    ) == Some(TailDomain::Touch)
+                } else {
+                    !crate::input::independent_key(*code)
+                }
+            });
         let absolute_updates: Vec<_> = frame
             .events
             .iter()
@@ -806,21 +988,20 @@ impl Router {
             .copied()
             .collect();
         let sequence = frame.sequence;
+        tail_frame.active = tail_active;
+        tail_frame.absolute_before = absolute_before;
         let journal = self.pending_keyboard.get_or_insert_with(Journal::default);
-        if let Err(error) = journal.stage_with_tail(
+        let domains = match journal.stage_with_tail(
             frame,
             watermark,
             pending,
             cuts,
             self.limits.offset,
-            TailFrame {
-                pending: tail,
-                active: tail_active,
-                absolute_before,
-            },
+            tail_frame,
         ) {
-            return self.fail(error);
-        }
+            Ok(domains) => domains,
+            Err(error) => return self.fail(error),
+        };
         self.physical = physical;
         if !absolute_updates.is_empty() {
             let absolute = Arc::make_mut(&mut self.physical_absolute);
@@ -830,7 +1011,7 @@ impl Router {
         }
         self.last_sequence = Some(sequence);
         self.last_at = at;
-        Ok(())
+        Ok(domains)
     }
 
     /// Atomically settle exact original downs before advancing their decision deadlines.
@@ -868,6 +1049,31 @@ impl Router {
         self.decide_input_clocked(keys, tails, at, at)
     }
 
+    /// Validate all key and independent-domain decisions before settling any.
+    pub fn decide_domain_scopes(
+        &mut self,
+        keys: &[KeyDecision],
+        domains: &[DomainDecision],
+        at: Duration,
+    ) -> Result<(), Fault> {
+        if self.stopped {
+            return Err(Fault::Stopped);
+        }
+        if keys
+            .iter()
+            .any(|decision| decision.authorization != self.authorization)
+            || domains
+                .iter()
+                .any(|decision| decision.authorization != self.authorization)
+        {
+            return self.fail(Fault::Unauthorized);
+        }
+        if at < self.last_at {
+            return self.fail(Fault::BackwardTime);
+        }
+        self.decide_domains_clocked(keys, domains, at, at)
+    }
+
     pub(crate) fn validate_key_decisions(
         &self,
         decisions: &[KeyDecision],
@@ -884,6 +1090,27 @@ impl Router {
         input_at: Duration,
         admitted_at: Duration,
     ) -> Result<(), Fault> {
+        self.validate_scoped_decisions(keys, tails, &[], input_at, admitted_at)
+    }
+
+    pub(crate) fn validate_domain_decisions(
+        &self,
+        keys: &[KeyDecision],
+        domains: &[DomainDecision],
+        input_at: Duration,
+        admitted_at: Duration,
+    ) -> Result<(), Fault> {
+        self.validate_scoped_decisions(keys, &[], domains, input_at, admitted_at)
+    }
+
+    fn validate_scoped_decisions(
+        &self,
+        keys: &[KeyDecision],
+        tails: &[TailDecision],
+        domains: &[DomainDecision],
+        input_at: Duration,
+        admitted_at: Duration,
+    ) -> Result<(), Fault> {
         if self.stopped {
             return Err(Fault::Stopped);
         }
@@ -891,6 +1118,9 @@ impl Router {
             .iter()
             .any(|decision| decision.authorization != self.authorization)
             || tails
+                .iter()
+                .any(|decision| decision.authorization != self.authorization)
+            || domains
                 .iter()
                 .any(|decision| decision.authorization != self.authorization)
         {
@@ -901,7 +1131,8 @@ impl Router {
         }
         let journal = self.pending_keyboard.as_ref().ok_or(Fault::WrongTicket)?;
         journal.validate_decisions(keys, admitted_at)?;
-        journal.tails.validate(tails, admitted_at)
+        journal.tails.validate(tails, admitted_at)?;
+        journal.domains.validate(domains, admitted_at)
     }
     pub(crate) fn decide_keys_clocked(
         &mut self,
@@ -926,6 +1157,21 @@ impl Router {
         self.last_at = input_at;
         Ok(())
     }
+
+    pub(crate) fn decide_domains_clocked(
+        &mut self,
+        keys: &[KeyDecision],
+        domains: &[DomainDecision],
+        input_at: Duration,
+        admitted_at: Duration,
+    ) -> Result<(), Fault> {
+        self.validate_domain_decisions(keys, domains, input_at, admitted_at)?;
+        let journal = self.pending_keyboard.as_mut().unwrap();
+        journal.decide(keys, admitted_at)?;
+        journal.domains.settle(domains, admitted_at);
+        self.last_at = input_at;
+        Ok(())
+    }
     pub(crate) fn key_journal_barrier(
         &mut self,
         barrier: Option<InputPosition>,
@@ -942,10 +1188,7 @@ impl Router {
         self.physical.neutral()
             && self.delivered.neutral()
             && self.queue.is_empty()
-            && self
-                .pending_keyboard
-                .as_ref()
-                .is_none_or(|journal| journal.first().is_none())
+            && self.pending_keyboard.as_ref().is_none_or(Journal::neutral)
     }
 
     pub(crate) fn key_journal_ready(&self) -> bool {
@@ -979,6 +1222,27 @@ impl Router {
             .map(|choice| choice.disposition)
     }
 
+    pub fn domain_scope(&self, domain: TailDomain) -> Option<DomainRoot> {
+        if self.stopped {
+            return None;
+        }
+        Some(DomainRoot {
+            domain,
+            position: self.pending_keyboard.as_ref()?.domains.current(domain)?,
+        })
+    }
+
+    pub fn domain_disposition(&self, scope: DomainRoot) -> Option<TailDisposition> {
+        if self.stopped {
+            return None;
+        }
+        self.pending_keyboard
+            .as_ref()?
+            .domains
+            .choice(scope)
+            .map(|choice| choice.disposition)
+    }
+
     pub fn pending_key_position(&self) -> Option<InputPosition> {
         self.pending_keyboard.as_ref()?.first()
     }
@@ -1005,7 +1269,11 @@ impl Router {
         for ready in &mut reports {
             let report = &mut ready.report;
             if let Some(before) = ready.absolute_before.take() {
-                let repairs = before.restore_for(absolute.as_ref().unwrap(), &report.frame);
+                let repairs = if ready.split_tail {
+                    before.restore_domains_for(absolute.as_ref().unwrap(), &report.frame)
+                } else {
+                    before.restore_for(absolute.as_ref().unwrap(), &report.frame)
+                };
                 if report.frame.events.len().saturating_add(repairs.len()) > 4096 {
                     return self.fail(Fault::Overflow);
                 }

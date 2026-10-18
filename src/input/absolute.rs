@@ -90,6 +90,14 @@ impl AbsoluteState {
     /// explicitly supplied by that frame win. Unused inactive slots remain
     /// private until an ordinary frame actually addresses them.
     pub(crate) fn restore_for(&self, output: &Self, frame: &Frame) -> Vec<RawEvent> {
+        self.restore_scoped(output, frame, false)
+    }
+
+    pub(crate) fn restore_domains_for(&self, output: &Self, frame: &Frame) -> Vec<RawEvent> {
+        self.restore_scoped(output, frame, true)
+    }
+
+    fn restore_scoped(&self, output: &Self, frame: &Frame, independent: bool) -> Vec<RawEvent> {
         let mut cursor = self.selected_slot();
         let mut used = BTreeSet::new();
         let mut globals = BTreeSet::new();
@@ -115,7 +123,7 @@ impl AbsoluteState {
             }
         }
         let mut events = Vec::new();
-        if has_absolute {
+        if has_absolute && (!independent || !globals.is_empty()) {
             for (&code, &value) in &self.values {
                 if code != ABS_MT_SLOT
                     && !globals.contains(&code)

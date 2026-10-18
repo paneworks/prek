@@ -271,17 +271,22 @@ class HybridKeyArbitration(unittest.TestCase):
                      for index, (code, state) in enumerate(((30, 1), (30, 0), (31, 1), (31, 0)))]
         received += [dict(event="pointer_motion", sequence=395, at_ns=1005, x=116, y=200),
                      dict(event="pointer_frame", sequence=396, at_ns=1006)]
-        for index, (state, x) in enumerate(((1, 123), (0, 132))):
+        received += [dict(event="key", sequence=397, at_ns=1007, code=105, state=1),
+                     dict(event="key", sequence=398, at_ns=1008, code=105, state=0),
+                     dict(event="pointer_motion", sequence=399, at_ns=1009, x=121, y=203),
+                     dict(event="pointer_frame", sequence=400, at_ns=1010)]
+        for index, (state, x) in enumerate(((1, 128), (0, 137))):
             at = 5_000_000_000 + index * 80_000_000
             sequence = 401 + index * 3
             received += [dict(event="key", sequence=sequence, at_ns=at, code=203, state=state),
-                         dict(event="pointer_motion", sequence=sequence + 1, at_ns=at + 1, x=x, y=200),
+                         dict(event="pointer_motion", sequence=sequence + 1, at_ns=at + 1, x=x, y=203),
                          dict(event="pointer_frame", sequence=sequence + 2, at_ns=at + 2)]
         return observations, received, runtime, raw, generated
 
     def test_coherent_relative_commit_and_original_fallback_cadence_pass(self):
         result = quiesce.validate_hybrid_keys(*self.fixture())
-        self.assertEqual(result["pointer_displacement"], 32)
+        self.assertEqual(result["pointer_displacement"], 37)
+        self.assertEqual(result["pointer_displacement_y"], 3)
         self.assertEqual(result["consumed_control_leaks"], 0)
 
     def test_changed_projection_protocol_or_scope_refuses(self):
@@ -315,6 +320,68 @@ class HybridKeyArbitration(unittest.TestCase):
                 observations.pop()
             with self.subTest(change=change), self.assertRaises(ValueError):
                 quiesce.validate_hybrid_keys(observations, received, runtime, raw, generated)
+
+
+class DomainJournal(unittest.TestCase):
+    def fixture(self):
+        observations, received, _, _, _ = HybridKeyArbitration().fixture()
+        source = dict(device=601, generation=1, seat="seat0")
+        def stamp(ns):
+            return dict(secs=0, nanos=ns)
+        def events(values):
+            return [dict(kind=kind, code=code, value=value) for kind, code, value in values] + [dict(kind=0, code=0, value=0)]
+        inputs = [dict(source=source, sequence=1, at=stamp(1000),
+                       events=events([(2, 0, 47), (1, 105, 1), (2, 1, 31), (1, 105, 0)])),
+                  dict(source=source, sequence=2, at=stamp(1008), events=events([(2, 0, 5), (2, 1, 3)]))]
+        payloads = [events([(1, 105, 1), (1, 105, 0)]), inputs[1]["events"]]
+        delivered = [dict(frame=dict(frame, events=payload), due=frame["at"], sent=frame["at"])
+                     for frame, payload in zip(inputs, payloads)]
+        runtime = dict(status="passed", scope="owned_protocol_domain_journal", source_and_readiness_modeled=True,
+                       native_gesture_arbitration_tested=False, physical_takeover_tested=False,
+                       kernel_input_opened=False, mt_rendering_tested=False, switch_ownership_tested=False,
+                       inputs=inputs, delivered=delivered)
+        trace = [dict(event="enqueue", frame=dict(item["frame"], source=dict(device=964, generation=1, seat="seat0"))) for item in delivered]
+        return observations, received, runtime, trace
+
+    def test_selective_motion_and_ordinary_typing_need_original_reports_and_causal_app_delivery(self):
+        result = quiesce.validate_domain_journal(*self.fixture())
+        self.assertEqual(result["ordinary_key_edges"], 2)
+        self.assertEqual(result["consumed_motion_leaks"], 0)
+        self.assertEqual((result["pointer_displacement_x"], result["pointer_displacement_y"]), (5, 3))
+
+    def test_unproven_scopes_missing_prefixes_and_motion_leaks_are_rejected(self):
+        for change in ("source", "bool", "input", "consumed", "ordinary", "raw", "time", "app-time", "key", "app-key-bool", "leak", "motion", "native", "kernel", "switch", "capture"):
+            observations, received, runtime, trace = self.fixture()
+            if change == "source":
+                runtime["inputs"][0]["source"]["generation"] = 2
+            elif change == "bool":
+                runtime["inputs"][0]["sequence"] = True
+            elif change == "input":
+                runtime["inputs"][0]["events"].pop(0)
+            elif change == "consumed":
+                runtime["delivered"][0]["frame"]["events"].insert(0, dict(kind=2, code=0, value=47))
+            elif change == "ordinary":
+                runtime["delivered"].pop()
+            elif change == "raw":
+                trace.pop()
+            elif change == "time":
+                runtime["delivered"][1]["due"] = dict(secs=0, nanos=0)
+            elif change == "app-time":
+                received[7]["at_ns"] = 999
+            elif change == "key":
+                received[7]["code"] = 30
+            elif change == "app-key-bool":
+                received[7]["state"] = True
+            elif change == "leak":
+                received.insert(9, dict(event="pointer_motion", sequence=398, at_ns=1008, x=163, y=231))
+            elif change == "motion":
+                received[9]["x"] += 1
+            elif change in ("native", "kernel", "switch"):
+                runtime[dict(native="native_gesture_arbitration_tested", kernel="kernel_input_opened", switch="switch_ownership_tested")[change]] = True
+            else:
+                observations.pop()
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                quiesce.validate_domain_journal(observations, received, runtime, trace)
 
 
 class NativeKeyArbitration(unittest.TestCase):

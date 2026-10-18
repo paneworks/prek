@@ -5,8 +5,10 @@
 
 use serde::{Deserialize, Serialize};
 mod absolute;
+mod domains;
 pub(crate) use absolute::per_slot;
 pub use absolute::{AbsoluteSlot, AbsoluteState};
+pub use domains::TailDomain;
 use std::{
     collections::{BTreeMap, BTreeSet},
     time::Duration,

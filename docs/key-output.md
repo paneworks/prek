@@ -468,7 +468,7 @@ explicitly modeled. Forty-two phases include consumed immediate per-key
 projection, ordinary typing, cross-source modifiers, tap-tail lifecycle,
 multiple same-report sequences, delayed tap/key completions, rejection of reversed
 steps and fresh reentry, plus explicitly decided journal fallback cadence, using
-fourteen owned protocol keyboards and one owned pointer. Six native arbitration phases additionally prove
+fifteen owned protocol keyboards and two owned pointers. Six native arbitration phases additionally prove
 selective buffered tap/hold/sequence consumption, deferred action order and unmatched fallback. The strict
 receiver checks every delivered edge, the absence of consumed control keys and
 the original unmatched down/up interval within existing scheduler slack. Earlier
@@ -578,6 +578,60 @@ These proofs are not journal consumption receipts or new broker authority.
 The legacy coarse raw path is not replaced, and native mixed key/tail settlement,
 semantic-domain decomposition and physical acceptance remain required before
 widening production admission.
+
+### Independent raw tail domains
+
+`Router::stage_domain_frame` retains independent key presses alongside explicit
+`PendingDomain` declarations. It returns a `DomainRoot` for each non-key family
+actually present in that report, binding the domain and original terminal-SYN
+position. Held-cohort references in empty/key-only reports are internal retention,
+not new physical input receipts. `domain_scope` and `domain_disposition` inspect
+an exact source-local root.
+
+Raw families separate relative XY, other relative axes, vertical wheel,
+horizontal wheel, scalar absolute axes, Type B contacts, switches and opaque
+metadata. XY stays indivisible; each wheel axis retains its legacy/high-resolution
+companions; contact slots, tracking IDs, coordinates and contact flags stay
+together. Native per-device policy still has to bind coordinated absolute/tool
+families together: raw-family classification does not prove their physical
+independence or authorize an untrusted declaration.
+
+`PendingDomain` binds the source authorization, family, fixed deadline and an
+optional exact `DomainRoot` continuation. Equal SYN positions in different
+domains are not interchangeable. New transient groups get fresh roots by
+default; explicit pending continuation cannot renew the deadline. Contact
+ownership drains until physical contact/flag neutrality. `decide_domain_scopes`
+validates the complete key/domain batch before changing any fate, and ordinary
+input cannot be reclaimed. Internal dual-clock validation keeps input watermarks
+separate from wall-clock proposal expiry.
+
+All domains share their original report's SYN delivery barrier. Ordinary key
+prefixes may be delivered first. Once decisions settle, remaining ordinary tail
+events keep their original order and cadence in one complete report. Completely
+untouched fallback remains byte-exact. Consuming one domain does not consume
+unrelated keys, wheel, motion, contact, switch or opaque data.
+
+Independent-domain absolute repair restores scalar values only when scalar data
+is ordinary, and per-slot values only when the corresponding contact data is
+ordinary. Private axes from another domain do not leak through repair. Retained
+domain roots charge 32 event-capacity units each, in addition to raw events and
+absolute snapshots, before publication. Metadata retires with retained reports
+and live physical cohorts. This is collection accounting, not process-RSS or
+latency acceptance.
+
+Switch and opaque ownership remain refused. Observed ordinary switch on/off
+transitions retain the output epoch and cadence; no initial switch baseline is
+queried or inferred. The whole-tail and independent-domain APIs use distinct,
+fixed source-lifetime interpretations. Switching between them requires a fresh
+prepared source rather than reinterpreting old scopes.
+
+`oslo make test-domain-journal` checks selective fates, shared barriers, bounded
+continuation, metadata limits, fallback timing and domain-private state repair.
+The owned Cage worker also exercises real protocol-sink delivery: XY47/31 is
+consumed while ordinary Left-key edges pass, then a fresh ordinary XY5/3 report
+moves the receiver pointer. This is trusted Router transport/rendering evidence,
+not configured mixed-recognizer arbitration, native hybrid/MT topology, switch
+ownership, kernel input or physical/production authorization.
 
 ## Private native worker binding
 

@@ -22,7 +22,8 @@ mod keyboard;
 use chain::Retention;
 pub use chain::{ChainAdmission, ChainToken, ClaimedChain};
 pub use keyboard::pending::{
-    KeyDecision, KeyDisposition, PendingKey, PendingTail, TailDecision, TailDisposition,
+    DomainDecision, DomainRoot, KeyDecision, KeyDisposition, PendingDomain, PendingKey,
+    PendingTail, TailDecision, TailDisposition,
 };
 pub use keyboard::{ConsumedKey, InputSpan, KeyClaim, KeyProjection};
 
@@ -458,7 +459,7 @@ impl Router {
             && self
                 .pending_keyboard
                 .as_ref()
-                .is_none_or(|journal| journal.first().is_none())
+                .is_none_or(keyboard::pending::Journal::neutral)
         {
             self.offset = Duration::ZERO;
         }

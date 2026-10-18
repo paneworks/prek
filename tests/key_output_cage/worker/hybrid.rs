@@ -250,6 +250,7 @@ pub(super) fn exercise(output: &Path, socket: &Path, index: usize, text: &str) -
         refreshed: at,
         dispatches: 0,
     };
+    let mut domain_sink = Keyboard::open_kind(output, socket, 964, true);
     hybrid.center(output);
     phase_service(output, index, text, &[], || hybrid.pump());
     hybrid.feed(&[
@@ -262,6 +263,7 @@ pub(super) fn exercise(output: &Path, socket: &Path, index: usize, text: &str) -
     ]);
     hybrid.settle(2);
     assert_eq!(hybrid.dispatches, 2);
+    domains::exercise(output, &mut domain_sink);
     let text = format!("{text}as");
     phase_service(output, index + 1, &text, &[], || hybrid.pump());
     hybrid.feed(&[(EV_REL, 0, 7), (EV_KEY, 203, 1)]);

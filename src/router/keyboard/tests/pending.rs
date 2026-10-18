@@ -1,6 +1,7 @@
 use super::*;
 use crate::router::{KeyDecision, KeyDisposition, PendingKey};
 
+mod domains;
 mod hybrid;
 mod tails;
 

@@ -558,17 +558,75 @@ def validate_hybrid_keys(observations, received, runtime, raw_trace, generated_t
         raise ValueError("invalid hybrid app event identity")
     if any(any(type(row.get(field)) is not int for field in ("code", "state")) for row in claimed + fallback if row["event"] == "key"):
         raise ValueError("invalid hybrid app key event")
-    if ([row["event"] for row in claimed] != ["key"] * 4 + ["pointer_motion", "pointer_frame"]
+    if ([row["event"] for row in claimed] != ["key"] * 4 + ["pointer_motion", "pointer_frame"] + ["key"] * 2 + ["pointer_motion", "pointer_frame"]
             or [(row["code"], row["state"]) for row in claimed[:4]] != [(30, 1), (30, 0), (31, 1), (31, 0)]
-            or claimed[4]["x"] != x + 16 or claimed[4]["y"] != y):
+            or [(row["code"], row["state"]) for row in claimed[6:8]] != [(105, 1), (105, 0)]
+            or (claimed[4]["x"], claimed[4]["y"]) != (x + 16, y)
+            or (claimed[8]["x"], claimed[8]["y"]) != (x + 21, y + 3)):
         raise ValueError("hybrid key cut or coherent relative commit changed at the app")
     if ([row["event"] for row in fallback] != ["key", "pointer_motion", "pointer_frame"] * 2
             or [(fallback[index]["code"], fallback[index]["state"]) for index in (0, 3)] != [(203, 1), (203, 0)]
-            or [(fallback[index]["x"], fallback[index]["y"]) for index in (1, 4)] != [(x + 23, y), (x + 32, y)]
+            or [(fallback[index]["x"], fallback[index]["y"]) for index in (1, 4)] != [(x + 28, y + 3), (x + 37, y + 3)]
             or fallback[3]["at_ns"] - fallback[0]["at_ns"] < gap - flags["slack_ns"]):
         raise ValueError("hybrid raw fallback changed payload, ordering or actual app cadence")
     return dict(flags, input_gap_ns=gap, app_gap_ns=fallback[3]["at_ns"] - fallback[0]["at_ns"],
-                coherent_relative_reports=3, consumed_control_leaks=0, pointer_displacement=32)
+                coherent_relative_reports=4, consumed_control_leaks=0, pointer_displacement=37,
+                pointer_displacement_y=3, independent_domain_rendering_tested=True)
+
+
+def validate_domain_journal(observations, received, runtime, trace):
+    flags = dict(status="passed", scope="owned_protocol_domain_journal", source_and_readiness_modeled=True,
+                 native_gesture_arbitration_tested=False, physical_takeover_tested=False,
+                 kernel_input_opened=False, mt_rendering_tested=False, switch_ownership_tested=False)
+    if any(type(runtime.get(key)) is not type(value) or runtime[key] != value for key, value in flags.items()):
+        raise ValueError("invalid domain journal scope")
+    if len(observations) != 42 or observations[39]["name"] != "hybrid-key-relative-consumed":
+        raise ValueError("missing domain journal capture")
+    def events(values):
+        return [dict(kind=kind, code=code, value=value) for kind, code, value in values] + [dict(kind=0, code=0, value=0)]
+    def equal(left, right):
+        return json.dumps(left, sort_keys=True) == json.dumps(right, sort_keys=True)
+    def nanos(stamp):
+        if (not isinstance(stamp, dict) or set(stamp) != {"secs", "nanos"}
+                or any(type(stamp[key]) is not int or stamp[key] < 0 for key in stamp) or stamp["nanos"] >= 1_000_000_000):
+            raise ValueError("invalid domain journal time")
+        return stamp["secs"] * 1_000_000_000 + stamp["nanos"]
+    inputs, delivered = runtime.get("inputs"), runtime.get("delivered")
+    if not isinstance(inputs, list) or len(inputs) != 2 or not isinstance(delivered, list) or len(delivered) != 2:
+        raise ValueError("invalid domain journal report inventory")
+    original = [events([(2, 0, 47), (1, 105, 1), (2, 1, 31), (1, 105, 0)]), events([(2, 0, 5), (2, 1, 3)])]
+    projected = [events([(1, 105, 1), (1, 105, 0)]), original[1]]
+    source = dict(device=601, generation=1, seat="seat0")
+    for index, (frame, item) in enumerate(zip(inputs, delivered)):
+        if (not equal(frame.get("source"), source) or type(frame.get("sequence")) is not int or frame["sequence"] != index + 1
+                or not equal(frame.get("events"), original[index]) or not isinstance(item, dict)):
+            raise ValueError("domain journal original input differs")
+        scheduled = item.get("frame")
+        if (not isinstance(scheduled, dict) or not equal(scheduled.get("source"), source)
+                or type(scheduled.get("sequence")) is not int or scheduled["sequence"] != index + 1
+                or not equal(scheduled.get("events"), projected[index]) or scheduled.get("at") != frame.get("at")
+                or nanos(item["sent"]) < nanos(item["due"]) or nanos(item["due"]) < nanos(frame["at"])):
+            raise ValueError("domain journal projection or clock differs")
+    if nanos(inputs[1]["at"]) <= nanos(inputs[0]["at"]):
+        raise ValueError("domain journal original order differs")
+    sent = [row["frame"] for row in trace if row.get("event") == "enqueue"]
+    if len(sent) != 2 or any(not equal(frame, dict(item["frame"], source=dict(device=964, generation=1, seat="seat0")))
+                             for frame, item in zip(sent, delivered)):
+        raise ValueError("domain journal sink differs")
+    lower, upper = (observations[index]["receipt"]["sequence"] for index in (38, 39))
+    if type(lower) is not int or type(upper) is not int or lower >= upper:
+        raise ValueError("invalid domain journal app boundary")
+    window = [row for row in received if lower < row["sequence"] <= upper and row.get("event") in ("key", "pointer_motion", "pointer_frame")]
+    if ([row["event"] for row in window] != ["key"] * 4 + ["pointer_motion", "pointer_frame"] + ["key"] * 2 + ["pointer_motion", "pointer_frame"]
+            or [(row.get("code"), row.get("state")) for row in window[6:8]] != [(105, 1), (105, 0)]
+            or any(type(row.get("at_ns")) is not int for row in window)
+            or any(type(row.get(field)) is not int for row in window if row["event"] == "key" for field in ("code", "state"))
+            or any(type(row.get(field)) not in (int, float) for row in window if row["event"] == "pointer_motion" for field in ("x", "y"))
+            or window[6]["at_ns"] < nanos(inputs[0]["at"]) or window[8]["at_ns"] < nanos(inputs[1]["at"])
+            or (window[8].get("x"), window[8].get("y")) != (window[4].get("x", 0) + 5, window[4].get("y", 0) + 3)):
+        raise ValueError("domain journal selective app delivery differs")
+    return dict(flags, consumed_motion_reports=1, forwarded_motion_reports=1,
+                ordinary_key_edges=2, consumed_motion_leaks=0, pointer_displacement_x=5, pointer_displacement_y=3)
 
 
 def validate_native_key_arbitration(observations, received, inputs):
@@ -826,7 +884,7 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
     wanted = dict(status="passed", phases=15, source="two_owned_wayland_virtual_keyboards", production_route_tested=False,
                   kernel_input_tested=False, unmodified_stock_acceptance=False, test_backpressure=True)
     if args.key_worker:
-        wanted.update(phases=42, source="fourteen_owned_wayland_virtual_keyboards_and_one_pointer", scoped_worker_tested=True, authority_modeled=True,
+        wanted.update(phases=42, source="fifteen_owned_wayland_virtual_keyboards_and_two_pointers", scoped_worker_tested=True, authority_modeled=True,
                       transport_readiness_modeled=True, selective_consumption_tested=True,
                       selective_consumption_scope="owned_protocol_native_keys", physical_takeover_tested=False,
                       selective_projection_tested=True, within_frame_order_tested=True, cross_source_order_tested=True,
@@ -841,6 +899,7 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
                       event_local_custom_activation_rendering_tested=True,
                       composed_custom_key_arbitration_rendering_tested=True,
                       hybrid_key_relative_rendering_tested=True, hybrid_key_fallback_cadence_tested=True,
+                      independent_domain_rendering_tested=True, domain_gesture_arbitration_tested=False,
                       native_hybrid_topology_tested=False, hybrid_mt_rendering_tested=False,
                       mixed_delayed_gesture_arbitration_tested=False)
         journal = json.loads((output / "pending-journal-receipt.json").read_text())
@@ -869,6 +928,8 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
         trace = lambda device: [json.loads(line) for line in (output / f"key-output-{device}.jsonl").read_text().splitlines()]
         hybrid = validate_hybrid_keys(phases, rows(), json.loads((output / "hybrid-key-runtime.json").read_text()), trace(962), trace(963))
         (output / "hybrid-key-receipt.json").write_text(json.dumps(hybrid, indent=2) + "\n")
+        domains = validate_domain_journal(phases, rows(), json.loads((output / "domain-journal-runtime.json").read_text()), trace(964))
+        (output / "domain-journal-receipt.json").write_text(json.dumps(domains, indent=2) + "\n")
     else:
         wanted.update(software_owner_tested=True, software_authorization_tested=False, software_repeat_rendering_tested=False)
     if json.dumps(result, sort_keys=True) != json.dumps(wanted, sort_keys=True):
