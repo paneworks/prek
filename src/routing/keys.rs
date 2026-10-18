@@ -138,7 +138,7 @@ pub(super) fn projectable(config: &Config, device: &Device) -> bool {
                 })
         })
         .all(|rule| {
-            arbitration::native(&rule.trigger)
+            arbitration::projected(&rule.trigger)
                 && matches!(rule.action, Action::Keys { .. } | Action::Remap { .. })
         })
 }

@@ -14,6 +14,8 @@ use prek::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+#[path = "worker/custom.rs"]
+mod custom;
 #[path = "worker/pending.rs"]
 mod pending;
 
@@ -446,6 +448,15 @@ impl RoutedKeyboard {
         (handles, cancellations)
     }
     fn pump(&mut self) {
+        for _ in 0..8 {
+            self.pump_once();
+            if self.generated.settled() {
+                self.pump_once();
+                break;
+            }
+        }
+    }
+    fn pump_once(&mut self) {
         let at = self.refresh();
         self.routing.push(Record::Tick { at }).unwrap();
         let works = self
@@ -649,7 +660,7 @@ fn local_cage_scoped_key_worker() {
     keyboard.feed(&[(183, 0)]);
     keyboard.drain();
     let (_, cancellations) = keyboard.feed(&[(184, 1)]);
-    keyboard.pump();
+    keyboard.pump_once();
     assert!(!keyboard.generated.settled());
     keyboard.cancel(&cancellations[0]);
     keyboard.feed(&[(184, 0)]);
@@ -702,7 +713,7 @@ fn local_cage_scoped_key_worker() {
     keyboard.drain();
     keyboard.capture(&output, 7, "bAAaAaA", &[]);
     keyboard.feed(&[(184, 1)]);
-    keyboard.pump();
+    keyboard.pump_once();
     keyboard
         .generated
         .retire_source(&source(1), monotonic().unwrap())
@@ -894,10 +905,11 @@ fn local_cage_scoped_key_worker() {
     assert!(generated.into_sink().is_ok());
     drop(keyboard.raw);
     drop(keyboard.other_raw);
-    pending::exercise(&output, socket, 31, "bAAaAaAAAaaaaaaaaaaasaaasasab");
-    phase(&output, 34, "bAAaAaAAAaaaaaaaaaaasaaasasaba", &[]);
-    fs::write(output.join("key-output-runtime-result.json"),serde_json::to_vec(&json!({"status":"passed","phases":35,
-        "source":"four_owned_wayland_virtual_keyboards","production_route_tested":false,"kernel_input_tested":false,
+    let text = custom::exercise(&output, socket, 31, "bAAaAaAAAaaaaaaaaaaasaaasasab");
+    pending::exercise(&output, socket, 32, &text);
+    phase(&output, 35, &format!("{text}a"), &[]);
+    fs::write(output.join("key-output-runtime-result.json"),serde_json::to_vec(&json!({"status":"passed","phases":36,
+        "source":"six_owned_wayland_virtual_keyboards","production_route_tested":false,"kernel_input_tested":false,
         "unmodified_stock_acceptance":false,"test_backpressure":true,"scoped_worker_tested":true,
         "authority_modeled":true,"transport_readiness_modeled":true,"selective_consumption_tested":true,
         "selective_consumption_scope":"owned_protocol_native_keys","physical_takeover_tested":false,
@@ -909,5 +921,6 @@ fn local_cage_scoped_key_worker() {
         "event_local_sequence_rendering_tested":true,"deferred_key_completion_rendering_tested":true,
         "pending_journal_protocol_tested":true,"pending_fallback_cadence_tested":true,
         "delayed_gesture_arbitration_tested":true,"delayed_gesture_arbitration_scope":"native_key_only",
+        "root_custom_key_arbitration_rendering_tested":true,
         "mixed_delayed_gesture_arbitration_tested":false})).unwrap()).unwrap();
 }

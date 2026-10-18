@@ -1,6 +1,7 @@
 use super::*;
 
 mod admission;
+mod custom;
 mod participants;
 mod sequences;
 

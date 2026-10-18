@@ -19,8 +19,155 @@ struct Harness {
     device: Device,
     sequence: u64,
 }
+
+struct CapturedSink {
+    source: Source,
+    pending: Option<Frame>,
+    frames: std::rc::Rc<std::cell::RefCell<Vec<Frame>>>,
+}
+impl prek::keys::output::Sink for CapturedSink {
+    fn source(&self) -> &Source {
+        &self.source
+    }
+    fn supports_key(&self, code: u16) -> bool {
+        code == 42
+    }
+    fn enqueue(&mut self, frame: &Frame) -> std::io::Result<()> {
+        assert!(self.pending.is_none());
+        self.pending = Some(frame.clone());
+        Ok(())
+    }
+    fn flush(&mut self) -> std::io::Result<prek::keys::output::Progress> {
+        self.frames.borrow_mut().push(self.pending.take().unwrap());
+        Ok(prek::keys::output::Progress::Complete)
+    }
+    fn abort(&mut self) -> std::io::Result<Vec<RawEvent>> {
+        self.pending.take();
+        Ok(vec![])
+    }
+}
+
+#[test]
+fn projected_custom_keys_preserve_unseen_typing_through_the_real_lua_helper() {
+    let mut harness = Harness::with_key_output(
+        "assert(#ticket.input.changes==1 and ticket.input.changes[1].code==30);return {phase='discrete',data={original=ticket.input.sequence}}",
+        false,
+        "buffer",
+        true,
+    );
+    let first = harness.key(1).unwrap();
+    let proposal = harness.proposal(first);
+    harness.sequence += 1;
+    harness
+        .routing
+        .push(Record::Frame {
+            frame: Frame {
+                source: harness.device.source.clone(),
+                at: monotonic().unwrap(),
+                sequence: harness.sequence,
+                events: vec![
+                    RawEvent {
+                        kind: EV_KEY,
+                        code: 31,
+                        value: 1,
+                    },
+                    RawEvent {
+                        kind: EV_KEY,
+                        code: 31,
+                        value: 0,
+                    },
+                    RawEvent {
+                        kind: EV_SYN,
+                        code: SYN_REPORT,
+                        value: 0,
+                    },
+                ],
+            },
+        })
+        .unwrap();
+    harness.respond(proposal);
+    let work = harness
+        .routing
+        .take_scoped_dispatches(monotonic().unwrap())
+        .into_iter()
+        .map(|dispatch| dispatch.into_key_work().ok().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(work.len(), 1);
+    let frames = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let output = prek::keys::output::Output::new(CapturedSink {
+        source: Source {
+            device: 100,
+            generation: 1,
+            seat: "seat0".into(),
+        },
+        pending: None,
+        frames: frames.clone(),
+    })
+    .unwrap();
+    let mut seat = prek::keys::worker::Seat::new(fence(1), output).unwrap();
+    seat.admit(&harness.routing, work, None, monotonic().unwrap())
+        .unwrap();
+    let mut ordinary = Vec::new();
+    let end = monotonic().unwrap() + Duration::from_millis(200);
+    loop {
+        let at = monotonic().unwrap();
+        seat.poll(&harness.routing, at).unwrap();
+        while let Some(scheduled) = harness
+            .routing
+            .due(&harness.device.source, at)
+            .unwrap()
+            .cloned()
+        {
+            let span = harness
+                .routing
+                .input_span(&harness.device.source, scheduled.ticket)
+                .unwrap();
+            if seat.blocks_ordered_span(&harness.routing, &harness.device.source, span) {
+                break;
+            }
+            ordinary.extend(
+                scheduled
+                    .frame
+                    .events
+                    .iter()
+                    .filter(|event| event.kind == EV_KEY)
+                    .map(|event| (event.code, event.value)),
+            );
+            harness
+                .routing
+                .delivered(&harness.device.source, scheduled.ticket, at)
+                .unwrap();
+        }
+        if seat.settled() {
+            break;
+        }
+        assert!(at < end, "projected custom key work did not settle");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(ordinary, [(31, 1), (31, 0)]);
+    assert_eq!(
+        frames
+            .borrow()
+            .iter()
+            .flat_map(|frame| frame.events.iter())
+            .filter(|event| event.kind == EV_KEY)
+            .map(|event| (event.code, event.value))
+            .collect::<Vec<_>>(),
+        [(42, 1), (42, 0)]
+    );
+    harness.cleanup(Retirement::Completed);
+    harness.stop();
+}
 impl Harness {
     fn new(body: &str, continuous: bool, delivery: &str) -> Self {
+        Self::with_key_output(body, continuous, delivery, false)
+    }
+    fn with_key_output(body: &str, continuous: bool, delivery: &str, projected: bool) -> Self {
+        let action = if projected {
+            "p.actions.keys{keys={'KEY_LEFTSHIFT'}}"
+        } else {
+            "p.actions.event{name='native-route'}"
+        };
         let definition = Definition::compile(
             &format!(
                 r#"
@@ -45,7 +192,7 @@ return p.config.new{{mode='route',
  devices={{keyboard={{keys={{'KEY_A'}}}}}},
  rules={{p.rules.define{{id='native-route',devices={{'keyboard'}},contexts={{'desktop'}},
   scope='everywhere',delivery='{delivery}',trigger=trigger,
-  action=p.actions.event{{name='native-route'}}}}}},
+  action={action}}}}},
 }}
 "#
             ),
@@ -72,7 +219,12 @@ return p.config.new{{mode='route',
         authorize_recognizer(&mut session);
         let at = monotonic().unwrap();
         let provided = context_view(at, 0).context.unwrap();
-        let mut routing = Routing::with_recognition(config, fence(1)).unwrap();
+        let mut routing = if projected {
+            Routing::with_key_projection(config, fence(1))
+        } else {
+            Routing::with_recognition(config, fence(1))
+        }
+        .unwrap();
         routing
             .authority_mut()
             .bind(provided.binding, true, false)
@@ -83,7 +235,11 @@ return p.config.new{{mode='route',
             .unwrap();
         routing.actions_available(
             1,
-            BTreeSet::from([Capability::LuaEvents, Capability::Observations]),
+            if projected {
+                BTreeSet::from([Capability::SyntheticInput])
+            } else {
+                BTreeSet::from([Capability::LuaEvents, Capability::Observations])
+            },
             at,
         );
         let device = Device {
@@ -101,7 +257,10 @@ return p.config.new{{mode='route',
             product: 1,
             properties: vec![],
             axes: BTreeMap::new(),
-            capabilities: BTreeMap::from([(EV_SYN, vec![SYN_REPORT]), (EV_KEY, vec![30])]),
+            capabilities: BTreeMap::from([
+                (EV_SYN, vec![SYN_REPORT]),
+                (EV_KEY, if projected { vec![30, 31] } else { vec![30] }),
+            ]),
             virtual_device: false,
         };
         let descriptor = Descriptor::mirror(

@@ -482,6 +482,7 @@ fn native_scope_storage_refuses_aggregate_overflow_before_inserting_a_leaf() {
         routes: &routing.routes,
         chains: &routing.chains,
         groups: &routing.custom_groups,
+        won: &routing.won,
         bindings: &mut routing.custom_chains,
         at: ms(0),
         now: ms(0),

@@ -26,8 +26,9 @@ fn hold(after: u64) -> Trigger {
         repeat: None,
     }
 }
-fn routed(rules: Vec<Rule>) -> Routing {
+pub(super) fn routed(rules: Vec<Rule>) -> Routing {
     let mut config = config(rules);
+    config.policy.allow_input_events = true;
     config.timing.tap_gap = Millis(20);
     config.timing.join_window = Millis(1);
     config.timing.decision_window = Millis(100);

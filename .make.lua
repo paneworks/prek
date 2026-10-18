@@ -523,6 +523,17 @@ make.recipe{ name="test-native-key-worker",desc="managed generated-output slots,
                sh.cargo("test","--locked","--lib","linux::owned_service_tests")
              end }
 
+make.recipe{ name="test-custom-key-arbitration",desc="exact custom key ticket ownership and real supervised Lua output; no devices",
+             run=function()
+               for _,args in ipairs({{"cargo","test","--locked","--lib","keys::worker::tests::coordinator::custom"},
+                 {"cargo","test","--locked","--test","lua_session","native_routing::projected_custom_keys_preserve_unseen_typing_through_the_real_lua_helper","--","--exact"}}) do
+                 args.capture=true
+                 local tested=oslo.run(args)
+                 io.stdout:write(tested.out or ""); io.stderr:write(tested.err or "")
+                 assert(tested.ok and (tested.out or ""):match("running [1-9]%d* tests?"),"custom key gate failed or selected no tests")
+               end
+             end }
+
 make.recipe{ name="test-generated-keyboard",desc="generated keyboard role, publication and readiness models; no devices",
              run=function()
                sh.cargo("test","--locked","--lib","keys::native::tests")
@@ -565,20 +576,23 @@ make.recipe{ name="test-key-worker-cage-dev",desc="current Cargo scheduler fixtu
                       "supply the immutable --runner executable explicitly")
                local built=oslo.run{"bash","-c",[[set -euo pipefail
 cargo test --locked --features native-test-harness --test key_output_cage --no-run --message-format=json | jq -ers '
-  [.[] | select(.reason=="compiler-artifact" and .target.name=="key_output_cage" and .profile.test and .executable!=null) | .executable] | unique |
-  if length==1 then .[0] else error("expected one current scheduler test executable") end'
+  [.[] | select(.reason=="compiler-artifact" and .executable!=null)] as $artifacts |
+  [$artifacts[] | select(.target.name=="key_output_cage" and .profile.test) | .executable] | unique as $fixture |
+  [$artifacts[] | select(.target.name=="prek" and (.target.kind|index("bin")) and (.profile.test|not)) | .executable] | unique as $app |
+  if ($fixture|length)==1 and ($app|length)==1 then $fixture[0],$app[0] else error("expected current scheduler and helper executables") end'
 ]],capture=true}
                if not built.ok then io.stderr:write(built.err or "") end
                assert(built.ok,"scheduler test failed to build")
-               local fixture=(built.out or ""):match("^%s*([^\r\n]+)%s*$")
-               assert(fixture and fixture:sub(1,1)=="/","missing current Cargo test executable")
+               local fixture,app=(built.out or ""):match("^%s*([^\r\n]+)[\r\n]+([^\r\n]+)%s*$")
+               assert(fixture and app and fixture:sub(1,1)=="/" and app:sub(1,1)=="/","missing current Cargo executables")
                print("DEV: current Cargo fixture; explicitly pinned compositor runner: "..a.runner)
                assert(oslo.run{"sha256sum",fixture}.ok,"could not identify scheduler fixture")
+               assert(oslo.run{"sha256sum",app}.ok,"could not identify Lua helper")
                local helper=project_root().."/tests/support/keyboard_quiesce.py"
                assert(oslo.run{"sha256sum",helper}.ok,"could not identify scheduler helper")
                for _,provider in ipairs{"lua","hyprlang"} do
                  assert(oslo.run{a.runner,"--hardware-rendering","--key-output","--key-worker",
-                   "--key-output-fixture",fixture,"--keyboard-quiesce-check",helper,"--hyprland-config",provider}.ok,"local debug scheduler fixture failed")
+                   "--key-output-fixture",fixture,"--prek-app",app,"--keyboard-quiesce-check",helper,"--hyprland-config",provider}.ok,"local debug scheduler fixture failed")
                end
              end }
 
@@ -797,6 +811,6 @@ make.alias("c", "compile")
 make.recipe{
   name = "verify",
   desc = "the whole local gate",
-  deps = { "fmt-check", "check-all", "test-all", "test-lua-lifetimes", "test-lua-tasks", "test-key-provenance", "test-key-admission", "test-key-participants", "test-key-journal", "test-software-worker", "test-routing-helper", "test-composition-helper", "test-chain-helper", "test-composed-worker-helper", "test-root-session", "test-root-routing", "test-native-managed-model", "test-cage-startup", "test-distribution", "clippy", "rustdoc" },
+  deps = { "fmt-check", "check-all", "test-all", "test-lua-lifetimes", "test-lua-tasks", "test-key-provenance", "test-key-admission", "test-key-participants", "test-key-journal", "test-custom-key-arbitration", "test-software-worker", "test-routing-helper", "test-composition-helper", "test-chain-helper", "test-composed-worker-helper", "test-root-session", "test-root-routing", "test-native-managed-model", "test-cage-startup", "test-distribution", "clippy", "rustdoc" },
 }
 make.alias("v", "verify")

@@ -505,7 +505,7 @@ def validate_native_key_arbitration(observations, received, inputs):
         ("buffered-unmatched-tap-fallback", [(31, 1), (31, 0)]),
         ("buffered-deferred-action-order", [(30, 1), (30, 0), (48, 1), (48, 0)]),
     ]
-    if len(observations) != 35:
+    if len(observations) != 36:
         raise ValueError("missing native key arbitration captures")
     keys = [row for row in received if row.get("event") == "key"]
     if any(any(type(row.get(field)) is not int for field in ("sequence", "code", "state", "at_ns")) for row in keys):
@@ -550,6 +550,63 @@ def validate_native_key_arbitration(observations, received, inputs):
                 deferred_arrival_gap_ns=arrival_gap, deferred_arrival_window_ns=20_000_000,
                 input_gap_ns=gap, delivery_gap_ns=delivery, slack_ns=20_000_000,
                 source_and_readiness_modeled=True, physical_takeover_tested=False)
+
+
+def validate_custom_key_arbitration(observations, received, runtime):
+    flags = dict(status="passed", scope="owned_protocol_root_key_only_custom", actual_lua_callback=True,
+                 source_and_readiness_modeled=True, physical_takeover_tested=False, kernel_input_opened=False,
+                 helper_stopped=True, generated_neutral=True)
+    if not isinstance(runtime, dict) or set(runtime) != set(flags) | {
+            "ordinary", "inputs", "ticket", "proposal", "proposed_at", "admitted_at"}:
+        raise ValueError("invalid custom key runtime fields")
+    for field, wanted in flags.items():
+        if type(runtime.get(field)) is not type(wanted) or runtime[field] != wanted:
+            raise ValueError("invalid custom key runtime scope")
+    if len(observations) != 36 or observations[31]["name"] != "custom-lua-unseen-key-tail":
+        raise ValueError("missing custom key rendered phase")
+    lower, upper = (observations[index]["receipt"]["sequence"] for index in (30, 31))
+    if type(lower) is not int or type(upper) is not int or lower >= upper:
+        raise ValueError("invalid custom key rendered boundary")
+    events = [row for row in received if row.get("event") == "key" and lower < row["sequence"] <= upper]
+    if any(any(type(row.get(field)) is not int for field in ("sequence", "code", "state", "at_ns")) for row in events):
+        raise ValueError("invalid custom key app event fields")
+    if [(row["code"], row["state"]) for row in events] != [(31, 1), (31, 0), (30, 1), (30, 0)]:
+        raise ValueError("custom reply consumed unrelated input or reordered its action")
+    def stamp(value):
+        if not isinstance(value, dict) or set(value) != {"secs", "nanos"} or any(type(value[key]) is not int for key in value):
+            raise ValueError("invalid custom key clock")
+        if value["secs"] < 0 or not 0 <= value["nanos"] < 1_000_000_000:
+            raise ValueError("invalid custom key clock range")
+        return value["secs"] * 1_000_000_000 + value["nanos"]
+    inputs, ticket, proposal = (runtime[key] for key in ("inputs", "ticket", "proposal"))
+    if not isinstance(inputs, list) or len(inputs) != 3:
+        raise ValueError("missing original custom key input")
+    edges = [[(event["code"], event["value"]) for event in frame["events"] if event["kind"] == 1] for frame in inputs]
+    if edges != [[(202, 1)], [(31, 1), (31, 0)], [(202, 0)]] or runtime["ordinary"] != [[31, 1], [31, 0]]:
+        raise ValueError("invalid original custom key consumption")
+    if any(any(type(event.get(field)) is not int for field in ("kind", "code", "value"))
+           for frame in inputs for event in frame["events"]):
+        raise ValueError("invalid original custom key event fields")
+    if [frame["sequence"] for frame in inputs] != [1, 2, 3] or any(frame["source"] != inputs[0]["source"] for frame in inputs):
+        raise ValueError("invalid custom key original source or order")
+    original = ticket.get("input", {})
+    if (type(ticket.get("id")) is not int or ticket["id"] <= 0 or ticket.get("cause") != "frame"
+            or ticket.get("rule") != "rendered-custom-key" or ticket.get("recognizer") != "rendered_key"
+            or original.get("source") != inputs[0]["source"] or original.get("sequence") != 1
+            or original.get("at") != inputs[0]["at"]
+            or original.get("changes") != [dict(kind="key", code=202, state="press")]):
+        raise ValueError("custom key ticket was not the original callback input")
+    if (proposal.get("ticket") != ticket["id"] or proposal.get("fence") != ticket.get("fence")
+            or proposal.get("phase") != "discrete" or proposal.get("data") != dict(trigger=202)):
+        raise ValueError("missing actual custom key callback proposal")
+    first, later, released = (stamp(frame["at"]) for frame in inputs)
+    proposed, admitted = stamp(runtime["proposed_at"]), stamp(runtime["admitted_at"])
+    if not first <= proposed < later < admitted <= released or stamp(ticket["requested_at"]) != first or admitted >= stamp(ticket["deadline"]):
+        raise ValueError("custom key reply did not cross a real unseen-input boundary")
+    return dict(status="passed", scope=flags["scope"], cases=1, actual_lua_callback=True,
+                consumed_control_edges=2, leaked_control_edges=0, preserved_ordinary_edges=2,
+                source_and_readiness_modeled=True, physical_takeover_tested=False, kernel_input_opened=False,
+                unseen_input_gap_ns=later - proposed)
 
 
 def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
@@ -602,12 +659,17 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
                     ("buffered-deferred-key-sequence", "bAAaAaAAAaaaaaaaaaaasaaasa", []),
                     ("buffered-unmatched-tap-fallback", "bAAaAaAAAaaaaaaaaaaasaaasas", []),
                     ("buffered-deferred-action-order", "bAAaAaAAAaaaaaaaaaaasaaasasab", []),
-                    ("journal-pending-withheld", "bAAaAaAAAaaaaaaaaaaasaaasasab", []),
-                    ("journal-decided-consumed", "bAAaAaAAAaaaaaaaaaaasaaasasab", []),
-                    ("journal-fallback-cadence", "bAAaAaAAAaaaaaaaaaaasaaasasaba", []),
-                    ("software-scoped-shutdown", "bAAaAaAAAaaaaaaaaaaasaaasasaba", [])]
+                    ("custom-lua-unseen-key-tail", "bAAaAaAAAaaaaaaaaaaasaaasasabsa", []),
+                    ("journal-pending-withheld", "bAAaAaAAAaaaaaaaaaaasaaasasabsa", []),
+                    ("journal-decided-consumed", "bAAaAaAAAaaaaaaaaaaasaaasasabsa", []),
+                    ("journal-fallback-cadence", "bAAaAaAAAaaaaaaaaaaasaaasasabsaa", []),
+                    ("software-scoped-shutdown", "bAAaAaAAAaaaaaaaaaaasaaasasabsaa", [])]
     fixture_env = dict(env, PREK_LOCAL_CAGE="1", PREK_CAGE_OUTPUT=str(output), PREK_CAGE_KEYBOARD=args.keyboard,
                        PREK_CAGE_KEY_SOCKET=str(socket))
+    if args.key_worker:
+        if not args.prek_app:
+            raise RuntimeError("custom Lua keyboard test requires its explicit helper binary")
+        fixture_env["PREK_TEST_LUA_BINARY"] = str(args.prek_app)
     before = {device["address"] for device in json.loads(command(["-j", "devices"]))["keyboards"]}
     with (output / "key-output-runtime.log").open("w") as log:
         test_name = "worker::local_cage_scoped_key_worker" if args.key_worker else "local_cage_generated_key_output"
@@ -642,7 +704,7 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
     wanted = dict(status="passed", phases=15, source="two_owned_wayland_virtual_keyboards", production_route_tested=False,
                   kernel_input_tested=False, unmodified_stock_acceptance=False, test_backpressure=True)
     if args.key_worker:
-        wanted.update(phases=35, source="four_owned_wayland_virtual_keyboards", scoped_worker_tested=True, authority_modeled=True,
+        wanted.update(phases=36, source="six_owned_wayland_virtual_keyboards", scoped_worker_tested=True, authority_modeled=True,
                       transport_readiness_modeled=True, selective_consumption_tested=True,
                       selective_consumption_scope="owned_protocol_native_keys", physical_takeover_tested=False,
                       selective_projection_tested=True, within_frame_order_tested=True, cross_source_order_tested=True,
@@ -653,6 +715,7 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
                       event_local_sequence_rendering_tested=True, deferred_key_completion_rendering_tested=True,
                       pending_journal_protocol_tested=True, pending_fallback_cadence_tested=True,
                       delayed_gesture_arbitration_tested=True, delayed_gesture_arbitration_scope="native_key_only",
+                      root_custom_key_arbitration_rendering_tested=True,
                       mixed_delayed_gesture_arbitration_tested=False)
         journal = json.loads((output / "pending-journal-receipt.json").read_text())
         if (journal.get("status") != "passed" or journal.get("consumed_reports_written") != 0
@@ -669,6 +732,8 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
         inputs = [json.loads(line) for line in (output / "key-worker-input.jsonl").read_text().splitlines()]
         native_arbitration = validate_native_key_arbitration(phases, rows(), inputs)
         (output / "native-key-arbitration-receipt.json").write_text(json.dumps(native_arbitration, indent=2) + "\n")
+        custom_arbitration = validate_custom_key_arbitration(phases, rows(), json.loads((output / "custom-key-runtime.json").read_text()))
+        (output / "custom-key-arbitration-receipt.json").write_text(json.dumps(custom_arbitration, indent=2) + "\n")
     else:
         wanted.update(software_owner_tested=True, software_authorization_tested=False, software_repeat_rendering_tested=False)
     if json.dumps(result, sort_keys=True) != json.dumps(wanted, sort_keys=True):
@@ -678,7 +743,7 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
     name = "key-worker" if args.key_worker else "key-output"
     (output / f"{name}-result.json").write_text(json.dumps(result, indent=2) + "\n")
     if args.key_worker:
-        print("PASS: native key tap/hold/sequence arbitration selectively consumed exact presses, ordered deferred actions and preserved fallback cadence; thirty-five rendered protocol-sink phases. Authority/readiness modeled; mixed/custom arbitration, native takeover, software authorization and repeat rendering are not tested.")
+        print("PASS: native key arbitration and actual Luna root key-only custom replies preserved unrelated typing, deferred action order and fallback cadence; thirty-six rendered protocol-sink phases. Authority/readiness modeled; mixed/hybrid arbitration, native takeover, software authorization and repeat rendering are not tested.")
     else:
         print("PASS: actual key-output driver preserved overlapping owners, software producer isolation, exact cancellation and context reentry; fifteen rendered app phases. Software authorization and repeat rendering are not tested.")
     return result

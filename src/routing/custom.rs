@@ -11,6 +11,7 @@ pub(super) struct CustomRoutes<'a> {
     pub(super) routes: &'a BTreeMap<Source, Route>,
     pub(super) chains: &'a BTreeMap<u64, BTreeMap<Source, ChainToken>>,
     pub(super) groups: &'a BTreeMap<u64, (Source, u64, u64)>,
+    pub(super) won: &'a BTreeMap<u64, Won>,
     pub(super) bindings: &'a mut BTreeMap<u64, BoundCustom>,
     pub(super) at: Duration,
     pub(super) now: Duration,
@@ -26,6 +27,7 @@ impl CustomRoutes<'_> {
             ownership: Some(Ownership::Forwarded),
             winner: None,
             deadline: None,
+            skip_offer: false,
         };
         if owner.rule.id != leaf.rule.id
             || owner.rule.delivery != leaf.rule.delivery
@@ -40,6 +42,14 @@ impl CustomRoutes<'_> {
             if owner.id() != leaf.id() {
                 return refused();
             }
+            if self
+                .routes
+                .get(leaf.source())
+                .is_some_and(|route| route.project_keys)
+                && keys::arbitration::custom_key(&leaf.rule.trigger)
+            {
+                return self.key_ownership(leaf);
+            }
             let (ownership, winner) = custom_ownership(
                 self.routes,
                 self.groups,
@@ -51,6 +61,7 @@ impl CustomRoutes<'_> {
                 ownership,
                 winner,
                 deadline: None,
+                skip_offer: false,
             };
         }
         let Some(scope) = self.chains.get(&owner.id()) else {
@@ -114,6 +125,66 @@ impl CustomRoutes<'_> {
             ownership,
             winner: (ownership == Some(Ownership::Claimed)).then_some(leaf.id()),
             deadline,
+            skip_offer: false,
+        }
+    }
+    fn key_ownership(&self, leaf: &RouteIntent) -> RecognitionOwnership {
+        use crate::router::KeyDisposition;
+        let refused = || RecognitionOwnership {
+            ownership: Some(Ownership::Forwarded),
+            winner: None,
+            deadline: None,
+            skip_offer: false,
+        };
+        let evidence = leaf.key_evidence();
+        let owned: BTreeSet<_> = self
+            .won
+            .get(&leaf.id())
+            .and_then(|won| won.key_claim.as_ref())
+            .into_iter()
+            .flat_map(|claim| claim.presses())
+            .collect();
+        let mut pending = false;
+        let mut deadline: Option<Duration> = None;
+        let mut any = false;
+        let mut lost = false;
+        for press in evidence.iter() {
+            let Some(route) = self
+                .routes
+                .get(&press.source)
+                .filter(|route| route.project_keys)
+            else {
+                return refused();
+            };
+            match route.router.key_disposition(press.code, press.position) {
+                Some(KeyDisposition::Pending { deadline: bound }) if self.now < bound => {
+                    any = true;
+                    pending = true;
+                    deadline = Some(deadline.map_or(bound, |old| old.min(bound)));
+                }
+                Some(KeyDisposition::Consumed { owner }) if owner == leaf.id() => any = true,
+                None if owned.contains(press) => any = true,
+                _ => lost = true,
+            }
+        }
+        if !any {
+            return refused();
+        }
+        if lost {
+            return RecognitionOwnership {
+                skip_offer: true,
+                ..refused()
+            };
+        }
+        RecognitionOwnership {
+            ownership: Some(if pending {
+                Ownership::Pending
+            } else {
+                Ownership::Claimed
+            }),
+            winner: (!pending).then_some(leaf.id()),
+            deadline,
+            skip_offer: false,
         }
     }
 }

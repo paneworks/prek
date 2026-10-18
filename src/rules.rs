@@ -172,6 +172,7 @@ pub(crate) struct RecognitionOwnership {
     pub ownership: Option<crate::router::Ownership>,
     pub winner: Option<u64>,
     pub deadline: Option<Duration>,
+    pub skip_offer: bool,
 }
 impl RouteIntent {
     pub(crate) fn has_key_press(
@@ -267,6 +268,26 @@ impl KeyEvidence {
     }
     pub(crate) fn include(&mut self, other: &Self) -> Result<(), &'static str> {
         self.0.merge(&other.0)
+    }
+    pub(crate) fn select(
+        &self,
+        mut keep: impl FnMut(&KeyPress) -> bool,
+    ) -> Result<Self, &'static str> {
+        let mut omitted = false;
+        let selected = self
+            .iter()
+            .filter(|press| {
+                let included = keep(press);
+                omitted |= !included;
+                included
+            })
+            .cloned()
+            .collect();
+        if omitted {
+            self.0.select(selected).map(Self)
+        } else {
+            Ok(self.clone())
+        }
     }
 }
 impl RouteIntent {

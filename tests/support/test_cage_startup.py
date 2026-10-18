@@ -17,9 +17,93 @@ quiesce = importlib.util.module_from_spec(quiesce_spec)
 quiesce_spec.loader.exec_module(quiesce)
 
 
+class CustomKeyArbitration(unittest.TestCase):
+    def fixture(self):
+        observations = [dict(name="unused", receipt=dict(sequence=(index + 1) * 10)) for index in range(36)]
+        observations[31]["name"] = "custom-lua-unseen-key-tail"
+        received = [dict(event="key", sequence=311 + index, code=code, state=state, at_ns=1000 + index)
+                    for index, (code, state) in enumerate([(31, 1), (31, 0), (30, 1), (30, 0)])]
+        source = dict(device=500, generation=1, seat="seat0")
+        def stamp(nanos):
+            return dict(secs=0, nanos=nanos)
+        inputs = [dict(source=source, sequence=index + 1, at=stamp(at),
+                       events=[dict(kind=1, code=code, value=value) for code, value in events])
+                  for index, (at, events) in enumerate([(100, [(202, 1)]), (120, [(31, 1), (31, 0)]), (126, [(202, 0)])])]
+        ticket = dict(id=1, cause="frame", rule="rendered-custom-key", recognizer="rendered_key", fence=dict(configuration=1),
+                      requested_at=stamp(100), deadline=stamp(200), input=dict(source=source, sequence=1, at=stamp(100),
+                      changes=[dict(kind="key", code=202, state="press")]))
+        runtime = dict(status="passed", scope="owned_protocol_root_key_only_custom", actual_lua_callback=True,
+                       source_and_readiness_modeled=True, physical_takeover_tested=False, kernel_input_opened=False,
+                       helper_stopped=True, generated_neutral=True, ordinary=[[31, 1], [31, 0]], inputs=inputs, ticket=ticket,
+                       proposal=dict(ticket=1, fence=ticket["fence"], phase="discrete", data=dict(trigger=202)),
+                       proposed_at=stamp(110), admitted_at=stamp(125))
+        return observations, received, runtime
+
+    def test_original_callback_and_actual_selective_edges_pass(self):
+        result = quiesce.validate_custom_key_arbitration(*self.fixture())
+        self.assertEqual((result["consumed_control_edges"], result["preserved_ordinary_edges"]), (2, 2))
+        self.assertFalse(result["physical_takeover_tested"])
+
+    def test_leaked_missing_duplicated_or_reordered_edges_refuse(self):
+        for change in ("leak", "missing", "duplicate", "reorder", "bool"):
+            observations, received, runtime = self.fixture()
+            if change == "leak":
+                received.insert(0, dict(received[0], code=202))
+            elif change == "missing":
+                received.pop()
+            elif change == "duplicate":
+                received.append(dict(received[-1]))
+            elif change == "bool":
+                received[0]["state"] = True
+            else:
+                received[0], received[2] = received[2], received[0]
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                quiesce.validate_custom_key_arbitration(observations, received, runtime)
+
+    def test_false_scope_and_incomplete_cleanup_refuse(self):
+        for field in ("actual_lua_callback", "source_and_readiness_modeled", "helper_stopped", "generated_neutral"):
+            for value in (False, 1):
+                observations, received, runtime = self.fixture()
+                runtime[field] = value
+                with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                    quiesce.validate_custom_key_arbitration(observations, received, runtime)
+
+    def test_missing_control_input_and_widened_or_foreign_ticket_refuse(self):
+        for change in ("control", "widened", "foreign", "proposal"):
+            observations, received, runtime = self.fixture()
+            if change == "control":
+                runtime["inputs"][0]["events"].clear()
+            elif change == "widened":
+                runtime["ticket"]["input"]["changes"].append(dict(kind="key", code=31, state="press"))
+            elif change == "foreign":
+                runtime["ticket"]["input"]["source"] = dict(device=501, generation=1, seat="seat0")
+            else:
+                runtime["proposal"]["ticket"] = 2
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                quiesce.validate_custom_key_arbitration(observations, received, runtime)
+
+    def test_original_unseen_boundary_and_clocks_are_required(self):
+        for change in ("no_unseen", "late", "bool", "negative", "nanos"):
+            observations, received, runtime = self.fixture()
+            field = "admitted_at" if change == "late" else "proposed_at"
+            runtime[field] = dict(secs=0, nanos={"no_unseen":121, "late":201, "bool":True, "negative":-1, "nanos":1_000_000_000}[change])
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                quiesce.validate_custom_key_arbitration(observations, received, runtime)
+
+    def test_missing_or_reversed_rendered_phase_refuses(self):
+        for missing in (False, True):
+            observations, received, runtime = self.fixture()
+            if missing:
+                observations.pop()
+            else:
+                observations[31]["receipt"]["sequence"] = 300
+            with self.subTest(missing=missing), self.assertRaises(ValueError):
+                quiesce.validate_custom_key_arbitration(observations, received, runtime)
+
+
 class NativeKeyArbitration(unittest.TestCase):
     def fixture(self):
-        observations = [dict(name="unused", receipt=dict(sequence=(index + 1) * 10)) for index in range(35)]
+        observations = [dict(name="unused", receipt=dict(sequence=(index + 1) * 10)) for index in range(36)]
         cases = [
             ("buffered-tap-selective", [(31, 1), (31, 0), (30, 1), (30, 0)]),
             ("buffered-hold-priority", [(30, 1), (30, 0)]),

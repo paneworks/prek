@@ -17,13 +17,20 @@ pub(super) struct State {
     ready_at: Duration,
     live: BTreeSet<u64>,
     offers: VecDeque<Offer>,
+    proofs: BTreeMap<u64, Proof>,
+    confirmed: BTreeMap<u64, Proof>,
     bytes: usize,
 }
 struct Offer {
     candidate: u64,
+    key_presses: presses::Set,
     input: OfferedInput,
     at: Duration,
     bytes: usize,
+}
+struct Proof {
+    key_presses: presses::Set,
+    _charge: presses::Reservation,
 }
 enum OfferedInput {
     Frame(Input),
@@ -64,10 +71,18 @@ impl State {
             ready_at: Duration::ZERO,
             live: BTreeSet::new(),
             offers: VecDeque::new(),
+            proofs: BTreeMap::new(),
+            confirmed: BTreeMap::new(),
             bytes: 0,
         }))
     }
-    fn offer(&mut self, candidate: u64, input: OfferedInput, at: Duration) -> io::Result<()> {
+    fn offer(
+        &mut self,
+        candidate: u64,
+        key_presses: presses::Set,
+        input: OfferedInput,
+        at: Duration,
+    ) -> io::Result<()> {
         let bytes = match &input {
             OfferedInput::Frame(input) | OfferedInput::TouchContinuation(input) => {
                 recognition::encoded_size(input, recognition::MAX_FRAME_BYTES - 1024)? + 128
@@ -81,6 +96,7 @@ impl State {
         }
         self.offers.push_back(Offer {
             candidate,
+            key_presses,
             input,
             at,
             bytes,
@@ -342,7 +358,12 @@ pub(super) fn frame(
     if let Some(candidate) = worker.candidates.get(source)
         && context
             .custom
-            .offer(candidate.id, OfferedInput::Frame(input), at)
+            .offer(
+                candidate.id,
+                candidate.key_presses.clone(),
+                OfferedInput::Frame(input),
+                at,
+            )
             .is_err()
     {
         cancel_candidate(
@@ -421,7 +442,12 @@ pub(super) fn continue_touch(
         .ok_or("custom deadline overflow")?;
     context
         .custom
-        .offer(id, OfferedInput::TouchContinuation(input), at)
+        .offer(
+            id,
+            candidate.key_presses.clone(),
+            OfferedInput::TouchContinuation(input),
+            at,
+        )
         .map_err(|_| "custom recognition queue exhausted")?;
     candidate.expires = Some(expires);
     context.custom.live.insert(id);
@@ -696,6 +722,10 @@ impl Engine {
             .offers
             .retain(|offer| custom.live.contains(&offer.candidate));
         custom.bytes = custom.offers.iter().map(|offer| offer.bytes).sum();
+        custom.confirmed.retain(|id, _| custom.live.contains(id));
+        custom
+            .proofs
+            .retain(|ticket, _| custom.gate.candidate(*ticket).is_some());
         for worker in &mut self.workers {
             if let Recognizer::Custom {
                 blocked,
@@ -755,6 +785,13 @@ impl Engine {
             };
             for (source, wake) in wakes {
                 let id = worker.candidates[source].id;
+                let Some(confirmed) = custom
+                    .confirmed
+                    .get(&id)
+                    .map(|proof| proof.key_presses.clone())
+                else {
+                    continue;
+                };
                 if closed.contains(source) {
                     continue;
                 }
@@ -763,7 +800,7 @@ impl Engine {
                     && !custom.offers.iter().any(|offer| {
                         offer.candidate == id && matches!(offer.input, OfferedInput::Wake)
                     })
-                    && custom.offer(id, OfferedInput::Wake, at).is_ok()
+                    && custom.offer(id, confirmed, OfferedInput::Wake, at).is_ok()
                 {
                     *wake = at.saturating_add(interval.duration());
                 }
@@ -784,6 +821,9 @@ impl Engine {
                     .iter()
                     .filter(|(source, _)| {
                         !closed.contains(*source)
+                            && custom
+                                .confirmed
+                                .contains_key(&worker.candidates[*source].id)
                             && !custom.gate.waiting(worker.candidates[*source].id)
                             && !custom
                                 .offers
@@ -811,11 +851,15 @@ impl Engine {
         custom.bytes = 0;
         let mut tickets = Vec::new();
         for offer in offers {
-            let Some((intent, owner)) = self.recognition_scope(offer.candidate, at) else {
+            let Some((mut intent, owner)) = self.recognition_scope(offer.candidate, at) else {
                 self.custom_cancel(offer.candidate, at, "custom eligibility changed");
                 continue;
             };
+            intent.candidate.key_presses = offer.key_presses.clone();
             let proof = ownership(&intent, &owner);
+            if proof.skip_offer {
+                continue;
+            }
             let current = self.custom_candidate(&intent, proof.ownership, proof.winner)?;
             let Trigger::Custom { recognizer, .. } = &intent.rule.trigger else {
                 unreachable!()
@@ -834,6 +878,7 @@ impl Engine {
                     .retire_with(offer.candidate, Retirement::Expired);
                 continue;
             }
+            let charge = offer.key_presses.reserve(128).map_err(invalid)?;
             let gate = &mut self.custom.as_mut().unwrap().gate;
             let result = match offer.input {
                 OfferedInput::Frame(input) => gate.offer(&recognizer.name, &current, &input, at),
@@ -853,6 +898,13 @@ impl Engine {
                             "custom ownership deadline refused",
                         );
                     } else {
+                        self.custom.as_mut().unwrap().proofs.insert(
+                            ticket.id,
+                            Proof {
+                                key_presses: offer.key_presses,
+                                _charge: charge,
+                            },
+                        );
                         tickets.push(ticket);
                     }
                 }
@@ -943,11 +995,19 @@ impl Engine {
             .as_ref()
             .and_then(|custom| custom.gate.candidate(proposal.ticket))
             .ok_or_else(|| invalid("unknown custom recognition ticket"))?;
-        let Some((intent, owner)) = self.recognition_scope(id, at) else {
+        let Some((mut intent, owner)) = self.recognition_scope(id, at) else {
             self.custom_cancel(id, at, "custom recognition is no longer eligible");
             self.custom_sync(at, Retirement::Cancelled);
             return Err(invalid("custom recognition is no longer eligible"));
         };
+        let evidence = self
+            .custom
+            .as_mut()
+            .unwrap()
+            .proofs
+            .remove(&proposal.ticket)
+            .ok_or_else(|| invalid("custom ticket has no original evidence"))?;
+        intent.candidate.key_presses = evidence.key_presses.clone();
         let proof = ownership(&intent, &owner);
         let candidate = self.custom_candidate(&intent, proof.ownership, proof.winner)?;
         let validation = self
@@ -956,14 +1016,24 @@ impl Engine {
             .unwrap()
             .gate
             .validate(proposal, &candidate, at);
-        let Some(validated) = (match validation {
+        let validated = match validation {
             Ok(value) => value,
             Err(error) => {
                 self.custom_cancel(id, at, "custom proposal failed native validation");
                 self.custom_sync(at, Retirement::Cancelled);
                 return Err(error);
             }
-        }) else {
+        };
+        let outcome_evidence = evidence.key_presses.clone();
+        if let Some(confirmed) = self.custom.as_mut().unwrap().confirmed.get_mut(&id) {
+            confirmed
+                .key_presses
+                .merge(&evidence.key_presses)
+                .map_err(invalid)?;
+        } else {
+            self.custom.as_mut().unwrap().confirmed.insert(id, evidence);
+        }
+        let Some(validated) = validated else {
             return Ok(());
         };
         let phase = match validated.phase {
@@ -1005,6 +1075,7 @@ impl Engine {
         if let Some(trace) = worker.matches.last_mut()
             && matches!(&trace.event, Event::Matched { id, ordinal, .. } if *id == intent.id() && *ordinal == validated.ordinal)
         {
+            trace.candidate.key_presses = outcome_evidence;
             trace.expires = Some(validated.deadline);
             if location.step.is_some() {
                 trace.after_input = Some(input_watermark);

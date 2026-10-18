@@ -236,9 +236,10 @@ into it. Returning from step advancement includes an already-active next candida
 and abandoning an unfinished step removes its observations from the projection.
 The existing private cancellation and held-contact continuation rules still apply.
 
-Pure-key native key/tap/hold/chord/key-only-sequence rules with typed key actions
-use exact participant arbitration. Custom, mixed and hybrid selective buffering,
-non-key/mixed event-local admission and native kernel acceptance remain required.
+Pure-key native key/tap/hold/chord/key-only-sequence rules and root key-only custom
+recognizers with typed key actions use exact participant arbitration. General
+custom, mixed and hybrid selective buffering, event-local custom/non-key admission
+and native kernel acceptance remain required.
 This does not create public grants or production takeover authority.
 
 `Router::stage_key_frame` retains bounded original pure-key reports and enrolls
@@ -284,6 +285,31 @@ pruning but not transport/configuration/session/availability loss. Prospective
 future key evidence controls pending enrollment without widening admitted prefixes.
 Waiting entries and held outcomes have hard caps of 4096 and 128 respectively;
 their conservative metadata reservations share the existing press-evidence budget.
+
+Root custom recognizers declared exclusively for key input retain a private
+immutable press snapshot when each original frame is offered. Issuing its ticket
+later does not widen that snapshot. Current context, rule and transport authority
+are still checked when the ticket is issued, the reply is admitted and the action
+executes. Callback data is not a consumption footprint or an input grant.
+
+Only validated replies extend a custom candidate's confirmed prefix. Timer
+tickets inherit that prefix rather than later observed or queued frames. Buffer
+progress consumes only accepted non-cancel outcome members; cancellation cannot
+acquire new keys. A conflicting later offer is skipped when an older claimable
+prefix survives, without retiring the older ticket. A native claim on unrelated
+later input cannot transfer ownership of that prefix. Existing exact owners
+remain protected, while new unowned input still competes by priority.
+
+Private pending-ticket and confirmed snapshots use charged shared press storage
+under the existing 64-ticket/candidate limits. Terminal/lifecycle cleanup retires
+them. `oslo make test-custom-key-arbitration` covers native competition, original
+offer versus delivery time, continuous cancellation, timer isolation and actual
+supervised Luna callbacks feeding the acknowledged device-free output actor.
+That gate is not rendered custom-input or kernel acceptance. The separate custom
+Cage phase uses a real supervised Luna callback, original ticket/reply clocks and
+owned protocol keyboards. Its strict receiver must see unrelated typing before
+the generated action, with no consumed control leakage. This proves the exercised
+root key-only custom path, not hybrid/mixed or physical/kernel consumption.
 
 Pending input fences later raw keys in the same keyboard domain. A common bounded
 epoch offset preserves cross-source cadence without rescheduling exposed output.
@@ -391,23 +417,24 @@ sole-worker ABI writes on owned private regular files (no devices).
 cancellation, timeout and bounds regressions. `oslo make test-key-worker-cage`
 drives the actual scheduler through owned protocol keyboards and a rendered app
 with both Hyprland configuration dialects. Its authority/readiness fixtures are
-explicitly modeled. Thirty-five phases include consumed immediate per-key
+explicitly modeled. Thirty-six phases include consumed immediate per-key
 projection, ordinary typing, cross-source modifiers, tap-tail lifecycle,
 multiple same-report sequences, delayed tap/key completions, rejection of reversed
 steps and fresh reentry, plus explicitly decided journal fallback cadence, using
-four owned protocol keyboards. Six native arbitration phases additionally prove
+six owned protocol keyboards. Six native arbitration phases additionally prove
 selective buffered tap/hold/sequence consumption, deferred action order and unmatched fallback. The strict
 receiver checks every delivered edge, the absence of consumed control keys and
 the original unmatched down/up interval within existing scheduler slack. Earlier
-sequence phases remain observational. This is owned protocol/native-key evidence,
-not mixed/custom arbitration, native takeover or physical/kernel selective
-consumption. Repeat interleaving has direct worker/file
+sequence phases remain observational. A separate actual Luna root key-only custom
+phase preserves a later unseen ordinary key before its generated action. These
+are owned protocol-key paths, not mixed/hybrid arbitration, native takeover or
+physical/kernel selective consumption. Repeat interleaving has direct worker/file
 evidence; these rendered phases do not simulate kernel repeat.
 
 For fixture development, `test-key-worker-cage-dev --runner=/nix/store/.../bin/prek-cage-host-test`
 requires an explicitly supplied, already built immutable compositor runner. It
-builds and selects the current Cargo test executable, prints its and the current
-helper's SHA-256, and runs both configuration dialects without rebuilding the release
+builds and selects the current Cargo test and helper executables, prints their
+SHA-256 hashes and explicitly supplies both binaries. It runs both configuration dialects without rebuilding the release
 application. This is development-binary evidence, not packaged-release evidence.
 
 ## Private native worker binding
