@@ -183,8 +183,31 @@ step merely because timestamps match. Existing same-press key/chord-to-hold
 continuations retain the exact shared input event. A completed tap's physical
 release precedes its settlement notification; a hold's recognition boundary is
 its timer boundary.
+Chord actions retain the exact completing key edge. Available observational
+key/chord/sequence actions cut pure-key raw reports after their verified original
+press, including when the final source differs from the admission owner. Raw
+prefix acknowledgment precedes the action, which precedes later same-report raw
+input. These ordinary cuts do not claim or consume compound gesture members.
 This ordering also applies to observation-only recognition without storing a
 routing footprint.
+
+Key-only sequences process original key edges in report order under the unchanged
+input watermark. Finishing one parent does not discard a later fresh parent in
+the same report. Reset restores canonical layer state, including released toggle
+keys. Immediate key steps require distinct downs; only the completing key/chord
+press may continue into its own hold.
+
+A completed future key step can wait for an earlier tap to settle. Retention is
+bound to the original parent, keeps physical positions unchanged and does not
+widen its admitted prefix. Completion reports the actual later recognition time
+without extending group deadlines. Cancelled, stale, reconciled or replaced
+sources and invalid authority cannot supply retained completions. Each sequence
+retains at most 1024 completions, with owned metadata conservatively charged to the
+shared 8 MiB press-evidence budget; pinned press nodes keep their existing charge.
+Exhaustion cancels the parent atomically. This retention does not queue arbitrary
+future touch/custom traces or bypass their existing held-contact handoff checks.
+General mixed-input event-local scheduling and selective delayed consumption
+remain separate unfinished requirements.
 
 Active press evidence records candidate observations, not exclusive consumption
 claims. Completed tap matches retain the shared snapshot at the last valid tap
@@ -338,9 +361,12 @@ sole-worker ABI writes on owned private regular files (no devices).
 cancellation, timeout and bounds regressions. `oslo make test-key-worker-cage`
 drives the actual scheduler through owned protocol keyboards and a rendered app
 with both Hyprland configuration dialects. Its authority/readiness fixtures are
-explicitly modeled. Nine phases include consumed per-key projection, ordinary
-typing within one report and a separate source behind a pending modifier, using
-three owned protocol keyboards. They do not grant native takeover or prove
+explicitly modeled. Twenty-nine phases include consumed immediate per-key
+projection, ordinary typing, cross-source modifiers, tap-tail lifecycle,
+multiple same-report sequences, delayed tap/key completions, rejection of reversed
+steps and fresh reentry, plus explicitly decided journal fallback cadence, using
+four owned protocol keyboards. Sequence actions are observational; these phases
+do not enable delayed recognizer arbitration, grant native takeover or prove
 physical/kernel selective consumption. Repeat interleaving has direct worker/file
 evidence; these rendered phases do not simulate kernel repeat.
 

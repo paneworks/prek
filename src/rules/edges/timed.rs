@@ -45,7 +45,11 @@ impl Edge<'_> {
             signals,
             self.generation,
             self.at,
-            InputPosition::after_frame(self.position.frame),
+            if matches!(worker.rule.trigger, Trigger::Chord { .. }) {
+                self.position
+            } else {
+                InputPosition::after_frame(self.position.frame)
+            },
             self.events,
         );
     }

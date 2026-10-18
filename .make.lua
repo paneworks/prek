@@ -482,7 +482,7 @@ make.recipe{ name="test-key-admission",desc="event-local timed conditions and ex
                end
              end }
 
-make.recipe{ name="test-key-participants",desc="completed gesture participants and provisional sequence replacement; no devices",
+make.recipe{ name="test-key-participants",desc="exact participants, original-edge sequences and bounded deferred completions; no devices",
              run=function()
                for _,filter in ipairs({"rules::presses::tests","keys::tests","routing::tests::custom::chains","rules::tests::composition"}) do
                  local tested=oslo.run{"cargo","test","--locked","--lib",filter,capture=true}

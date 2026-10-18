@@ -131,6 +131,23 @@ impl Routing {
         let watermark = self.engine.input_watermark();
         let mut winners = BTreeMap::new();
         let mut cuts = BTreeSet::new();
+        for outcome in outcomes.iter().filter(|outcome| {
+            outcome.intent.rule.delivery == Delivery::Observe
+                && matches!(
+                    outcome.intent.rule.action,
+                    Action::Keys { .. } | Action::Remap { .. }
+                )
+                && self.available(&outcome.intent, now)
+        }) {
+            if let Some(position) = outcome.intent.position()
+                && position.frame == watermark
+                && let Some(event) = frame.events.get(position.event)
+                && event.kind == EV_KEY
+                && outcome.intent.has_key_press(source, event.code, position)
+            {
+                cuts.insert(position.event);
+            }
+        }
         for outcome in &eligible {
             let position = outcome
                 .intent

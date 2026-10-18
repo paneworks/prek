@@ -536,10 +536,14 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
                     ("tap-fresh-after-held-tail", "bAAaAaAAAaaaaaa", [190]),
                     ("tap-invalid-activation-rejected", "bAAaAaAAAaaaaaa", []),
                     ("tap-fresh-activation-reentry", "bAAaAaAAAaaaaaaa", []),
-                    ("journal-pending-withheld", "bAAaAaAAAaaaaaaa", []),
-                    ("journal-decided-consumed", "bAAaAaAAAaaaaaaa", []),
-                    ("journal-fallback-cadence", "bAAaAaAAAaaaaaaaa", []),
-                    ("software-scoped-shutdown", "bAAaAaAAAaaaaaaaa", [])]
+                    ("two-sequences-one-report", "bAAaAaAAAaaaaaaaaa", []),
+                    ("deferred-same-report-key", "bAAaAaAAAaaaaaaaaaa", []),
+                    ("reversed-deferred-key-rejected", "bAAaAaAAAaaaaaaaaaa", []),
+                    ("deferred-key-fresh-reentry", "bAAaAaAAAaaaaaaaaaaa", []),
+                    ("journal-pending-withheld", "bAAaAaAAAaaaaaaaaaaa", []),
+                    ("journal-decided-consumed", "bAAaAaAAAaaaaaaaaaaa", []),
+                    ("journal-fallback-cadence", "bAAaAaAAAaaaaaaaaaaaa", []),
+                    ("software-scoped-shutdown", "bAAaAaAAAaaaaaaaaaaaa", [])]
     fixture_env = dict(env, PREK_LOCAL_CAGE="1", PREK_CAGE_OUTPUT=str(output), PREK_CAGE_KEYBOARD=args.keyboard,
                        PREK_CAGE_KEY_SOCKET=str(socket))
     before = {device["address"] for device in json.loads(command(["-j", "devices"]))["keyboards"]}
@@ -576,13 +580,14 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
     wanted = dict(status="passed", phases=15, source="two_owned_wayland_virtual_keyboards", production_route_tested=False,
                   kernel_input_tested=False, unmodified_stock_acceptance=False, test_backpressure=True)
     if args.key_worker:
-        wanted.update(phases=25, source="four_owned_wayland_virtual_keyboards", scoped_worker_tested=True, authority_modeled=True,
+        wanted.update(phases=29, source="four_owned_wayland_virtual_keyboards", scoped_worker_tested=True, authority_modeled=True,
                       transport_readiness_modeled=True, selective_consumption_tested=False,
                       selective_projection_tested=True, within_frame_order_tested=True, cross_source_order_tested=True,
                       software_actor_tested=True, software_lease_tested=True, software_private_control_tested=False,
                       software_authorization_tested=False, software_repeat_rendering_tested=False,
                       timed_condition_rendering_tested=True, chord_condition_rendering_tested=True,
                       tap_tail_lifecycle_rendering_tested=True, tap_invalid_activation_rendering_tested=True,
+                      event_local_sequence_rendering_tested=True, deferred_key_completion_rendering_tested=True,
                       pending_journal_protocol_tested=True, pending_fallback_cadence_tested=True,
                       delayed_gesture_arbitration_tested=False)
         journal = json.loads((output / "pending-journal-receipt.json").read_text())
@@ -606,7 +611,7 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
     name = "key-worker" if args.key_worker else "key-output"
     (output / f"{name}-result.json").write_text(json.dumps(result, indent=2) + "\n")
     if args.key_worker:
-        print("PASS: shared scheduler and pending journal preserved routing, conditions, tap-tail lifecycle and fallback cadence; twenty-five rendered protocol-sink phases. Authority/readiness modeled; no delayed gesture arbitration, private software control, authorization, repeat rendering or native takeover.")
+        print("PASS: shared scheduler preserved event-local and deferred key sequences, conditions, tap-tail lifecycle and journal fallback cadence; twenty-nine rendered protocol-sink phases. Authority/readiness modeled; no delayed gesture arbitration, private software control, authorization, repeat rendering or native takeover.")
     else:
         print("PASS: actual key-output driver preserved overlapping owners, software producer isolation, exact cancellation and context reentry; fifteen rendered app phases. Software authorization and repeat rendering are not tested.")
     return result

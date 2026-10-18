@@ -335,6 +335,25 @@ pub struct Permit {
     starts: Vec<Point>,
 }
 impl Permit {
+    pub(crate) fn retained_heap_bytes(&self) -> usize {
+        self.source.seat.capacity()
+            + self.starts.capacity() * std::mem::size_of::<Point>()
+            + self.output.as_ref().map_or(0, |output| {
+                output.geometry.name.capacity()
+                    + output
+                        .keyboard
+                        .as_ref()
+                        .map_or(0, |keyboard| keyboard.layout.capacity())
+            })
+            + self
+                .window
+                .as_ref()
+                .map_or(0, |window| window.id.capacity() + window.output.capacity())
+            + self
+                .region
+                .as_ref()
+                .map_or(0, |region| region.id.capacity() + region.output.capacity())
+    }
     pub fn generation(&self) -> u64 {
         self.generation
     }

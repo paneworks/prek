@@ -2,6 +2,7 @@ use super::*;
 
 mod admission;
 mod participants;
+mod sequences;
 
 fn press(frame: u64, event: usize, code: u16) -> Press {
     Press {

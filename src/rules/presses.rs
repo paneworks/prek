@@ -36,6 +36,22 @@ impl Budget {
             .map(|_| ())
             .map_err(|_| "key press provenance budget exhausted")
     }
+    fn reserve(self: &Arc<Self>, bytes: usize) -> Result<Reservation, &'static str> {
+        self.acquire(bytes)?;
+        Ok(Reservation {
+            budget: self.clone(),
+            bytes,
+        })
+    }
+}
+pub(super) struct Reservation {
+    budget: Arc<Budget>,
+    bytes: usize,
+}
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        self.budget.used.fetch_sub(self.bytes, Ordering::AcqRel);
+    }
 }
 
 #[derive(Clone)]
@@ -118,6 +134,9 @@ impl<'a> Iterator for Iter<'a> {
     }
 }
 impl Set {
+    pub(super) fn reserve(&self, bytes: usize) -> Result<Reservation, &'static str> {
+        self.budget.reserve(bytes)
+    }
     pub(super) fn empty(budget: Arc<Budget>) -> Self {
         Self {
             budget,

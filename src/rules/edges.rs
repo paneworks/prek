@@ -200,6 +200,7 @@ impl Engine {
                     candidate.expires = None;
                 }
             }
+            self.key_sequences_edge(frame, (event, code, key_state))?;
         }
         Ok(())
     }

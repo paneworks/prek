@@ -157,6 +157,33 @@ impl RoutedKeyboard {
             conditional.keys_throughout = throughout;
             config.rules.push(conditional);
         }
+        for (id, first, last) in [
+            ("ordered-sequence", 191, 192),
+            ("settled-sequence", 193, 194),
+        ] {
+            let mut sequence = rule(
+                id,
+                first,
+                Action::Keys {
+                    keys: vec![Key(30)],
+                },
+            );
+            sequence.trigger = Trigger::Sequence {
+                steps: vec![
+                    if first == 193 {
+                        Trigger::ButtonTaps {
+                            key: Key(first),
+                            count: 1,
+                        }
+                    } else {
+                        Trigger::Key { key: Key(first) }
+                    },
+                    Trigger::Key { key: Key(last) },
+                ],
+                timeout: Millis(200),
+            };
+            config.rules.push(sequence);
+        }
         let fence = Fence {
             broker: Epoch([1, 2]),
             configuration: 1,
@@ -212,7 +239,10 @@ impl RoutedKeyboard {
             vendor: 1,
             product: 1,
             properties: vec![],
-            capabilities: BTreeMap::from([(EV_KEY, vec![30, 183, 184, 185, 187, 188, 189, 190])]),
+            capabilities: BTreeMap::from([(
+                EV_KEY,
+                vec![30, 183, 184, 185, 187, 188, 189, 190, 191, 192, 193, 194],
+            )]),
             axes: BTreeMap::new(),
             virtual_device: false,
         };
@@ -709,6 +739,34 @@ fn local_cage_scoped_key_worker() {
     keyboard.advance(Duration::from_millis(60));
     keyboard.drain();
     keyboard.capture(&output, 20, "bAAaAaAAAaaaaaaa", &[]);
+    keyboard.feed_from(
+        2,
+        &[
+            (191, 1),
+            (191, 0),
+            (192, 1),
+            (192, 0),
+            (191, 1),
+            (191, 0),
+            (192, 1),
+            (192, 0),
+        ],
+    );
+    keyboard.drain();
+    keyboard.capture(&output, 21, "bAAaAaAAAaaaaaaaaa", &[]);
+    keyboard.feed_from(2, &[(193, 1), (193, 0), (194, 1), (194, 0)]);
+    keyboard.advance(Duration::from_millis(60));
+    keyboard.drain();
+    keyboard.capture(&output, 22, "bAAaAaAAAaaaaaaaaaa", &[]);
+    keyboard.feed_from(2, &[(194, 1), (194, 0), (193, 1), (193, 0)]);
+    keyboard.advance(Duration::from_millis(220));
+    keyboard.drain();
+    keyboard.capture(&output, 23, "bAAaAaAAAaaaaaaaaaa", &[]);
+    keyboard.feed_from(2, &[(193, 1), (193, 0)]);
+    keyboard.feed_from(2, &[(194, 1), (194, 0)]);
+    keyboard.advance(Duration::from_millis(60));
+    keyboard.drain();
+    keyboard.capture(&output, 24, "bAAaAaAAAaaaaaaaaaaa", &[]);
     keyboard.generated.retire(monotonic().unwrap()).unwrap();
     for _ in 0..8 {
         if keyboard.generated.drain(monotonic().unwrap()).unwrap() == Progress::Complete {
@@ -723,9 +781,9 @@ fn local_cage_scoped_key_worker() {
     assert!(generated.into_sink().is_ok());
     drop(keyboard.raw);
     drop(keyboard.other_raw);
-    pending::exercise(&output, socket, 21, "bAAaAaAAAaaaaaaa");
-    phase(&output, 24, "bAAaAaAAAaaaaaaaa", &[]);
-    fs::write(output.join("key-output-runtime-result.json"),serde_json::to_vec(&json!({"status":"passed","phases":25,
+    pending::exercise(&output, socket, 25, "bAAaAaAAAaaaaaaaaaaa");
+    phase(&output, 28, "bAAaAaAAAaaaaaaaaaaaa", &[]);
+    fs::write(output.join("key-output-runtime-result.json"),serde_json::to_vec(&json!({"status":"passed","phases":29,
         "source":"four_owned_wayland_virtual_keyboards","production_route_tested":false,"kernel_input_tested":false,
         "unmodified_stock_acceptance":false,"test_backpressure":true,"scoped_worker_tested":true,
         "authority_modeled":true,"transport_readiness_modeled":true,"selective_consumption_tested":false,
@@ -734,6 +792,7 @@ fn local_cage_scoped_key_worker() {
         "software_authorization_tested":false,"software_repeat_rendering_tested":false,
         "timed_condition_rendering_tested":true,"chord_condition_rendering_tested":true,
         "tap_tail_lifecycle_rendering_tested":true,"tap_invalid_activation_rendering_tested":true,
+        "event_local_sequence_rendering_tested":true,"deferred_key_completion_rendering_tested":true,
         "pending_journal_protocol_tested":true,"pending_fallback_cadence_tested":true,
         "delayed_gesture_arbitration_tested":false})).unwrap()).unwrap();
 }

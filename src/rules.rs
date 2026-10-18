@@ -247,13 +247,13 @@ pub(crate) struct RouteOutcome {
     pub intent: RouteIntent,
     pub expires: Option<Duration>,
 }
-#[derive(Clone)]
 struct StepMatch {
     event: Event,
     candidate: Candidate,
     finished: Duration,
     expires: Option<Duration>,
     after_input: Option<u64>,
+    retention: Option<sequence::Retention>,
 }
 enum Recognizer {
     Custom {
@@ -994,6 +994,7 @@ impl Engine {
             _ => {}
         }
         let mut sequence_input = None;
+        let mut key_sequences_processed = false;
         let project_sequence_input = self.sequences.iter().any(|sequence| sequence.has_custom);
         for observation in observations {
             match observation {
@@ -1002,6 +1003,7 @@ impl Engine {
                         sequence_input = Some(frame.clone());
                     }
                     self.frame(frame)?;
+                    key_sequences_processed = true;
                 }
                 Observation::Cancelled { source, at, reason } => {
                     self.cancel_source(&source, at, &format!("{reason:?}"))
@@ -1023,6 +1025,12 @@ impl Engine {
             normalized: sequence_input.as_ref(),
         };
         for sequence in &mut self.sequences {
+            if key_sequences_processed
+                && sequence.key_timeline
+                && matches!(record, Record::Frame { .. })
+            {
+                continue;
+            }
             sequence.push(
                 &record,
                 &context,
@@ -1338,6 +1346,7 @@ impl Engine {
         state.input_watermark = self.input_watermark;
         state.last_input = Some((frame.raw.sequence, at));
         state.contacts = frame.contacts.clone();
+        self.key_sequences_begin(&frame)?;
         let positioned_keys = edges::positioned_keys(&frame)?;
         self.key_edges(&frame, &positioned_keys, allowed)?;
         let state = &self.devices[&source.device];
@@ -1690,6 +1699,7 @@ struct SequenceGroup {
     timeout: Duration,
 }
 struct PendingSequence {
+    deferred: Vec<(usize, StepMatch)>,
     key_presses: presses::Set,
     completed: sequence::Prefix,
     step_candidates: BTreeMap<Source, u64>,
@@ -1736,6 +1746,7 @@ impl PendingSequence {
     }
 }
 struct Sequence {
+    key_timeline: bool,
     condition_loss: Option<(String, InputPosition)>,
     rule: Rule,
     steps: Vec<Engine>,
@@ -1818,6 +1829,7 @@ impl Sequence {
             steps.push(engine);
         }
         Ok(Self {
+            key_timeline: triggers.iter().all(edges::is_key_trigger),
             condition_loss: None,
             rule,
             steps,
@@ -1906,6 +1918,7 @@ impl Sequence {
                 }
             }
             engine.events.clear();
+            engine.conditions = context.keys.clone();
         }
         Ok(())
     }
@@ -1927,6 +1940,7 @@ impl Sequence {
         self.pending.insert(
             seat,
             PendingSequence {
+                deferred: Vec::new(),
                 key_presses: candidate.key_presses.clone(),
                 completed: sequence::Prefix::new(&candidate),
                 step_candidates: BTreeMap::new(),
@@ -2031,7 +2045,11 @@ impl Sequence {
                 }
             }
         }
-        let mut traces = Vec::new();
+        let mut traces: Vec<_> = self
+            .pending
+            .values_mut()
+            .flat_map(|pending| std::mem::take(&mut pending.deferred))
+            .collect();
         let mut cancelled = Vec::new();
         let mut skipped = Vec::new();
         for (index, engine) in self.steps.iter_mut().enumerate() {
@@ -2053,6 +2071,7 @@ impl Sequence {
                 }
             }
         }
+        traces.retain(|(_, trace)| trace.retention.is_none() || trace.retainable(context, record));
         let mut reset = BTreeSet::new();
         let recognized: BTreeSet<_> = traces
             .iter()
@@ -2165,18 +2184,49 @@ impl Sequence {
         // notifications. Future recognizers can never lend an old press/path.
         traces.sort_by(|(ai, a), (bi, b)| ai.cmp(bi).then_with(|| a.finished.cmp(&b.finished)));
         let mut activated = BTreeMap::new();
-        for (index, trace) in traces {
+        for (index, mut trace) in traces {
             let seat = trace.candidate.source.seat.clone();
             if reset.contains(&seat) {
                 continue;
             }
+            let deferred_count: usize = self
+                .pending
+                .values()
+                .map(|pending| pending.deferred.len())
+                .sum();
             let Some(pending) = self.pending.get_mut(&seat) else {
                 continue;
             };
-            if pending.step != index {
+            if trace
+                .retention
+                .as_ref()
+                .is_some_and(|retention| retention.parent != pending.id)
+            {
                 continue;
             }
-            if !pending.admits_input(&trace.candidate) {
+            if pending.step != index {
+                if index > pending.step && trace.can_wait_for(&pending.first, &self.triggers[index])
+                {
+                    if !trace.retainable(context, record) {
+                        continue;
+                    }
+                    if deferred_count >= sequence::MAX_DEFERRED
+                        || trace.retain_for(pending.id).is_err()
+                    {
+                        self.cancel(
+                            &seat,
+                            context.at,
+                            "sequence deferred completion budget exhausted",
+                            events,
+                        );
+                        reset.insert(seat);
+                    } else {
+                        pending.deferred.push((index, trace));
+                    }
+                }
+                continue;
+            }
+            if !pending.accepts(&trace.candidate, &self.triggers) {
                 continue;
             }
             let Event::Matched {
@@ -2187,6 +2237,11 @@ impl Sequence {
             } = &trace.event
             else {
                 continue;
+            };
+            let recognized_at = if trace.retention.is_some() {
+                (*at).max(context.admitted_at)
+            } else {
+                *at
             };
             if matches!(stage, Stage::Update | Stage::End)
                 && !pending.progress
@@ -2202,18 +2257,6 @@ impl Sequence {
                 continue;
             }
             if matches!(evidence, Evidence::Hold { repeat: true }) {
-                continue;
-            }
-            let continuation = index > 0
-                && pending.previous.as_ref().is_some_and(|previous| {
-                    same_contact_continuation(
-                        &self.triggers[index - 1],
-                        &self.triggers[index],
-                        previous,
-                        &trace.candidate,
-                    )
-                });
-            if index > 0 && trace.candidate.started < pending.finished && !continuation {
                 continue;
             }
             if let (Some(first), Some(later)) = (&pending.first.permit, &trace.candidate.permit)
@@ -2237,7 +2280,7 @@ impl Sequence {
             if pending
                 .groups
                 .iter()
-                .any(|(index, started)| *at >= *started + self.groups[*index].timeout)
+                .any(|(index, started)| recognized_at >= *started + self.groups[*index].timeout)
             {
                 self.cancel(&seat, context.at, "sequence timeout", events);
                 reset.insert(seat);
@@ -2271,7 +2314,7 @@ impl Sequence {
                     id: pending.id,
                     ordinal: pending.ordinal,
                     source,
-                    at: *at,
+                    at: recognized_at,
                     config_generation: context.generation,
                     session_generation: pending.first.session_generation,
                     stage: if matches!(self.triggers[index], Trigger::Key { .. }) {
@@ -3496,6 +3539,7 @@ fn report_signals(
                     completed.key_end = candidate.key_tap_end;
                 }
                 worker.matches.push(StepMatch {
+                    retention: None,
                     expires: None,
                     after_input: None,
                     event: events.last().unwrap().clone(),

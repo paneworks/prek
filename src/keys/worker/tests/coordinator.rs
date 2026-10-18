@@ -220,3 +220,96 @@ fn a_previously_held_observer_keeps_repeat_before_same_report_release() {
     poll(&mut seat, &routing, 20);
     assert_eq!(key_events(&writes), [(42, 1), (42, 2), (42, 0)]);
 }
+
+fn observed_sequence() -> Rule {
+    let mut rule = rule(
+        "sequence",
+        Action::Keys {
+            keys: vec![Key(42)],
+        },
+    );
+    rule.trigger = Trigger::Sequence {
+        steps: vec![Trigger::Key { key: Key(30) }, Trigger::Key { key: Key(31) }],
+        timeout: crate::config::Millis(100),
+    };
+    rule
+}
+
+#[test]
+fn observed_sequences_cut_raw_reports_at_each_original_completing_key() {
+    let mut routing = projected(vec![observed_sequence()]);
+    let (mut seat, writes) = model();
+    let input = packet(
+        1,
+        1,
+        10,
+        &[
+            (30, 1),
+            (30, 0),
+            (31, 1),
+            (31, 0),
+            (30, 1),
+            (30, 0),
+            (31, 1),
+            (31, 0),
+        ],
+    );
+    let work = submit(&mut routing, input.clone());
+    assert_eq!(work.len(), 2);
+    seat.admit(&routing, work, Some(&input), ms(10)).unwrap();
+    poll(&mut seat, &routing, 10);
+    assert!(key_events(&writes).is_empty());
+    assert_eq!(raw(&mut routing, &seat, 1, 10), [(30, 1), (30, 0), (31, 1)]);
+    poll(&mut seat, &routing, 10);
+    assert_eq!(key_events(&writes), [(42, 1), (42, 0)]);
+    assert_eq!(
+        raw(&mut routing, &seat, 1, 10),
+        [(31, 0), (30, 1), (30, 0), (31, 1)]
+    );
+    poll(&mut seat, &routing, 10);
+    assert_eq!(key_events(&writes), [(42, 1), (42, 0), (42, 1), (42, 0)]);
+    assert_eq!(raw(&mut routing, &seat, 1, 10), [(31, 0)]);
+    routing.push(Record::Tick { at: ms(40) }).unwrap();
+}
+
+#[test]
+fn a_cross_source_sequence_cuts_the_finishing_source_not_only_its_admission_owner() {
+    let mut routing = projected(vec![observed_sequence()]);
+    let (mut seat, writes) = model();
+    assert!(submit(&mut routing, packet(1, 1, 10, &[(30, 1), (30, 0)])).is_empty());
+    assert_eq!(raw(&mut routing, &seat, 1, 10), [(30, 1), (30, 0)]);
+    let input = packet(2, 1, 20, &[(31, 1), (31, 0), (30, 1), (30, 0)]);
+    let work = submit(&mut routing, input.clone());
+    assert_eq!(work.len(), 1);
+    assert_eq!(work[0].source(), &source(1));
+    seat.admit(&routing, work, Some(&input), ms(20)).unwrap();
+    assert_eq!(raw(&mut routing, &seat, 2, 20), [(31, 1)]);
+    poll(&mut seat, &routing, 20);
+    assert_eq!(key_events(&writes), [(42, 1), (42, 0)]);
+    assert_eq!(raw(&mut routing, &seat, 2, 20), [(31, 0), (30, 1), (30, 0)]);
+}
+
+#[test]
+fn an_observed_chord_cuts_after_its_actual_completing_press_before_releases() {
+    let mut rule = rule(
+        "chord",
+        Action::Keys {
+            keys: vec![Key(42)],
+        },
+    );
+    rule.trigger = Trigger::Chord {
+        keys: vec![Key(30), Key(31)],
+        ordered: false,
+        timeout: crate::config::Millis(100),
+    };
+    let mut routing = projected(vec![rule]);
+    let (mut seat, writes) = model();
+    let input = packet(1, 1, 10, &[(30, 1), (31, 1), (30, 0), (31, 0)]);
+    let work = submit(&mut routing, input.clone());
+    assert_eq!(work.len(), 1);
+    seat.admit(&routing, work, Some(&input), ms(10)).unwrap();
+    assert_eq!(raw(&mut routing, &seat, 1, 10), [(30, 1), (31, 1)]);
+    poll(&mut seat, &routing, 10);
+    assert_eq!(key_events(&writes), [(42, 1), (42, 0)]);
+    assert_eq!(raw(&mut routing, &seat, 1, 10), [(30, 0), (31, 0)]);
+}
