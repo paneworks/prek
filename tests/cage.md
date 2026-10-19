@@ -22,7 +22,7 @@ oslo make test-cage-startup
 | `test-cage-lua-stock` | Same stock dependencies | Actual Lua compositor config, mode edits and the same effects |
 | `test-cage-wayland-fix` | Explicit test-only Aquamarine startup patch | Separate legacy-config mode/layer sessions and the same effects |
 | `test-cage-lua-wayland-fix` | Same explicit test-only patch | Separate Lua-config mode/layer sessions and the same effects |
-| `test-cage-touch` | Test-only Cage 0.2.1 touch source | Direct touch plus Lua pan consumption, unmatched-tap cadence, acknowledged rule disable and restored rendered contacts |
+| `test-cage-touch` | Test-only Cage 0.2.1 touch source | Direct touch plus Lua pan consumption, unmatched-tap cadence, acknowledged rule disable and restored rendered contacts, once with the coarse and once with the scoped (`with_input_projection`) routing constructor |
 | `test-cage-startup` | No compositor started | Readiness, config, rendered-state and library-provenance models |
 
 The original `test-cage` keeps its older pinned Hyprland 0.54.3 dependencies.

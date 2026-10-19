@@ -127,6 +127,9 @@ fn up(fingers: u16) -> Vec<RawEvent> {
 fn raw(kind: u16, code: u16, value: i32) -> RawEvent {
     RawEvent { kind, code, value }
 }
+fn scoped() -> bool {
+    std::env::var("PREK_CAGE_TOUCH_ROUTING").as_deref() == Ok("scoped")
+}
 fn frame(device: &Device, sequence: u64, at: Duration, events: &[RawEvent]) -> Frame {
     let mut events = events.to_vec();
     events.push(raw(EV_SYN, 0, 0));
@@ -206,7 +209,11 @@ impl Fixture {
             origin: Point { x: 0.0, y: 0.0 },
             transform: Transform::Normal,
         };
-        let mut routing = Routing::new(config).unwrap();
+        let mut routing = if scoped() {
+            Routing::with_input_projection(config, fence).unwrap()
+        } else {
+            Routing::new(config).unwrap()
+        };
         routing
             .authority_mut()
             .bind(binding.clone(), true, false)
@@ -774,7 +781,7 @@ fn local_cage_lua_touch_routing() {
     );
     assert!(log.contains("touch-rule-disabled"));
     fs::write(output.join("touch-routing-receipts.json"),serde_json::to_vec_pretty(&serde_json::json!({
-            "version":1,"status":"passed","model_source_and_readiness":true,"kernel_input_opened":false,"physical_takeover_tested":false,"production_broker_tested":false,
+            "version":1,"status":"passed","routing":if scoped() {"scoped"} else {"coarse"},"model_source_and_readiness":true,"kernel_input_opened":false,"physical_takeover_tested":false,"production_broker_tested":false,
         "consumed_pan_frames":4,"consumed_pan_forwarded":0,"unmatched_tap_frames":2,"tap_interval":input_interval,
         "restored_pan_frames":4,"runtime_rule_revision":revision,"source_generations":[1,2],"dispatches":fixture.dispatches,
         "inputs":fixture.inputs,"forwarded":fixture.forwarded,

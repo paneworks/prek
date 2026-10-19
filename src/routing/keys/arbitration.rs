@@ -586,13 +586,19 @@ impl Routing {
                     && (native_claim
                         || matches!(intent.rule.trigger, Trigger::TouchTaps { fingers, .. }
                             if fingers >= 2 && intent.contacts() == usize::from(fingers)));
+            let group = intent
+                .sources()
+                .iter()
+                .chain(std::iter::once(intent.source()))
+                .filter_map(|source| self.routes.get(source).map(|route| route.first))
+                .fold(intent.started(), Duration::max);
             let joining = self.split_inputs
                 && intent.rule.trigger.contains_touch()
                 && !finished
-                && at < intent.started().saturating_add(join);
+                && at < group.saturating_add(join);
             if !reserve && (!claimed || joining) {
                 if claimed {
-                    let wake = intent.started().saturating_add(join);
+                    let wake = group.saturating_add(join);
                     self.key_journal
                         .joins
                         .entry(intent.source().clone())
@@ -609,6 +615,7 @@ impl Routing {
                 {
                     completed.intent.input_evidence()
                 }
+                _ if reserve => self.admitted_evidence(&intent).map_err(io::Error::other)?,
                 _ => observed,
             };
             if let Some(owned) = self

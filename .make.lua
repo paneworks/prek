@@ -728,10 +728,13 @@ printf '%s\n%s\n' "$app" "$fixture"]],capture=true}
                assert(built.ok,"touch application/controller failed to build")
                local app,fixture=(built.out or ""):match("^%s*([^\r\n]+)\r?\n([^\r\n]+)%s*$")
                assert(app and fixture,"missing current Cargo application/test executable")
-               assert(oslo.run{a.dbus,"--config-file="..project_root().."/tests/support/dbus-session.conf","--",
-                 "bash","-c",'export PREK_TEST_SESSION_BUS="$DBUS_SESSION_BUS_ADDRESS"; exec "$@"',"--",
-                 "python3","tests/cage-touch.py","--hardware-rendering","--cage",a.cage,"--receiver",a.receiver,
-                 "--screencopy",a.grim,"--fixture",fixture,"--app",app}.ok,"local debug touch fixture failed")
+               for _, routing in ipairs{"coarse","scoped"} do
+                 assert(oslo.run{a.dbus,"--config-file="..project_root().."/tests/support/dbus-session.conf","--",
+                   "bash","-c",'export PREK_TEST_SESSION_BUS="$DBUS_SESSION_BUS_ADDRESS"; exec "$@"',"--",
+                   "env","PREK_CAGE_TOUCH_ROUTING="..routing,
+                   "python3","tests/cage-touch.py","--hardware-rendering","--cage",a.cage,"--receiver",a.receiver,
+                   "--screencopy",a.grim,"--fixture",fixture,"--app",app}.ok,"local debug touch fixture failed: "..routing)
+               end
              end }
 
 make.recipe{ name = "test-cage-lua-wayland-fix", desc = "typed window/power effects in an owned Lua-config compositor",

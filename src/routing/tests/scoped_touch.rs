@@ -541,3 +541,115 @@ fn scoped_touch_continuous_pan_keeps_ownership_past_the_decision_window() {
         );
     }
 }
+
+fn touch_sequence(steps: Vec<Trigger>, scoped: bool) -> Routing {
+    let mut config = config();
+    config.timing.tap_gap = Millis(20);
+    config.rules[0].scope = crate::config::Scope::Everywhere;
+    config.rules[0].trigger = Trigger::Sequence {
+        steps,
+        timeout: Millis(1000),
+    };
+    let mut device = device();
+    let keys = device.capabilities.entry(EV_KEY).or_default();
+    keys.push(48);
+    keys.sort_unstable();
+    keys.dedup();
+    attach_device(config, scoped, device)
+}
+
+#[test]
+fn scoped_touch_sequence_waits_for_the_join_window_of_its_latest_group() {
+    for scoped in [false, true] {
+        let mut routing = touch_sequence(
+            vec![
+                Trigger::TouchTaps {
+                    fingers: 2,
+                    count: 1,
+                },
+                Trigger::ButtonHold {
+                    key: crate::config::Key(48),
+                    after: Millis(100),
+                    repeat: None,
+                },
+            ],
+            scoped,
+        );
+        contact(&mut routing, 1, 0, 2);
+        up(&mut routing, 2, 10, 2);
+        routing.push(Record::Tick { at: ms(30) }).unwrap();
+        frame(&mut routing, 3, 40, &[(EV_KEY, 48, 1)]);
+        routing.push(Record::Tick { at: ms(140) }).unwrap();
+        assert!(
+            routing.take_dispatches(ms(140)).is_empty(),
+            "scoped={scoped}"
+        );
+        if scoped {
+            assert_eq!(routing.deadline(), Some(ms(160)));
+        }
+        routing.push(Record::Tick { at: ms(160) }).unwrap();
+        assert_eq!(routing.take_dispatches(ms(160)).len(), 1, "scoped={scoped}");
+    }
+}
+
+#[test]
+fn scoped_touch_continuous_sequence_dispatches_every_stage_without_leaking_contacts() {
+    for scoped in [false, true] {
+        let mut routing = touch_sequence(
+            vec![
+                Trigger::TouchTaps {
+                    fingers: 2,
+                    count: 1,
+                },
+                Trigger::Swipe {
+                    fingers: 2,
+                    direction: crate::config::Direction::Down,
+                    travel: crate::config::Distance::Millimetres(12.0),
+                    fallback_travel: crate::config::Distance::Normalized(0.04),
+                    continuous: true,
+                },
+            ],
+            scoped,
+        );
+        contact(&mut routing, 1, 0, 2);
+        up(&mut routing, 2, 10, 2);
+        routing.push(Record::Tick { at: ms(30) }).unwrap();
+        frame(
+            &mut routing,
+            3,
+            40,
+            &[
+                (EV_KEY, 0x14a, 1),
+                (EV_ABS, ABS_MT_SLOT, 0),
+                (EV_ABS, ABS_MT_TRACKING_ID, 30),
+                (EV_ABS, ABS_MT_POSITION_X, 1000),
+                (EV_ABS, ABS_MT_POSITION_Y, 1000),
+                (EV_ABS, ABS_MT_SLOT, 1),
+                (EV_ABS, ABS_MT_TRACKING_ID, 31),
+                (EV_ABS, ABS_MT_POSITION_X, 1500),
+                (EV_ABS, ABS_MT_POSITION_Y, 1000),
+            ],
+        );
+        movement(&mut routing, 4, 180, 3000, 2);
+        movement(&mut routing, 5, 190, 3500, 2);
+        up(&mut routing, 6, 200, 2);
+        let events = routing.take_dispatches(ms(210));
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| match event {
+                    Event::Matched { stage, .. } => Some(*stage),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            [
+                crate::rules::Stage::Begin,
+                crate::rules::Stage::Update,
+                crate::rules::Stage::End
+            ]
+            .map(Some),
+            "scoped={scoped}"
+        );
+        assert!(drain(&mut routing, 210).is_empty(), "scoped={scoped}");
+    }
+}

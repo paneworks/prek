@@ -13,12 +13,15 @@ let
   });
 in
 (pkgs.writeShellScriptBin "prek-cage-touch-test" ''
-  exec ${pkgs.dbus}/bin/dbus-run-session --config-file=${./support/dbus-session.conf} -- \
-    ${pkgs.bash}/bin/bash -c 'export PREK_TEST_SESSION_BUS="$DBUS_SESSION_BUS_ADDRESS"; exec "$@"' -- \
-    ${pkgs.python3}/bin/python3 ${./cage-touch.py} \
-    --cage ${cage}/bin/cage --receiver ${receiver}/bin/prek-wayland-receiver \
-    --fixture ${runtime}/bin/prek-local-cage-tests --app ${package}/bin/prek \
-    --screencopy ${pkgs.grim}/bin/grim "$@"
+  set -e
+  for routing in coarse scoped; do
+    PREK_CAGE_TOUCH_ROUTING=$routing ${pkgs.dbus}/bin/dbus-run-session --config-file=${./support/dbus-session.conf} -- \
+      ${pkgs.bash}/bin/bash -c 'export PREK_TEST_SESSION_BUS="$DBUS_SESSION_BUS_ADDRESS"; exec "$@"' -- \
+      ${pkgs.python3}/bin/python3 ${./cage-touch.py} \
+      --cage ${cage}/bin/cage --receiver ${receiver}/bin/prek-wayland-receiver \
+      --fixture ${runtime}/bin/prek-local-cage-tests --app ${package}/bin/prek \
+      --screencopy ${pkgs.grim}/bin/grim "$@"
+  done
 '').overrideAttrs (old: {
   passthru = (old.passthru or { }) // {
     inherit cage receiver;

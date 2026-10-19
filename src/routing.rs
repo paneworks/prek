@@ -552,6 +552,9 @@ impl Routing {
                 .get(&source)
                 .is_some_and(|route| route.project_keys)
             {
+                if fresh_group && let Some(route) = self.routes.get_mut(&source) {
+                    route.first = at;
+                }
                 self.project_key_frame(&source, frame, &previous, &outcomes, now)?;
             } else {
                 if self.ordered_keys

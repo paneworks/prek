@@ -131,6 +131,8 @@ def main():
                 ("touch_up",0),("touch_up",1),("touch_frame",None)]
             trace = json.loads((output / "touch-routing-receipts.json").read_text())
             assert trace["status"] == "passed" and trace["consumed_pan_forwarded"] == 0
+            routing = os.environ.get("PREK_CAGE_TOUCH_ROUTING", "coarse")
+            assert trace["routing"] == routing
             interval = trace["tap_interval"]["secs"] * 1000 + trace["tap_interval"]["nanos"] / 1_000_000
             assert abs((routed[2]["time_ms"] - routed[0]["time_ms"]) - interval) < 1.1
             assert routed[2]["at_ns"] - routed[0]["at_ns"] >= max(0, interval - 8) * 1_000_000
@@ -144,9 +146,9 @@ def main():
             for name in ("restored-down", "restored-motion", "neutral"):
                 assert (output / f"touch-{name}.png").stat().st_size > 0
             (output / "touch-routing-app-receipts.json").write_text(json.dumps({
-                "status":"passed", "events":routed, "rendered_through":routed[-1]["sequence"],
+                "status":"passed", "routing":routing, "events":routed, "rendered_through":routed[-1]["sequence"],
                 "tap_interval_ms":interval, "source_and_readiness":"model", "kernel_input_opened":False}))
-            print("PASS: Lua pan consumption, cadence-preserving unmatched tap, acknowledged rule disable and restored two-contact rendering crossed the real routing/helper/Cage path.")
+            print(f"PASS ({routing} routing): Lua pan consumption, cadence-preserving unmatched tap, acknowledged rule disable and restored two-contact rendering crossed the real routing/helper/Cage path.")
             # Malformed operations terminate this owned fixture without adding
             # contacts or acknowledging unrecognized input.
             parent.sendall(struct.pack("=IIIidd",1,99,0xffffffff,0,0.0,0.0))

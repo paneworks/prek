@@ -59,6 +59,14 @@ fn setup_profile(
     targeted: bool,
     delivery: Delivery,
 ) -> (Routing, Device, Device) {
+    setup_mode(steps, targeted, delivery, false)
+}
+fn setup_mode(
+    steps: Vec<Trigger>,
+    targeted: bool,
+    delivery: Delivery,
+    scoped: bool,
+) -> (Routing, Device, Device) {
     let mut config = config();
     config.timing.tap_gap = Millis(20);
     let selector = config.devices.get_mut("touch").unwrap();
@@ -83,7 +91,11 @@ fn setup_profile(
             action: crate::config::WindowAction::Close,
         };
     }
-    let mut routing = Routing::new(config).unwrap();
+    let mut routing = if scoped {
+        Routing::with_input_projection(config, crate::keys::worker::tests::fence()).unwrap()
+    } else {
+        Routing::new(config).unwrap()
+    };
     if targeted {
         context(&mut routing, 0);
         routing
@@ -243,4 +255,52 @@ fn losing_an_admitted_later_source_cancels_the_parent_before_completion() {
             .iter()
             .any(|event| matches!(event, Event::Cancelled { .. }))
     );
+}
+
+fn pump(routing: &mut Routing, devices: [&Device; 2], from: u64, to: u64) -> Vec<Frame> {
+    let mut result = Vec::new();
+    for at in from..=to {
+        for device in devices {
+            result.extend(
+                received(routing, device, at)
+                    .into_iter()
+                    .filter(|frame| frame.source == devices[1].source),
+            );
+        }
+    }
+    result
+}
+
+#[test]
+fn a_future_step_press_is_delivered_but_never_reused_in_either_routing_mode() {
+    for scoped in [false, true] {
+        let (mut routing, first, second) =
+            setup_mode(vec![hold(30), hold(48)], false, Delivery::Reserve, scoped);
+        let devices = [&first, &second];
+        key(&mut routing, &first, 1, 0, 30, 1);
+        key(&mut routing, &second, 1, 10, 48, 1);
+        let mut ordinary = pump(&mut routing, devices, 10, 110);
+        routing.push(Record::Tick { at: ms(110) }).unwrap();
+        assert!(
+            routing.take_dispatches(ms(110)).is_empty(),
+            "scoped={scoped}"
+        );
+        key(&mut routing, &second, 2, 111, 48, 0);
+        ordinary.extend(pump(&mut routing, devices, 111, 120));
+        key(&mut routing, &second, 3, 120, 48, 1);
+        ordinary.extend(pump(&mut routing, devices, 120, 220));
+        routing.push(Record::Tick { at: ms(220) }).unwrap();
+        assert_eq!(routing.take_dispatches(ms(220)).len(), 1, "scoped={scoped}");
+        key(&mut routing, &second, 4, 230, 48, 0);
+        key(&mut routing, &first, 2, 231, 30, 0);
+        ordinary.extend(pump(&mut routing, devices, 231, 700));
+        assert_eq!(
+            ordinary
+                .iter()
+                .map(|frame| frame.sequence)
+                .collect::<Vec<_>>(),
+            [1, 2],
+            "scoped={scoped}"
+        );
+    }
 }

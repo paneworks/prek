@@ -300,6 +300,8 @@ route authorization, including the original admission owner even when a chord
 selects fresher members from other sources. Receipts survive normal journal
 pruning but not transport/configuration/session/availability loss. Prospective
 future key evidence controls pending enrollment without widening admitted prefixes.
+Reserve claims take only evidence the sequence engine has admitted, so a press
+made before its step activates is held within its window but never consumed.
 Waiting entries and held outcomes have hard caps of 4096 and 128 respectively;
 their conservative metadata reservations share the existing press-evidence budget.
 
@@ -830,8 +832,9 @@ ordinary XY5/3 as a positive control.
 Scoped touch keeps the existing lifecycle. A native pan claim or a complete
 multi-finger tap contact count claims coherent motion before completion and
 outranks an unclaimed swipe/tap rival on the same source. Touch-containing
-claims, including custom Begin replies, wait for `started + join_window` unless
-the source is neutral, and that cutpoint is advertised by `deadline()`. An
+claims, including custom Begin replies and sequence completions, wait for
+`join_window` after the latest physical group start of their sources unless the
+source is neutral, and that cutpoint is advertised by `deadline()`. An
 owner keeps binding later reports of a live contact cohort after its decision
 window, so long continuous pans keep their ownership; a past-window candidate
 never admits a new pending scope. `oslo make test-scoped-touch` compares these

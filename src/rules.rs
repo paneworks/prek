@@ -886,8 +886,16 @@ impl Engine {
         &self,
         intent: &RouteIntent,
     ) -> Result<InputEvidence, &'static str> {
+        let mut evidence = self.admitted_input_evidence(intent)?;
+        evidence.keys.include(&self.pending_key_evidence(intent)?)?;
+        Ok(evidence)
+    }
+    /// Evidence accepted by the sequence engine, excluding prospective future steps.
+    pub(crate) fn admitted_input_evidence(
+        &self,
+        intent: &RouteIntent,
+    ) -> Result<InputEvidence, &'static str> {
         let mut evidence = intent.input_evidence();
-        evidence.keys = self.pending_key_evidence(intent)?;
         for sequence in &self.sequences {
             let Some(pending) = sequence
                 .pending

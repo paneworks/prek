@@ -178,6 +178,18 @@ impl Routing {
             Ok(evidence)
         }
     }
+    pub(in crate::routing) fn admitted_evidence(
+        &self,
+        intent: &RouteIntent,
+    ) -> Result<InputEvidence, &'static str> {
+        let admitted = self.engine.admitted_input_evidence(intent)?;
+        if self.split_inputs {
+            return Ok(admitted);
+        }
+        let mut evidence = intent.input_evidence();
+        evidence.keys = admitted.keys;
+        Ok(evidence)
+    }
     pub(in crate::routing) fn domain_claimable(
         &self,
         id: u64,
