@@ -190,6 +190,11 @@ make.recipe{ name="build-aarch64",desc="cross-build and inspect dynamic ARM64 EL
                assert(oslo.run{"nix","--option","eval-cache","false","--extra-experimental-features","nix-command flakes","--max-jobs","1","--cores","2","develop","--no-write-lock-file",".#cross-aarch64","--command","bash","tests/run-aarch64-build.sh"}.ok,"ARM64 cross-build or ELF verification failed")
              end }
 
+make.recipe{ name="exec-aarch64",desc="run the current ARM64 cross-build under host binfmt emulation (not hardware evidence)",
+             run=function()
+               assert(oslo.run{"nix","--option","eval-cache","false","--extra-experimental-features","nix-command flakes","--max-jobs","1","--cores","2","develop","--no-write-lock-file",".#cross-aarch64","--command","bash","tests/run-aarch64-exec.sh"}.ok,"ARM64 emulated execution failed")
+             end }
+
 make.recipe{
   name = "run",
   desc = "list devices, or observe one with --device PATH",
@@ -835,7 +840,7 @@ make.recipe{
     sh.shellcheck("tests/run-rust-gate.sh")
     sh.bash("-n", "tests/run-dist-offline.sh")
     sh.shellcheck("tests/run-dist-offline.sh")
-    for _, path in ipairs{"tests/run-nix-gate.sh","tests/run-aarch64-build.sh"} do
+    for _, path in ipairs{"tests/run-nix-gate.sh","tests/run-aarch64-build.sh","tests/run-aarch64-exec.sh"} do
       sh.bash("-n",path)
       sh.shellcheck(path)
     end

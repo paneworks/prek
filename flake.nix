@@ -258,10 +258,11 @@
             cp ${./tests/support/test_build_tools.py} source/tests/support/test_build_tools.py
             cp ${./tests/run-nix-gate.sh} source/tests/run-nix-gate.sh
             cp ${./tests/run-aarch64-build.sh} source/tests/run-aarch64-build.sh
+            cp ${./tests/run-aarch64-exec.sh} source/tests/run-aarch64-exec.sh
             cd source
             python3 -m unittest discover -s tests/support -p test_nix_dist.py -v > "$out" 2>&1
             python3 -m unittest discover -s tests/support -p test_build_tools.py -v >> "$out" 2>&1
-            for script in tests/run-nix-gate.sh tests/run-aarch64-build.sh; do
+            for script in tests/run-nix-gate.sh tests/run-aarch64-build.sh tests/run-aarch64-exec.sh; do
               bash -n "$script"
               shellcheck "$script"
             done
@@ -408,7 +409,7 @@
             packages = [
               (pkgs.rust-bin.stable.latest.default.override { targets = [ crossTriple ]; })
               crossPkgs.stdenv.cc
-              pkgs.binutils pkgs.git
+              pkgs.binutils pkgs.git pkgs.patchelf
             ];
             CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER = crossCc;
             CC_aarch64_unknown_linux_musl = crossCc;

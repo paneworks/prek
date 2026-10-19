@@ -192,5 +192,76 @@ exec ''' + shutil.which("cat") + ''' "$@"
                 self.assertFalse((evidence / "receipt.txt").exists())
 
 
+class Aarch64Exec(unittest.TestCase):
+    @contextlib.contextmanager
+    def model(self, revision="0" * 40, binfmt="enabled\ninterpreter /run/binfmt/aarch64-linux\n", version="9.9.9", check='{"status":"valid"}'):
+        with fixture("run-aarch64-exec.sh") as (root, tools, env, script):
+            tool(tools, "git", 'printf "%040d\\n" 0\n')
+            tool(tools, "patchelf", 'printf "%s\\0" "$@" >> "$MOCK_LOG"; printf "\\0" >> "$MOCK_LOG"\n')
+            store = root / "store"
+            for name in ("musl/lib/ld-musl-aarch64.so.1", "musl/lib/libc.so", "gcc/lib/libgcc_s.so.1"):
+                (store / name).parent.mkdir(parents=True, exist_ok=True)
+                (store / name).write_text("")
+            tool(tools, "cross-cc", '''case $1 in
+  -print-file-name=ld-musl-aarch64.so.1) echo "$PREK_NIX_STORE/musl/lib/ld-musl-aarch64.so.1" ;;
+  -print-file-name=libc.so) echo "$PREK_NIX_STORE/musl/lib/libc.so" ;;
+  -print-file-name=libgcc_s.so.1) echo "$PREK_NIX_STORE/gcc/lib/libgcc_s.so.1" ;;
+  *) exit 9 ;;
+esac
+''')
+            build = root / "target/cross-aarch64/evidence/run-build"
+            build.mkdir(parents=True)
+            (build / "status.txt").write_text("passed\n")
+            (build / "receipt.txt").write_text(f"source_revision={revision}\nsource_dirty=false\nexecution=not-attempted\n")
+            tool(build, "prek", f'''case $1 in
+  --version) echo "prek {version}" ;;
+  check) echo '{check}' ;;
+  *) exit 9 ;;
+esac
+''')
+            digest = hashlib.sha256((build / "prek").read_bytes()).hexdigest()
+            (build / "SHA256SUMS").write_text(f"{digest}  prek\n")
+            (root / "target/cross-aarch64/latest").symlink_to(build)
+            (root / "Cargo.toml").write_text('[package]\nname = "prek"\nversion = "9.9.9"\n')
+            for config in ("touch_routing", "window_keys", "power"):
+                (root / "examples/lua").mkdir(parents=True, exist_ok=True)
+                (root / f"examples/lua/{config}.lua").write_text("")
+            (root / "binfmt").write_text(binfmt)
+            env.update(PREK_BINFMT_AARCH64=str(root / "binfmt"), PREK_NIX_STORE=str(store),
+                       CC_aarch64_unknown_linux_musl=str(tools / "cross-cc"))
+            yield root, build, env, script
+
+    def test_runs_a_redirected_copy_and_keeps_the_retained_artifact(self):
+        with self.model() as (root, build, env, script):
+            original = (build / "prek").read_bytes()
+            result = run(script, env)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            evidence = (root / "target/cross-aarch64/executed").resolve(strict=True)
+            receipt = (evidence / "receipt.txt").read_text()
+            self.assertEqual((evidence / "status.txt").read_text(), "passed\n")
+            self.assertIn("execution=emulated-binfmt\nhardware=false\n", receipt)
+            self.assertIn(f"artifact_sha256={hashlib.sha256(original).hexdigest()}\n", receipt)
+            self.assertEqual((build / "prek").read_bytes(), original)
+            store = env["PREK_NIX_STORE"]
+            self.assertEqual(commands(env), [["--set-interpreter", f"{store}/musl/lib/ld-musl-aarch64.so.1",
+                                              "--set-rpath", f"{store}/musl/lib:{store}/gcc/lib", str(evidence / "prek")]])
+
+    def test_stale_disabled_mismatched_or_invalid_runs_leave_no_receipt(self):
+        cases = dict(stale=dict(revision="1" * 40), disabled=dict(binfmt="disabled\n"),
+                     version=dict(version="0.0.1"), invalid=dict(check='{"status":"invalid"}'))
+        for name, overrides in [*cases.items(), ("tampered", {})]:
+            with self.subTest(case=name), self.model(**overrides) as (root, build, env, script):
+                if name == "tampered":
+                    with (build / "prek").open("a") as artifact:
+                        artifact.write("# changed\n")
+                result = run(script, env)
+                self.assertNotEqual(result.returncode, 0)
+                evidence = (root / "target/cross-aarch64/executed").resolve(strict=True)
+                self.assertEqual((evidence / "status.txt").read_text(), "failed\n")
+                self.assertFalse((evidence / "receipt.txt").exists())
+                if name in ("stale", "disabled", "tampered"):
+                    self.assertEqual(commands(env), [])
+
+
 if __name__ == "__main__":
     unittest.main()

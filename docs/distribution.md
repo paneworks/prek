@@ -86,6 +86,18 @@ dirty-state record, source-diff digest, complete ELF headers/dynamic table and
 explicitly says `execution=not-attempted` and confirms the checked linkage.
 Rejected ELF headers and logs remain available without a successful receipt.
 
+`oslo make exec-aarch64` runs that artifact separately, under the host kernel's
+enabled aarch64 binfmt emulation. It accepts only a passed, clean cross-build of
+the current `HEAD`, rechecks the retained hash before and after, and executes a
+copy whose interpreter and runtime path point at the pinned cross musl loader
+and `libgcc_s.so.1`; the retained artifact is never modified. It requires
+`prek --version` to match `Cargo.toml` and `prek check --json` to report the
+shipped `touch_routing`, `window_keys` and `power` Lua examples valid, which
+exercises Luna and the isolated compile worker. Evidence lands in
+`target/cross-aarch64/executed`; its receipt says `execution=emulated-binfmt`
+and `hardware=false`. Emulation is not ARM64 hardware, phone, native-bundle or
+system-loader evidence.
+
 This is a **dynamic musl cross-build**, not a portable standalone binary or the
 native GNU/Nix ARM64 bundle. The target needs the recorded loader, libraries and
 runtime integration; cross-compilation does not prove they are installed or
