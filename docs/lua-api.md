@@ -10,6 +10,10 @@ action handlers producing command/event plans. Custom recognizers,
 live adapter bindings and the remaining operational APIs remain required
 work in `PLAN.md`. Discovery labels the runtime API partial.
 Run `prek api --json` for the installed manifest or inspect `prek.api` in Lua.
+`oslo make test-lua-api` requires every function reachable from `require('prek')`
+and every method on a returned replay, timer, task, subscription or rule
+transaction to appear in the manifest, every manifest symbol to resolve to a real
+function and be cited here, and the editor stubs to match the manifest.
 
 ## Native Morf connections
 

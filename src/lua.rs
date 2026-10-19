@@ -1158,4 +1158,68 @@ mod tests {
             .dispatch(EventKind::Ready, &serde_json::json!({}))
             .unwrap();
     }
+    #[test]
+    fn every_live_binding_and_returned_method_is_in_the_manifest() {
+        let known = api()["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|symbol| format!("[{:?}]=true", symbol["name"].as_str().unwrap()))
+            .collect::<Vec<_>>()
+            .join(",");
+        let source = format!(
+            r#"
+local p=require('prek')
+local known={{{known}}}
+local function check(name) assert(known[name], 'undocumented binding '..name) end
+local function walk(prefix,t,depth)
+ for k,v in pairs(t) do
+  local name=prefix..tostring(k)
+  if type(v)=='function' then check(name)
+  elseif type(v)=='table' and depth<4 then walk(name..'.',v,depth+1) end
+ end
+end
+local function methods(receiver,object)
+ for k,v in pairs(object) do if type(v)=='function' then check(receiver..'.'..k) end end
+end
+walk('',p,0)
+local replay=p.replay.new();methods('Replay',replay);replay:close()
+local timer=p.scheduler.defer(function()end);methods('Timer',timer);timer:cancel()
+local task=p.scheduler.spawn(function()end);methods('Task',task);task:cancel()
+local handle=p.events.on('ready',function()
+ local tx=p.rules.transaction();methods('RuleTransaction',tx);tx:cancel()
+ p.log.info('methods-documented')
+end)
+methods('Subscription',handle)
+return {{version=1,policy={{allow_runtime_rules=true}}}}
+"#
+        );
+        let definition = Definition::compile(&source, "live-bindings.lua").unwrap();
+        let mut runtime = definition.instantiate().unwrap();
+        runtime.enable_rule_transactions();
+        let logs = runtime
+            .dispatch(EventKind::Ready, &serde_json::json!({}))
+            .unwrap();
+        assert!(logs.iter().any(|log| log.message == "methods-documented"));
+    }
+    #[test]
+    fn every_manifest_symbol_is_cited_by_the_reference() {
+        let reference = include_str!("../docs/lua-api.md");
+        for symbol in api()["symbols"].as_array().unwrap() {
+            let name = symbol["name"].as_str().unwrap();
+            let cited = match name.split_once('.') {
+                Some((receiver, method)) if receiver.starts_with(char::is_uppercase) => {
+                    reference.contains(&format!(":{method}("))
+                }
+                _ => [
+                    format!("{name}("),
+                    format!("{name} {{"),
+                    format!("`{name}`"),
+                ]
+                .iter()
+                .any(|form| reference.contains(form)),
+            };
+            assert!(cited, "reference does not cite {name}");
+        }
+    }
 }
