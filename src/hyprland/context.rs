@@ -119,7 +119,7 @@ impl ContextSampler {
         client: &Client,
         outputs: &[OutputState],
         until: Instant,
-    ) -> io::Result<Vec<super::layers::Layer>> {
+    ) -> io::Result<super::layers::Inventory> {
         super::layers::sample(client, outputs, until, &mut self.inhibited)
     }
     /// Broker calls this only after accepting the bound native provider's

@@ -1,13 +1,15 @@
-//! Native, read-only named bounds from Morf's submitted primary frame.
-//! These are surface-local inspection data, not input regions or presentation
-//! acknowledgement. They cannot establish a keyboard's absence or a safe scope.
+//! Native, read-only named bounds and committed input region from Morf's
+//! submitted primary frame. These are surface-local inspection data, not
+//! presentation acknowledgement or a safe scope by themselves.
 use super::*;
 use std::collections::BTreeSet;
 mod projection;
+pub(crate) mod scopes;
 pub use projection::{LayoutProjection, ProjectedRegion};
 
 pub const MAX_BYTES: usize = 128 * 1024;
 pub const MAX_REGIONS: usize = 256;
+pub const MAX_INPUT_RECTS: usize = 512;
 
 mod decimal {
     use serde::{Deserialize, Deserializer, Serializer, de::Error};
@@ -21,6 +23,25 @@ mod decimal {
             return Err(D::Error::custom("noncanonical decimal"));
         }
         Ok(number)
+    }
+    pub mod optional {
+        use serde::{Deserialize, Deserializer, Serializer};
+        pub fn serialize<S: Serializer>(
+            value: &Option<u64>,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error> {
+            match value {
+                Some(value) => super::serialize(value, serializer),
+                None => serializer.serialize_none(),
+            }
+        }
+        pub fn deserialize<'de, D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<Option<u64>, D::Error> {
+            #[derive(Deserialize)]
+            struct Present(#[serde(with = "super")] u64);
+            Ok(Some(Present::deserialize(deserializer)?.0))
+        }
     }
 }
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
@@ -95,6 +116,18 @@ pub struct Frame {
     pub surface: Option<SurfaceSpace>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keyboard: Option<KeyboardRegistry>,
+    /// The input region committed with this frame; None when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<Vec<InputRect>>,
+}
+/// One committed input-region rectangle in Morf layout units.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct InputRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
 }
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -103,6 +136,14 @@ pub struct SurfaceSpace {
     pub width: u32,
     pub height: u32,
     pub local_scale: f64,
+    /// CLOCK_MONOTONIC time of the surface's first frame callback, an upper
+    /// bound of when the compositor mapped it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "decimal::optional"
+    )]
+    pub mapped_ns: Option<u64>,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -253,6 +294,9 @@ impl Context {
                     || surface.height == 0
                     || surface.width > 1_000_000
                     || surface.height > 1_000_000
+                    || surface
+                        .mapped_ns
+                        .is_some_and(|mapped| mapped == 0 || mapped > self.sampled_ns)
                     || !surface.local_scale.is_finite()
                     || surface.local_scale <= 0.0
                     || surface.local_scale > 64.0
@@ -277,6 +321,21 @@ impl Context {
                 || frame.scale_120 == 0
                 || frame.scale_120 > 120 * 64
                 || frame.regions.len() > MAX_REGIONS
+                || frame.input.as_ref().is_some_and(|input| {
+                    input.len() > MAX_INPUT_RECTS
+                        || input.iter().any(|r| {
+                            r.width < 0
+                                || r.height < 0
+                                || [
+                                    r.x,
+                                    r.y,
+                                    r.x.saturating_add(r.width),
+                                    r.y.saturating_add(r.height),
+                                ]
+                                .into_iter()
+                                .any(|n| n.unsigned_abs() > 1_000_000)
+                        })
+                })
             {
                 return Err(invalid("invalid or stale native rendered frame"));
             }
@@ -338,6 +397,7 @@ impl Client<ShellState> {
             if context.frame.as_ref().is_some_and(|frame| {
                 frame.surface.is_some() && !capabilities.has_layer_space()
                     || frame.keyboard.is_some() != capabilities.has_keyboard_registry()
+                    || frame.input.is_some() && !capabilities.has_input_region()
             }) {
                 return Err(invalid(
                     "native surface/registry metadata was not negotiated",

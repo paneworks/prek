@@ -11,6 +11,7 @@ pub(crate) fn sample(at: Duration) -> Context {
         frame: Some(Frame {
             surface: None,
             keyboard: None,
+            input: None,
             width: 1000,
             height: 800,
             scale_120: 120,
@@ -87,6 +88,7 @@ fn registered_keyboard_and_surface_metadata_reject_contradictions_without_claimi
         width: 1000,
         height: 800,
         local_scale: 1.0,
+        mapped_ns: Some(1_000_000_000),
     });
     frame.regions[0].semantic = Some(Semantic {
         role: SemanticRole::Keyboard,
@@ -100,7 +102,7 @@ fn registered_keyboard_and_surface_metadata_reject_contradictions_without_claimi
         layout: Some("full".into()),
     });
     context.validate(&state(), at, None).unwrap();
-    for case in 0..6 {
+    for case in 0..8 {
         let mut bad = context.clone();
         let frame = bad.frame.as_mut().unwrap();
         match case {
@@ -109,10 +111,30 @@ fn registered_keyboard_and_surface_metadata_reject_contradictions_without_claimi
             2 => frame.keyboard.as_mut().unwrap().node = Some("01".into()),
             3 => frame.keyboard.as_mut().unwrap().layout = Some("dev".into()),
             4 => frame.surface.as_mut().unwrap().local_scale = f64::NAN,
+            5 => frame.surface.as_mut().unwrap().mapped_ns = Some(0),
+            6 => frame.surface.as_mut().unwrap().mapped_ns = Some(1_000_000_001),
             _ => frame.surface.as_mut().unwrap().width = 1001 + 2,
         }
         assert!(bad.validate(&state(), at, None).is_err());
     }
+    let wire = serde_json::to_value(&context).unwrap();
+    assert_eq!(wire["frame"]["surface"]["mapped_ns"], "1000000000");
+    for mapped in [
+        serde_json::json!("01"),
+        serde_json::json!(1),
+        serde_json::Value::Null,
+    ] {
+        let mut forged = wire.clone();
+        forged["frame"]["surface"]["mapped_ns"] = mapped;
+        assert!(serde_json::from_value::<Context>(forged).is_err());
+    }
+    let mut unmapped = wire.clone();
+    unmapped["frame"]["surface"]
+        .as_object_mut()
+        .unwrap()
+        .remove("mapped_ns");
+    let unmapped: Context = serde_json::from_value(unmapped).unwrap();
+    assert_eq!(unmapped.frame.unwrap().surface.unwrap().mapped_ns, None);
     let frame = context.frame.as_mut().unwrap();
     frame.regions.clear();
     frame.keyboard.as_mut().unwrap().state = KeyboardState::Hidden;

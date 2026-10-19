@@ -207,6 +207,7 @@ fn refresh_native_shells(bound: &mut Bound, policy: &Policy, logind: &Logind, no
             }
         }
         let mut rendered = Vec::new();
+        let started = monotonic()?;
         let before = bound
             .context
             .sampler
@@ -247,7 +248,7 @@ fn refresh_native_shells(bound: &mut Bound, policy: &Policy, logind: &Logind, no
                     &before,
                     &after,
                     producer,
-                    sampled,
+                    (started, sampled),
                 )?;
             }
         }
@@ -2456,6 +2457,13 @@ impl Broker {
             }
         }
         refresh_native_shells(bound, &self.policy, &self.logind, checked);
+        if let Some(value) = bound.context.value.as_mut() {
+            crate::morf::rendered::scopes::apply(
+                &mut value.snapshot,
+                &bound.shell_rendered,
+                monotonic()?,
+            );
+        }
         if bound.context.sampler.inhibited() {
             if self.inhibited.len() >= 4096 && !self.inhibited.contains(&bound.compositor) {
                 return Err(protocol::invalid("locked compositor history exhausted"));

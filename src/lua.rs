@@ -470,24 +470,41 @@ pub fn api() -> serde_json::Value {
         "identity":"verified native output/endpoint epoch, UI generation and broker fence",
         "integers":"node identity, UI generation, revision and sampled_ns are canonical decimal strings",
         "unavailable":"nil without a fresh owning desktop; empty array when no fresh native frame is available",
-        "authority":"inspection only; no input-mask, keyboard-absence, authentication, stacking or presentation proof",
+        "authority":"inspection only in the report; no keyboard-absence, authentication, stacking or presentation proof",
         "scopes":false,
+        "routing_refinement":{
+            "requires":"fresh settled_stock_layer projection with a described input region naming the exact coarse layer:<output>:<address> region",
+            "replaces":"the coarse interactive layer region with morf:<epoch>:input:<i> interactive regions",
+            "adds":"local_control as interactive unscoped regions; clock_background, content_bottom, physical_bottom, top_left, top_right, side_left and side_right as scoped regions",
+            "keyboard":"registered hidden/visible state sets keyboard_known, with visible geometry, only on an exclusive output whose keyboard was unknown",
+            "secure_overlay":"any visible secure_overlay node, settled or not"
+        },
+        "input_region":{
+            "capability":"input_region","maximum_rectangles":512,
+            "coordinates":"integer Morf layout units in the frame; outward-rounded global logical boxes in the projection",
+            "unknown":"absent for a configured mask or too many rectangles; never empty by omission"
+        },
         "layout_projection":{
-            "basis":"stock_layer_layout",
-            "coordinates":"global logical layout boxes; not animated rendered positions",
+            "basis":["stock_layer_layout","settled_stock_layer"],
+            "coordinates":"global logical layout boxes; the layer's current position only for settled_stock_layer, never presentation, stacking or input masks",
+            "settlement":"surface mapped_ns plus the stock layersIn bound agreed by both bracketing samples plus 100 ms, at or before started_ns",
+            "map_in":"zero while animations:enabled or the layersIn node is off; otherwise speed tenths of a second for a listed cubic bezier; none for springs or unknown curves",
+            "integers":"started_ns, sampled_ns, map_in_ns and rendered_from_ns are canonical decimal strings",
             "identity":"unique stable native producer PID, process birth, output, layer namespace/address/level/box and geometry generation",
             "missing_bounds":"viewport-clipped rows retain their native identities with null bounds",
+            "exclusive":"no other process's bottom, top or overlay layer on the output in either bracketing sample",
             "optional":true
         },
         "keyboard_registry":{
             "capability":"keyboard_registry","scope":"registered_morf_primary",
             "states":["unknown","hidden","visible"],
             "known":"one declared keyboard under the primary root, with node and layout",
-            "absence":"hidden applies only to the registered Morf node; does not set snapshot keyboard_known"
+            "absence":"hidden applies only to the registered Morf node; sets snapshot keyboard_known only through the routing refinement on an exclusive output"
         },
         "surface_space":{
-            "capability":"layer_space","fields":["namespace","width","height","local_scale"],
-            "local_scale":"compositor logical units per native Morf layout unit"
+            "capability":"layer_space","fields":["namespace","width","height","local_scale","mapped_ns"],
+            "local_scale":"compositor logical units per native Morf layout unit",
+            "mapped_ns":"optional decimal CLOCK_MONOTONIC receipt of the first frame callback; an upper bound of compositor map time"
         }
     });
     manifest["morf_rendered_queries"]["semantic"] = serde_json::json!({

@@ -98,11 +98,12 @@ def main():
     env = dict(os.environ, WAYLAND_DISPLAY=wayland.name,
                HYPRLAND_INSTANCE_SIGNATURE=args.instance, MORF_BACKEND="wayland",
                CAELESTIA_DRY_RUN="1", CAELESTIA_STYLE="material", CAELESTIA_WALLPAPER="",
+               EVA_DRY_RUN="1", EVA_WALLPAPER="",
                MORF_RUNTIME_PATH=str(library),
                LIBGL_ALWAYS_SOFTWARE="1")
 
     def stock(command):
-        reply = subprocess.run([args.hyprctl, "-j", command], env=env,
+        reply = subprocess.run([args.hyprctl, "-j", *command.split()], env=env,
                                capture_output=True, text=True, check=True, timeout=3)
         return json.loads(reply.stdout)
 
@@ -238,7 +239,7 @@ def main():
             else:
                 raise RuntimeError("Morf controller startup timed out")
             layers = stock("layers")
-            assert "caelestia-drawers" in json.dumps(layers)
+            assert any(f'"{shell}-drawers"' in json.dumps(layers) for shell in ("eva", "caelestia"))
             native_path, initial_native = native_state()
             def native_rpc(message, maximum=4096):
                 with socket.socket(socket.AF_UNIX) as client:
@@ -264,14 +265,33 @@ def main():
                     capabilities["grant_ms"]) == (8, 64, 1000, 250)
             rendered_observations = []
             layout_observations = []
+            def map_in_ns(animations, option):
+                nodes, beziers = animations
+                matching = [node for node in nodes if node["name"] == "layersIn"]
+                if len(matching) != 1:
+                    return None
+                globally = option.get("int", option.get("bool"))
+                if not matching[0]["enabled"] or globally in (0, False):
+                    return 0
+                if not matching[0]["speed"] > 0:
+                    return None
+                if matching[0]["bezier"] not in {curve["name"] for curve in beziers}:
+                    return None
+                bound = round((matching[0]["speed"] + 0.005) / 10 * 1e9)
+                return bound if bound <= 10_000_000_000 else None
             def rendered_frame(keyboard=None, layout=None):
                 if not capabilities.get("rendered_context", False):
                     return None
                 until = time.monotonic() + 5
                 while True:
+                    started = time.monotonic_ns()
                     before_layers = stock("layers") if capabilities.get("layer_space", False) else None
+                    before_animations = stock("animations") if before_layers is not None else None
+                    before_option = stock("getoption animations:enabled") if before_layers is not None else None
                     value = native_rpc(dict(version=1, op="rendered-context"), 128 * 1024)
                     after_layers = stock("layers") if before_layers is not None else None
+                    after_animations = stock("animations") if before_layers is not None else None
+                    after_option = stock("getoption animations:enabled") if before_layers is not None else None
                     with (output / "morf-rendered-observations.jsonl").open("a") as log:
                         log.write(json.dumps(dict(expected_keyboard=keyboard, expected_layout=layout, report=value)) + "\n")
                     assert set(value) == {"version", "epoch", "ui_generation", "revision", "sampled_ns", "coverage", "frame"}
@@ -329,9 +349,28 @@ def main():
                                 assert set(registry) == {"scope", "registered", "state", "node", "layout"}
                                 assert str(int(registry["node"])) == registry["node"] and int(registry["node"]) > 0
                                 assert (registry["node"] in nodes) == (expected == "visible")
+                            input_rects = frame.get("input")
+                            if capabilities.get("input_region", False):
+                                assert "input" in frame
+                            else:
+                                assert input_rects is None
+                            if input_rects is not None:
+                                assert len(input_rects) <= 512
+                                for rect in input_rects:
+                                    assert set(rect) == {"x", "y", "width", "height"}
+                                    assert all(isinstance(n, int) and abs(n) <= 1_000_000 for n in rect.values())
+                                    assert rect["width"] >= 0 and rect["height"] >= 0
+                                if capabilities.get("keyboard_registry", False) and frame["keyboard"]["state"] == "visible":
+                                    keys = next(r["bounds"] for r in frame["regions"] if r["node"] == frame["keyboard"]["node"])
+                                    assert any(r["x"] < keys["x"] + keys["width"] and keys["x"] < r["x"] + r["width"]
+                                               and r["y"] < keys["y"] + keys["height"] and keys["y"] < r["y"] + r["height"]
+                                               for r in input_rects), "a visible keyboard takes no committed input"
                             if before_layers is not None:
                                 space = frame["surface"]
-                                assert set(space) == {"namespace", "width", "height", "local_scale"}
+                                assert set(space) - {"mapped_ns"} == {"namespace", "width", "height", "local_scale"}
+                                mapped = space.get("mapped_ns")
+                                if mapped is not None:
+                                    assert str(int(mapped)) == mapped and 0 < int(mapped) <= int(value["sampled_ns"])
                                 scale = space["local_scale"]
                                 assert math.isfinite(scale) and 0 < scale <= 64
                                 assert abs(frame["width"] * scale - space["width"]) <= scale + 1e-6
@@ -345,8 +384,31 @@ def main():
                                     assert time.monotonic() < until, "owning compositor layer layout did not converge"
                                     time.sleep(.025)
                                     continue
-                                layout_observations.append(dict(basis="stock_layer_layout", producer_pid=producer,
-                                                                output=name, surface=space, layer=before[0]))
+                                map_in = map_in_ns(before_animations, before_option)
+                                map_in = map_in if map_in == map_in_ns(after_animations, after_option) else None
+                                rendered_from = None if mapped is None or map_in is None else int(mapped) + map_in + 100_000_000
+                                settled = rendered_from is not None and rendered_from <= started
+                                exclusive = all(layer["pid"] == producer for inventory in (before_layers, after_layers)
+                                                for level, items in inventory[name]["levels"].items() if level != "0"
+                                                for layer in items)
+                                projected = None
+                                if input_rects is not None:
+                                    origin = (before[0]["x"], before[0]["y"])
+                                    projected = []
+                                    for rect in input_rects:
+                                        x = min(max(math.floor(rect["x"] * scale), 0), space["width"])
+                                        y = min(max(math.floor(rect["y"] * scale), 0), space["height"])
+                                        right = min(max(math.ceil((rect["x"] + rect["width"]) * scale), x), space["width"])
+                                        bottom = min(max(math.ceil((rect["y"] + rect["height"]) * scale), y), space["height"])
+                                        if right > x and bottom > y:
+                                            projected.append(dict(x=origin[0] + x, y=origin[1] + y, w=right - x, h=bottom - y))
+                                layout_observations.append(dict(
+                                    basis="settled_stock_layer" if settled else "stock_layer_layout",
+                                    producer_pid=producer, output=name, surface=space, layer=before[0],
+                                    started_ns=str(started), map_in_ns=map_in, rendered_from_ns=rendered_from,
+                                    exclusive=exclusive, input=projected,
+                                    layers_in=[node for node in before_animations[0] if node["name"] == "layersIn"],
+                                    animations_enabled=before_option))
                             rendered_observations.append(value)
                             return value
                     assert time.monotonic() < until, "native submitted-frame geometry did not converge"
@@ -483,7 +545,14 @@ def main():
                 shutdown_acknowledged = False
             child.wait(timeout=5)
             assert child.returncode == 0 and not native_path.exists(), "native binding survived orderly shell shutdown"
+            settled_input = [o for o in layout_observations if o["basis"] == "settled_stock_layer" and o["input"] is not None]
+            if capabilities.get("input_region", False) and layout_observations:
+                assert settled_input, "no settled shell layout with a committed input region was observed"
             (output / "morf-controls-receipts.json").write_text(json.dumps(dict(
+                native_map_bound_tested=any(o["surface"].get("mapped_ns") for o in layout_observations),
+                native_input_region_tested=any(o["input"] is not None for o in layout_observations),
+                native_settled_layout_observed=bool(settled_input),
+                native_routing_refinement_tested=False,
                 status="passed", producer_pid=producer, output=name, ordinary_shell_ipc=True,
                 broker_grant_tested=False, recognizer_handoff_tested=False,
                 native_root_operations_refused=True, root_grant_tested=False,
@@ -523,6 +592,7 @@ def main():
                     process_before_cleanup=process_before_cleanup,
                     root_grant_tested=False, recognizer_handoff_tested=False,
                     observations=observations, rpc_calls=rpc_calls,
+                    native_layer_layout_observations=locals().get("layout_observations", []),
                     rpc_timing_limit=timing_limit, rpc_timings=rpc_timings)) + "\n")
 
 

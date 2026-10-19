@@ -100,7 +100,11 @@ if [[ ! -x $morf_default ]]; then
   done
 fi
 morf_binary=${PREK_MORF_BINARY:-"$morf_default"}
-morf_shell=${PREK_MORF_SHELL:-"$morf_repo/examples/shells/caelestia/shell/init.lua"}
+morf_shell_default="$morf_repo/examples/shells/eva/shell/init.lua"
+if [[ ! -f $morf_shell_default ]]; then
+  morf_shell_default="$morf_repo/examples/shells/caelestia/shell/init.lua"
+fi
+morf_shell=${PREK_MORF_SHELL:-"$morf_shell_default"}
 if [[ ! -x "$morf_binary" || ! -f "$morf_shell" ]]; then
   printf 'Missing Morf executable or shell: %s / %s\n' "$morf_binary" "$morf_shell" >&2
   echo 'Set PREK_MORF_BINARY and PREK_MORF_SHELL to your local build paths.' >&2

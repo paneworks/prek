@@ -755,8 +755,9 @@ function MorfAPI.providers() error("Prek editor definition") end
 ---@field height integer Surface-local logical height.
 ---@field scale_120 integer Actual surface scale in units of 1/120.
 ---@field regions prek.MorfNamedBounds[] At most 256 named scene bounds from a submitted GPU frame.
----@field surface? {namespace:string,width:integer,height:integer,local_scale:number} Immutable native layer namespace, viewport and compositor logical units per Morf layout unit.
+---@field surface? {namespace:string,width:integer,height:integer,local_scale:number,mapped_ns?:prek.Identity} Immutable native layer namespace, viewport, compositor logical units per Morf layout unit and first frame callback receipt.
 ---@field keyboard? prek.MorfKeyboardRegistry Scoped declaration coverage; no global keyboard absence proof.
+---@field input? {x:integer,y:integer,width:integer,height:integer}[] Input region committed with this frame in Morf layout units; absent when unknown.
 ---@class (exact) prek.MorfKeyboardRegistry
 ---@field scope 'registered_morf_primary'
 ---@field registered integer Number of declared keyboards across native scene roots.
@@ -770,12 +771,17 @@ function MorfAPI.providers() error("Prek editor definition") end
 ---@field interactive boolean
 ---@field semantic? prek.MorfSemanticRegion
 ---@class (exact) prek.MorfLayoutProjection
----@field basis 'stock_layer_layout' Does not describe animated rendered position or presentation.
+---@field basis 'stock_layer_layout'|'settled_stock_layer' Settled boxes are the layer's current position, never its presentation.
 ---@field producer_pid integer
 ---@field producer_start prek.Identity
 ---@field output prek.Output
 ---@field geometry_generation prek.Identity
+---@field started_ns prek.Identity Before the first bracketing layer sample.
 ---@field sampled_ns prek.Identity
+---@field map_in_ns? prek.Identity Stock layersIn bound agreed by both samples.
+---@field rendered_from_ns? prek.Identity Map bound plus map-in bound plus 100ms.
+---@field input? {origin:{x:number,y:number},size:{x:number,y:number}}[] Committed input region as global logical boxes, rounded outward and clipped to the layer.
+---@field exclusive boolean No other process's bottom, top or overlay layer on this output in either sample.
 ---@field surface {output:string,address:string,namespace:string,pid:integer,level:integer,rect:{origin:{x:number,y:number},size:{x:number,y:number}}}
 ---@field regions prek.MorfProjectedRegion[]
 ---@class (exact) prek.MorfFrameContext

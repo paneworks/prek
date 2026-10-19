@@ -6,7 +6,7 @@ Prek's broker can consume Morf's native lock evidence with
 a shell wrapper is not an executable identity. No desktop/root deployment is
 performed by building this project.
 
-The upstream implementation lives in `../mold` under
+The upstream implementation lives in `../morf` (formerly `../mold`) under
 `crates/frontend/morf-host/src/lock/provider.rs`. It creates a private native
 endpoint when the real Wayland lock loop starts. Compositor identity comes from
 that connection's socket credentials and process birth. Lua cannot supply or
@@ -48,7 +48,7 @@ remain required. See the exact shape in [the Lua reference](lua-api.md).
 
 When `semantic_regions=true`, named bounds can also contain a typed `semantic`
 annotation. Morf configs attach `input_context={role,layout?}` to the actual scene
-node; they never submit coordinates. Caelestia labels its keyboard panel with the
+node; they never submit coordinates. The eva shell labels its keyboard panel with the
 current layout, authentication/session drawers as secure overlays, ordinary
 drawers as local controls and persistent top/bottom/side geometry as shell roles.
 The semantic Items take no input and remain laid out while native recognizers
@@ -72,8 +72,29 @@ exports `m_geometry`; its
 [renderer](https://github.com/hyprwm/Hyprland/blob/v0.54.3/src/render/Renderer.cpp)
 arranges that box in global logical coordinates. The
 [rendered surface box](https://github.com/hyprwm/Hyprland/blob/v0.54.3/src/desktop/view/LayerSurface.cpp)
-uses animated position and size instead. A layout projection therefore cannot
-establish the surface's current animated position or grant gesture authority.
+uses animated position and size instead. A plain layout projection therefore
+cannot establish the surface's current animated position or grant gesture
+authority.
+
+In both pinned stock versions (0.54.3 and 0.56.2), `CLayerSurface::onMap` maps
+the surface and starts the `layersIn` animation in one dispatch, and
+`onCommit` warps later geometry changes once that animation has finished.
+Frame callbacks are only sent for a mapped surface. Morf therefore reports
+`frame.surface.mapped_ns`, its CLOCK_MONOTONIC receipt of the primary layer's
+first frame callback, as an upper bound of the map time. The layer batch now
+also reads stock `animations` and `getoption animations:enabled`, and
+`map_in_ns` requires both bracketing samples to agree. The stock tick
+(`AnimationManager::tick`, both versions) warps every value while the global
+switch or the `layersIn` node is off, so the bound is then zero. Otherwise a
+listed `layersIn` cubic bezier lasts `speed` tenths of a second (rounded up for
+the two-decimal reply). Springs, unknown curves and values over ten seconds
+give no bound. If
+`mapped_ns + map_in_ns + 100ms <= started_ns`, the projection's `basis` is
+`settled_stock_layer`, where `started_ns` precedes the first layer sample.
+Such a box is the layer's current position. It is still not presentation,
+stacking or an input mask, and stock IPC cannot tell a spring that reuses a
+listed bezier's name apart from that bezier. Settled projections become gesture
+scopes as described under [settled shell scopes](#settled-shell-scopes).
 
 The separate `keyboard_registry` capability supplies `frame.keyboard` with
 `scope="registered_morf_primary"`, a declaration count and `state` of `unknown`,
@@ -81,8 +102,31 @@ The separate `keyboard_registry` capability supplies `frame.keyboard` with
 primary root and include its native `node` and `layout`. Extra declarations,
 foreign roots, exiting nodes and incomplete visible geometry remain unknown.
 Hidden describes that registered node only; another program's keyboard remains
-outside this coverage. Neither this registry nor the layout projection changes
-`keyboard_known` in a gesture snapshot.
+outside this coverage. Only an exclusive output, below, lets the registry
+change `keyboard_known` in a gesture snapshot.
+
+## Settled shell scopes
+
+A full-output shell layer such as eva's `eva-drawers` primary surface appears in the
+stock snapshot as one interactive `layer:<output>:<address>` region. That
+region blocks application-content gestures and every reserved edge rule on the
+whole output. With `input_region=true`, Morf also reports the rectangles of the
+input region it committed with the witnessed frame, including unnamed
+interactive items and the reload-error band. A configured mask or more than 512
+rectangles is reported as unknown.
+
+After each native refresh the broker refines the desktop snapshot it publishes.
+A view qualifies only if its projection is `settled_stock_layer`, it describes
+its input, it still validates against the current output, and it names the
+exact coarse layer. The coarse region is then replaced by the outward-rounded
+input rectangles, local controls and the semantic scope regions. Otherwise the
+coarse region stays. On an output where neither bracketing sample showed
+another process's bottom, top or overlay layer, the registered keyboard state
+becomes `keyboard_known`, with its node's bounds when visible. A visible secure
+overlay node always sets `secure_overlay`. The unit fixtures prove that a
+reserved G11 strip and G05's physical bottom become eligible only after this
+refinement. Physical delivery, presentation and production action negotiation
+are not established by it.
 
 The optional owned local test is:
 
@@ -105,8 +149,8 @@ and the absence of a root/logind execution claim. Tests use short private paths
 under `/tmp/pc-*` so native Unix sockets still fit when launched from a Nix
 development shell with a long `TMPDIR`.
 
-The companion Caelestia shell also supplies typed ordinary controller IPC,
-documented upstream in `../mold/docs/PREK_CONTROLS.md`. Prek's strict wire types
+The companion eva shell also supplies typed ordinary controller IPC,
+documented upstream in `../morf/docs/PREK_CONTROLS.md`. Prek's strict wire types
 live in `src/morf/controls.rs`: frozen output, epoch/gesture/ordinal correlation,
 discrete/continuous action validation and bounded finite motion. They provide
 no execution grant and do not enable Morf action capability negotiation.
@@ -119,8 +163,8 @@ provider:
 
 ```sh
 nix run --no-write-lock-file .#cage-test -- --modes --input --power --windows \
-  --morf /absolute/path/to/mold/target/release/morf \
-  --morf-shell /absolute/path/to/mold/examples/shells/caelestia/shell/init.lua
+  --morf /absolute/path/to/morf/target/release/morf \
+  --morf-shell /absolute/path/to/morf/examples/shells/eva/shell/init.lua
 ```
 
 This starts the full shell with its source library and plugins disabled inside
@@ -304,10 +348,10 @@ store. The compositor, Morf and log writer remain your user. The root probe
 clears its environment, uses the packaged libsystemd, and selects one exact
 ignored test; it cannot select an arbitrary command or test filter.
 
-The local default prefers the frozen Morf executable in
-`../mold/target/native-layout-verified/morf`, falling back to the newest available
-verified context, cancellation or wallpaper build, and the Caelestia shell in that
-checkout. Override `PREK_MORF_REPO`, `PREK_MORF_BINARY` or `PREK_MORF_SHELL` for
+The local default uses `../morf` (falling back to `../mold`), prefers its
+`target/release/morf`, then the newest available verified layout, context,
+cancellation or wallpaper build, and the eva shell in that checkout (falling
+back to the older Caelestia path). Override `PREK_MORF_REPO`, `PREK_MORF_BINARY` or `PREK_MORF_SHELL` for
 another local build. The script enters the Morf development environment for its
 graphics dependencies. It uses the existing visible nested session with parent
 input isolation.

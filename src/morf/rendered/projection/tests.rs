@@ -1,7 +1,5 @@
 use super::*;
-#[test]
-fn layout_projection_requires_one_stable_owning_surface_and_keeps_keyboard_unknown() {
-    let at = Duration::from_secs(1);
+fn fixture(at: Duration) -> (Context, OutputState, Layer) {
     let mut context = super::super::tests::sample(at);
     let frame = context.frame.as_mut().unwrap();
     frame.surface = Some(SurfaceSpace {
@@ -9,6 +7,7 @@ fn layout_projection_requires_one_stable_owning_surface_and_keeps_keyboard_unkno
         width: 1500,
         height: 1200,
         local_scale: 1.5,
+        mapped_ns: Some(100_000_000),
     });
     let mut output = crate::context_transfer::tests::view(at)
         .context
@@ -32,11 +31,24 @@ fn layout_projection_requires_one_stable_owning_surface_and_keeps_keyboard_unkno
         level: 2,
         rect: output.rect(),
     };
-    let layers = [layer.clone()];
-    let mapped =
-        LayoutProjection::from_samples(&context, &output, &layers, &layers, (4321, 999), at)
+    (context, output, layer)
+}
+fn inventory(layers: &[Layer], map_in: Option<u64>) -> Inventory {
+    Inventory {
+        layers: layers.to_vec(),
+        map_in: map_in.map(Duration::from_millis),
+    }
+}
+#[test]
+fn layout_projection_requires_one_stable_owning_surface_and_keeps_keyboard_unknown() {
+    let at = Duration::from_secs(1);
+    let (context, output, layer) = fixture(at);
+    let layers = inventory(std::slice::from_ref(&layer), None);
+    let project = |before: &Inventory, after: &Inventory, pid| {
+        LayoutProjection::from_samples(&context, &output, before, after, (pid, 999), (at, at))
             .unwrap()
-            .unwrap();
+    };
+    let mapped = project(&layers, &layers, 4321).unwrap();
     assert_eq!(
         mapped.regions[0].bounds.unwrap(),
         Rect {
@@ -51,28 +63,16 @@ fn layout_projection_requires_one_stable_owning_surface_and_keeps_keyboard_unkno
         }
     );
     assert!(!output.keyboard_known);
+    assert!(!mapped.settled());
     mapped.validate(&context, &output, at).unwrap();
-    let mut duplicated = layers.to_vec();
     let mut extra = layer.clone();
     extra.address = "0x456".into();
-    duplicated.push(extra);
-    assert!(
-        LayoutProjection::from_samples(&context, &output, &duplicated, &layers, (4321, 999), at)
-            .unwrap()
-            .is_none()
-    );
+    let duplicated = inventory(&[layer.clone(), extra], None);
+    assert!(project(&duplicated, &layers, 4321).is_none());
     let mut changed = layer.clone();
     changed.level = 3;
-    assert!(
-        LayoutProjection::from_samples(&context, &output, &layers, &[changed], (4321, 999), at)
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        LayoutProjection::from_samples(&context, &output, &layers, &layers, (4322, 999), at)
-            .unwrap()
-            .is_none()
-    );
+    assert!(project(&layers, &inventory(&[changed], None), 4321).is_none());
+    assert!(project(&layers, &layers, 4322).is_none());
     let mut forged = mapped.clone();
     forged.regions[0].bounds.as_mut().unwrap().origin.x += 1.0;
     assert!(forged.validate(&context, &output, at).is_err());
@@ -84,4 +84,57 @@ fn layout_projection_requires_one_stable_owning_surface_and_keeps_keyboard_unkno
             .validate(&context, &output, at + Duration::from_millis(250))
             .is_err()
     );
+}
+#[test]
+fn layout_settles_only_after_its_map_bound_and_an_agreed_map_in_animation() {
+    let at = Duration::from_secs(1);
+    let (mut context, output, layer) = fixture(at);
+    let layer = std::slice::from_ref(&layer);
+    let project = |context: &Context, before, after, started| {
+        LayoutProjection::from_samples(
+            context,
+            &output,
+            &inventory(layer, before),
+            &inventory(layer, after),
+            (4321, 999),
+            (Duration::from_millis(started), at),
+        )
+        .unwrap()
+        .unwrap()
+    };
+    let settled = project(&context, Some(500), Some(500), 700);
+    assert!(settled.settled());
+    assert_eq!(settled.map_in_ns, Some(500_000_000));
+    assert_eq!(settled.rendered_from_ns, Some(700_000_000));
+    settled.validate(&context, &output, at).unwrap();
+    let early = project(&context, Some(500), Some(500), 699);
+    assert!(!early.settled());
+    assert_eq!(early.rendered_from_ns, Some(700_000_000));
+    for (before, after) in [(Some(500), Some(400)), (Some(500), None), (None, None)] {
+        let unknown = project(&context, before, after, 900);
+        assert!(!unknown.settled());
+        assert_eq!((unknown.map_in_ns, unknown.rendered_from_ns), (None, None));
+    }
+    let mut forged = early.clone();
+    forged.basis = Basis::SettledStockLayer;
+    assert!(forged.validate(&context, &output, at).is_err());
+    let mut forged = settled.clone();
+    forged.rendered_from_ns = Some(0);
+    assert!(forged.validate(&context, &output, at).is_err());
+    assert!(
+        LayoutProjection::from_samples(
+            &context,
+            &output,
+            &inventory(layer, None),
+            &inventory(layer, None),
+            (4321, 999),
+            (at + Duration::from_nanos(1), at),
+        )
+        .is_err()
+    );
+    let frame = context.frame.as_mut().unwrap();
+    frame.surface.as_mut().unwrap().mapped_ns = None;
+    let unmapped = project(&context, Some(500), Some(500), 900);
+    assert!(!unmapped.settled());
+    assert_eq!(unmapped.rendered_from_ns, None);
 }

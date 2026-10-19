@@ -59,6 +59,8 @@ pub struct Capabilities {
     layer_space: bool,
     #[serde(default)]
     keyboard_registry: bool,
+    #[serde(default)]
+    input_region: bool,
 }
 impl Capabilities {
     pub fn epoch(&self) -> &str {
@@ -93,6 +95,9 @@ impl Capabilities {
     }
     pub fn has_keyboard_registry(&self) -> bool {
         self.keyboard_registry
+    }
+    pub fn has_input_region(&self) -> bool {
+        self.input_region
     }
     fn validate(&self, state: &ShellState, previous: Option<u64>) -> io::Result<()> {
         if self.version != 1

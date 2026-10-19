@@ -122,16 +122,72 @@ pub(crate) fn parse(value: &Value, outputs: &[OutputState]) -> io::Result<Vec<La
     }
     Ok(result)
 }
+/// Longest accepted map-in animation; a slower setting yields no bound.
+const MAX_MAP_IN: Duration = Duration::from_secs(10);
+
+/// Stock layer inventory with the compositor's bound on a newly mapped
+/// layer's position animation, read in the same batch.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Inventory {
+    pub layers: Vec<Layer>,
+    pub map_in: Option<Duration>,
+}
+/// The global `animations:enabled` switch from a stock `getoption` reply.
+fn animations_enabled(option: &Value) -> Option<bool> {
+    if option["option"] != "animations:enabled" {
+        return None;
+    }
+    option["int"]
+        .as_i64()
+        .map(|value| value != 0)
+        .or_else(|| option["bool"].as_bool())
+}
+/// Effective `layersIn` duration. The tick warps every value while animations
+/// or the node are disabled; otherwise `speed` tenths of a second, which only
+/// a listed cubic bezier guarantees; springs and unknown curves have none.
+pub(crate) fn map_in(value: &Value, enabled: Option<bool>) -> Option<Duration> {
+    let [nodes, beziers] = value.as_array()?.as_slice() else {
+        return None;
+    };
+    let mut matching = nodes
+        .as_array()?
+        .iter()
+        .filter(|node| node["name"] == "layersIn");
+    let node = matching.next()?;
+    if matching.next().is_some() {
+        return None;
+    }
+    if !node["enabled"].as_bool()? || enabled == Some(false) {
+        return Some(Duration::ZERO);
+    }
+    let bezier = node["bezier"].as_str()?;
+    let speed = node["speed"]
+        .as_f64()
+        .filter(|speed| speed.is_finite() && *speed > 0.0)?;
+    if !beziers
+        .as_array()?
+        .iter()
+        .any(|curve| curve["name"] == bezier)
+    {
+        return None;
+    }
+    // Replies round speed to hundredths.
+    let bound = Duration::try_from_secs_f64((speed + 0.005) / 10.0).ok()?;
+    (bound <= MAX_MAP_IN).then_some(bound)
+}
 pub(crate) fn sample(
     client: &Client,
     outputs: &[OutputState],
     until: Instant,
     inhibited: &mut bool,
-) -> io::Result<Vec<Layer>> {
-    let bytes = client.exchange("[[BATCH]]j/locked;j/monitors;j/layers;j/locked", until)?;
+) -> io::Result<Inventory> {
+    let bytes = client.exchange(
+        "[[BATCH]]j/locked;j/monitors;j/layers;j/locked;j/animations;j/getoption animations:enabled",
+        until,
+    )?;
     decode(&bytes, outputs, inhibited)
 }
-fn decode(bytes: &[u8], outputs: &[OutputState], inhibited: &mut bool) -> io::Result<Vec<Layer>> {
+fn decode(bytes: &[u8], outputs: &[OutputState], inhibited: &mut bool) -> io::Result<Inventory> {
     let mut replies = serde_json::Deserializer::from_slice(bytes).into_iter::<Value>();
     let mut next = || {
         replies
@@ -146,9 +202,16 @@ fn decode(bytes: &[u8], outputs: &[OutputState], inhibited: &mut bool) -> io::Re
     let monitors = next()?;
     let layers = next()?;
     *inhibited |= super::context::locked(&next()?)?;
-    if *inhibited || replies.next().is_some() {
+    if *inhibited {
         return Err(invalid("layer inventory lacks unlocked context"));
     }
+    let trailing: Vec<_> = replies.by_ref().take(3).collect();
+    let map_in = match trailing.as_slice() {
+        [Ok(animations), Ok(option)] => map_in(animations, animations_enabled(option)),
+        [Ok(animations)] | [Ok(animations), Err(_)] => map_in(animations, None),
+        [Ok(_), Ok(_), _] => return Err(invalid("layer inventory has trailing replies")),
+        _ => None,
+    };
     let topology = super::context::parse_outputs(&monitors)?;
     if topology.len() != outputs.len()
         || outputs.iter().any(|o| {
@@ -159,7 +222,10 @@ fn decode(bytes: &[u8], outputs: &[OutputState], inhibited: &mut bool) -> io::Re
     {
         return Err(invalid("layer inventory output topology changed"));
     }
-    parse(&layers, outputs)
+    Ok(Inventory {
+        layers: parse(&layers, outputs)?,
+        map_in,
+    })
 }
 
 #[cfg(test)]

@@ -2021,4 +2021,43 @@ mod tests {
             Rejection::TargetMissing,
         );
     }
+    #[test]
+    fn a_settled_morf_shell_scopes_the_phone_edges_its_coarse_layer_hid() {
+        use crate::morf::rendered::{KeyboardState, scopes};
+        let mut authority = authority();
+        let source = source();
+        let map = mapping();
+        let mut strip = rule("G11_left");
+        strip.delivery = Delivery::Reserve;
+        let bottom = [point(100, 1960), point(300, 1960)];
+        let mut output = snapshot(1, 1, 0).outputs.remove(0);
+        output.keyboard_known = false;
+        output.keyboard = None;
+        let mut coarse = scopes::tests::coarse(output, ms(200));
+        coarse.generation = authority.generation();
+        coarse.revision = 2;
+        authority.update(coarse.clone(), ms(200)).unwrap();
+        error(
+            authority.start(&strip, input(&source, &map, 200), &[point(4, 200)]),
+            Rejection::KeyboardUnavailable,
+        );
+        error(
+            authority.start(&rule("G05"), input(&source, &map, 200), &bottom),
+            Rejection::KeyboardUnavailable,
+        );
+        let view = scopes::tests::shell(&coarse.outputs[0], ms(200), KeyboardState::Hidden);
+        scopes::apply(&mut coarse, &[view], ms(200));
+        coarse.revision = 3;
+        authority.update(coarse, ms(200)).unwrap();
+        authority
+            .start(&strip, input(&source, &map, 200), &[point(4, 200)])
+            .unwrap();
+        authority
+            .start(&rule("G05"), input(&source, &map, 200), &bottom)
+            .unwrap();
+        error(
+            authority.start(&strip, input(&source, &map, 200), &[point(4, 1960)]),
+            Rejection::OutsideRegion,
+        );
+    }
 }

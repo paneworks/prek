@@ -87,7 +87,9 @@ p.events.on('ready',function()
   assert(c.frame.surface.namespace=='shell' and c.frame.surface.local_scale==1)
   assert(c.frame.keyboard.scope=='registered_morf_primary' and c.frame.keyboard.state=='visible')
   assert(c.frame.keyboard.node=='18446744073709551615')
-  assert(reports[1].layout.basis=='stock_layer_layout' and reports[1].layout.producer_start=='18446744073709551615')
+  assert(reports[1].layout.basis=='settled_stock_layer' and reports[1].layout.producer_start=='18446744073709551615')
+  assert(c.frame.surface.mapped_ns=='100000000' and reports[1].layout.map_in_ns=='500000000')
+  assert(reports[1].layout.rendered_from_ns=='700000000' and reports[1].layout.started_ns=='999000000')
   assert(reports[1].layout.regions[1].bounds.origin.x==10.25)
   c.frame.regions[1].id='forged'
   c.frame.regions[1].semantic.layout='forged'
@@ -150,6 +152,7 @@ return {version=1}
             width: 1000,
             height: 800,
             local_scale: 1.0,
+            mapped_ns: Some(100_000_000),
         });
         frame.keyboard = Some(crate::morf::rendered::KeyboardRegistry {
             scope: crate::morf::rendered::RegistryScope::RegisteredMorfPrimary,
@@ -167,13 +170,17 @@ return {version=1}
             level: 2,
             rect: output.rect(),
         };
+        let inventory = crate::hyprland::layers::Inventory {
+            layers: vec![layer],
+            map_in: Some(Duration::from_millis(500)),
+        };
         report.layout = crate::morf::rendered::LayoutProjection::from_samples(
             &report.context,
             output,
-            std::slice::from_ref(&layer),
-            std::slice::from_ref(&layer),
+            &inventory,
+            &inventory,
             (4321, u64::MAX),
-            at,
+            (at - Duration::from_millis(1), at),
         )
         .unwrap();
         runtime.set_context(current.clone(), at).unwrap();

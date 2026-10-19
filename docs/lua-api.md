@@ -74,24 +74,49 @@ masked and exiting subtrees. They are bounding boxes, including for curved or
 rotated items. `interactive` describes an enabled native input target itself;
 it does not describe the exact hit shape or the compositor input mask.
 
-With native `layer_space` support, `frame.surface={namespace,width,height,local_scale}`
+With native `layer_space` support, `frame.surface={namespace,width,height,local_scale,mapped_ns?}`
 identifies the immutable Wayland layer namespace and native logical viewport;
 multiply Morf local coordinates by `local_scale` to obtain compositor logical
-units. An optional report-level `layout` contains `basis="stock_layer_layout"`,
-`producer_pid`, exact decimal-string `producer_start`, `geometry_generation`
-and `sampled_ns`, owning output geometry, matched `surface` and projected
-`regions`. Each projected row preserves its native identity and metadata;
+units. `mapped_ns`, once present, is the decimal CLOCK_MONOTONIC time at which
+Morf received the surface's first frame callback, an upper bound of its
+compositor map time. An optional report-level `layout` contains `basis`,
+`producer_pid`, exact decimal-string `producer_start`, `geometry_generation`,
+`started_ns` and `sampled_ns`, optional `map_in_ns` and `rendered_from_ns`,
+owning output geometry, matched `surface` and projected `regions`. Each
+projected row preserves its native identity and metadata;
 `bounds={origin={x,y},size={x,y}}` is global logical layout geometry, or `nil`
 when the native viewport clips it completely. This mapping requires one stable
 compositor layer with the same native producer, namespace, output and viewport.
-Stock layout coordinates do not track animated rendered position.
+
+`basis="stock_layer_layout"` describes the layout goal, which an animating
+layer has not reached. `basis="settled_stock_layer"` means the layer's map-in
+animation was provably over before `started_ns`, the time before the first of
+the two bracketing layer samples. `map_in_ns` is the stock `layersIn` bound and
+is present only when both samples agree. It is zero while `animations:enabled`
+is off or the node is disabled, because the stock tick then warps every
+animated value. Otherwise it is `speed` tenths of a second for a listed cubic
+bezier; springs and unknown curves give no bound.
+`rendered_from_ns = mapped_ns + map_in_ns + 100ms` must not exceed
+`started_ns`. Stock layers move without animation once mapped, so a settled box
+is the layer's current position. It is still not presentation, stacking or the
+surface's input mask, and a spring defined with a listed bezier's name cannot
+be distinguished through stock IPC.
 
 With `keyboard_registry` support, `frame.keyboard` contains
 `{scope="registered_morf_primary",registered,state,node?,layout?}`. `state` is
 `unknown`, `hidden` or `visible`. Known states identify exactly one declared
 keyboard on the primary scene. A hidden registered keyboard says nothing about
-other programs' keyboards. These fields remain inspection data and do not set
-snapshot `keyboard_known` or authorize gestures.
+other programs' keyboards. In the report itself these fields are inspection
+data; see below for how a settled report updates the routing snapshot.
+
+With `input_region` support, `frame.input` lists the rectangles of the input
+region committed with that frame, `{x,y,width,height}` in Morf layout units; it
+is absent when Morf did not describe it (a configured mask or more than 512
+rectangles), which means unknown, not empty. `layout.input` holds the same
+rectangles as global logical boxes, scaled by `local_scale`, rounded outward
+and clipped to the layer. `layout.exclusive` is true when neither bracketing
+stock sample showed another process's bottom, top or overlay layer on that
+output.
 
 The native host records a successful GPU submission, then refreshes unchanged
 geometry only while the current scene, surface size/scale and Lua generation
@@ -103,10 +128,24 @@ native binding around each read within the shared 200 ms deadline. Lua gets
 independent tables, `nil` without fresh desktop context and an empty array when
 no fresh report is available. Unavailable reports are never proof of absence.
 
-These inspection bounds do not populate gesture scopes or keyboard state. They
-do not prove compositor presentation, authentication, keyboard absence, surface
-stacking or the contents of auxiliary layers. Complete semantic regions and
-production ownership/cutover remain required before Morf action negotiation.
+The broker refines its desktop snapshot from a fresh report only when its
+`layout` is `settled_stock_layer` and describes `input`, and the stock snapshot
+holds that exact layer as `layer:<output>:<address>`. That coarse interactive
+region is then replaced by one interactive region per input rectangle
+(`morf:<epoch>:input:<i>`) and one region per visible semantic node
+(`morf:<epoch>:node:<node>`): `local_control` is an interactive unscoped region,
+and `clock_background`, `content_bottom`, `physical_bottom`, `top_left`,
+`top_right`, `side_left` and `side_right` become regions of that scope. On an
+exclusive output whose keyboard is still unknown, a `hidden` registry sets
+`keyboard_known=true` without geometry, and a `visible` one also sets
+`keyboard={rect,layout}` from the registered node. Any visible `secure_overlay`
+node sets `secure_overlay=true`, settled or not. An inconsistent view changes
+nothing else. The result must still pass snapshot validation.
+
+This does not prove compositor presentation, authentication, surface stacking
+or the contents of auxiliary layers, and other programs' xdg windows are not
+keyboards for this purpose. Production ownership/cutover remains required
+before Morf action negotiation.
 
 Output snapshots explicitly distinguish keyboard knowledge. `keyboard_known=false`
 means unknown, even when `keyboard=nil`. Keyboard visibility conditions and
@@ -115,9 +154,9 @@ A known state with no keyboard geometry establishes hidden; a known state with
 geometry establishes visible. Knowledge loss invalidates frozen output targets.
 Explicit global rules can remain independent of keyboard context, and an explicit
 screen-off rule can use its supplied region without inferring a visible keyboard.
-Stock compositor metadata reports unknown. Native annotations remain inspection
-data until a complete, verified output mapping/coverage provider supplies knowledge;
-missing keyboard annotations cannot establish hidden.
+Stock compositor metadata reports unknown. Only the settled, exclusive Morf
+refinement above supplies knowledge; missing keyboard annotations cannot
+establish hidden.
 
 ## Editor definitions
 
