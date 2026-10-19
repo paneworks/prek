@@ -13,7 +13,8 @@ Run `prek api --json` for the installed manifest or inspect `prek.api` in Lua.
 `oslo make test-lua-api` requires every function reachable from `require('prek')`
 and every method on a returned replay, timer, task, subscription or rule
 transaction to appear in the manifest, every manifest symbol to resolve to a real
-function and be cited here, and the editor stubs to match the manifest. It also
+function and be cited here, the editor stubs to match the manifest, and every
+editor class field to be described in README or `docs/`. It also
 runs `prek check --json` on every shipped `examples/lua` entry point (top-level
 files and each directory's `config.lua`) and dispatches each one's `ready`
 event with a session-shaped `{fence, seat}` payload; other Lua files must live
@@ -1116,6 +1117,47 @@ activation keys, permitted seats and source selectors. A rule accepts `id`,
 `enabled`, `priority`, `devices`, `seats`, `contexts`, `scope`, `output`, `screen`,
 `keyboard_visible`, `require_keys`, `keys_throughout`, `layer`, `delivery`,
 `trigger` and `action`. Existing defaults and exact units remain in effect.
+
+### Timing, policy, selector and shape fields
+
+Every `timing` field is optional. Durations need `ms`, `s` or `m`; distances
+need `mm`, `px` or `norm`.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `tap_max` | `250ms` | Longest press, or contact group, that still counts as a tap. |
+| `tap_gap` | `300ms` | Wait after a release before a tap count is final. |
+| `hold_after` | `600ms` | Press duration that reports a hold; must exceed `tap_max`. |
+| `join_window` | `120ms` | Time for further contacts to join a touch group before a touch claim. |
+| `decision_window` | `300ms` | Longest buffered input waits for a decision before ordinary delivery. |
+| `swipe_timeout` | `1500ms` | Longest a contact group may last and still complete a swipe. |
+| `tap_motion` | `3mm` | Contact movement that disqualifies a tap. |
+| `fallback_motion` | `0.01norm` | Normalized movement used without physical size; must use `norm`. |
+| `pan_slop` | `3mm` | Coherent movement before a pan begins. |
+
+Validation requires `0 < join_window <= decision_window <= 5000ms`; buffered
+routing additionally requires `join_window < decision_window`.
+
+`policy` is protected system policy. `allowed_devices` names the selector IDs a
+broker may open and `allowed_seats` the seats it may serve (default
+`{"seat0"}`). `allow_runtime_rules`, `allow_input_events`,
+`allow_power_actions` and `allow_hyprland_actions` default to false and must be
+booleans.
+
+A `devices` selector matches a non-virtual device whose `identity`, `path`,
+`name`, `physical`, `unique` and `seat` equal every given value, which reports
+every listed `keys` code and every listed `absolute_axes` code (numeric
+`EV_ABS` codes, for example `53`/`54` for multi-touch X/Y), and which has every
+listed input `properties` code.
+
+A `shapes` template has a `name`, 2–2048 `points`, a `threshold`
+(minimum similarity in `(0, 1]`) and a `margin` (minimum lead over the runner-up
+in `(0, 1]`; a smaller lead is ambiguous and produces no match). Optional
+`rotation_invariant` aligns the input to the template's best rotation and
+`reflection_invariant` also tries horizontally and vertically mirrored input.
+A match reports `ShapeMatch {name, confidence, margin}` with that lead. Wheel
+evidence reports `amount`, the signed steps accumulated since the previous
+match; its magnitude reaches the rule's `minimum`.
 
 ## Trigger constructors
 

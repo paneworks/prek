@@ -46,6 +46,45 @@ mod tests {
     }
 
     #[test]
+    fn every_editor_field_is_described_by_the_documentation() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut documentation = std::fs::read_to_string(root.join("README.md")).unwrap();
+        for entry in std::fs::read_dir(root.join("docs")).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|extension| extension == "md") {
+                documentation.push_str(&std::fs::read_to_string(path).unwrap());
+            }
+        }
+        let word = |text: &str, name: &str| {
+            text.match_indices(name).any(|(index, _)| {
+                let boundary = |c: char| !c.is_ascii_alphanumeric() && c != '_';
+                text[..index].chars().next_back().is_none_or(boundary)
+                    && text[index + name.len()..]
+                        .chars()
+                        .next()
+                        .is_none_or(boundary)
+            })
+        };
+        let mut missing = Vec::new();
+        let mut lines = editor_definitions().lines().peekable();
+        while let Some(line) = lines.next() {
+            let Some(class) = line.strip_prefix("---@class (exact) prek.") else {
+                continue;
+            };
+            while let Some(field) = lines.next_if(|line| line.starts_with("---@field ")) {
+                let name = field["---@field ".len()..]
+                    .split([' ', '?'])
+                    .next()
+                    .unwrap();
+                if !word(&documentation, name) {
+                    missing.push(format!("{class}.{name}"));
+                }
+            }
+        }
+        assert!(missing.is_empty(), "undocumented fields: {missing:?}");
+    }
+
+    #[test]
     fn editor_configuration_fields_match_serialized_rust_models() {
         use crate::config::{Config, Key, Layer, LayerActivation, NamedMode, Selector};
 
