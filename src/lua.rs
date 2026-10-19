@@ -547,6 +547,10 @@ local handlers = __prek_handlers
 __prek_handlers = nil
 local modules = __prek_modules
 __prek_modules = nil
+local rule_sites = setmetatable(__prek_rule_sites, {__mode="k"})
+__prek_rule_sites = nil
+local rule_site = api.rules.__site
+api.rules.__site = nil
 local handler_guard = api.actions.__guard
 api.actions.__guard = nil
 function api.actions.define(name, options, callback)
@@ -655,6 +659,7 @@ function api.config.new(value)
 end
 function api.rules.define(value)
     assert(type(value) == "table", "rules.define expects a table")
+    rule_sites[value] = rule_site()
     for _,phase in ipairs({"discrete","begin","update","end","cancel"}) do
         local key="on_" .. phase
         if value[key]~=nil then
@@ -822,7 +827,7 @@ fn instantiate(
         configuring: true,
         ..Default::default()
     }));
-    let (registry, timers, handlers, module_loaders, tasks) = lua
+    let (registry, timers, handlers, module_loaders, tasks, rule_sites) = lua
         .try_enter(|ctx| {
             ctx.set_max_call_depth(256);
             let module = Table::new(&ctx);
@@ -984,12 +989,34 @@ fn instantiate(
                     self::devices::getter(&ctx, host.clone(), "seat"),
                 )?;
             }
+            let rule_sites = Table::new(&ctx);
+            ctx.globals().set(ctx, "__prek_rule_sites", rule_sites)?;
+            let rules: Table = module.get(ctx, "rules")?;
+            rules.set(
+                ctx,
+                "__site",
+                Callback::from_fn(&ctx, |ctx, exec, mut stack| {
+                    match exec.frame_at(1) {
+                        Some(frame) => {
+                            let site = format!(
+                                "{}:{}",
+                                frame.chunk_name.display_lossy(),
+                                frame.current_line
+                            );
+                            stack.replace(ctx, ctx.intern(site.as_bytes()));
+                        }
+                        None => stack.replace(ctx, Value::Nil),
+                    }
+                    Ok(CallbackReturn::Return)
+                }),
+            )?;
             Ok((
                 ctx.stash(registry),
                 ctx.stash(timers),
                 ctx.stash(handlers),
                 ctx.stash(module_loaders),
                 ctx.stash(tasks),
+                ctx.stash(rule_sites),
             ))
         })
         .map_err(error)?;
@@ -1039,7 +1066,8 @@ fn instantiate(
             if values.0.len() != 1 {
                 return Err(io::Error::other("Lua configuration must return one table").into());
             }
-            let config = self::values::configuration(ctx, values.0[0])?;
+            let config =
+                self::values::located_configuration(ctx, values.0[0], ctx.fetch(&rule_sites))?;
             config.validate().map_err(io::Error::other)?;
             Ok(config)
         })
@@ -1201,6 +1229,41 @@ return {{version=1,policy={{allow_runtime_rules=true}}}}
             .dispatch(EventKind::Ready, &serde_json::json!({}))
             .unwrap();
         assert!(logs.iter().any(|log| log.message == "methods-documented"));
+    }
+    #[test]
+    fn invalid_rules_report_their_index_id_and_defining_statement() {
+        let error = compile(
+            "local p=require('prek')\n\
+             local second=p.rules.define{id='second',tirgger=p.triggers.key{key='KEY_B'},action=p.actions.event{name='b'}}\n\
+             return p.config.new{rules={\n\
+              p.rules.define{id='first',trigger=p.triggers.key{key='KEY_A'},action=p.actions.event{name='a'}},\n\
+              second,\n\
+             }}",
+            "bad-rules.lua",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("bad-rules.lua:2: rules[2] (\"second\"): unknown field `tirgger`"),
+            "{error}"
+        );
+        let error = compile(
+            "return {version=1,rules={{id='plain',trigger={kind='key',key='KEY_NOPE'},action={kind='event',name='c'}}}}",
+            "plain-rules.lua",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("rules[1] (\"plain\"): unknown key \"KEY_NOPE\""),
+            "{error}"
+        );
+        let error = compile(
+            "return {version=1,devices={keyboard={kees={'KEY_A'}}}}",
+            "bad-device.lua",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(!error.contains("rules["), "{error}");
     }
     #[test]
     fn every_manifest_symbol_is_cited_by_the_reference() {

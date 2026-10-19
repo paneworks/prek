@@ -1569,4 +1569,8 @@ at 1 MiB; the source/model/registration snapshot is capped at 4 MiB, and compile
 diagnostics at 4 KiB. Failed or abandoned children are
 killed and reaped. These bounds do not establish a complete system-call sandbox.
 Syntax/runtime errors include the named Lua chunk; schema errors identify invalid
-data. A rejected model does not become the worker's active configuration.
+data. A rule that fails on its own is reported as
+`chunk:line: rules[index] ("id"): reason`; the line is that of the statement
+which called `rules.define`, because the pinned Luna attributes lines per
+statement, and it is omitted for plain-table rules. A rejected model does not
+become the worker's active configuration.

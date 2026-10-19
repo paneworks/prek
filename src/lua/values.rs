@@ -33,6 +33,65 @@ pub(super) fn configuration<'gc>(
     decode(ctx, value, 64, CONFIG_VALUES, CONFIG_EXPANDED_BYTES)
 }
 
+/// Decode a returned configuration; schema failures name the first failing rule.
+pub(super) fn located_configuration<'gc>(
+    ctx: Context<'gc>,
+    value: Value<'gc>,
+    sites: Table<'gc>,
+) -> Result<Config, luna::Error<'gc>> {
+    configuration_fields(ctx, value)?;
+    budget(ctx, value, 64, CONFIG_VALUES, CONFIG_EXPANDED_BYTES)?;
+    luna_util::serde::from_value_with(
+        ctx,
+        value,
+        luna_util::serde::DeOptions::default().max_depth(64),
+    )
+    .map_err(|error| locate_rule(ctx, value, sites, io::Error::other(error).into()))
+}
+
+/// Name the first rule that fails on its own, with its `rules.define` call site.
+fn locate_rule<'gc>(
+    ctx: Context<'gc>,
+    value: Value<'gc>,
+    sites: Table<'gc>,
+    error: luna::Error<'gc>,
+) -> luna::Error<'gc> {
+    let Value::Table(config) = value else {
+        return error;
+    };
+    let Ok(Value::Table(rules)) = config.get::<_, Value>(ctx, "rules") else {
+        return error;
+    };
+    for index in 1..=crate::config::MAX_RULES as i64 {
+        let Ok(rule) = rules.get::<_, Value>(ctx, index) else {
+            return error;
+        };
+        if rule.is_nil() {
+            return error;
+        }
+        let Err(reason) = luna_util::serde::from_value_with::<crate::config::Rule>(
+            ctx,
+            rule,
+            luna_util::serde::DeOptions::default().max_depth(64),
+        ) else {
+            continue;
+        };
+        let id = match rule {
+            Value::Table(table) => match table.get::<_, Value>(ctx, "id") {
+                Ok(Value::String(id)) => format!(" ({:?})", id.display_lossy().to_string()),
+                _ => String::new(),
+            },
+            _ => String::new(),
+        };
+        let site = match sites.get::<_, Value>(ctx, rule) {
+            Ok(Value::String(site)) => format!("{}: ", site.display_lossy()),
+            _ => String::new(),
+        };
+        return io::Error::other(format!("{site}rules[{index}]{id}: {reason}")).into();
+    }
+    error
+}
+
 pub(super) fn configuration_fields<'gc>(ctx: Context<'gc>, value: Value<'gc>) -> io::Result<()> {
     policy_booleans(ctx, value)?;
     if let Value::Table(config) = value {
