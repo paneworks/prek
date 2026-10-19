@@ -98,6 +98,12 @@ exercises Luna and the isolated compile worker. Evidence lands in
 and `hardware=false`. Emulation is not ARM64 hardware, phone, native-bundle or
 system-loader evidence.
 
+`oslo make build-aarch64-msrv` and `exec-aarch64-msrv` repeat both steps with the
+declared 1.88 minimum toolchain in the `cross-aarch64-msrv` shell. Their
+evidence stays separate under `target/cross-aarch64-msrv`. Every build receipt
+records the `rustc --version` that produced it, and each execution receipt
+repeats it as `build_toolchain`.
+
 This is a **dynamic musl cross-build**, not a portable standalone binary or the
 native GNU/Nix ARM64 bundle. The target needs the recorded loader, libraries and
 runtime integration; cross-compilation does not prove they are installed or
