@@ -1215,8 +1215,7 @@ fn t85_installed_api_discovery_matches_the_configuration_manifest() {
     assert!(String::from_utf8_lossy(&denied.stderr).contains("--lua"));
 }
 
-#[test]
-fn t86_every_shipped_lua_example_entry_point_checks_without_edits() {
+fn lua_example_entries() -> Vec<std::path::PathBuf> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/lua");
     let mut entries = Vec::new();
     let mut pending = vec![root.clone()];
@@ -1244,7 +1243,12 @@ fn t86_every_shipped_lua_example_entry_point_checks_without_edits() {
     }
     entries.sort();
     assert!(entries.len() >= 25, "{entries:?}");
-    for path in entries {
+    entries
+}
+
+#[test]
+fn t86_every_shipped_lua_example_entry_point_checks_without_edits() {
+    for path in lua_example_entries() {
         let result = run(&["check", "--config", path.to_str().unwrap(), "--json"]);
         assert!(
             result.status.success(),
@@ -1254,6 +1258,30 @@ fn t86_every_shipped_lua_example_entry_point_checks_without_edits() {
         );
         let checked: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
         assert_eq!(checked["status"], "valid", "{}", path.display());
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn t86_every_shipped_lua_example_runs_its_ready_callbacks() {
+    use prek::{
+        lua::{Definition, EventKind, Sources},
+        protocol::{Epoch, Fence},
+    };
+    let fence = Fence {
+        broker: Epoch([1, 2]),
+        configuration: 1,
+        session: 1,
+    };
+    let payload = serde_json::json!({"fence": fence, "seat": "seat0"});
+    for path in lua_example_entries() {
+        let sources = Sources::capture(fs::read_to_string(&path).unwrap(), &path).unwrap();
+        let definition = Definition::compile_sources(&sources).unwrap();
+        let mut runtime = definition.instantiate().unwrap();
+        runtime.enable_rule_transactions();
+        if let Err(error) = runtime.dispatch(EventKind::Ready, &payload) {
+            panic!("{}: {error}", path.display());
+        }
     }
 }
 
