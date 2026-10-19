@@ -211,13 +211,73 @@ fn refresh(routing: &mut Routing, revision: u64, now: Duration) {
     routing.actions_available(1, BTreeSet::from([Capability::Observations]), now);
 }
 
-#[test]
-#[ignore = "long soak; run with oslo make soak-routing"]
-fn scoped_routing_keeps_bounded_memory_and_frame_overhead_for_an_hour() {
+const KEYBOARD_CONFIG: &str = r#"
+local p=require('prek')
+return p.config.new {
+    mode='route', policy={allowed_devices={'keyboard'}},
+    devices={keyboard={name='Prek soak keyboard'}},
+    rules={
+        p.rules.define {id='f13', devices={'keyboard'}, contexts={'desktop'}, scope='everywhere',
+            delivery='buffer', trigger=p.triggers.key {key='KEY_F13'}, action=p.actions.event {name='f13'}},
+    },
+}
+"#;
+const KEY_A: u16 = 30;
+const KEY_F13: u16 = 183;
+
+fn keyboard() -> Device {
+    Device {
+        identity: "test:soak-keyboard".into(),
+        source: Source {
+            device: 2,
+            generation: 1,
+            seat: "seat0".into(),
+        },
+        name: "Prek soak keyboard".into(),
+        path: String::new(),
+        physical: "fixture/soak-keyboard".into(),
+        unique: String::new(),
+        vendor: 0x1209,
+        product: 0xbeee,
+        properties: vec![],
+        virtual_device: false,
+        capabilities: BTreeMap::from([(EV_SYN, vec![0]), (EV_KEY, vec![KEY_A, KEY_F13])]),
+        axes: BTreeMap::new(),
+    }
+}
+
+/// One 480 ms cycle: ordinary typing around one consumed F13 press.
+fn typing(slot: u64) -> Vec<RawEvent> {
+    match slot % 60 {
+        0 | 30 => vec![raw(EV_KEY, KEY_A, 1)],
+        2 | 31 => vec![raw(EV_KEY, KEY_A, 0)],
+        10 => vec![raw(EV_KEY, KEY_F13, 1)],
+        14 => vec![raw(EV_KEY, KEY_F13, 0)],
+        _ => Vec::new(),
+    }
+}
+
+struct Soak {
+    receipt: serde_json::Value,
+    cycles: u64,
+    dispatches: u64,
+    delivered: u64,
+    growth: u64,
+    p99: Duration,
+}
+
+fn soak(
+    label: &str,
+    source: &str,
+    device: Device,
+    touch: bool,
+    script: fn(u64) -> Vec<RawEvent>,
+    inspect: &mut dyn FnMut(&Frame),
+) -> Soak {
     let seconds: u64 = std::env::var("PREK_SOAK_SECONDS")
         .ok()
         .map_or(3600, |value| value.parse().unwrap());
-    let config = Definition::compile(CONFIG, "routing-soak.lua")
+    let config = Definition::compile(source, "routing-soak.lua")
         .unwrap()
         .validate()
         .unwrap();
@@ -243,24 +303,21 @@ fn scoped_routing_keeps_bounded_memory_and_frame_overhead_for_an_hour() {
         )
         .unwrap();
     refresh(&mut routing, 1, Duration::ZERO);
-    let device = device();
-    let mut mapping = Mapping::from_device(&device).unwrap();
-    mapping.generation = 2;
-    mapping.output = Some(Output {
-        name: "SOAK-1".into(),
-        pixel_width: 1000.0,
-        pixel_height: 1000.0,
-        scale: 1.0,
-        origin: Point { x: 0.0, y: 0.0 },
-        transform: Transform::Normal,
+    let mapping = touch.then(|| {
+        let mut mapping = Mapping::from_device(&device).unwrap();
+        mapping.generation = 2;
+        mapping.output = Some(Output {
+            name: "SOAK-1".into(),
+            pixel_width: 1000.0,
+            pixel_height: 1000.0,
+            scale: 1.0,
+            origin: Point { x: 0.0, y: 0.0 },
+            transform: Transform::Normal,
+        });
+        mapping
     });
     routing
-        .attach(
-            device.clone(),
-            &ready(&device),
-            Some(mapping),
-            Duration::ZERO,
-        )
+        .attach(device.clone(), &ready(&device), mapping, Duration::ZERO)
         .unwrap();
     let step = Duration::from_millis(8);
     let end = Duration::from_secs(seconds);
@@ -298,6 +355,7 @@ fn scoped_routing_keeps_bounded_memory_and_frame_overhead_for_an_hour() {
             routing
                 .delivered(&device.source, scheduled.ticket, now)
                 .unwrap();
+            inspect(&scheduled.frame);
             delivered += 1;
         }
         dispatches += routing.take_dispatches(now).len() as u64;
@@ -342,20 +400,66 @@ fn scoped_routing_keeps_bounded_memory_and_frame_overhead_for_an_hour() {
     let directory = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("routing-soak");
     std::fs::create_dir_all(&directory).unwrap();
     std::fs::write(
-        directory.join("receipt.json"),
+        directory.join(format!("{label}.json")),
         serde_json::to_vec_pretty(&receipt).unwrap(),
     )
     .unwrap();
-    eprintln!("{receipt}");
-    let cycles = slot / 60;
+    eprintln!("{label}: {receipt}");
+    Soak {
+        receipt,
+        cycles: slot / 60,
+        dispatches,
+        delivered,
+        growth: peak - warm,
+        p99: percentile(99),
+    }
+}
+
+#[test]
+#[ignore = "long soak; run with oslo make soak-routing"]
+fn scoped_routing_keeps_bounded_memory_and_frame_overhead_for_an_hour() {
+    let run = soak("touch", CONFIG, device(), true, script, &mut |_| {});
+    let receipt = &run.receipt;
     assert!(
-        dispatches + 1 >= cycles && dispatches <= cycles + 1,
+        run.dispatches + 1 >= run.cycles && run.dispatches <= run.cycles + 1,
         "{receipt}"
     );
     assert!(
-        delivered + 4 >= 4 * cycles && delivered <= 4 * (cycles + 1),
+        run.delivered + 4 >= 4 * run.cycles && run.delivered <= 4 * (run.cycles + 1),
         "consumed swipes must not leak: {receipt}"
     );
-    assert!(peak - warm < 4 * 1024 * 1024, "{receipt}");
-    assert!(percentile(99) < Duration::from_millis(5), "{receipt}");
+    assert!(run.growth < 4 * 1024 * 1024, "{receipt}");
+    assert!(run.p99 < Duration::from_millis(5), "{receipt}");
+}
+
+#[test]
+#[ignore = "long soak; run with oslo make soak-routing"]
+fn scoped_key_journal_keeps_bounded_memory_and_never_leaks_a_consumed_key() {
+    let (mut ordinary, mut leaked) = (0u64, 0u64);
+    let run = soak(
+        "keyboard",
+        KEYBOARD_CONFIG,
+        keyboard(),
+        false,
+        typing,
+        &mut |frame| {
+            for event in &frame.events {
+                if event.kind == EV_KEY && event.code == KEY_A && event.value == 1 {
+                    ordinary += 1;
+                }
+                if event.kind == EV_KEY && event.code == KEY_F13 {
+                    leaked += 1;
+                }
+            }
+        },
+    );
+    let receipt = &run.receipt;
+    assert_eq!(leaked, 0, "consumed F13 reached the consumer: {receipt}");
+    assert!(
+        ordinary + 2 >= 2 * run.cycles && ordinary <= 2 * (run.cycles + 1),
+        "{receipt}"
+    );
+    assert!(run.dispatches + 1 >= run.cycles, "{receipt}");
+    assert!(run.growth < 4 * 1024 * 1024, "{receipt}");
+    assert!(run.p99 < Duration::from_millis(5), "{receipt}");
 }

@@ -852,11 +852,14 @@ staging keeps scalar and contact fates independent.
 `oslo make soak-routing` drives the scoped constructor through one virtual hour
 (`--seconds` overrides it) of 8 ms slots: per 480 ms cycle a consumed two-finger
 swipe, an ordinary tap and a motionless pair that falls back after the decision
-window. It requires one dispatch and four ordinary reports per cycle, no
-recovery, resident-memory growth under 4 MiB after warm-up and a per-slot
-push/drain 99th percentile under 5 ms, and writes
-`target/tmp/routing-soak/receipt.json`. This measures implementation overhead,
-not the configured decision windows, kernel I/O or compositor delivery.
+window. It requires one dispatch and four ordinary reports per cycle. A second
+keyboard workload types ordinary `A` around one consumed `F13` press per cycle
+and requires every `A` press delivered and no `F13` event ever delivered. Both
+require no recovery, resident-memory growth under 4 MiB after warm-up and a
+per-slot push/drain 99th percentile under 5 ms, and write
+`target/tmp/routing-soak/{touch,keyboard}.json`. This measures implementation
+overhead, not the configured decision windows, kernel I/O or compositor
+delivery.
 
 The managed route worker builds every seat with `Routing::with_input_projection`.
 Its supervised helper gates, the touch Cage and the 42-phase key Cage run in both
