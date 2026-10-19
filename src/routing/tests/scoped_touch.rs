@@ -705,3 +705,47 @@ fn scoped_touch_reload_while_held_releases_only_what_the_consumer_saw() {
         }
     }
 }
+
+#[test]
+fn scoped_touch_device_loss_and_lock_mid_gesture_release_only_what_the_consumer_saw() {
+    for scoped in [false, true] {
+        for trigger in ["remove", "lock"] {
+            for claimed in [false, true] {
+                let label = format!("scoped={scoped}, {trigger}, claimed={claimed}");
+                let mut routing = prepared(config(), true, scoped);
+                if claimed {
+                    contact(&mut routing, 1, 0, 2);
+                    movement(&mut routing, 2, 140, 1500, 2);
+                    assert!(drain(&mut routing, 140).is_empty(), "{label}");
+                } else {
+                    contact(&mut routing, 1, 20, 1);
+                    routing.push(Record::Tick { at: ms(140) }).unwrap();
+                    assert_eq!(drain(&mut routing, 140).len(), 1, "{label}");
+                }
+                if trigger == "remove" {
+                    routing
+                        .push(Record::Remove {
+                            source: device().source,
+                            at: ms(150),
+                        })
+                        .unwrap();
+                } else {
+                    routing.authority_mut().lock_requested();
+                    routing.push(Record::Tick { at: ms(150) }).unwrap();
+                }
+                let recoveries = routing.take_recoveries();
+                assert_eq!(recoveries.len(), 1, "{label}");
+                let releases = &recoveries[0].neutral_events;
+                assert_eq!(
+                    releases.iter().any(|event| event.kind == EV_ABS
+                        && event.code == ABS_MT_TRACKING_ID
+                        && event.value == -1),
+                    !claimed,
+                    "{label}: {releases:?}"
+                );
+                assert!(routing.take_dispatches(ms(150)).is_empty(), "{label}");
+                assert!(routing.due(&device().source, ms(150)).is_err(), "{label}");
+            }
+        }
+    }
+}
