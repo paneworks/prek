@@ -13,7 +13,10 @@ Run `prek api --json` for the installed manifest or inspect `prek.api` in Lua.
 `oslo make test-lua-api` requires every function reachable from `require('prek')`
 and every method on a returned replay, timer, task, subscription or rule
 transaction to appear in the manifest, every manifest symbol to resolve to a real
-function and be cited here, and the editor stubs to match the manifest.
+function and be cited here, and the editor stubs to match the manifest. It also
+runs `prek check --json` on every shipped `examples/lua` entry point (top-level
+files and each directory's `config.lua`); other Lua files must live under a
+`modules/` tree.
 
 ## Native Morf connections
 

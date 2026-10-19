@@ -371,10 +371,10 @@ make.recipe{ name="test-lua-tasks", desc="owned coroutine scheduling, joining an
                end
              end }
 
-make.recipe{ name="test-lua-api", desc="live Lua bindings, manifest, editor stubs and reference agree (T85); no devices",
+make.recipe{ name="test-lua-api", desc="live Lua bindings, manifest, editor stubs and reference agree (T85); every shipped example checks (T86); no devices",
              run=function()
                for _,args in ipairs({{"cargo","test","--locked","--lib","lua::tests::every_"}, {"cargo","test","--locked","--lib","lua::tests::manifest_exports"},
-                                     {"cargo","test","--locked","--lib","lua::editor"}, {"cargo","test","--locked","--test","cli","t85_"}}) do
+                                     {"cargo","test","--locked","--lib","lua::editor"}, {"cargo","test","--locked","--test","cli","t85_"}, {"cargo","test","--locked","--test","cli","t86_"}}) do
                  args.capture=true
                  local tested=oslo.run(args)
                  io.stdout:write(tested.out or ""); io.stderr:write(tested.err or "")
