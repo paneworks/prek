@@ -653,3 +653,55 @@ fn scoped_touch_continuous_sequence_dispatches_every_stage_without_leaking_conta
         assert!(drain(&mut routing, 210).is_empty(), "scoped={scoped}");
     }
 }
+
+#[test]
+fn scoped_touch_reload_while_held_releases_only_what_the_consumer_saw() {
+    for scoped in [false, true] {
+        for case in ["ordinary", "claimed", "completed"] {
+            let mut routing = prepared(config(), true, scoped);
+            if case == "ordinary" {
+                contact(&mut routing, 1, 20, 1);
+                routing.push(Record::Tick { at: ms(140) }).unwrap();
+                assert_eq!(drain(&mut routing, 140).len(), 1, "scoped={scoped}");
+            } else {
+                contact(&mut routing, 1, 0, 2);
+                movement(&mut routing, 2, 140, 1500, 2);
+                if case == "completed" {
+                    movement(&mut routing, 3, 145, 2000, 2);
+                    up(&mut routing, 4, 148, 2);
+                }
+                assert!(drain(&mut routing, 148).is_empty(), "scoped={scoped}");
+                assert_eq!(
+                    routing.dispatches.len(),
+                    usize::from(case == "completed"),
+                    "scoped={scoped}, {case}"
+                );
+            }
+            routing.reload(config(), ms(150)).unwrap();
+            let recoveries = routing.take_recoveries();
+            assert_eq!(recoveries.len(), 1, "scoped={scoped}, {case}");
+            let releases = &recoveries[0].neutral_events;
+            if case == "ordinary" {
+                assert!(
+                    releases.iter().any(|event| event.kind == EV_ABS
+                        && event.code == ABS_MT_TRACKING_ID
+                        && event.value == -1),
+                    "scoped={scoped}: {releases:?}"
+                );
+                assert!(
+                    releases.iter().any(|event| event.kind == EV_KEY
+                        && event.code == 0x14a
+                        && event.value == 0),
+                    "scoped={scoped}: {releases:?}"
+                );
+            } else {
+                assert!(releases.is_empty(), "scoped={scoped}, {case}: {releases:?}");
+            }
+            assert!(
+                routing.take_dispatches(ms(150)).is_empty(),
+                "scoped={scoped}, {case}"
+            );
+            assert!(routing.due(&device().source, ms(150)).is_err());
+        }
+    }
+}
