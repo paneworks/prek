@@ -7,10 +7,12 @@ cd -- "$repo"
 binfmt=${PREK_BINFMT_AARCH64:-/proc/sys/fs/binfmt_misc/aarch64-linux}
 store=${PREK_NIX_STORE:-/nix/store}
 cc=${CC_aarch64_unknown_linux_musl:?run inside the cross-aarch64 shell}
-build=$(readlink -f -- target/cross-aarch64/latest)
-mkdir -p target/cross-aarch64/execution
-run=$(mktemp -d "$repo/target/cross-aarch64/execution/run-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")
-ln -sfn -- "$run" target/cross-aarch64/executed
+root=${PREK_CROSS_ROOT:-target/cross-aarch64}
+[[ $root == target/cross-aarch64 || $root == target/cross-aarch64-msrv ]]
+build=$(readlink -f -- "$root/latest")
+mkdir -p "$root/execution"
+run=$(mktemp -d "$repo/$root/execution/run-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")
+ln -sfn -- "$run" "$root/executed"
 exec > >(tee -a "$run/execution.log") 2>&1
 finish() {
   result=$?
@@ -58,6 +60,7 @@ done
 {
   printf 'build=%s\n' "$build"
   printf 'source_revision=%s\n' "$(git rev-parse HEAD)"
+  printf 'build_toolchain=%s\n' "$(sed -n 's/^toolchain=//p' "$build/receipt.txt")"
   printf 'artifact_sha256=%s\n' "$(cut -d' ' -f1 "$build/SHA256SUMS")"
   printf 'host_machine=%s\n' "$(uname -m)"
   printf 'execution=emulated-binfmt\nhardware=false\nchecked=version,lua-check:touch_routing,window_keys,power\n'

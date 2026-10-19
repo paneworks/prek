@@ -195,6 +195,16 @@ make.recipe{ name="exec-aarch64",desc="run the current ARM64 cross-build under h
                assert(oslo.run{"nix","--option","eval-cache","false","--extra-experimental-features","nix-command flakes","--max-jobs","1","--cores","2","develop","--no-write-lock-file",".#cross-aarch64","--command","bash","tests/run-aarch64-exec.sh"}.ok,"ARM64 emulated execution failed")
              end }
 
+make.recipe{ name="build-aarch64-msrv",desc="cross-build and inspect the ARM64 ELF with the declared 1.88 minimum toolchain",
+             run=function()
+               assert(oslo.run{"nix","--option","eval-cache","false","--extra-experimental-features","nix-command flakes","--max-jobs","1","--cores","2","develop","--no-write-lock-file",".#cross-aarch64-msrv","--command","bash","tests/run-aarch64-build.sh"}.ok,"minimum-version ARM64 cross-build failed")
+             end }
+
+make.recipe{ name="exec-aarch64-msrv",desc="run the minimum-toolchain ARM64 cross-build under host binfmt emulation",
+             run=function()
+               assert(oslo.run{"nix","--option","eval-cache","false","--extra-experimental-features","nix-command flakes","--max-jobs","1","--cores","2","develop","--no-write-lock-file",".#cross-aarch64-msrv","--command","bash","tests/run-aarch64-exec.sh"}.ok,"minimum-version ARM64 emulated execution failed")
+             end }
+
 make.recipe{
   name = "run",
   desc = "list devices, or observe one with --device PATH",

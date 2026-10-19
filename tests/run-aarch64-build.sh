@@ -4,10 +4,12 @@ if (( $# != 0 )); then echo 'Usage: oslo make build-aarch64' >&2; exit 2; fi
 export LC_ALL=C
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd -- "$repo"
-export CARGO_TARGET_DIR="$repo/target/cross-aarch64/system-build"
-mkdir -p target/cross-aarch64/evidence
-run=$(mktemp -d "$repo/target/cross-aarch64/evidence/run-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")
-ln -sfn -- "$run" target/cross-aarch64/latest
+root=${PREK_CROSS_ROOT:-target/cross-aarch64}
+[[ $root == target/cross-aarch64 || $root == target/cross-aarch64-msrv ]]
+export CARGO_TARGET_DIR="$repo/$root/system-build"
+mkdir -p "$root/evidence"
+run=$(mktemp -d "$repo/$root/evidence/run-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")
+ln -sfn -- "$run" "$root/latest"
 exec > >(tee -a "$run/build.log") 2>&1
 finish() {
   result=$?
@@ -48,6 +50,7 @@ git status --porcelain=v1 | cmp - "$run/source.status"
 (cd -- "$run"; sha256sum prek > SHA256SUMS)
 {
   printf 'target=%s\ninterpreter=/lib/ld-musl-aarch64.so.1\n' "$target"
+  printf 'toolchain=%s\n' "$(rustc --version)"
   printf 'source_revision=%s\n' "$(cat "$run/source.revision")"
   if [[ -s $run/source.status ]]; then echo source_dirty=true; else echo source_dirty=false; fi
   printf 'nix_runtime_references=false\nworkspace_runtime_references=false\nexecution=not-attempted\n'

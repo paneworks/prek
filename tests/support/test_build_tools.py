@@ -137,12 +137,26 @@ mkdir -p "$CARGO_TARGET_DIR/aarch64-unknown-linux-musl/release"
 printf '#!/bin/sh\\nexit 97\\n' > "$CARGO_TARGET_DIR/aarch64-unknown-linux-musl/release/prek"
 ''')
             tool(tools, "readelf", 'cat "$MOCK_ELF"\n')
+            tool(tools, "rustc", 'echo "rustc ${MOCK_RUSTC:-1.88.0 (fixture)}"\n')
             tool(tools, "cat", '''if [[ ${1:-} == */"${MOCK_CAT_FAIL:-never}" ]]; then exit 45; fi
 exec ''' + shutil.which("cat") + ''' "$@"
 ''')
             (root / "elf").write_text(elf)
+            env.update(PREK_CROSS_ROOT="target/cross-aarch64")
             env.update(overrides)
             yield root, env, script
+
+    def test_minimum_toolchain_root_keeps_separate_evidence_and_records_rustc(self):
+        with self.model(PREK_CROSS_ROOT="target/cross-aarch64-msrv") as (root, env, script):
+            result = run(script, env)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            receipt = (root / "target/cross-aarch64-msrv/latest/receipt.txt").read_text()
+            self.assertIn("toolchain=rustc 1.88.0 (fixture)\n", receipt)
+            self.assertFalse((root / "target/cross-aarch64").exists())
+        for other in ("target", "target/cross-aarch64/../escape", "/tmp/cross"):
+            with self.subTest(root=other), self.model(PREK_CROSS_ROOT=other) as (root, env, script):
+                self.assertNotEqual(run(script, env).returncode, 0)
+                self.assertEqual(commands(env), [])
 
     def test_retains_artifact_hash_and_linkage_without_executing_it(self):
         with self.model() as (root, env, script):
@@ -228,7 +242,7 @@ esac
                 (root / f"examples/lua/{config}.lua").write_text("")
             (root / "binfmt").write_text(binfmt)
             env.update(PREK_BINFMT_AARCH64=str(root / "binfmt"), PREK_NIX_STORE=str(store),
-                       CC_aarch64_unknown_linux_musl=str(tools / "cross-cc"))
+                       PREK_CROSS_ROOT="target/cross-aarch64", CC_aarch64_unknown_linux_musl=str(tools / "cross-cc"))
             yield root, build, env, script
 
     def test_runs_a_redirected_copy_and_keeps_the_retained_artifact(self):
