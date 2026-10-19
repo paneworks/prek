@@ -592,9 +592,9 @@ Raw families separate relative XY, other relative axes, vertical wheel,
 horizontal wheel, scalar absolute axes, Type B contacts, switches and opaque
 metadata. XY stays indivisible; each wheel axis retains its legacy/high-resolution
 companions; contact slots, tracking IDs, coordinates and contact flags stay
-together. Native per-device policy still has to bind coordinated absolute/tool
-families together: raw-family classification does not prove their physical
-independence or authorize an untrusted declaration.
+together. Ordered admission binds coupled scalar absolute data to its contacts
+(see configured selective input scopes); raw-family classification alone does
+not prove physical independence or authorize an untrusted declaration.
 
 `PendingDomain` binds the source authorization, family, fixed deadline and an
 optional exact `DomainRoot` continuation. Equal SYN positions in different
@@ -827,11 +827,30 @@ protocol sink and receiving app, with correlated tickets/proposals/dispatches.
 It consumes nonzero XY47/31 while ordinary Left-key edges pass, then requires
 ordinary XY5/3 as a positive control.
 
-The managed production worker still uses the existing constructor. Native touch
-join/claim parity, per-device scalar/contact/tool coupling, switch baseline and
-transition recovery, broader mixed gestures, kernel input and physical takeover
-remain acceptance gates before replacing that path. Owned protocol evidence
-does not establish those gates or public synthetic-input authorization.
+Scoped touch keeps the existing lifecycle. A native pan claim or a complete
+multi-finger tap contact count claims coherent motion before completion and
+outranks an unclaimed swipe/tap rival on the same source. Touch-containing
+claims, including custom Begin replies, wait for `started + join_window` unless
+the source is neutral, and that cutpoint is advertised by `deadline()`. An
+owner keeps binding later reports of a live contact cohort after its decision
+window, so long continuous pans keep their ownership; a past-window candidate
+never admits a new pending scope. `oslo make test-scoped-touch` compares these
+cases with the existing constructor.
+
+A device that reports scalar absolute axes alongside contacts or contact flags
+is coupled. Owning its contacts covers the scalar emulation of the same report;
+absolute data without owned contacts authorizes nothing in that report, so an
+absolute declaration observing MT samples cannot claim relative motion beside
+them. In ordered admission each scalar root created beside a live contact root
+mirrors that root's disposition and cannot be decided on its own, so the
+emulation follows a consumed cohort to neutral. Public `stage_domain_frame`
+staging keeps scalar and contact fates independent.
+
+The managed production worker still uses the existing constructor. Switch
+baseline and transition recovery, broader mixed gestures, new-mode integrated
+Cage evidence, kernel input and physical takeover remain acceptance gates before
+replacing that path. Owned protocol evidence does not establish those gates or
+public synthetic-input authorization.
 
 ## Bounds and verification
 

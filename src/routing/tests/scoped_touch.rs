@@ -341,3 +341,203 @@ fn scoped_touch_custom_begin_before_join_waits_and_advertises_the_original_join_
         assert!(routing.deadline().is_none_or(|at| at > ms(30)));
     }
 }
+
+fn attach_device(config: Config, scoped: bool, device: Device) -> Routing {
+    let mut routing = if scoped {
+        Routing::with_input_projection(config, crate::keys::worker::tests::fence()).unwrap()
+    } else {
+        Routing::new(config).unwrap()
+    };
+    context(&mut routing, 0);
+    let mut mapping = Mapping::from_device(&device).unwrap();
+    mapping.output = Some(output());
+    mapping.generation = 2;
+    routing
+        .attach(device.clone(), &ready(&device), Some(mapping), ms(0))
+        .unwrap();
+    routing
+}
+
+fn coupled_device() -> Device {
+    let mut device = device();
+    let codes = device.capabilities.get_mut(&EV_ABS).unwrap();
+    codes.extend([0, 1]);
+    codes.sort_unstable();
+    for code in [0, 1] {
+        device.axes.insert(code, device.axes[&ABS_MT_POSITION_X]);
+    }
+    assert!(crate::input::coupled_absolute(&device));
+    device
+}
+
+#[test]
+fn scoped_touch_consumes_coupled_scalar_emulation_with_its_contacts() {
+    for scoped in [false, true] {
+        for complete in [false, true] {
+            let mut routing = attach_device(config(), scoped, coupled_device());
+            let mut down = vec![(EV_KEY, 0x14a, 1)];
+            for slot in 0..2 {
+                down.extend([
+                    (EV_ABS, ABS_MT_SLOT, slot),
+                    (EV_ABS, ABS_MT_TRACKING_ID, slot + 10),
+                    (EV_ABS, ABS_MT_POSITION_X, 1000 + slot * 500),
+                    (EV_ABS, ABS_MT_POSITION_Y, 1000),
+                ]);
+            }
+            down.extend([(EV_ABS, 0, 1000), (EV_ABS, 1, 1000)]);
+            frame(&mut routing, 1, 0, &down);
+            let mut sequence = 2;
+            for (at, y) in [(140, 1500), (180, 2000)]
+                .into_iter()
+                .take(1 + usize::from(complete))
+            {
+                frame(
+                    &mut routing,
+                    sequence,
+                    at,
+                    &[
+                        (EV_ABS, ABS_MT_SLOT, 0),
+                        (EV_ABS, ABS_MT_POSITION_Y, y),
+                        (EV_ABS, ABS_MT_SLOT, 1),
+                        (EV_ABS, ABS_MT_POSITION_Y, y),
+                        (EV_ABS, 1, y),
+                    ],
+                );
+                sequence += 1;
+                assert!(drain(&mut routing, at).is_empty(), "scoped={scoped}");
+            }
+            context(&mut routing, 240);
+            frame(&mut routing, sequence, 320, &[(EV_ABS, 1, 2100)]);
+            up(&mut routing, sequence + 1, 330, 2);
+            assert_eq!(
+                routing.take_dispatches(ms(330)).len(),
+                usize::from(complete),
+                "scoped={scoped}, complete={complete}"
+            );
+            assert!(
+                drain(&mut routing, 470).is_empty(),
+                "scoped={scoped}, complete={complete}"
+            );
+        }
+    }
+}
+
+#[test]
+fn scoped_touch_unclaimed_cohort_keeps_coupled_scalar_emulation_ordinary() {
+    for scoped in [false, true] {
+        let mut config = config();
+        config.rules[0].contexts = vec![crate::config::Context::Locked];
+        let mut routing = attach_device(config, scoped, coupled_device());
+        frame(
+            &mut routing,
+            1,
+            0,
+            &[
+                (EV_KEY, 0x14a, 1),
+                (EV_ABS, ABS_MT_SLOT, 0),
+                (EV_ABS, ABS_MT_TRACKING_ID, 10),
+                (EV_ABS, ABS_MT_POSITION_X, 1000),
+                (EV_ABS, ABS_MT_POSITION_Y, 1000),
+                (EV_ABS, 0, 1000),
+                (EV_ABS, 1, 1000),
+            ],
+        );
+        assert_eq!(drain(&mut routing, 0).len(), 1, "scoped={scoped}");
+        frame(&mut routing, 2, 10, &[(EV_ABS, 1, 1100)]);
+        let scalar = drain(&mut routing, 10);
+        assert_eq!(scalar.len(), 1, "scoped={scoped}");
+        assert!(scalar[0].events.contains(&RawEvent {
+            kind: EV_ABS,
+            code: 1,
+            value: 1100
+        }));
+    }
+}
+
+#[test]
+fn scoped_contact_samples_cannot_authorize_an_unrelated_relative_claim() {
+    use crate::recognition::InputKind;
+    for contacts in [false, true] {
+        let mut config = config();
+        config.policy.allow_input_events = true;
+        let mut inputs = BTreeSet::from([InputKind::Relative]);
+        if contacts {
+            inputs.insert(InputKind::Absolute);
+        }
+        config.rules[0].trigger = Trigger::Custom {
+            recognizer: crate::recognition::Definition {
+                name: "pointer".into(),
+                selectors: BTreeSet::from(["touch".into()]),
+                inputs,
+                reply_within: Millis(100),
+                continuous: false,
+            },
+            timeout: Millis(1000),
+            wake: None,
+        };
+        let mut device = device();
+        device.capabilities.insert(crate::input::EV_REL, vec![0, 1]);
+        let mut routing = attach_device(config, true, device);
+        frame(
+            &mut routing,
+            1,
+            0,
+            &[
+                (EV_KEY, 0x14a, 1),
+                (EV_ABS, ABS_MT_SLOT, 0),
+                (EV_ABS, ABS_MT_TRACKING_ID, 10),
+                (EV_ABS, ABS_MT_POSITION_X, 1000),
+                (EV_ABS, ABS_MT_POSITION_Y, 1000),
+                (crate::input::EV_REL, 0, 5),
+            ],
+        );
+        let ordinary = drain(&mut routing, 0);
+        if contacts {
+            assert_eq!(ordinary.len(), 1);
+            assert!(ordinary[0].events.contains(&RawEvent {
+                kind: crate::input::EV_REL,
+                code: 0,
+                value: 5
+            }));
+        } else {
+            assert!(ordinary.is_empty(), "a declared relative report waits");
+        }
+    }
+}
+
+#[test]
+fn scoped_touch_continuous_pan_keeps_ownership_past_the_decision_window() {
+    for scoped in [false, true] {
+        let mut config = config();
+        let Trigger::Swipe { continuous, .. } = &mut config.rules[0].trigger else {
+            unreachable!()
+        };
+        *continuous = true;
+        let mut routing = prepared(config, true, scoped);
+        contact(&mut routing, 1, 0, 2);
+        let mut updates = Vec::new();
+        for (sequence, at, y) in [
+            (2, 140, 1500),
+            (3, 200, 2000),
+            (4, 260, 2300),
+            (5, 340, 2600),
+            (6, 400, 2900),
+        ] {
+            if at == 260 {
+                context(&mut routing, 240);
+            }
+            movement(&mut routing, sequence, at, y, 2);
+            assert!(
+                drain(&mut routing, at).is_empty(),
+                "scoped={scoped}, at={at}"
+            );
+            updates.push(routing.take_dispatches(ms(at)).len());
+        }
+        up(&mut routing, 7, 420, 2);
+        assert!(drain(&mut routing, 420).is_empty(), "scoped={scoped}");
+        assert!(
+            updates[2..].iter().all(|count| *count > 0),
+            "scoped={scoped}, updates={updates:?}"
+        );
+    }
+}

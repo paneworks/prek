@@ -162,7 +162,7 @@ impl Routing {
         let watermark = self.engine.input_watermark();
         let mut pending = BTreeMap::<usize, (Duration, InputEvidence)>::new();
         let mut pending_domains =
-            BTreeMap::<crate::input::TailDomain, (Duration, InputEvidence)>::new();
+            BTreeMap::<crate::input::TailDomain, (Option<Duration>, InputEvidence)>::new();
         let mut cuts = BTreeSet::new();
         let active = self.engine.route_intents();
         for intent in active.iter().chain(
@@ -189,13 +189,11 @@ impl Routing {
                 let deadline = intent
                     .started()
                     .saturating_add(self.engine.config().timing.decision_window.duration());
-                if deadline < frame.at {
-                    continue;
-                }
-                for press in evidence
-                    .iter()
-                    .filter(|press| press.source == *source && press.position.frame == watermark)
-                {
+                // Past its window an intent only binds report atoms to scopes it may already own.
+                let open = (deadline >= frame.at).then_some(deadline);
+                for press in evidence.iter().filter(|press| {
+                    open.is_some() && press.source == *source && press.position.frame == watermark
+                }) {
                     if frame.events.get(press.position.event).is_none_or(|event| {
                         event.kind != EV_KEY || event.value != 1 || event.code != press.code
                     }) {
@@ -214,10 +212,13 @@ impl Routing {
                         .filter(|atom| atom.source == *source && atom.position.frame == watermark)
                     {
                         if let Some((old, previous)) = pending_domains.get_mut(&atom.domain) {
-                            *old = (*old).min(deadline);
+                            *old = match (*old, open) {
+                                (Some(old), Some(open)) => Some(old.min(open)),
+                                (old, open) => old.or(open),
+                            };
                             previous.include(&evidence).map_err(io::Error::other)?;
                         } else {
-                            pending_domains.insert(atom.domain, (deadline, evidence.clone()));
+                            pending_domains.insert(atom.domain, (open, evidence.clone()));
                         }
                     }
                 }

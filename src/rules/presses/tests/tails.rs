@@ -496,3 +496,96 @@ fn deep_report_snapshots_share_nodes_and_retire_without_recursive_teardown() {
     drop(saved);
     assert_eq!(budget.used.load(Ordering::Acquire), 0);
 }
+
+fn report_domains(intent: &RouteIntent) -> BTreeSet<crate::input::TailDomain> {
+    intent
+        .input_evidence()
+        .tails
+        .atoms()
+        .map(|atom| atom.domain)
+        .collect()
+}
+
+#[test]
+fn absolute_observations_without_owned_contacts_authorize_no_report_domain() {
+    for scalar in [false, true] {
+        let mut engine = hybrid(&[InputKind::Absolute, InputKind::Relative], false);
+        let mut events = vec![(EV_REL, 0, 4)];
+        if scalar {
+            events.push((EV_ABS, 0, 20));
+        } else {
+            events.extend([
+                (EV_ABS, ABS_MT_SLOT, 0),
+                (EV_ABS, ABS_MT_TRACKING_ID, 7),
+                (EV_ABS, ABS_MT_POSITION_X, 100),
+                (EV_ABS, ABS_MT_POSITION_Y, 200),
+            ]);
+        }
+        raw(&mut engine, 1, 10, &events);
+        let intent = engine.route_intents().pop().unwrap();
+        let report = intent.tail_reports().next().unwrap();
+        assert!(report.observes(InputKind::Absolute), "scalar={scalar}");
+        assert!(report.observes(InputKind::Relative), "scalar={scalar}");
+        assert!(report_domains(&intent).is_empty(), "scalar={scalar}");
+    }
+}
+
+#[test]
+fn owned_contacts_cover_the_coupled_scalar_emulation_of_the_same_report() {
+    let mut engine = hybrid(&[InputKind::Touch], false);
+    raw(
+        &mut engine,
+        1,
+        10,
+        &[
+            (EV_ABS, ABS_MT_SLOT, 0),
+            (EV_ABS, ABS_MT_TRACKING_ID, 7),
+            (EV_ABS, ABS_MT_POSITION_X, 100),
+            (EV_ABS, ABS_MT_POSITION_Y, 200),
+            (EV_KEY, 0x14a, 1),
+            (EV_ABS, 0, 100),
+            (EV_REL, 0, 4),
+        ],
+    );
+    let intent = engine.route_intents().pop().unwrap();
+    assert_eq!(
+        report_domains(&intent),
+        BTreeSet::from([
+            crate::input::TailDomain::Absolute,
+            crate::input::TailDomain::Touch
+        ])
+    );
+}
+
+#[test]
+fn scalar_absolute_on_a_device_without_contacts_remains_independently_ownable() {
+    let mut engine = hybrid(&[InputKind::Absolute, InputKind::Relative], false);
+    let mut device = engine.devices[&1].device.clone();
+    engine
+        .push(Record::Remove {
+            source: device.source.clone(),
+            at: ms(0),
+        })
+        .unwrap();
+    device.source.generation += 1;
+    device.capabilities.insert(EV_KEY, vec![30]);
+    device.axes.retain(|code, _| *code == 0);
+    device.capabilities.insert(EV_ABS, vec![0]);
+    assert!(!crate::input::coupled_absolute(&device));
+    engine
+        .push(Record::Device {
+            device,
+            keys: BTreeSet::new(),
+            contacts: Vec::new(),
+        })
+        .unwrap();
+    raw(&mut engine, 1, 10, &[(EV_ABS, 0, 20), (EV_REL, 0, 4)]);
+    let intent = engine.route_intents().pop().unwrap();
+    assert_eq!(
+        report_domains(&intent),
+        BTreeSet::from([
+            crate::input::TailDomain::Relative,
+            crate::input::TailDomain::Absolute
+        ])
+    );
+}

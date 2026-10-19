@@ -13,6 +13,18 @@ pub enum TailDomain {
     RelativeOther = 64,
     Opaque = 128,
 }
+fn contact_axis(code: u16) -> bool {
+    code == ABS_MT_SLOT || (0x30..=0x3d).contains(&code)
+}
+
+/// Whether the device reports scalar absolute axes alongside contacts or contact flags.
+pub(crate) fn coupled_absolute(device: &Device) -> bool {
+    let codes = |kind| device.capabilities.get(&kind).into_iter().flatten();
+    let contacts = codes(EV_ABS).any(|&code| contact_axis(code))
+        || codes(EV_KEY).any(|&code| matches!(code, 0x145 | 0x14a | 0x14d..=0x14f));
+    contacts && codes(EV_ABS).any(|&code| !contact_axis(code))
+}
+
 impl TailDomain {
     pub(crate) const ALL: [Self; 8] = [
         Self::Relative,
@@ -38,9 +50,7 @@ impl TailDomain {
             EV_REL if matches!(event.code, REL_HWHEEL | REL_HWHEEL_HI_RES) => Self::HorizontalWheel,
             EV_REL if matches!(event.code, 0 | 1) => Self::Relative,
             EV_REL => Self::RelativeOther,
-            EV_ABS if event.code == ABS_MT_SLOT || (0x30..=0x3d).contains(&event.code) => {
-                Self::Touch
-            }
+            EV_ABS if contact_axis(event.code) => Self::Touch,
             EV_ABS => Self::Absolute,
             EV_SW => Self::Switch,
             EV_KEY if matches!(event.code, 0x145 | 0x14a | 0x14d..=0x14f) => Self::Touch,

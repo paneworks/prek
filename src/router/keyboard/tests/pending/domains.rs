@@ -842,3 +842,132 @@ fn source_authorization_clock_and_declaration_bounds_are_checked_before_reinterp
     );
     assert!(router.recover().unwrap().neutral_events.is_empty());
 }
+
+fn ordered(router: &mut Router, frame: Frame, pending: &[PendingDomain]) -> Vec<DomainRoot> {
+    let at = frame.at;
+    let watermark = frame.sequence;
+    router
+        .stage_ordered_domain_frame(frame, watermark, &[], pending, &BTreeSet::new(), at)
+        .unwrap()
+}
+
+#[test]
+fn coupled_scalar_absolute_shares_its_contact_cohort_fate_in_ordered_admission() {
+    for consume in [false, true] {
+        let mut router = prepared_domains(Limits::default());
+        let mut first = contacts();
+        first.push((EV_ABS, 0, 100));
+        let roots = ordered(
+            &mut router,
+            mixed(1, 1, &first),
+            &[
+                admission(TailDomain::Touch, 100),
+                admission(TailDomain::Absolute, 100),
+            ],
+        );
+        let touch = router.domain_scope(TailDomain::Touch).unwrap();
+        let scalar = roots
+            .iter()
+            .copied()
+            .find(|root| root.domain == TailDomain::Absolute)
+            .unwrap();
+        assert_eq!(
+            router.domain_disposition(scalar),
+            Some(KeyDisposition::Pending { deadline: ms(100) })
+        );
+        assert!(delivered(&mut router, 1).is_empty());
+        settle(&mut router, &[], &[choose(scalar, Some(9))], 20);
+        assert_eq!(
+            router.domain_disposition(scalar),
+            Some(KeyDisposition::Pending { deadline: ms(100) }),
+            "scalar data cannot be owned apart from its contacts"
+        );
+        assert!(delivered(&mut router, 20).is_empty());
+        router
+            .decide_domain_scopes(&[], &[choose(touch, consume.then_some(9))], ms(50))
+            .unwrap();
+        assert_eq!(
+            router.domain_disposition(scalar),
+            router.domain_disposition(touch)
+        );
+        router.advance(ms(50)).unwrap();
+        let output = delivered(&mut router, 50);
+        if consume {
+            assert!(output.is_empty());
+        } else {
+            assert_eq!(output.len(), 1);
+            assert_eq!(output[0].frame.events, mixed(1, 1, &first).events);
+        }
+        let late = ordered(&mut router, mixed(2, 60, &[(EV_ABS, 1, 300)]), &[]);
+        let late = late
+            .iter()
+            .copied()
+            .find(|root| root.domain == TailDomain::Absolute)
+            .unwrap();
+        assert_eq!(
+            router.domain_disposition(late),
+            router.domain_disposition(touch)
+        );
+        assert_eq!(
+            delivered_clocked(&mut router, 60, 109).len(),
+            usize::from(!consume)
+        );
+        ordered(
+            &mut router,
+            mixed(
+                3,
+                70,
+                &[
+                    (EV_ABS, ABS_MT_TRACKING_ID, -1),
+                    (EV_KEY, 0x14a, 0),
+                    (EV_ABS, 0, 110),
+                ],
+            ),
+            &[],
+        );
+        assert_eq!(
+            delivered_clocked(&mut router, 70, 119).len(),
+            usize::from(!consume)
+        );
+        assert!(router.domain_scope(TailDomain::Touch).is_none());
+        ordered(&mut router, mixed(4, 130, &[(EV_ABS, 0, 150)]), &[]);
+        let output = delivered(&mut router, 130);
+        assert_eq!(output.len(), 1, "consume={consume}");
+        assert!(output[0].frame.events.contains(&RawEvent {
+            kind: EV_ABS,
+            code: 0,
+            value: 150
+        }));
+    }
+}
+
+#[test]
+fn uncoupled_transport_staging_keeps_scalar_and_contact_fates_independent() {
+    let mut router = prepared_domains(Limits::default());
+    let mut first = contacts();
+    first.push((EV_ABS, 0, 100));
+    let roots = retain(
+        &mut router,
+        mixed(1, 1, &first),
+        &[],
+        &[
+            admission(TailDomain::Touch, 100),
+            admission(TailDomain::Absolute, 100),
+        ],
+    );
+    let scalar = roots
+        .iter()
+        .copied()
+        .find(|root| root.domain == TailDomain::Absolute)
+        .unwrap();
+    settle(&mut router, &[], &[choose(scalar, Some(9))], 20);
+    assert_eq!(
+        router.domain_disposition(scalar),
+        Some(KeyDisposition::Consumed { owner: 9 })
+    );
+    let touch = router.domain_scope(TailDomain::Touch).unwrap();
+    assert!(matches!(
+        router.domain_disposition(touch),
+        Some(KeyDisposition::Pending { .. })
+    ));
+}

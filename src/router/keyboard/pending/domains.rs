@@ -29,12 +29,15 @@ pub(super) const STORAGE_PER_ROOT: usize = 32;
 pub(super) struct Domains {
     scopes: BTreeMap<TailDomain, tails::Tails>,
     switches: BTreeSet<u16>,
+    /// Coupled scalar absolute roots mapped to the contact root whose fate they share.
+    followers: BTreeMap<InputPosition, InputPosition>,
 }
 pub(super) struct Plan {
     plans: Vec<(TailDomain, tails::Plan)>,
     pub(super) bindings: Vec<DomainRoot>,
     pub(super) inputs: Vec<DomainRoot>,
     switches: BTreeSet<u16>,
+    followers: Vec<(InputPosition, InputPosition)>,
 }
 impl Plan {
     pub(super) fn transformed(&self) -> bool {
@@ -55,8 +58,17 @@ impl Domains {
     pub(super) fn current(&self, domain: TailDomain) -> Option<InputPosition> {
         self.scopes.get(&domain)?.current()
     }
+    fn leader(&self, root: DomainRoot) -> Option<InputPosition> {
+        (root.domain == TailDomain::Absolute)
+            .then(|| self.followers.get(&root.position).copied())
+            .flatten()
+    }
     pub(super) fn choice(&self, root: DomainRoot) -> Option<Choice> {
-        self.scopes.get(&root.domain)?.choice(root.position)
+        let own = self.scopes.get(&root.domain)?.choice(root.position)?;
+        match self.leader(root) {
+            Some(leader) => self.scopes.get(&TailDomain::Touch)?.choice(leader),
+            None => Some(own),
+        }
     }
     pub(super) fn live(&self, root: DomainRoot) -> bool {
         self.scopes
@@ -74,9 +86,8 @@ impl Domains {
         frame: &Frame,
         watermark: u64,
         pending: &[PendingDomain],
-        touch_active: bool,
+        flags: &super::TailFrame,
         offset: Duration,
-        preserve_pending: bool,
     ) -> Result<Plan, Fault> {
         if pending.len() > TailDomain::ALL.len() {
             return Err(Fault::InvalidCandidate);
@@ -122,8 +133,16 @@ impl Domains {
             bindings: Vec::new(),
             inputs: Vec::new(),
             switches,
+            followers: Vec::new(),
         };
-        for domain in TailDomain::ALL {
+        let deferred = flags.coupled.then_some(TailDomain::Absolute);
+        let mut leader = None;
+        for domain in TailDomain::ALL
+            .into_iter()
+            .filter(|domain| Some(*domain) != deferred)
+            .chain(deferred)
+        {
+            let follows = deferred == Some(domain) && leader.is_some();
             let scopes = self.scopes.get(&domain);
             let empty = tails::Tails::default();
             let position = present.contains(&domain).then_some(InputPosition {
@@ -132,18 +151,24 @@ impl Domains {
             });
             let next = scopes.unwrap_or(&empty).prepare_retained(
                 position,
-                admissions.get(&domain).copied(),
-                domain == TailDomain::Touch && touch_active
+                admissions.get(&domain).copied().filter(|_| !follows),
+                domain == TailDomain::Touch && flags.active
                     || domain == TailDomain::Switch && switch_active,
                 frame.at,
                 offset,
-                preserve_pending,
+                flags.preserve_pending,
             )?;
             if let Some(position) = next.input() {
                 let root = DomainRoot { domain, position };
                 plan.bindings.push(root);
                 if present.contains(&domain) {
                     plan.inputs.push(root);
+                }
+                if domain == TailDomain::Touch {
+                    leader = Some(position);
+                }
+                if let Some(leader) = leader.filter(|_| follows) {
+                    plan.followers.push((position, leader));
                 }
             }
             plan.plans.push((domain, next));
@@ -155,6 +180,7 @@ impl Domains {
         for (domain, next) in plan.plans {
             self.scopes.entry(domain).or_default().commit(next);
         }
+        self.followers.extend(plan.followers);
     }
     pub(super) fn validate(&self, decisions: &[DomainDecision], at: Duration) -> Result<(), Fault> {
         let mut seen = BTreeSet::new();
@@ -170,6 +196,9 @@ impl Domains {
     }
     pub(super) fn settle(&mut self, decisions: &[DomainDecision], at: Duration) {
         for decision in decisions {
+            if self.leader(decision.scope).is_some() {
+                continue;
+            }
             self.scopes.get_mut(&decision.scope.domain).unwrap().settle(
                 &[TailDecision {
                     authorization: decision.authorization,
@@ -197,5 +226,8 @@ impl Domains {
         for scopes in self.scopes.values_mut() {
             scopes.prune();
         }
+        let absolute = self.scopes.get(&TailDomain::Absolute);
+        self.followers
+            .retain(|root, _| absolute.is_some_and(|scopes| scopes.choice(*root).is_some()));
     }
 }

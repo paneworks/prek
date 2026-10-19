@@ -10,6 +10,7 @@ struct TailFrame {
     pending: Option<PendingTail>,
     domains: Option<Vec<PendingDomain>>,
     preserve_pending: bool,
+    coupled: bool,
     active: bool,
     absolute_before: Option<Arc<crate::input::AbsoluteState>>,
     capacity: Option<usize>,
@@ -451,14 +452,8 @@ impl Journal {
             .domains
             .as_ref()
             .map(|pending| {
-                self.domains.prepare(
-                    &frame,
-                    watermark,
-                    pending,
-                    tail_frame.active,
-                    offset,
-                    tail_frame.preserve_pending,
-                )
+                self.domains
+                    .prepare(&frame, watermark, pending, &tail_frame, offset)
             })
             .transpose()?;
         let storage = frame.events.len()
@@ -913,6 +908,7 @@ impl Router {
             TailFrame {
                 domains: Some(domains.to_vec()),
                 preserve_pending: true,
+                coupled: crate::input::coupled_absolute(&self.device),
                 ..TailFrame::default()
             },
         )

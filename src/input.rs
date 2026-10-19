@@ -9,6 +9,7 @@ mod domains;
 pub(crate) use absolute::per_slot;
 pub use absolute::{AbsoluteSlot, AbsoluteState};
 pub use domains::TailDomain;
+pub(crate) use domains::coupled_absolute;
 use std::{
     collections::{BTreeMap, BTreeSet},
     time::Duration,

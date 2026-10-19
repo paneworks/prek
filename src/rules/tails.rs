@@ -89,6 +89,7 @@ impl Report {
         frame: &NormalizedFrame,
         watermark: u64,
         projected: &Input,
+        coupled: bool,
     ) -> Result<Option<Self>, &'static str> {
         let Input::Frame {
             source,
@@ -118,6 +119,7 @@ impl Report {
             .fold(0, |mask, domain| mask | domain.mask());
         let mut observed = 0;
         let mut covered = 0;
+        let mut contact_samples = false;
         for change in changes {
             let family = match change {
                 Change::Key { .. } => 0,
@@ -133,15 +135,30 @@ impl Report {
                 Change::Switch { .. } => SWITCH,
             };
             observed |= family;
-            if !matches!(change, Change::Absolute { code, .. }
+            if matches!(change, Change::Absolute { code, .. }
                 if *code == ABS_MT_SLOT || (0x30..=0x3d).contains(code))
             {
+                contact_samples = true;
+            } else {
                 covered |= family;
             }
         }
-        if !contacts.is_empty() || !contacts_started.is_empty() || !contacts_ended.is_empty() {
+        let touch =
+            !contacts.is_empty() || !contacts_started.is_empty() || !contacts_ended.is_empty();
+        if touch {
             observed |= TOUCH;
             covered |= TOUCH;
+        }
+        if coupled {
+            covered = if touch {
+                covered | ABSOLUTE
+            } else {
+                covered & !ABSOLUTE
+            };
+        }
+        // Contact data seen without owning the contacts authorizes nothing in this report.
+        if !touch && (contact_samples || coupled && observed & ABSOLUTE != 0) {
+            covered = 0;
         }
         covered &= domains;
         Ok((domains != 0 && observed != 0).then(|| Self {
@@ -167,18 +184,20 @@ pub(super) fn record(
     if !worker.routing || !worker.candidates.contains_key(&frame.raw.source) {
         return true;
     }
-    let result = Report::from_frame(frame, state.input_watermark, projected).and_then(|report| {
-        if let Some(report) = report
-            && let Some(candidate) = worker.candidates.get_mut(&frame.raw.source)
-        {
-            candidate.observed_position = Some(report.position);
-            candidate.tails.insert(report)?;
-            candidate
-                .source_inputs
-                .insert(frame.raw.source.clone(), state.input_watermark);
-        }
-        Ok(())
-    });
+    let coupled = crate::input::coupled_absolute(&state.device);
+    let result =
+        Report::from_frame(frame, state.input_watermark, projected, coupled).and_then(|report| {
+            if let Some(report) = report
+                && let Some(candidate) = worker.candidates.get_mut(&frame.raw.source)
+            {
+                candidate.observed_position = Some(report.position);
+                candidate.tails.insert(report)?;
+                candidate
+                    .source_inputs
+                    .insert(frame.raw.source.clone(), state.input_watermark);
+            }
+            Ok(())
+        });
     if let Err(reason) = result {
         cancel_candidate(worker, &frame.raw.source, frame.raw.at, reason, events);
         false

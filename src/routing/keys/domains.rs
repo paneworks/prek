@@ -217,7 +217,7 @@ impl Routing {
         frame: crate::input::Frame,
         watermark: u64,
         keys: &[crate::router::PendingKey],
-        pending: BTreeMap<TailDomain, (Duration, InputEvidence)>,
+        pending: BTreeMap<TailDomain, (Option<Duration>, InputEvidence)>,
         cuts: &BTreeSet<usize>,
     ) -> io::Result<()> {
         let at = frame.at;
@@ -228,6 +228,9 @@ impl Routing {
         let route = &self.routes[source];
         let mut declarations = Vec::new();
         for (&domain, (deadline, evidence)) in &pending {
+            let Some(deadline) = deadline else {
+                continue;
+            };
             let current = route.router.domain_scope(domain);
             let live = current.filter(|root| route.router.domain_scope_live(*root));
             let continuation = live
