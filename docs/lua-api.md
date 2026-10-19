@@ -1612,7 +1612,13 @@ diagnostics at 4 KiB. Failed or abandoned children are
 killed and reaped. A single operation can outgrow the slice-granular VM check
 (for example repeatedly doubling a string); the child then aborts at its data
 limit and the error reads "Lua configuration exceeded the isolated compiler
-memory limit" instead of runtime abort text. These bounds do not establish a complete system-call sandbox.
+memory limit" instead of runtime abort text.
+
+`oslo make soak-lua` runs one virtual hour (`--seconds` overrides it) of a
+5 ms periodic timer, a sleeping task loop and context callbacks, replacing the
+runtime every virtual minute. It fails if resident memory grows by 4 MiB or more
+after warm-up or if the 99th-percentile tick exceeds 5 ms, and writes its
+measurements to `target/tmp/lua-soak/receipt.json`. These bounds do not establish a complete system-call sandbox.
 Syntax/runtime errors include the named Lua chunk; schema errors identify invalid
 data. A rule that fails on its own is reported as
 `chunk:line: rules[index] ("id"): reason`; the line is that of the statement
