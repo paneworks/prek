@@ -237,6 +237,7 @@ impl Job {
         }
         if let Some(input) = &mut self.input {
             let end = (self.written + IO_SLICE).min(self.source.len());
+            let mut closed = false;
             match input.write(&self.source[self.written..end]) {
                 Ok(0) if self.written < self.source.len() => {
                     return Err(io::ErrorKind::WriteZero.into());
@@ -247,9 +248,12 @@ impl Job {
                         error.kind(),
                         io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
                     ) => {}
+                // A compiler that stopped reading is judged by its exit; an
+                // unread source can never match the returned snapshot.
+                Err(error) if error.kind() == io::ErrorKind::BrokenPipe => closed = true,
                 Err(error) => return Err(error),
             }
-            if self.written == self.source.len() {
+            if closed || self.written == self.source.len() {
                 self.input.take();
             }
         }
@@ -364,13 +368,16 @@ mod tests {
     use super::*;
 
     fn shell(script: &str) -> Job {
+        shell_source(script, String::new())
+    }
+    fn shell_source(script: &str, source: String) -> Job {
         let executable = std::env::split_paths(&std::env::var_os("PATH").unwrap())
             .map(|path| path.join("sh"))
             .find(|path| path.is_file())
             .unwrap();
         let mut command = Command::new(executable);
         command.args(["-c", script]);
-        Job::spawn_command(command, String::new(), "fixture.lua").unwrap()
+        Job::spawn_command(command, source, "fixture.lua").unwrap()
     }
 
     #[test]
@@ -421,6 +428,21 @@ mod tests {
         let job = shell("printf 'memory allocation of 1 bytes failed\\n' >&2; exit 3");
         let error = job.wait().err().unwrap().to_string();
         assert!(error.contains("memory allocation"), "{error}");
+        // More source than a pipe holds guarantees writes after the reader closed.
+        let job = shell_source(
+            "exec 0<&-; printf 'memory allocation of 8 bytes failed\\n' >&2; kill -ABRT $$",
+            format!("-- {}\nreturn {{version=1}}\n", "x".repeat(300_000)),
+        );
+        let error = job.wait().err().unwrap().to_string();
+        assert_eq!(
+            error,
+            "Lua configuration exceeded the isolated compiler memory limit"
+        );
+        let job = shell_source(
+            "exec 0<&-; exit 0",
+            format!("-- {}\nreturn {{version=1}}\n", "x".repeat(300_000)),
+        );
+        assert!(job.wait().is_err());
     }
 
     #[test]
