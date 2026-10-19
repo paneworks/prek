@@ -179,3 +179,75 @@ fn consumed_work_waits_for_prior_raw_ack_and_blocks_its_own_cutpoint() {
     routing.delivered(&source(1), ticket, ms(20)).unwrap();
     assert!(work.input_prefix_ready(&routing));
 }
+
+#[test]
+fn retiring_a_keyboard_releases_only_the_keys_its_consumer_saw() {
+    use crate::keys::worker::tests::{projected, scoped};
+    for scoped_mode in [false, true] {
+        for trigger in ["reload", "remove", "lock"] {
+            let label = format!("scoped={scoped_mode}, {trigger}");
+            let mut consumed = rule(
+                "consumed-s",
+                Action::Keys {
+                    keys: vec![Key(48)],
+                },
+            );
+            consumed.delivery = Delivery::Buffer;
+            consumed.trigger = Trigger::Key { key: Key(31) };
+            let rules = vec![consumed];
+            let mut routing = if scoped_mode {
+                scoped(rules.clone())
+            } else {
+                projected(rules.clone())
+            };
+            let mut seen = Vec::new();
+            for (sequence, at, code) in [(1, 10, 30), (2, 20, 31)] {
+                routing
+                    .push(Record::Frame {
+                        frame: frame(1, sequence, at, code, 1),
+                    })
+                    .unwrap();
+                routing.take_scoped_dispatches(ms(at));
+                while let Some(scheduled) = routing.due(&source(1), ms(at)).unwrap().cloned() {
+                    routing
+                        .delivered(&source(1), scheduled.ticket, ms(at))
+                        .unwrap();
+                    seen.extend(scheduled.frame.events.iter().map(|event| event.code));
+                }
+            }
+            assert!(
+                seen.contains(&30) && !seen.contains(&31),
+                "{label}: {seen:?}"
+            );
+            match trigger {
+                "reload" => {
+                    let config = routing.engine.config().clone();
+                    routing.reload(config, ms(30)).unwrap();
+                }
+                "remove" => routing
+                    .push(Record::Remove {
+                        source: source(1),
+                        at: ms(30),
+                    })
+                    .unwrap(),
+                _ => {
+                    routing.authority_mut().lock_requested();
+                    routing.push(Record::Tick { at: ms(30) }).unwrap();
+                }
+            }
+            let recovery = routing
+                .take_recoveries()
+                .into_iter()
+                .find(|recovery| recovery.source == source(1))
+                .unwrap_or_else(|| panic!("{label}: no recovery"));
+            let released: Vec<_> = recovery
+                .neutral_events
+                .iter()
+                .filter(|event| event.kind == crate::input::EV_KEY && event.value == 0)
+                .map(|event| event.code)
+                .collect();
+            assert_eq!(released, [30], "{label}");
+            assert!(routing.due(&source(1), ms(30)).is_err(), "{label}");
+        }
+    }
+}

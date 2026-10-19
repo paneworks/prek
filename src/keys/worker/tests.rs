@@ -213,17 +213,26 @@ pub(crate) fn routing(rules: Vec<Rule>) -> Routing {
     with_fence(rules, Some(fence()))
 }
 pub(crate) fn with_fence(rules: Vec<Rule>, fence: Option<Fence>) -> Routing {
-    with_order(rules, fence, false)
+    with_order(rules, fence, Order::Recognition)
 }
 pub(crate) fn projected(rules: Vec<Rule>) -> Routing {
-    with_order(rules, Some(fence()), true)
+    with_order(rules, Some(fence()), Order::Keys)
 }
-fn with_order(rules: Vec<Rule>, fence: Option<Fence>, ordered: bool) -> Routing {
+pub(crate) fn scoped(rules: Vec<Rule>) -> Routing {
+    with_order(rules, Some(fence()), Order::Inputs)
+}
+#[derive(Clone, Copy)]
+enum Order {
+    Recognition,
+    Keys,
+    Inputs,
+}
+fn with_order(rules: Vec<Rule>, fence: Option<Fence>, order: Order) -> Routing {
     let mut routing = if let Some(fence) = fence {
-        if ordered {
-            Routing::with_key_projection(config(rules), fence)
-        } else {
-            Routing::with_recognition(config(rules), fence)
+        match order {
+            Order::Recognition => Routing::with_recognition(config(rules), fence),
+            Order::Keys => Routing::with_key_projection(config(rules), fence),
+            Order::Inputs => Routing::with_input_projection(config(rules), fence),
         }
     } else {
         Routing::new(config(rules))
