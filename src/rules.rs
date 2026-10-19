@@ -152,12 +152,14 @@ struct Candidate {
     peak_at: Duration,
     cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     position: Option<crate::input::InputPosition>,
+    observed_position: Option<InputPosition>,
 }
 impl Candidate {
     fn input_proof(&self) -> InputProof {
         InputProof {
             key_presses: self.key_presses.clone(),
             tails: self.tails.clone(),
+            position: self.observed_position,
         }
     }
     fn key_edge(&mut self, position: InputPosition, state: KeyState) {
@@ -174,6 +176,7 @@ impl Candidate {
 struct InputProof {
     key_presses: presses::Set,
     tails: tails::Set,
+    position: Option<InputPosition>,
 }
 impl InputProof {
     fn valid_for(&self, source: &Source, definition: &crate::recognition::Definition) -> bool {
@@ -191,6 +194,7 @@ impl InputProof {
         let mut combined = self.clone();
         combined.key_presses.merge(&other.key_presses)?;
         combined.tails.merge(&other.tails)?;
+        combined.position = combined.position.max(other.position);
         *self = combined;
         Ok(())
     }
@@ -212,6 +216,10 @@ pub(crate) fn key_only_custom(trigger: &Trigger) -> bool {
         if recognizer.inputs.len() == 1 && recognizer.inputs.contains(&crate::recognition::InputKind::Key))
 }
 impl RouteIntent {
+    pub(crate) fn observation_position(&self) -> Option<InputPosition> {
+        self.candidate.observed_position.or(self.candidate.position)
+    }
+    #[cfg(test)]
     pub(crate) fn tail_reports(&self) -> impl Iterator<Item = &tails::Report> {
         self.candidate.tails.iter()
     }
@@ -330,9 +338,79 @@ impl KeyEvidence {
         }
     }
 }
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct TailAtom {
+    pub source: Source,
+    pub position: InputPosition,
+    pub domain: crate::input::TailDomain,
+}
+
+#[derive(Clone)]
+pub(crate) struct TailEvidence(tails::Set);
+impl TailEvidence {
+    pub(crate) fn atoms(&self) -> impl Iterator<Item = TailAtom> + '_ {
+        self.0.iter().flat_map(|report| {
+            report.covered_domains().map(|domain| TailAtom {
+                source: report.source.clone(),
+                position: report.position,
+                domain,
+            })
+        })
+    }
+    pub(crate) fn include(&mut self, other: &Self) -> Result<(), &'static str> {
+        self.0.merge(&other.0)
+    }
+    pub(crate) fn select(
+        &self,
+        mut keep: impl FnMut(&TailAtom) -> bool,
+    ) -> Result<Self, &'static str> {
+        let reports = self
+            .0
+            .iter()
+            .filter_map(|report| {
+                report.select_domains(|domain| {
+                    keep(&TailAtom {
+                        source: report.source.clone(),
+                        position: report.position,
+                        domain,
+                    })
+                })
+            })
+            .collect();
+        self.0.select(reports).map(Self)
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct InputEvidence {
+    pub keys: KeyEvidence,
+    pub tails: TailEvidence,
+}
+impl InputEvidence {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &KeyPress> {
+        self.keys.iter()
+    }
+    pub(crate) fn reserve(&self, bytes: usize) -> Result<KeyReservation, &'static str> {
+        self.keys.reserve(bytes)
+    }
+    pub(crate) fn include(&mut self, other: &Self) -> Result<(), &'static str> {
+        let mut combined = self.clone();
+        combined.keys.include(&other.keys)?;
+        combined.tails.include(&other.tails)?;
+        *self = combined;
+        Ok(())
+    }
+}
 impl RouteIntent {
     pub(crate) fn key_evidence(&self) -> KeyEvidence {
         KeyEvidence(self.candidate.key_presses.clone())
+    }
+    pub(crate) fn input_evidence(&self) -> InputEvidence {
+        InputEvidence {
+            keys: self.key_evidence(),
+            tails: TailEvidence(self.candidate.tails.clone()),
+        }
     }
 }
 enum Recognizer {
@@ -799,6 +877,42 @@ impl Engine {
                     {
                         evidence.0.merge(&candidate.key_presses)?;
                     }
+                }
+            }
+        }
+        Ok(evidence)
+    }
+    pub(crate) fn pending_input_evidence(
+        &self,
+        intent: &RouteIntent,
+    ) -> Result<InputEvidence, &'static str> {
+        let mut evidence = intent.input_evidence();
+        evidence.keys = self.pending_key_evidence(intent)?;
+        for sequence in &self.sequences {
+            let Some(pending) = sequence
+                .pending
+                .values()
+                .find(|pending| pending.id == intent.id())
+            else {
+                continue;
+            };
+            for (_, trace) in &pending.deferred {
+                evidence.include(
+                    &RouteIntent {
+                        rule: intent.rule.clone(),
+                        candidate: trace.candidate.clone(),
+                    }
+                    .input_evidence(),
+                )?;
+            }
+            if let Some(step) = sequence.steps.get(pending.step) {
+                for candidate in step.workers[0]
+                    .candidates
+                    .values()
+                    .filter(|candidate| pending.accepts(candidate, &sequence.triggers))
+                {
+                    evidence.keys.0.merge(&candidate.key_presses)?;
+                    evidence.tails.0.merge(&candidate.tails)?;
                 }
             }
         }
@@ -2533,6 +2647,7 @@ impl Sequence {
                     candidate.id = pending.id;
                     candidate.cancelled = pending.cancelled.clone();
                     candidate.position = trace.candidate.position;
+                    candidate.observed_position = trace.candidate.observed_position;
                     candidate.key_end = trace.candidate.key_end;
                     candidate.sources = pending.sources.clone();
                     candidate.source_inputs = pending.source_inputs.clone();
@@ -3346,6 +3461,7 @@ fn start_candidate(
                     peak_at: at,
                     cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     position: None,
+                    observed_position: None,
                 },
             );
         }

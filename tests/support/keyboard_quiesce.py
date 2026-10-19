@@ -575,8 +575,8 @@ def validate_hybrid_keys(observations, received, runtime, raw_trace, generated_t
 
 
 def validate_domain_journal(observations, received, runtime, trace):
-    flags = dict(status="passed", scope="owned_protocol_domain_journal", source_and_readiness_modeled=True,
-                 native_gesture_arbitration_tested=False, physical_takeover_tested=False,
+    flags = dict(status="passed", scope="owned_protocol_configured_domains", source_and_readiness_modeled=True,
+                 native_gesture_arbitration_tested=True, physical_takeover_tested=False,
                  kernel_input_opened=False, mt_rendering_tested=False, switch_ownership_tested=False)
     if any(type(runtime.get(key)) is not type(value) or runtime[key] != value for key, value in flags.items()):
         raise ValueError("invalid domain journal scope")
@@ -609,6 +609,56 @@ def validate_domain_journal(observations, received, runtime, trace):
             raise ValueError("domain journal projection or clock differs")
     if nanos(inputs[1]["at"]) <= nanos(inputs[0]["at"]):
         raise ValueError("domain journal original order differs")
+    configured = runtime.get("configured")
+    if (not isinstance(configured, dict) or configured.get("supervised_lua") is not True
+            or configured.get("helper_stopped") is not True or type(configured.get("cleanup_count")) is not int
+            or configured["cleanup_count"] != 2):
+        raise ValueError("missing configured domain callback or cleanup")
+    ticket, proposal, dispatch = (configured.get(key, {}) for key in ("ticket", "proposal", "dispatch"))
+    original = ticket.get("input", {})
+    if (type(ticket.get("id")) is not int or ticket["id"] <= 0
+            or type(ticket.get("candidate")) is not int or ticket["candidate"] <= 0
+            or ticket.get("cause") != "frame" or ticket.get("rule") != "rendered-relative"
+            or ticket.get("recognizer") != "rendered_relative" or not isinstance(ticket.get("fence"), dict)
+            or original.get("kind") != "frame" or not equal(original.get("source"), source)
+            or type(original.get("sequence")) is not int or original["sequence"] != 1
+            or original.get("at") != inputs[0]["at"] or original.get("selectors") != ["relative"]
+            or not equal(original.get("changes"), [dict(kind="relative", code=0, value=47), dict(kind="relative", code=1, value=31)])
+            or any(original.get(field) != [] for field in ("contacts", "contacts_started", "contacts_ended", "ended_contacts"))):
+        raise ValueError("configured domain ticket differs from declared original input")
+    if (type(proposal.get("ticket")) is not int or proposal["ticket"] != ticket["id"]
+            or proposal.get("fence") != ticket["fence"] or proposal.get("phase") != "discrete"
+            or not equal(proposal.get("data"), dict(x=47, y=31))
+            or dispatch.get("outcome") != "matched" or dispatch.get("rule") != ticket["rule"]
+            or type(dispatch.get("id")) is not int or dispatch["id"] != ticket["candidate"]
+            or dispatch.get("stage") != "discrete" or not equal(dispatch.get("source"), source)
+            or dispatch.get("action") != dict(kind="event", name="relative-consumed")
+            or not equal(dispatch.get("evidence"), dict(kind="custom", recognizer="rendered_relative", data=dict(x=47, y=31)))):
+        raise ValueError("configured domain proposal and native dispatch do not correlate")
+    if not (nanos(inputs[0]["at"]) <= nanos(ticket["requested_at"]) <= nanos(configured["admitted_at"])
+            < nanos(ticket["deadline"]) and nanos(dispatch["at"]) <= nanos(configured["admitted_at"])
+            < nanos(inputs[1]["at"])):
+        raise ValueError("configured domain callback chronology differs")
+    ordinary_ticket, ordinary_proposal = (configured.get(key, {}) for key in ("ordinary_ticket", "ordinary_proposal"))
+    ordinary = ordinary_ticket.get("input", {})
+    if (type(ordinary_ticket.get("id")) is not int or ordinary_ticket["id"] <= ticket["id"]
+            or type(ordinary_ticket.get("candidate")) is not int or ordinary_ticket["candidate"] <= ticket["candidate"]
+            or ordinary_ticket.get("cause") != "frame" or ordinary_ticket.get("rule") != ticket["rule"]
+            or ordinary_ticket.get("recognizer") != ticket["recognizer"] or ordinary_ticket.get("fence") != ticket["fence"]
+            or ordinary.get("kind") != "frame" or not equal(ordinary.get("source"), source)
+            or type(ordinary.get("sequence")) is not int or ordinary["sequence"] != 2
+            or ordinary.get("at") != inputs[1]["at"] or ordinary.get("selectors") != ["relative"]
+            or not equal(ordinary.get("changes"), [dict(kind="relative", code=0, value=5), dict(kind="relative", code=1, value=3)])
+            or any(ordinary.get(field) != [] for field in ("contacts", "contacts_started", "contacts_ended", "ended_contacts"))
+            or type(ordinary_proposal.get("ticket")) is not int or ordinary_proposal["ticket"] != ordinary_ticket["id"]
+            or ordinary_proposal.get("fence") != ticket["fence"] or ordinary_proposal.get("phase") != "cancel"
+            or not equal(ordinary_proposal.get("data"), dict(x=5, y=3))
+            or type(configured.get("ordinary_dispatches")) is not int or configured["ordinary_dispatches"] != 0):
+        raise ValueError("ordinary positive control lacks its actual cancelled callback")
+    if not (nanos(inputs[1]["at"]) <= nanos(ordinary_ticket["requested_at"])
+            <= nanos(configured["ordinary_admitted_at"]) < nanos(ordinary_ticket["deadline"])
+            and nanos(configured["ordinary_admitted_at"]) <= nanos(delivered[1]["sent"])):
+        raise ValueError("ordinary positive control callback chronology differs")
     sent = [row["frame"] for row in trace if row.get("event") == "enqueue"]
     if len(sent) != 2 or any(not equal(frame, dict(item["frame"], source=dict(device=964, generation=1, seat="seat0")))
                              for frame, item in zip(sent, delivered)):
@@ -620,9 +670,10 @@ def validate_domain_journal(observations, received, runtime, trace):
     if ([row["event"] for row in window] != ["key"] * 4 + ["pointer_motion", "pointer_frame"] + ["key"] * 2 + ["pointer_motion", "pointer_frame"]
             or [(row.get("code"), row.get("state")) for row in window[6:8]] != [(105, 1), (105, 0)]
             or any(type(row.get("at_ns")) is not int for row in window)
+            or any(left["at_ns"] > right["at_ns"] for left, right in zip(window, window[1:]))
             or any(type(row.get(field)) is not int for row in window if row["event"] == "key" for field in ("code", "state"))
             or any(type(row.get(field)) not in (int, float) for row in window if row["event"] == "pointer_motion" for field in ("x", "y"))
-            or window[6]["at_ns"] < nanos(inputs[0]["at"]) or window[8]["at_ns"] < nanos(inputs[1]["at"])
+            or window[6]["at_ns"] < nanos(inputs[0]["at"]) or window[8]["at_ns"] < nanos(configured["ordinary_admitted_at"])
             or (window[8].get("x"), window[8].get("y")) != (window[4].get("x", 0) + 5, window[4].get("y", 0) + 3)):
         raise ValueError("domain journal selective app delivery differs")
     return dict(flags, consumed_motion_reports=1, forwarded_motion_reports=1,
@@ -939,7 +990,7 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
     name = "key-worker" if args.key_worker else "key-output"
     (output / f"{name}-result.json").write_text(json.dumps(result, indent=2) + "\n")
     if args.key_worker:
-        print("PASS: native/custom key arbitration plus coherent hybrid relative reports and fallback cadence; forty-two rendered protocol-sink phases. Authority/readiness modeled; native hybrid topology, MT rendering, general non-key/mixed arbitration, physical takeover and software authorization remain untested.")
+        print("PASS: native/custom keys, coherent hybrid reports and configured Lua relative consumption/cancellation; forty-two rendered protocol-sink phases. Authority/readiness modeled; native hybrid topology, MT rendering, general non-key/mixed arbitration, physical takeover and software authorization remain untested.")
     else:
         print("PASS: actual key-output driver preserved overlapping owners, software producer isolation, exact cancellation and context reentry; fifteen rendered app phases. Software authorization and repeat rendering are not tested.")
     return result

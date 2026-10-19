@@ -58,6 +58,11 @@ impl Domains {
     pub(super) fn choice(&self, root: DomainRoot) -> Option<Choice> {
         self.scopes.get(&root.domain)?.choice(root.position)
     }
+    pub(super) fn live(&self, root: DomainRoot) -> bool {
+        self.scopes
+            .get(&root.domain)
+            .is_some_and(|scopes| scopes.live(root.position))
+    }
     pub(super) fn deadline(&self) -> Option<Duration> {
         self.scopes
             .values()
@@ -71,6 +76,7 @@ impl Domains {
         pending: &[PendingDomain],
         touch_active: bool,
         offset: Duration,
+        preserve_pending: bool,
     ) -> Result<Plan, Fault> {
         if pending.len() > TailDomain::ALL.len() {
             return Err(Fault::InvalidCandidate);
@@ -124,13 +130,14 @@ impl Domains {
                 frame: watermark,
                 event: frame.events.len() - 1,
             });
-            let next = scopes.unwrap_or(&empty).prepare(
+            let next = scopes.unwrap_or(&empty).prepare_retained(
                 position,
                 admissions.get(&domain).copied(),
                 domain == TailDomain::Touch && touch_active
                     || domain == TailDomain::Switch && switch_active,
                 frame.at,
                 offset,
+                preserve_pending,
             )?;
             if let Some(position) = next.input() {
                 let root = DomainRoot { domain, position };

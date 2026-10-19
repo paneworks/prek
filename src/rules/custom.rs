@@ -12,7 +12,8 @@ use std::collections::VecDeque;
 #[cfg(test)]
 mod tests;
 
-pub(super) const PROOF_BYTES: usize = 128 + std::mem::size_of::<tails::Set>();
+pub(super) const PROOF_BYTES: usize =
+    128 + std::mem::size_of::<tails::Set>() + std::mem::size_of::<Option<InputPosition>>();
 
 pub(super) fn group_active(rule: &Rule, state: &DeviceState) -> bool {
     let Trigger::Custom { recognizer, .. } = &rule.trigger else {
@@ -455,6 +456,12 @@ fn frame_at(
     }
     if edge.is_none() && !tails::record(worker, state, frame, &input, context.events) {
         return;
+    }
+    if let Some(candidate) = worker.candidates.get_mut(source) {
+        candidate.observed_position = Some(InputPosition {
+            frame: state.input_watermark,
+            event: edge.map_or(frame.raw.events.len() - 1, |(event, _, _)| event),
+        });
     }
     if let Some(candidate) = worker.candidates.get(source)
         && context
@@ -1145,6 +1152,7 @@ impl Engine {
         }
         intent.candidate.key_presses = evidence.input.key_presses.clone();
         intent.candidate.tails = evidence.input.tails.clone();
+        intent.candidate.observed_position = evidence.input.position;
         let proof = ownership(&intent, &owner);
         let candidate = self.custom_candidate(&intent, proof.ownership, proof.winner)?;
         let validation = self
@@ -1215,6 +1223,7 @@ impl Engine {
         {
             trace.candidate.key_presses = outcome_evidence.key_presses;
             trace.candidate.tails = outcome_evidence.tails;
+            trace.candidate.observed_position = outcome_evidence.position;
             trace.expires = Some(validated.deadline);
             if location.step.is_some() {
                 trace.after_input = Some(input_watermark);

@@ -63,6 +63,9 @@ impl Tails {
     pub(super) fn choice(&self, root: InputPosition) -> Option<Choice> {
         self.scopes.get(&root).map(|scope| scope.choice)
     }
+    pub(super) fn live(&self, root: InputPosition) -> bool {
+        self.scopes.get(&root).is_some_and(|scope| scope.active)
+    }
     pub(super) fn deadline(&self) -> Option<Duration> {
         self.scopes
             .values()
@@ -79,6 +82,17 @@ impl Tails {
         active: bool,
         at: Duration,
         offset: Duration,
+    ) -> Result<Plan, Fault> {
+        self.prepare_retained(position, pending, active, at, offset, false)
+    }
+    pub(super) fn prepare_retained(
+        &self,
+        position: Option<InputPosition>,
+        pending: Option<PendingTail>,
+        active: bool,
+        at: Duration,
+        offset: Duration,
+        preserve_pending: bool,
     ) -> Result<Plan, Fault> {
         if let Some(pending) = pending
             && (position.is_none() && pending.continuation.is_none()
@@ -163,7 +177,11 @@ impl Tails {
             previous: fresh
                 .then(|| {
                     previous.map(|(root, mut scope)| {
-                        scope.choice = scope.choice.decided(None, at);
+                        if !preserve_pending
+                            || !matches!(scope.choice.disposition, TailDisposition::Pending { .. })
+                        {
+                            scope.choice = scope.choice.decided(None, at);
+                        }
                         (root, scope)
                     })
                 })

@@ -801,6 +801,38 @@ Its authority/readiness remain modeled and it does not test private software IPC
 public authorization or repeat rendering. Default application packages expose no
 fixture admission method.
 
+## Configured selective input scopes
+
+Trusted embeddings can use `Routing::with_input_projection` to stage every
+source report in fixed split-domain mode. Native wheel rules and custom
+relative/key declarations arbitrate original key presses and exact non-key
+cohorts together; undeclared keys, wheel companions, switches and other raw
+families remain ordinary. Switch ownership is unavailable without a known
+baseline. This constructor is not a broker or native-device admission grant.
+
+Each covered report family binds its original terminal SYN to the actual journal
+root returned during staging, under the source authorization. Multi-source
+decisions validate all keys and domains before committing any. Bounded immutable
+receipts retain those bindings after journal pruning; losing a participating
+source invalidates queued work. A callback action keeps its offered observation
+cutpoint, separately from the watermark that activates later sequence steps.
+Transient reports retain distinct pending roots, so an older ticket cannot
+consume later unseen motion. Live contact cohorts keep their physical root.
+
+`oslo make test-mixed-arbitration` covers configured mixed claims, independent
+wheel/relative competition, exact deferred tickets, cross-source dependencies,
+expiry, cancellation cadence and refusal of unknown switch ownership. The Cage
+domain exercise crosses the actual supervised Luna callback, native coordinator,
+protocol sink and receiving app, with correlated tickets/proposals/dispatches.
+It consumes nonzero XY47/31 while ordinary Left-key edges pass, then requires
+ordinary XY5/3 as a positive control.
+
+The managed production worker still uses the existing constructor. Native touch
+join/claim parity, per-device scalar/contact/tool coupling, switch baseline and
+transition recovery, broader mixed gestures, kernel input and physical takeover
+remain acceptance gates before replacing that path. Owned protocol evidence
+does not establish those gates or public synthetic-input authorization.
+
 ## Bounds and verification
 
 There are at most 4096 active owners, 32 keys per generated owner, 1024 unretired

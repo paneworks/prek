@@ -9,6 +9,7 @@ pub use tails::{PendingTail, TailDecision, TailDisposition};
 struct TailFrame {
     pending: Option<PendingTail>,
     domains: Option<Vec<PendingDomain>>,
+    preserve_pending: bool,
     active: bool,
     absolute_before: Option<Arc<crate::input::AbsoluteState>>,
     capacity: Option<usize>,
@@ -450,8 +451,14 @@ impl Journal {
             .domains
             .as_ref()
             .map(|pending| {
-                self.domains
-                    .prepare(&frame, watermark, pending, tail_frame.active, offset)
+                self.domains.prepare(
+                    &frame,
+                    watermark,
+                    pending,
+                    tail_frame.active,
+                    offset,
+                    tail_frame.preserve_pending,
+                )
             })
             .transpose()?;
         let storage = frame.events.len()
@@ -879,6 +886,38 @@ impl Router {
         )
     }
 
+    pub(crate) fn stage_ordered_domain_frame(
+        &mut self,
+        frame: Frame,
+        watermark: u64,
+        keys: &[PendingKey],
+        domains: &[PendingDomain],
+        cuts: &BTreeSet<usize>,
+        at: Duration,
+    ) -> Result<Vec<DomainRoot>, Fault> {
+        if frame.source != self.device.source {
+            return Err(Fault::StaleSource);
+        }
+        if self.stopped {
+            return Err(Fault::Stopped);
+        }
+        if domains.len() > TailDomain::ALL.len() {
+            return self.fail(Fault::InvalidCandidate);
+        }
+        self.stage_scoped_frame(
+            frame,
+            watermark,
+            keys,
+            cuts,
+            at,
+            TailFrame {
+                domains: Some(domains.to_vec()),
+                preserve_pending: true,
+                ..TailFrame::default()
+            },
+        )
+    }
+
     fn stage_scoped_frame(
         &mut self,
         frame: Frame,
@@ -1241,6 +1280,14 @@ impl Router {
             .domains
             .choice(scope)
             .map(|choice| choice.disposition)
+    }
+
+    pub(crate) fn domain_scope_live(&self, scope: DomainRoot) -> bool {
+        !self.stopped
+            && self
+                .pending_keyboard
+                .as_ref()
+                .is_some_and(|journal| journal.domains.live(scope))
     }
 
     pub fn pending_key_position(&self) -> Option<InputPosition> {

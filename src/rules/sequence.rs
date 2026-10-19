@@ -96,6 +96,7 @@ impl Prefix {
         let mut proof = InputProof {
             key_presses: presses.clone(),
             tails: tails.clone(),
+            position: None,
         };
         proof.include(&candidate.input_proof())?;
         *presses = proof.key_presses;

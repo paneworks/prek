@@ -3,6 +3,7 @@ use super::*;
 mod arbitration;
 mod custom;
 mod hybrid;
+mod mixed;
 
 fn packet(id: u64, sequence: u64, at: u64, events: &[(u16, i32)]) -> Frame {
     let mut frame = frame(id, sequence, at, 30, 1);

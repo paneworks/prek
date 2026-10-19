@@ -7,7 +7,7 @@ use prek::{
     worker::ProvidedContext,
 };
 
-fn settle(session: &mut Session) -> Vec<LogRecord> {
+pub(super) fn settle(session: &mut Session) -> Vec<LogRecord> {
     let until = Instant::now() + Duration::from_secs(3);
     let mut logs = Vec::new();
     loop {

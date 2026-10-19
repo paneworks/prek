@@ -88,9 +88,12 @@ impl Routing {
         if !self.ordered_keys {
             return None;
         }
-        let position = intent
-            .position()
-            .unwrap_or(InputPosition::after_frame(self.engine.input_watermark()));
+        let position = (if self.split_inputs {
+            intent.observation_position()
+        } else {
+            intent.position()
+        })
+        .unwrap_or(InputPosition::after_frame(self.engine.input_watermark()));
         Some(
             if self
                 .routes

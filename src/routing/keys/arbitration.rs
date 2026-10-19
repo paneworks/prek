@@ -1,8 +1,9 @@
 use super::*;
 use crate::{
     input::{EV_KEY, Frame, InputPosition},
+    router::DomainDecision,
     router::{KeyDecision, KeyDisposition, PendingKey},
-    rules::{KeyEvidence, KeyPress, KeyReservation},
+    rules::{InputEvidence, KeyPress, KeyReservation, TailAtom},
 };
 
 const MAX_WAITING: usize = 4096;
@@ -10,8 +11,10 @@ const MAX_HELD: usize = 128;
 
 pub(in crate::routing) struct Claim {
     id: u64,
-    evidence: KeyEvidence,
+    evidence: InputEvidence,
+    pub(in crate::routing) domains: BTreeMap<TailAtom, domains::Binding>,
     routes: BTreeMap<Source, u64>,
+    _charge: KeyReservation,
 }
 impl Claim {
     pub(in crate::routing) fn presses(&self) -> impl Iterator<Item = &KeyPress> {
@@ -20,7 +23,11 @@ impl Claim {
     pub(in crate::routing) fn valid(&self, routing: &Routing, intent: &RouteIntent) -> bool {
         let owned: BTreeSet<_> = self.evidence.iter().collect();
         self.id == intent.id()
-            && intent.tail_reports().next().is_none()
+            && intent
+                .input_evidence()
+                .tails
+                .atoms()
+                .all(|atom| self.domains.contains_key(&atom))
             && intent
                 .sources()
                 .iter()
@@ -48,6 +55,7 @@ pub(in crate::routing) struct Held {
 }
 #[derive(Default)]
 pub(in crate::routing) struct State {
+    pub(in crate::routing) domains: domains::State,
     waiting: BTreeMap<KeyPress, Waiting>,
     pub(in crate::routing) held: Vec<Held>,
     offsets: BTreeMap<String, Duration>,
@@ -59,6 +67,9 @@ impl State {
             .iter()
             .filter(|(press, _)| press.source == *source)
             .map(|(_, waiting)| at.min(waiting.deadline).saturating_sub(waiting.at))
+            .max()
+            .into_iter()
+            .chain(self.domains.remove(source, at))
             .max();
         if let Some(offset) = offset {
             self.offsets
@@ -104,7 +115,11 @@ pub(in crate::routing) fn outcome_id(outcome: &RouteOutcome) -> (u64, u64) {
 impl Routing {
     pub(in crate::routing) fn projected_key_intent(&self, intent: &RouteIntent) -> bool {
         self.ordered_keys
-            && projected(&intent.rule.trigger)
+            && if self.split_inputs {
+                domains::supported(&intent.rule.trigger)
+            } else {
+                projected(&intent.rule.trigger)
+            }
             && intent.sources().iter().all(|source| {
                 self.routes
                     .get(source)
@@ -134,7 +149,9 @@ impl Routing {
         now: Duration,
     ) -> io::Result<()> {
         let watermark = self.engine.input_watermark();
-        let mut pending = BTreeMap::<usize, (Duration, KeyEvidence)>::new();
+        let mut pending = BTreeMap::<usize, (Duration, InputEvidence)>::new();
+        let mut pending_domains =
+            BTreeMap::<crate::input::TailDomain, (Duration, InputEvidence)>::new();
         let mut cuts = BTreeSet::new();
         let active = self.engine.route_intents();
         for intent in active.iter().chain(
@@ -155,8 +172,7 @@ impl Routing {
                 continue;
             }
             let evidence = self
-                .engine
-                .pending_key_evidence(intent)
+                .input_evidence(intent, true)
                 .map_err(io::Error::other)?;
             if intent.rule.delivery != Delivery::Observe && self.projected_key_intent(intent) {
                 let deadline = intent
@@ -179,6 +195,20 @@ impl Routing {
                         .entry(press.position.event)
                         .and_modify(|(old, _)| *old = (*old).min(deadline))
                         .or_insert((deadline, evidence.clone()));
+                }
+                if self.split_inputs {
+                    for atom in evidence
+                        .tails
+                        .atoms()
+                        .filter(|atom| atom.source == *source && atom.position.frame == watermark)
+                    {
+                        if let Some((old, previous)) = pending_domains.get_mut(&atom.domain) {
+                            *old = (*old).min(deadline);
+                            previous.include(&evidence).map_err(io::Error::other)?;
+                        } else {
+                            pending_domains.insert(atom.domain, (deadline, evidence.clone()));
+                        }
+                    }
                 }
             }
         }
@@ -249,6 +279,20 @@ impl Routing {
             );
         }
         let at = frame.at;
+        if self.split_inputs {
+            if let Err(error) = self.stage_input_domains(
+                source,
+                frame,
+                watermark,
+                &declarations,
+                pending_domains,
+                &cuts,
+            ) {
+                self.recover(source);
+                return Err(error);
+            }
+            return Ok(());
+        }
         if let Err(error) = self.routes.get_mut(source).unwrap().router.stage_key_frame(
             frame,
             watermark,
@@ -261,12 +305,15 @@ impl Routing {
         }
         Ok(())
     }
-    fn key_claimable(&self, id: u64, evidence: &KeyEvidence, now: Duration) -> bool {
+    fn key_claimable(&self, id: u64, evidence: &InputEvidence, now: Duration) -> bool {
         let owned = self.owned_key_presses(id);
         let mut any = false;
         evidence.iter().all(|press| {
             any = true;
             self.key_press_claimable(id, press, now, &owned)
+        }) && evidence.tails.atoms().all(|atom| {
+            any = true;
+            self.split_inputs && self.domain_claimable(id, &atom, now)
         }) && any
     }
     fn owned_key_presses(&self, id: u64) -> BTreeSet<&KeyPress> {
@@ -300,26 +347,44 @@ impl Routing {
     }
     fn settle_keys(
         &mut self,
-        decisions: BTreeMap<Source, Vec<KeyDecision>>,
+        mut decisions: BTreeMap<Source, Vec<KeyDecision>>,
+        domains: BTreeMap<Source, Vec<DomainDecision>>,
         at: Duration,
         now: Duration,
     ) -> io::Result<()> {
-        for (source, choices) in &decisions {
-            self.routes
-                .get(source)
-                .ok_or_else(|| fault(Fault::StaleSource))?
-                .router
-                .validate_key_decisions(choices, at, now)
-                .map_err(fault)?;
+        for source in domains.keys() {
+            decisions.entry(source.clone()).or_default();
         }
         for (source, choices) in &decisions {
-            if let Err(error) = self
+            let router = &self
                 .routes
-                .get_mut(source)
-                .unwrap()
-                .router
-                .decide_keys_clocked(choices, at, now)
-            {
+                .get(source)
+                .ok_or_else(|| fault(Fault::StaleSource))?
+                .router;
+            if self.split_inputs {
+                router.validate_domain_decisions(
+                    choices,
+                    domains.get(source).map_or(&[], Vec::as_slice),
+                    at,
+                    now,
+                )
+            } else {
+                router.validate_key_decisions(choices, at, now)
+            }
+            .map_err(fault)?;
+        }
+        for (source, choices) in &decisions {
+            let router = &mut self.routes.get_mut(source).unwrap().router;
+            if let Err(error) = if self.split_inputs {
+                router.decide_domains_clocked(
+                    choices,
+                    domains.get(source).map_or(&[], Vec::as_slice),
+                    at,
+                    now,
+                )
+            } else {
+                router.decide_keys_clocked(choices, at, now)
+            } {
                 for source in decisions.keys() {
                     self.recover(source);
                 }
@@ -341,6 +406,17 @@ impl Routing {
                         .and_modify(|old| *old = (*old).max(offset))
                         .or_insert(offset);
                 }
+            }
+            if let Some(offset) = self.key_journal.domains.settle(
+                &source,
+                domains.get(&source).map_or(&[], Vec::as_slice),
+                now,
+            ) {
+                self.key_journal
+                    .offsets
+                    .entry(source.seat.clone())
+                    .and_modify(|old| *old = (*old).max(offset))
+                    .or_insert(offset);
             }
         }
         Ok(())
@@ -381,7 +457,8 @@ impl Routing {
             self.won
                 .get(&intent.id())
                 .is_some_and(|won| won.key_claim.is_some())
-                && (!custom_key(&intent.rule.trigger) || intent.rule.delivery == Delivery::Reserve)
+                && (intent.rule.trigger.recognizers().next().is_none()
+                    || intent.rule.delivery == Delivery::Reserve)
         };
         candidates.sort_by(|a, b| {
             established(b)
@@ -391,13 +468,30 @@ impl Routing {
                 .then_with(|| a.id().cmp(&b.id()))
         });
         let mut higher = BTreeSet::new();
+        let mut higher_domains = BTreeSet::new();
         let mut supported = BTreeSet::new();
+        let mut supported_domains = BTreeSet::new();
         for intent in candidates {
+            if self.split_inputs
+                && !self.viable(
+                    &intent,
+                    at,
+                    intent.started(),
+                    self.routes
+                        .get(intent.source())
+                        .is_none_or(|route| route.router.physical_neutral()),
+                )
+            {
+                self.engine
+                    .cancel_key_candidate(intent.id(), at, "input group no longer viable");
+                continue;
+            }
             let completed = outcomes
                 .iter()
                 .find(|outcome| outcome.intent.id() == intent.id());
             let reserve = intent.rule.delivery == Delivery::Reserve
-                || !custom_key(&intent.rule.trigger) && self.won.contains_key(&intent.id());
+                || intent.rule.trigger.recognizers().next().is_none()
+                    && self.won.contains_key(&intent.id());
             if completed.is_none()
                 && !reserve
                 && now
@@ -410,12 +504,11 @@ impl Routing {
                 continue;
             }
             let mut observed = self
-                .engine
-                .pending_key_evidence(&intent)
+                .input_evidence(&intent, true)
                 .map_err(io::Error::other)?;
-            if custom_key(&intent.rule.trigger) && !reserve {
+            if intent.rule.trigger.recognizers().next().is_some() && !reserve {
                 if let Some(completed) = completed {
-                    observed = completed.intent.key_evidence();
+                    observed = completed.intent.input_evidence();
                     for outcome in outcomes.iter().filter(|outcome| {
                         outcome.intent.id() == intent.id()
                             && !matches!(
@@ -427,13 +520,18 @@ impl Routing {
                             )
                     }) {
                         observed
-                            .include(&outcome.intent.key_evidence())
+                            .include(&outcome.intent.input_evidence())
                             .map_err(io::Error::other)?;
                     }
                 } else {
                     let owned = self.owned_key_presses(intent.id());
-                    observed = observed
+                    observed.keys = observed
+                        .keys
                         .select(|press| self.key_press_claimable(intent.id(), press, now, &owned))
+                        .map_err(io::Error::other)?;
+                    observed.tails = observed
+                        .tails
+                        .select(|atom| self.domain_claimable(intent.id(), atom, now))
                         .map_err(io::Error::other)?;
                 }
             }
@@ -446,20 +544,26 @@ impl Routing {
                 continue;
             }
             supported.extend(observed.iter().cloned());
-            if observed
-                .iter()
-                .any(|press| higher.contains(&press.position))
+            let scopes: BTreeSet<_> = observed
+                .tails
+                .atoms()
+                .filter_map(|atom| self.domain_scope(intent.id(), &atom).cloned())
+                .collect();
+            supported_domains.extend(scopes.iter().cloned());
+            if observed.iter().any(|press| higher.contains(press))
+                || scopes.iter().any(|scope| higher_domains.contains(scope))
             {
                 continue;
             }
             if completed.is_none() && !reserve {
-                higher.extend(observed.iter().map(|press| press.position));
+                higher.extend(observed.iter().cloned());
+                higher_domains.extend(scopes);
                 continue;
             }
-            let mut evidence = if reserve || custom_key(&intent.rule.trigger) {
+            let mut evidence = if reserve || intent.rule.trigger.recognizers().next().is_some() {
                 observed
             } else {
-                completed.unwrap().intent.key_evidence()
+                completed.unwrap().intent.input_evidence()
             };
             if let Some(owned) = self
                 .won
@@ -474,6 +578,8 @@ impl Routing {
                 continue;
             }
             let mut decisions: BTreeMap<Source, Vec<KeyDecision>> = BTreeMap::new();
+            let mut domain_decisions: BTreeMap<Source, Vec<DomainDecision>> = BTreeMap::new();
+            let mut domain_receipt = BTreeMap::new();
             let mut routes = BTreeMap::new();
             for source in intent
                 .sources()
@@ -501,8 +607,51 @@ impl Routing {
                         });
                 }
             }
-            self.settle_keys(decisions, at, now)?;
-            higher.extend(evidence.iter().map(|press| press.position));
+            for atom in evidence.tails.atoms() {
+                let owned = self
+                    .won
+                    .get(&intent.id())
+                    .and_then(|won| won.key_claim.as_ref())
+                    .map(|claim| &claim.domains);
+                let binding = self
+                    .key_journal
+                    .domains
+                    .binding(&atom, owned)
+                    .ok_or_else(|| fault(Fault::InvalidCandidate))?
+                    .clone();
+                let scope = &binding.scope;
+                routes.insert(scope.source.clone(), scope.authorization);
+                if self.routes[&scope.source]
+                    .router
+                    .domain_disposition(scope.root)
+                    .is_some()
+                {
+                    let choices = domain_decisions.entry(scope.source.clone()).or_default();
+                    if !choices.iter().any(|choice| choice.scope == scope.root) {
+                        choices.push(DomainDecision {
+                            authorization: scope.authorization,
+                            scope: scope.root,
+                            owner: Some(intent.id()),
+                        });
+                    }
+                }
+                higher_domains.insert(scope.clone());
+                domain_receipt.insert(atom, binding);
+            }
+            let charge = evidence
+                .reserve(
+                    1024 + routes
+                        .keys()
+                        .map(|source| source.seat.capacity() + 256)
+                        .sum::<usize>()
+                        + domain_receipt
+                            .keys()
+                            .map(|atom| 512 + atom.source.seat.capacity())
+                            .sum::<usize>(),
+                )
+                .map_err(io::Error::other)?;
+            self.settle_keys(decisions, domain_decisions, at, now)?;
+            higher.extend(evidence.iter().cloned());
             let id = intent.id();
             self.won.insert(
                 id,
@@ -513,7 +662,9 @@ impl Routing {
                     key_claim: Some(Arc::new(Claim {
                         id,
                         evidence,
+                        domains: domain_receipt,
                         routes,
+                        _charge: charge,
                     })),
                 },
             );
@@ -538,7 +689,11 @@ impl Routing {
                     });
             }
         }
-        self.settle_keys(ordinary, at, now)?;
+        let ordinary_domains =
+            self.key_journal
+                .domains
+                .ordinary(&self.routes, &supported_domains, at);
+        self.settle_keys(ordinary, ordinary_domains, at, now)?;
         self.key_journal.waiting.retain(|press, _| {
             self.routes.get(&press.source).is_some_and(|route| {
                 matches!(
@@ -547,6 +702,12 @@ impl Routing {
                 )
             })
         });
+        let retained = active
+            .iter()
+            .chain(outcomes.iter().map(|outcome| &outcome.intent))
+            .flat_map(|intent| intent.input_evidence().tails.atoms().collect::<Vec<_>>())
+            .collect();
+        self.key_journal.domains.prune(&self.routes, &retained);
         self.refresh_key_barriers()
     }
     pub(in crate::routing) fn refresh_key_barriers(&mut self) -> io::Result<()> {
@@ -556,6 +717,12 @@ impl Routing {
                 .entry(&press.source.seat)
                 .and_modify(|old| *old = (*old).min(press.position))
                 .or_insert(press.position);
+        }
+        for (seat, position) in self.key_journal.domains.barriers() {
+            barriers
+                .entry(seat)
+                .and_modify(|old| *old = (*old).min(position))
+                .or_insert(position);
         }
         for (source, route) in self
             .routes
@@ -582,7 +749,7 @@ impl Routing {
         now: Duration,
         charge: Option<KeyReservation>,
     ) -> io::Result<()> {
-        if !self.key_claimable(outcome.intent.id(), &outcome.intent.key_evidence(), now) {
+        if !self.key_claimable(outcome.intent.id(), &outcome.intent.input_evidence(), now) {
             return Ok(());
         }
         if now

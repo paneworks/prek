@@ -479,6 +479,8 @@ fn native_scope_storage_refuses_aggregate_overflow_before_inserting_a_leaf() {
         );
     }
     let mut scopes = crate::routing::custom::CustomRoutes {
+        domains: &routing.key_journal.domains,
+        split_inputs: routing.split_inputs,
         routes: &routing.routes,
         chains: &routing.chains,
         groups: &routing.custom_groups,

@@ -248,6 +248,7 @@ fn conflicting_tail_union_does_not_partially_merge_independent_key_evidence() {
     let other = InputProof {
         key_presses: current.candidate.key_presses.clone(),
         tails,
+        position: current.observation_position(),
     };
     let before = engine.press_budget.used.load(Ordering::Acquire);
     assert!(proof.include(&other).is_err());

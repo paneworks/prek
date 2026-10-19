@@ -336,10 +336,30 @@ class DomainJournal(unittest.TestCase):
         payloads = [events([(1, 105, 1), (1, 105, 0)]), inputs[1]["events"]]
         delivered = [dict(frame=dict(frame, events=payload), due=frame["at"], sent=frame["at"])
                      for frame, payload in zip(inputs, payloads)]
-        runtime = dict(status="passed", scope="owned_protocol_domain_journal", source_and_readiness_modeled=True,
-                       native_gesture_arbitration_tested=False, physical_takeover_tested=False,
+        ticket = dict(id=1, candidate=1, cause="frame", rule="rendered-relative", recognizer="rendered_relative",
+                      fence=dict(configuration=1), requested_at=stamp(1000), deadline=stamp(1010),
+                      input=dict(kind="frame", source=source, sequence=1, at=stamp(1000), selectors=["relative"],
+                                 changes=[dict(kind="relative", code=0, value=47), dict(kind="relative", code=1, value=31)],
+                                 contacts=[], contacts_started=[], contacts_ended=[], ended_contacts=[]))
+        ordinary_ticket = copy.deepcopy(ticket)
+        ordinary_ticket.update(id=2, candidate=2, requested_at=stamp(1008), deadline=stamp(1020))
+        ordinary_ticket["input"].update(sequence=2, at=stamp(1008),
+                                        changes=[dict(kind="relative", code=0, value=5), dict(kind="relative", code=1, value=3)])
+        delivered[1].update(due=stamp(1013), sent=stamp(1013))
+        received[9]["at_ns"] = 1014
+        received[10]["at_ns"] = 1015
+        configured = dict(supervised_lua=True, helper_stopped=True, cleanup_count=2, ticket=ticket,
+                          ordinary_ticket=ordinary_ticket, ordinary_proposal=dict(ticket=2, fence=ticket["fence"], phase="cancel", data=dict(x=5, y=3)),
+                          ordinary_admitted_at=stamp(1012), ordinary_dispatches=0,
+                          proposal=dict(ticket=1, fence=ticket["fence"], phase="discrete", data=dict(x=47, y=31)),
+                          dispatch=dict(outcome="matched", rule="rendered-relative", id=1, stage="discrete", source=source,
+                                        at=stamp(1001), action=dict(kind="event", name="relative-consumed"),
+                                        evidence=dict(kind="custom", recognizer="rendered_relative", data=dict(x=47, y=31))),
+                          admitted_at=stamp(1005))
+        runtime = dict(status="passed", scope="owned_protocol_configured_domains", source_and_readiness_modeled=True,
+                       native_gesture_arbitration_tested=True, physical_takeover_tested=False,
                        kernel_input_opened=False, mt_rendering_tested=False, switch_ownership_tested=False,
-                       inputs=inputs, delivered=delivered)
+                       inputs=inputs, delivered=delivered, configured=configured)
         trace = [dict(event="enqueue", frame=dict(item["frame"], source=dict(device=964, generation=1, seat="seat0"))) for item in delivered]
         return observations, received, runtime, trace
 
@@ -350,7 +370,7 @@ class DomainJournal(unittest.TestCase):
         self.assertEqual((result["pointer_displacement_x"], result["pointer_displacement_y"]), (5, 3))
 
     def test_unproven_scopes_missing_prefixes_and_motion_leaks_are_rejected(self):
-        for change in ("source", "bool", "input", "consumed", "ordinary", "raw", "time", "app-time", "key", "app-key-bool", "leak", "motion", "native", "kernel", "switch", "capture"):
+        for change in ("source", "bool", "input", "consumed", "ordinary", "raw", "time", "app-time", "key", "app-key-bool", "leak", "motion", "native", "kernel", "switch", "capture", "lua", "cleanup", "helper", "ticket", "proposal", "dispatch", "deadline"):
             observations, received, runtime, trace = self.fixture()
             if change == "source":
                 runtime["inputs"][0]["source"]["generation"] = 2
@@ -376,10 +396,45 @@ class DomainJournal(unittest.TestCase):
                 received.insert(9, dict(event="pointer_motion", sequence=398, at_ns=1008, x=163, y=231))
             elif change == "motion":
                 received[9]["x"] += 1
-            elif change in ("native", "kernel", "switch"):
-                runtime[dict(native="native_gesture_arbitration_tested", kernel="kernel_input_opened", switch="switch_ownership_tested")[change]] = True
+            elif change == "native":
+                runtime["native_gesture_arbitration_tested"] = False
+            elif change in ("kernel", "switch"):
+                runtime[dict(kernel="kernel_input_opened", switch="switch_ownership_tested")[change]] = True
+            elif change in ("lua", "helper"):
+                runtime["configured"][dict(lua="supervised_lua", helper="helper_stopped")[change]] = False
+            elif change == "cleanup":
+                runtime["configured"]["cleanup_count"] = True
+            elif change == "ticket":
+                runtime["configured"]["ticket"]["input"]["changes"].append(dict(kind="key", code=105, state="press"))
+            elif change == "proposal":
+                runtime["configured"]["proposal"]["ticket"] = 2
+            elif change == "dispatch":
+                runtime["configured"]["dispatch"]["evidence"]["data"]["x"] = 0
+            elif change == "deadline":
+                runtime["configured"]["admitted_at"] = runtime["configured"]["ticket"]["deadline"]
             else:
                 observations.pop()
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                quiesce.validate_domain_journal(observations, received, runtime, trace)
+
+    def test_ordinary_positive_control_requires_its_own_cancelled_callback_and_no_dispatch(self):
+        for change in ("missing", "replay", "phase", "input", "dispatch", "time", "app-time"):
+            observations, received, runtime, trace = self.fixture()
+            configured = runtime["configured"]
+            if change == "missing":
+                configured.pop("ordinary_ticket")
+            elif change == "replay":
+                configured["ordinary_proposal"]["ticket"] = configured["ticket"]["id"]
+            elif change == "phase":
+                configured["ordinary_proposal"]["phase"] = "discrete"
+            elif change == "input":
+                configured["ordinary_ticket"]["input"]["changes"][0]["value"] = 47
+            elif change == "dispatch":
+                configured["ordinary_dispatches"] = 1
+            elif change == "time":
+                configured["ordinary_admitted_at"] = configured["ordinary_ticket"]["deadline"]
+            else:
+                received[9]["at_ns"] = 1008
             with self.subTest(change=change), self.assertRaises(ValueError):
                 quiesce.validate_domain_journal(observations, received, runtime, trace)
 

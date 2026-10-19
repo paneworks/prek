@@ -44,6 +44,21 @@ impl presses::Entry for Report {
     }
 }
 impl Report {
+    pub(crate) fn covered_domains(&self) -> impl Iterator<Item = TailDomain> + '_ {
+        TailDomain::ALL
+            .into_iter()
+            .filter(|domain| self.covered & domain.mask() != 0)
+    }
+
+    pub(super) fn select_domains(&self, mut keep: impl FnMut(TailDomain) -> bool) -> Option<Self> {
+        let mut selected = self.clone();
+        selected.covered = self
+            .covered_domains()
+            .filter(|domain| keep(*domain))
+            .fold(0, |mask, domain| mask | domain.mask());
+        (selected.covered != 0).then_some(selected)
+    }
+
     #[cfg(test)]
     pub(crate) fn complete(&self) -> bool {
         self.domains == self.covered
@@ -156,6 +171,7 @@ pub(super) fn record(
         if let Some(report) = report
             && let Some(candidate) = worker.candidates.get_mut(&frame.raw.source)
         {
+            candidate.observed_position = Some(report.position);
             candidate.tails.insert(report)?;
             candidate
                 .source_inputs

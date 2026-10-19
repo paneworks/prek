@@ -41,6 +41,7 @@ fn keys(event: usize) -> InputProof {
     InputProof {
         tails: keys.related(),
         key_presses: keys,
+        position: Some(InputPosition { frame: 1, event }),
     }
 }
 fn assert_bytes(state: &State) {

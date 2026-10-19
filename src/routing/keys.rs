@@ -1,6 +1,7 @@
 use super::*;
 use crate::{config::Action, keys::SourceKey, protocol::Fence};
 pub(super) mod arbitration;
+pub(super) mod domains;
 mod ordering;
 mod projection;
 
@@ -32,7 +33,9 @@ impl KeyWork {
         self.dispatch.outcome.intent.source()
     }
     pub fn position(&self) -> Option<crate::input::InputPosition> {
-        self.dispatch.outcome.intent.position()
+        self.dispatch
+            .cause_position
+            .or(self.dispatch.outcome.intent.position())
     }
     pub fn affects(&self, source: &Source) -> bool {
         self.dispatch.outcome.intent.sources().contains(source) || self.source() == source

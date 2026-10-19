@@ -55,6 +55,7 @@ struct Dispatch {
     key_epoch: u64,
     inputs: BTreeMap<Source, u64>,
     position: Option<crate::input::InputPosition>,
+    cause_position: Option<crate::input::InputPosition>,
 }
 
 pub struct ScopedDispatch {
@@ -69,6 +70,7 @@ pub use keys::KeyWork;
 pub struct Routing {
     key_journal: keys::arbitration::State,
     ordered_keys: bool,
+    split_inputs: bool,
     last_key_input: Option<(u64, crate::input::Frame)>,
     native_claims: BTreeMap<u64, native::Claim>,
     chains: BTreeMap<u64, BTreeMap<Source, ChainToken>>,
@@ -159,6 +161,15 @@ impl Routing {
         routing.ordered_keys = true;
         Ok(routing)
     }
+    /// Coordinate declared input families under their original report scopes.
+    pub fn with_input_projection(
+        config: Config,
+        fence: crate::protocol::Fence,
+    ) -> io::Result<Self> {
+        let mut routing = Self::with_key_projection(config, fence)?;
+        routing.split_inputs = true;
+        Ok(routing)
+    }
     pub(crate) fn validate_profile(config: &Config) -> io::Result<()> {
         if config.mode != crate::config::Mode::Route {
             return Err(io::Error::other(
@@ -189,6 +200,7 @@ impl Routing {
         Ok(Self {
             key_journal: keys::arbitration::State::default(),
             ordered_keys: false,
+            split_inputs: false,
             last_key_input: None,
             native_claims: BTreeMap::new(),
             chains: BTreeMap::new(),
@@ -329,7 +341,8 @@ impl Routing {
                 mapping,
             })?;
         }
-        let project_keys = self.ordered_keys && keys::projectable(self.engine.config(), &device);
+        let project_keys = self.ordered_keys
+            && (self.split_inputs || keys::projectable(self.engine.config(), &device));
         self.routes.insert(
             device.source,
             Route {
@@ -769,6 +782,10 @@ impl Routing {
                 self.dispatches.push_back(Dispatch {
                     key_claim: self.won.get(&id).and_then(|won| won.key_claim.clone()),
                     position: self.ordered_position(&outcome.intent),
+                    cause_position: self
+                        .split_inputs
+                        .then(|| outcome.intent.observation_position())
+                        .flatten(),
                     outcome,
                     configuration: self.engine.generation(),
                     rule_revision: self.engine.rule_revision(),
@@ -1201,6 +1218,8 @@ impl Routing {
     ) -> io::Result<Vec<crate::recognition::Ticket>> {
         self.push_at(Record::Tick { at }, now)?;
         let mut scopes = custom::CustomRoutes {
+            domains: &self.key_journal.domains,
+            split_inputs: self.split_inputs,
             routes: &self.routes,
             chains: &self.chains,
             groups: &self.custom_groups,
@@ -1230,6 +1249,8 @@ impl Routing {
     ) -> io::Result<()> {
         self.push_at(Record::Tick { at: input_at }, now)?;
         let mut scopes = custom::CustomRoutes {
+            domains: &self.key_journal.domains,
+            split_inputs: self.split_inputs,
             routes: &self.routes,
             chains: &self.chains,
             groups: &self.custom_groups,

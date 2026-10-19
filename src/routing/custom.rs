@@ -8,6 +8,8 @@ pub(super) struct BoundCustom {
 }
 
 pub(super) struct CustomRoutes<'a> {
+    pub(super) domains: &'a keys::domains::State,
+    pub(super) split_inputs: bool,
     pub(super) routes: &'a BTreeMap<Source, Route>,
     pub(super) chains: &'a BTreeMap<u64, BTreeMap<Source, ChainToken>>,
     pub(super) groups: &'a BTreeMap<u64, (Source, u64, u64)>,
@@ -46,7 +48,11 @@ impl CustomRoutes<'_> {
             .routes
             .get(leaf.source())
             .is_some_and(|route| route.project_keys)
-            && keys::arbitration::projected(&owner.rule.trigger)
+            && if self.split_inputs {
+                keys::domains::supported(&owner.rule.trigger)
+            } else {
+                keys::arbitration::projected(&owner.rule.trigger)
+            }
         {
             if sequence && !owner.sources().contains(leaf.source()) {
                 return refused();
@@ -140,9 +146,9 @@ impl CustomRoutes<'_> {
             deadline: None,
             skip_offer: false,
         };
-        let mut evidence = leaf.key_evidence();
+        let mut evidence = leaf.input_evidence();
         if matches!(parent.rule.trigger, Trigger::Sequence { .. })
-            && evidence.include(&parent.key_evidence()).is_err()
+            && evidence.include(&parent.input_evidence()).is_err()
         {
             return refused();
         }
@@ -173,6 +179,28 @@ impl CustomRoutes<'_> {
                 }
                 Some(KeyDisposition::Consumed { owner }) if owner == parent.id() => any = true,
                 None if owned.contains(press) => any = true,
+                _ => lost = true,
+            }
+        }
+        let domain_receipt = self
+            .won
+            .get(&parent.id())
+            .and_then(|won| won.key_claim.as_ref())
+            .map(|claim| &claim.domains);
+        for atom in evidence.tails.atoms() {
+            if !self.split_inputs {
+                return refused();
+            }
+            match self
+                .domains
+                .disposition(self.routes, &atom, domain_receipt, parent.id())
+            {
+                Some(KeyDisposition::Pending { deadline: bound }) if self.now < bound => {
+                    any = true;
+                    pending = true;
+                    deadline = Some(deadline.map_or(bound, |old| old.min(bound)));
+                }
+                Some(KeyDisposition::Consumed { owner }) if owner == parent.id() => any = true,
                 _ => lost = true,
             }
         }
