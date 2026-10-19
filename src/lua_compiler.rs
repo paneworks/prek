@@ -266,6 +266,13 @@ impl Job {
             self.finished = true;
             if !status.success() {
                 let reason = String::from_utf8_lossy(&self.diagnostics).trim().to_owned();
+                if std::os::unix::process::ExitStatusExt::signal(&status).is_some()
+                    && reason.contains("memory allocation of")
+                {
+                    return Err(io::Error::other(
+                        "Lua configuration exceeded the isolated compiler memory limit",
+                    ));
+                }
                 return Err(io::Error::other(if reason.is_empty() {
                     format!("isolated Lua compiler failed: {status}")
                 } else {
@@ -399,6 +406,21 @@ mod tests {
         let error = job.wait().err().unwrap();
         assert!(error.to_string().contains("byte limit"), "{error}");
         assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+    }
+
+    #[test]
+    fn compiler_allocation_abort_reports_the_memory_limit_not_runtime_text() {
+        let job = shell(
+            "printf 'memory allocation of 134217728 bytes failed\\nnote: run with `RUST_BACKTRACE=1`\\n' >&2; kill -ABRT $$",
+        );
+        let error = job.wait().err().unwrap().to_string();
+        assert_eq!(
+            error,
+            "Lua configuration exceeded the isolated compiler memory limit"
+        );
+        let job = shell("printf 'memory allocation of 1 bytes failed\\n' >&2; exit 3");
+        let error = job.wait().err().unwrap().to_string();
+        assert!(error.contains("memory allocation"), "{error}");
     }
 
     #[test]

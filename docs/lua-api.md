@@ -1567,7 +1567,10 @@ Trusted VM/API setup is separate from the user-source budget; its bootstrap has
 a separate bounded execution window. The approved serialized model is capped
 at 1 MiB; the source/model/registration snapshot is capped at 4 MiB, and compiler
 diagnostics at 4 KiB. Failed or abandoned children are
-killed and reaped. These bounds do not establish a complete system-call sandbox.
+killed and reaped. A single operation can outgrow the slice-granular VM check
+(for example repeatedly doubling a string); the child then aborts at its data
+limit and the error reads "Lua configuration exceeded the isolated compiler
+memory limit" instead of runtime abort text. These bounds do not establish a complete system-call sandbox.
 Syntax/runtime errors include the named Lua chunk; schema errors identify invalid
 data. A rule that fails on its own is reported as
 `chunk:line: rules[index] ("id"): reason`; the line is that of the statement
