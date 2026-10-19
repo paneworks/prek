@@ -90,11 +90,13 @@ impl StateProbe {
         Ok(Self { raw })
     }
 
-    /// Query held keys and contacts without changing the forwarding queue.
-    /// Key and contact snapshots are separate and can change before a grab.
+    /// Query held keys, active switches and contacts without changing the
+    /// forwarding queue. The snapshots are separate and can change before a grab.
     pub fn is_neutral(&self, device: &Device) -> io::Result<bool> {
         Ok((self.raw.supported_keys().is_none()
             || self.raw.get_key_state()?.iter().next().is_none())
+            && (self.raw.supported_switches().is_none()
+                || self.raw.get_switch_state()?.iter().next().is_none())
             && initial_contacts(&self.raw, device)?.is_empty())
     }
 }

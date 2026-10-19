@@ -30,6 +30,12 @@ witness and a separate state-query probe. It never changes the original clock.
    clients: never inject it again. `retained` must precede later reads from the
    original. Events still queued on that reader remain untouched.
 
+The managed worker's separate state probe treats a node as neutral only with no
+held key, no active switch and no contact. A virtual mirror starts with every
+switch off and no switch baseline is replayed into it, so a node with an active
+switch (for example a closed lid or tablet mode) stays ungrabbed and its
+consumers keep reading the original node until every switch is off.
+
 Dropping an uncommitted handoff attempts to release only the grab it acquired.
 Read/acquisition/classification/phase failures poison the handoff; commit cannot
 convert them into success. An ungrab error is not proof of descriptor release:
