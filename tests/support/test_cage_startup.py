@@ -47,6 +47,18 @@ class CustomKeyArbitration(unittest.TestCase):
         self.assertEqual((result["consumed_control_edges"], result["preserved_ordinary_edges"]), (2, 2))
         self.assertFalse(result["physical_takeover_tested"])
 
+    def test_scoped_routing_requires_the_action_at_its_offered_cutpoint(self):
+        observations, received, runtime = self.fixture()
+        with self.assertRaises(ValueError):
+            quiesce.validate_custom_key_arbitration(observations, received, runtime, scoped=True)
+        received = [dict(row, code=code, state=state) for row, (code, state) in zip(received, [(30, 1), (30, 0), (31, 1), (31, 0)])]
+        result = quiesce.validate_custom_key_arbitration(observations, received, runtime, scoped=True)
+        self.assertEqual(result["preserved_ordinary_edges"], 2)
+        with self.assertRaises(ValueError):
+            quiesce.validate_custom_key_arbitration(observations, received, runtime)
+        self.assertEqual(quiesce.scoped_order("bAAaAaAAAaaaaaaaaaaasaaasasabsassassasa"), "bAAaAaAAAaaaaaaaaaaasaaasasabassassassa")
+        self.assertEqual(quiesce.scoped_order("bAAaAaAAAaaaaaaaaaaasaaasasab"), "bAAaAaAAAaaaaaaaaaaasaaasasab")
+
     def test_leaked_missing_duplicated_or_reordered_edges_refuse(self):
         for change in ("leak", "missing", "duplicate", "reorder", "bool"):
             observations, received, runtime = self.fixture()

@@ -838,7 +838,7 @@ source is neutral, and that cutpoint is advertised by `deadline()`. An
 owner keeps binding later reports of a live contact cohort after its decision
 window, so long continuous pans keep their ownership; a past-window candidate
 never admits a new pending scope. `oslo make test-scoped-touch` compares these
-cases with the existing constructor.
+cases with the coarse `Routing::new` constructor.
 
 A device that reports scalar absolute axes alongside contacts or contact flags
 is coupled. Owning its contacts covers the scalar emulation of the same report;
@@ -849,11 +849,14 @@ mirrors that root's disposition and cannot be decided on its own, so the
 emulation follows a consumed cohort to neutral. Public `stage_domain_frame`
 staging keeps scalar and contact fates independent.
 
-The managed production worker still uses the existing constructor. Switch
-baseline and transition recovery, broader mixed gestures, new-mode integrated
-Cage evidence, kernel input and physical takeover remain acceptance gates before
-replacing that path. Owned protocol evidence does not establish those gates or
-public synthetic-input authorization.
+The managed route worker builds every seat with `Routing::with_input_projection`.
+Its supervised helper gates, the touch Cage and the 42-phase key Cage run in both
+the previous and the scoped mode (`PREK_CAGE_TOUCH_ROUTING`,
+`PREK_KEY_WORKER_ROUTING`). Scoped rendering differs only where a callback reply
+arrives after later unseen input: its action is written at the offered cutpoint,
+before that input, instead of at the reply. Switch ownership stays refused
+without a known baseline. Kernel input, physical takeover, broker authorization
+and public synthetic input remain unproven by this owned protocol evidence.
 
 ## Bounds and verification
 

@@ -736,7 +736,17 @@ def validate_native_key_arbitration(observations, received, inputs):
                 source_and_readiness_modeled=True, physical_takeover_tested=False)
 
 
-def validate_custom_key_arbitration(observations, received, runtime, event_local=False, composition=None):
+def scoped_order(text):
+    """Rendered text with phases 31-33 callback actions at their offered cutpoints."""
+    base = "bAAaAaAAAaaaaaaaaaaasaaasasab"
+    tail = text[len(base):] if text.startswith(base) else ""
+    for old, new in (("sassassa", "assassas"), ("sassa", "assas"), ("sa", "as")):
+        if tail.startswith(old):
+            return base + new + tail[len(old):]
+    return text
+
+
+def validate_custom_key_arbitration(observations, received, runtime, event_local=False, composition=None, scoped=False):
     if composition not in (None, "native_prefix", "native_suffix") or event_local and composition:
         raise ValueError("invalid custom key composition")
     native_first, custom_first = composition == "native_prefix", composition == "native_suffix"
@@ -775,7 +785,9 @@ def validate_custom_key_arbitration(observations, received, runtime, event_local
     if any(any(type(row.get(field)) is not int for field in ("sequence", "code", "state", "at_ns")) for row in events):
         raise ValueError("invalid custom key app event fields")
     ordinary = [(203, 1), (203, 0), (31, 1), (31, 0)] if custom_first else [(31, 1), (31, 0)] * (2 if event_local or native_first else 1)
-    if [(row["code"], row["state"]) for row in events] != ordinary + [(30, 1), (30, 0)]:
+    # Scoped routing writes a callback action at its offered cutpoint, before later unseen input.
+    cut = len(ordinary) if custom_first or not scoped else len(ordinary) - 2
+    if [(row["code"], row["state"]) for row in events] != ordinary[:cut] + [(30, 1), (30, 0)] + ordinary[cut:]:
         raise ValueError("custom reply consumed unrelated input or reordered its action")
     def stamp(value):
         if not isinstance(value, dict) or set(value) != {"secs", "nanos"} or any(type(value[key]) is not int for key in value):
@@ -837,6 +849,7 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
     hyprctl = str(Path(args.hyprland).parent / "hyprctl")
     pictures = []
     phases = []
+    scoped = os.environ.get("PREK_KEY_WORKER_ROUTING") == "scoped"
 
     def command(arguments):
         return subprocess.run([hyprctl] + arguments, env=env, check=True,
@@ -891,6 +904,8 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
                     ("hybrid-key-relative-consumed", "bAAaAaAAAaaaaaaaaaaasaaasasabsassa" + "ssa" + "sa" + "aas", []),
                     ("hybrid-key-relative-fallback", "bAAaAaAAAaaaaaaaaaaasaaasasabsassa" + "ssa" + "sa" + "aas", []),
                     ("software-scoped-shutdown", "bAAaAaAAAaaaaaaaaaaasaaasasabsassa" + "ssa" + "sa" + "aas", [])]
+        if scoped:
+            expected = [(name, scoped_order(text), keys) for name, text, keys in expected]
     fixture_env = dict(env, PREK_LOCAL_CAGE="1", PREK_CAGE_OUTPUT=str(output), PREK_CAGE_KEYBOARD=args.keyboard,
                        PREK_CAGE_KEY_SOCKET=str(socket))
     if args.key_worker:
@@ -935,7 +950,8 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
     wanted = dict(status="passed", phases=15, source="two_owned_wayland_virtual_keyboards", production_route_tested=False,
                   kernel_input_tested=False, unmodified_stock_acceptance=False, test_backpressure=True)
     if args.key_worker:
-        wanted.update(phases=42, source="fifteen_owned_wayland_virtual_keyboards_and_two_pointers", scoped_worker_tested=True, authority_modeled=True,
+        wanted.update(phases=42, routing="scoped" if scoped else "key",
+                      source="fifteen_owned_wayland_virtual_keyboards_and_two_pointers", scoped_worker_tested=True, authority_modeled=True,
                       transport_readiness_modeled=True, selective_consumption_tested=True,
                       selective_consumption_scope="owned_protocol_native_keys", physical_takeover_tested=False,
                       selective_projection_tested=True, within_frame_order_tested=True, cross_source_order_tested=True,
@@ -968,13 +984,13 @@ def run_key_output(args, env, output, socket, rows, wait_rendered, capture):
         inputs = [json.loads(line) for line in (output / "key-worker-input.jsonl").read_text().splitlines()]
         native_arbitration = validate_native_key_arbitration(phases, rows(), inputs)
         (output / "native-key-arbitration-receipt.json").write_text(json.dumps(native_arbitration, indent=2) + "\n")
-        custom_arbitration = validate_custom_key_arbitration(phases, rows(), json.loads((output / "custom-key-runtime.json").read_text()))
+        custom_arbitration = validate_custom_key_arbitration(phases, rows(), json.loads((output / "custom-key-runtime.json").read_text()), scoped=scoped)
         (output / "custom-key-arbitration-receipt.json").write_text(json.dumps(custom_arbitration, indent=2) + "\n")
-        activation = validate_custom_key_arbitration(phases, rows(), json.loads((output / "custom-key-activation-runtime.json").read_text()), event_local=True)
+        activation = validate_custom_key_arbitration(phases, rows(), json.loads((output / "custom-key-activation-runtime.json").read_text()), event_local=True, scoped=scoped)
         (output / "custom-key-activation-receipt.json").write_text(json.dumps(activation, indent=2) + "\n")
         for composition in ("native_prefix", "native_suffix"):
             suffix = "native-prefix" if composition == "native_prefix" else "native-suffix"
-            receipt = validate_custom_key_arbitration(phases, rows(), json.loads((output / f"custom-key-{suffix}-runtime.json").read_text()), composition=composition)
+            receipt = validate_custom_key_arbitration(phases, rows(), json.loads((output / f"custom-key-{suffix}-runtime.json").read_text()), composition=composition, scoped=scoped)
             (output / f"custom-key-{suffix}-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
         trace = lambda device: [json.loads(line) for line in (output / f"key-output-{device}.jsonl").read_text().splitlines()]
         hybrid = validate_hybrid_keys(phases, rows(), json.loads((output / "hybrid-key-runtime.json").read_text()), trace(962), trace(963))

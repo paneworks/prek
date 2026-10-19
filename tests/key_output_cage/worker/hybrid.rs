@@ -200,7 +200,7 @@ pub(super) fn exercise(output: &Path, socket: &Path, index: usize, text: &str) -
         axes: BTreeMap::new(),
         virtual_device: false,
     };
-    let mut routing = Routing::with_key_projection(config, fence).unwrap();
+    let mut routing = worker_routing(config, fence);
     routing
         .authority_mut()
         .bind(

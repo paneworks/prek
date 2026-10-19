@@ -23,6 +23,17 @@ mod hybrid;
 #[path = "worker/pending.rs"]
 mod pending;
 
+fn scoped() -> bool {
+    std::env::var("PREK_KEY_WORKER_ROUTING").as_deref() == Ok("scoped")
+}
+fn worker_routing(config: Config, fence: Fence) -> Routing {
+    if scoped() {
+        Routing::with_input_projection(config, fence)
+    } else {
+        Routing::with_key_projection(config, fence)
+    }
+    .unwrap()
+}
 fn rule(id: &str, key: u16, action: Action) -> Rule {
     Rule {
         id: id.into(),
@@ -277,7 +288,7 @@ impl RoutedKeyboard {
             Output::new(Keyboard::open(output, socket, 100)).unwrap(),
         )
         .unwrap();
-        let mut routing = Routing::with_key_projection(config, fence).unwrap();
+        let mut routing = worker_routing(config, fence);
         routing
             .authority_mut()
             .bind(
@@ -922,7 +933,7 @@ fn local_cage_scoped_key_worker() {
     pending::exercise(&output, socket, 35, &text);
     let text = hybrid::exercise(&output, socket, 38, &format!("{text}a"));
     phase(&output, 41, &text, &[]);
-    fs::write(output.join("key-output-runtime-result.json"),serde_json::to_vec(&json!({"status":"passed","phases":42,
+    let mut result = json!({"status":"passed","phases":42,
         "source":"fifteen_owned_wayland_virtual_keyboards_and_two_pointers","production_route_tested":false,"kernel_input_tested":false,
         "unmodified_stock_acceptance":false,"test_backpressure":true,"scoped_worker_tested":true,
         "authority_modeled":true,"transport_readiness_modeled":true,"selective_consumption_tested":true,
@@ -941,5 +952,11 @@ fn local_cage_scoped_key_worker() {
         "hybrid_key_relative_rendering_tested":true,"hybrid_key_fallback_cadence_tested":true,
         "independent_domain_rendering_tested":true,"domain_gesture_arbitration_tested":false,
         "native_hybrid_topology_tested":false,"hybrid_mt_rendering_tested":false,
-        "mixed_delayed_gesture_arbitration_tested":false})).unwrap()).unwrap();
+        "mixed_delayed_gesture_arbitration_tested":false});
+    result["routing"] = json!(if scoped() { "scoped" } else { "key" });
+    fs::write(
+        output.join("key-output-runtime-result.json"),
+        serde_json::to_vec(&result).unwrap(),
+    )
+    .unwrap();
 }

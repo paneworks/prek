@@ -180,7 +180,7 @@ return p.config.new{mode='route',
         })
         .unwrap();
     assert!(settle(&mut session).is_empty());
-    let mut routing = Routing::with_key_projection(config, fence).unwrap();
+    let mut routing = worker_routing(config, fence);
     routing
         .authority_mut()
         .bind(provided.binding, true, false)
@@ -344,14 +344,14 @@ return p.config.new{mode='route',
         "trigger":trigger,"work_admitted_at":work_admitted_at,"reply_dispatches":reply_dispatches,
         "inputs":inputs,"ticket":ticket,"proposal":proposal,"proposed_at":proposed_at,"admitted_at":admitted_at,
     })).unwrap()).unwrap();
-    let text = format!(
-        "{text}{}",
-        if event_local || native_first {
-            "ssa"
-        } else {
-            "sa"
-        }
-    );
+    // Scoped routing writes the action at its offered cutpoint, before later unseen input.
+    let suffix = match (event_local || native_first, case == Case::Root, scoped()) {
+        (true, _, true) => "sas",
+        (true, _, false) => "ssa",
+        (false, true, true) => "as",
+        _ => "sa",
+    };
+    let text = format!("{text}{suffix}");
     phase(output, index, &text, &[]);
     text
 }

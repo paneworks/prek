@@ -587,7 +587,7 @@ impl Stream {
         for subscription in update.seats {
             if !self.seats.contains_key(&subscription.seat) {
                 let mut routing =
-                    Routing::with_key_projection(self.config.clone(), subscription.fence)?;
+                    Routing::with_input_projection(self.config.clone(), subscription.fence)?;
                 routing.configuration_generation(self.generation)?;
                 routing.recognition_ready(false, now)?;
                 self.seats.insert(

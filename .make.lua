@@ -685,12 +685,14 @@ cargo test --locked --features native-test-harness --test key_output_cage --no-r
                assert(oslo.run{"sha256sum",app}.ok,"could not identify Lua helper")
                local helper=project_root().."/tests/support/keyboard_quiesce.py"
                assert(oslo.run{"sha256sum",helper}.ok,"could not identify scheduler helper")
-               for _,provider in ipairs{"lua","hyprlang"} do
-                 assert(oslo.run{a.runner,"--hardware-rendering","--key-output","--key-worker",
-                   "--key-output-fixture",fixture,"--prek-app",app,"--keyboard-quiesce-check",helper,
-                   "--keyboard",project_root().."/target/hybrid-key-journal/keyboard/bin/prek-wayland-keyboard",
-                   "--receiver",project_root().."/target/hybrid-key-journal/receiver/bin/prek-wayland-receiver",
-                   "--hyprland-config",provider}.ok,"local debug scheduler fixture failed")
+               for _,routing in ipairs{"key","scoped"} do
+                 for _,provider in ipairs{"lua","hyprlang"} do
+                   assert(oslo.run{"env","PREK_KEY_WORKER_ROUTING="..routing,a.runner,"--hardware-rendering","--key-output","--key-worker",
+                     "--key-output-fixture",fixture,"--prek-app",app,"--keyboard-quiesce-check",helper,
+                     "--keyboard",project_root().."/target/hybrid-key-journal/keyboard/bin/prek-wayland-keyboard",
+                     "--receiver",project_root().."/target/hybrid-key-journal/receiver/bin/prek-wayland-receiver",
+                     "--hyprland-config",provider}.ok,"local debug scheduler fixture failed: "..routing.." "..provider)
+                 end
                end
              end }
 
