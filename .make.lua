@@ -549,11 +549,20 @@ make.recipe{ name="test-tail-provenance",desc="native original-report snapshots,
                end
              end }
 
+make.recipe{ name="test-scoped-touch",desc="native scoped touch claim/join/cancel and ordinary fallback parity; no devices",
+             run=function()
+               local tested=oslo.run{"cargo","test","--locked","--lib","routing::tests::scoped_touch",capture=true}
+               io.stdout:write(tested.out or ""); io.stderr:write(tested.err or "")
+               assert(tested.ok and (tested.out or ""):match("running [1-9]%d* tests?"),"scoped touch gate failed or selected no tests")
+             end }
+
 make.recipe{ name="test-mixed-arbitration",desc="configured native and custom key/domain ownership and original ticket causality; no devices",
              run=function()
-               local tested=oslo.run{"cargo","test","--locked","--lib","keys::worker::tests::coordinator::mixed",capture=true}
-               io.stdout:write(tested.out or ""); io.stderr:write(tested.err or "")
-               assert(tested.ok and (tested.out or ""):match("running [1-9]%d* tests?"),"mixed arbitration gate failed or selected no tests")
+               for _,filter in ipairs({"keys::worker::tests::coordinator::mixed", "keys::worker::tests::independence"}) do
+                 local tested=oslo.run{"cargo","test","--locked","--lib",filter,capture=true}
+                 io.stdout:write(tested.out or ""); io.stderr:write(tested.err or "")
+                 assert(tested.ok and (tested.out or ""):match("running [1-9]%d* tests?"),"mixed arbitration gate failed or selected no tests: "..filter)
+               end
              end }
 
 make.recipe{ name="test-domain-journal",desc="independent non-key ownership, shared report barriers and domain-private absolute repair; no devices",
@@ -911,6 +920,6 @@ make.alias("c", "compile")
 make.recipe{
   name = "verify",
   desc = "the whole local gate",
-  deps = { "fmt-check", "check-all", "test-all", "test-lua-native-values", "test-lua-lifetimes", "test-lua-tasks", "test-key-provenance", "test-key-admission", "test-key-participants", "test-key-journal", "test-tail-provenance", "test-domain-journal", "test-mixed-arbitration", "test-custom-key-arbitration", "test-software-worker", "test-routing-helper", "test-composition-helper", "test-chain-helper", "test-composed-worker-helper", "test-root-session", "test-root-routing", "test-native-managed-model", "test-cage-startup", "test-distribution", "clippy", "rustdoc" },
+  deps = { "fmt-check", "check-all", "test-all", "test-lua-native-values", "test-lua-lifetimes", "test-lua-tasks", "test-key-provenance", "test-key-admission", "test-key-participants", "test-key-journal", "test-tail-provenance", "test-domain-journal", "test-mixed-arbitration", "test-scoped-touch", "test-custom-key-arbitration", "test-software-worker", "test-routing-helper", "test-composition-helper", "test-chain-helper", "test-composed-worker-helper", "test-root-session", "test-root-routing", "test-native-managed-model", "test-cage-startup", "test-distribution", "clippy", "rustdoc" },
 }
 make.alias("v", "verify")

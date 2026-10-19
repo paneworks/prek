@@ -58,10 +58,16 @@ pub(in crate::routing) struct State {
     pub(in crate::routing) domains: domains::State,
     waiting: BTreeMap<KeyPress, Waiting>,
     pub(in crate::routing) held: Vec<Held>,
-    offsets: BTreeMap<String, Duration>,
+    pub(in crate::routing) offsets: BTreeMap<OrderDomain, Duration>,
+    pub(in crate::routing) joins: BTreeMap<Source, Duration>,
 }
 impl State {
-    pub(in crate::routing) fn waiting_remove(&mut self, source: &Source, at: Duration) {
+    pub(in crate::routing) fn waiting_remove(
+        &mut self,
+        source: &Source,
+        domain: Option<&OrderDomain>,
+        at: Duration,
+    ) {
         let offset = self
             .waiting
             .iter()
@@ -71,13 +77,16 @@ impl State {
             .into_iter()
             .chain(self.domains.remove(source, at))
             .max();
-        if let Some(offset) = offset {
+        if let Some(offset) = offset
+            && let Some(domain) = domain
+        {
             self.offsets
-                .entry(source.seat.clone())
+                .entry(domain.clone())
                 .and_modify(|old| *old = (*old).max(offset))
                 .or_insert(offset);
         }
         self.waiting.retain(|press, _| press.source != *source);
+        self.joins.remove(source);
         self.held
             .retain(|held| !held.outcome.intent.sources().contains(source));
     }
@@ -134,9 +143,11 @@ impl Routing {
         claim.valid(self, intent)
     }
     pub(in crate::routing) fn reset_key_epochs(&mut self) {
-        self.key_journal.offsets.retain(|seat, _| {
-            self.routes.iter().any(|(source, route)| {
-                source.seat == *seat && route.project_keys && !route.router.key_journal_neutral()
+        self.key_journal.offsets.retain(|domain, _| {
+            self.routes.values().any(|route| {
+                route.order_domain == *domain
+                    && route.project_keys
+                    && !route.router.key_journal_neutral()
             })
         });
     }
@@ -402,7 +413,7 @@ impl Routing {
                     let offset = now.min(waiting.deadline).saturating_sub(waiting.at);
                     self.key_journal
                         .offsets
-                        .entry(source.seat.clone())
+                        .entry(self.routes[&source].order_domain.clone())
                         .and_modify(|old| *old = (*old).max(offset))
                         .or_insert(offset);
                 }
@@ -414,7 +425,7 @@ impl Routing {
             ) {
                 self.key_journal
                     .offsets
-                    .entry(source.seat.clone())
+                    .entry(self.routes[&source].order_domain.clone())
                     .and_modify(|old| *old = (*old).max(offset))
                     .or_insert(offset);
             }
@@ -425,9 +436,12 @@ impl Routing {
         &mut self,
         active: &[RouteIntent],
         outcomes: &[RouteOutcome],
+        claims: &[RouteIntent],
         at: Duration,
         now: Duration,
     ) -> io::Result<()> {
+        self.key_journal.joins.clear();
+        let join = self.engine.config().timing.join_window.duration();
         let mut candidates = BTreeMap::new();
         for intent in active.iter().chain(
             outcomes
@@ -472,16 +486,11 @@ impl Routing {
         let mut supported = BTreeSet::new();
         let mut supported_domains = BTreeSet::new();
         for intent in candidates {
-            if self.split_inputs
-                && !self.viable(
-                    &intent,
-                    at,
-                    intent.started(),
-                    self.routes
-                        .get(intent.source())
-                        .is_none_or(|route| route.router.physical_neutral()),
-                )
-            {
+            let finished = self
+                .routes
+                .get(intent.source())
+                .is_none_or(|route| route.router.physical_neutral());
+            if self.split_inputs && !self.viable(&intent, at, intent.started(), finished) {
                 self.engine
                     .cancel_key_candidate(intent.id(), at, "input group no longer viable");
                 continue;
@@ -550,20 +559,56 @@ impl Routing {
                 .filter_map(|atom| self.domain_scope(intent.id(), &atom).cloned())
                 .collect();
             supported_domains.extend(scopes.iter().cloned());
+            let native_claim = claims.iter().any(|claim| claim.id() == intent.id());
+            if self.split_inputs
+                && !native_claim
+                && matches!(
+                    intent.rule.trigger,
+                    Trigger::Swipe { .. } | Trigger::TouchTaps { .. }
+                )
+                && claims.iter().any(|claim| {
+                    claim
+                        .sources()
+                        .iter()
+                        .any(|source| intent.sources().contains(source))
+                })
+            {
+                continue;
+            }
             if observed.iter().any(|press| higher.contains(press))
                 || scopes.iter().any(|scope| higher_domains.contains(scope))
             {
                 continue;
             }
-            if completed.is_none() && !reserve {
+            let claimed = completed.is_some()
+                || self.split_inputs
+                    && (native_claim
+                        || matches!(intent.rule.trigger, Trigger::TouchTaps { fingers, .. }
+                            if fingers >= 2 && intent.contacts() == usize::from(fingers)));
+            let joining = self.split_inputs
+                && intent.rule.trigger.contains_touch()
+                && !finished
+                && at < intent.started().saturating_add(join);
+            if !reserve && (!claimed || joining) {
+                if claimed {
+                    let wake = intent.started().saturating_add(join);
+                    self.key_journal
+                        .joins
+                        .entry(intent.source().clone())
+                        .and_modify(|old| *old = (*old).min(wake))
+                        .or_insert(wake);
+                }
                 higher.extend(observed.iter().cloned());
                 higher_domains.extend(scopes);
                 continue;
             }
-            let mut evidence = if reserve || intent.rule.trigger.recognizers().next().is_some() {
-                observed
-            } else {
-                completed.unwrap().intent.input_evidence()
+            let mut evidence = match completed {
+                Some(completed)
+                    if !reserve && intent.rule.trigger.recognizers().next().is_none() =>
+                {
+                    completed.intent.input_evidence()
+                }
+                _ => observed,
             };
             if let Some(owned) = self
                 .won
@@ -711,31 +756,33 @@ impl Routing {
         self.refresh_key_barriers()
     }
     pub(in crate::routing) fn refresh_key_barriers(&mut self) -> io::Result<()> {
-        let mut barriers: BTreeMap<&str, InputPosition> = BTreeMap::new();
+        let mut barriers: BTreeMap<OrderDomain, InputPosition> = BTreeMap::new();
         for press in self.key_journal.waiting.keys() {
+            let Some(route) = self.routes.get(&press.source) else {
+                continue;
+            };
             barriers
-                .entry(&press.source.seat)
+                .entry(route.order_domain.clone())
                 .and_modify(|old| *old = (*old).min(press.position))
                 .or_insert(press.position);
         }
-        for (seat, position) in self.key_journal.domains.barriers() {
+        for (source, position) in self.key_journal.domains.barriers() {
+            let Some(route) = self.routes.get(source) else {
+                continue;
+            };
             barriers
-                .entry(seat)
+                .entry(route.order_domain.clone())
                 .and_modify(|old| *old = (*old).min(position))
                 .or_insert(position);
         }
-        for (source, route) in self
-            .routes
-            .iter_mut()
-            .filter(|(_, route)| route.project_keys)
-        {
+        for route in self.routes.values_mut().filter(|route| route.project_keys) {
             route
                 .router
                 .key_journal_barrier(
-                    barriers.get(source.seat.as_str()).copied(),
+                    barriers.get(&route.order_domain).copied(),
                     self.key_journal
                         .offsets
-                        .get(&source.seat)
+                        .get(&route.order_domain)
                         .copied()
                         .unwrap_or_default(),
                 )

@@ -4,6 +4,7 @@ pub(super) mod arbitration;
 pub(super) mod domains;
 mod ordering;
 mod projection;
+pub(in crate::routing) use ordering::OrderDomain;
 
 /// Linear configured key work retaining its original route and coordinator fence.
 pub struct KeyWork {

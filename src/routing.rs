@@ -38,6 +38,7 @@ struct Route {
     joined: bool,
     project_keys: bool,
     key_domain: bool,
+    order_domain: keys::OrderDomain,
 }
 struct Won {
     intent: RouteIntent,
@@ -343,11 +344,13 @@ impl Routing {
         }
         let project_keys = self.ordered_keys
             && (self.split_inputs || keys::projectable(self.engine.config(), &device));
+        let order_domain = keys::OrderDomain::Input(device.source.clone());
         self.routes.insert(
             device.source,
             Route {
                 project_keys,
                 key_domain: false,
+                order_domain,
                 attached_at: at,
                 router,
                 authorization,
@@ -693,7 +696,7 @@ impl Routing {
                 }
             }
         }
-        self.arbitrate_keys(&active, &outcomes, at, now)?;
+        self.arbitrate_keys(&active, &outcomes, &claims, at, now)?;
         let mut invalid = self.prune_chains(at, now);
         invalid.extend(
             active
@@ -1349,8 +1352,12 @@ impl Routing {
         self.routes.contains_key(source)
     }
     pub fn recover(&mut self, source: &Source) {
+        let domain = self
+            .routes
+            .get(source)
+            .map(|route| route.order_domain.clone());
         self.key_journal
-            .waiting_remove(source, self.engine.input_at());
+            .waiting_remove(source, domain.as_ref(), self.engine.input_at());
         if self
             .routes
             .get(source)
@@ -1428,6 +1435,7 @@ impl Routing {
                     .iter()
                     .filter_map(|outcome| outcome.expires),
             )
+            .chain(self.key_journal.joins.values().copied())
             .chain(
                 self.routes
                     .values()
@@ -1457,6 +1465,7 @@ mod tests {
     mod custom;
     #[cfg(target_os = "linux")]
     mod native_claims;
+    mod scoped_touch;
     mod sequence;
     use super::*;
     use crate::config::Action;

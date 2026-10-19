@@ -92,10 +92,10 @@ impl State {
             })
         });
     }
-    pub(in crate::routing) fn barriers(&self) -> impl Iterator<Item = (&str, InputPosition)> {
+    pub(in crate::routing) fn barriers(&self) -> impl Iterator<Item = (&Source, InputPosition)> {
         self.waiting
             .keys()
-            .map(|scope| (scope.source.seat.as_str(), scope.root.position))
+            .map(|scope| (&scope.source, scope.root.position))
     }
     pub(in crate::routing) fn settle(
         &mut self,

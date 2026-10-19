@@ -1,6 +1,12 @@
 use super::*;
 use crate::config::EffectKind;
 
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(in crate::routing) enum OrderDomain {
+    Keyboard(String),
+    Input(Source),
+}
+
 fn keyboard(code: u16) -> bool {
     matches!(code, 1..=0xff | 0x160..=0x21f | 0x224..=0x2bf | 0x2e8..=0x2ff)
 }
@@ -141,8 +147,37 @@ impl Routing {
             .filter(|(index, _)| roots.contains(&root(&parents, *index)))
             .map(|(_, device)| device.source.clone())
             .collect();
+        let mut components = BTreeMap::new();
+        for (index, device) in devices.iter().enumerate() {
+            components
+                .entry(root(&parents, index))
+                .or_insert_with(|| device.source.clone());
+        }
+        let domains: BTreeMap<_, _> = devices
+            .iter()
+            .enumerate()
+            .map(|(index, device)| {
+                let source = &device.source;
+                let domain = if ordered.contains(source) {
+                    OrderDomain::Keyboard(source.seat.clone())
+                } else {
+                    OrderDomain::Input(components[&root(&parents, index)].clone())
+                };
+                (source.clone(), domain)
+            })
+            .collect();
+        let previous = std::mem::take(&mut self.key_journal.offsets);
         for (source, route) in &mut self.routes {
+            let domain = &domains[source];
+            if let Some(offset) = previous.get(&route.order_domain) {
+                self.key_journal
+                    .offsets
+                    .entry(domain.clone())
+                    .and_modify(|old| *old = (*old).max(*offset))
+                    .or_insert(*offset);
+            }
             route.key_domain = ordered.contains(source);
+            route.order_domain = domain.clone();
         }
     }
 }

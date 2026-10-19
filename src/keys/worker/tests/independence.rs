@@ -68,7 +68,15 @@ pub(super) fn setup(required: bool, slow_keyboard: bool) -> Routing {
     configured(profile(required, slow_keyboard))
 }
 fn configured(config: Config) -> Routing {
-    let mut routing = Routing::with_key_projection(config, fence()).unwrap();
+    configured_projection(config, false)
+}
+fn configured_projection(config: Config, scoped: bool) -> Routing {
+    let mut routing = if scoped {
+        Routing::with_input_projection(config, fence())
+    } else {
+        Routing::with_key_projection(config, fence())
+    }
+    .unwrap();
     context(&mut routing, 0, 1, ContextState::Desktop);
     for device in [device(1), device(2), pointer()] {
         routing
@@ -81,6 +89,232 @@ fn configured(config: Config) -> Routing {
         ms(0),
     );
     routing
+}
+
+#[test]
+fn scoped_pointer_waiting_only_fences_keys_when_explicitly_linked() {
+    for linked in [false, true] {
+        let mut routing = configured_projection(profile(linked, false), true);
+        let (mut seat, writes) = model();
+        if linked {
+            routing
+                .push(Record::Frame {
+                    frame: frame(1, 1, 5, 31, 1),
+                })
+                .unwrap();
+            while let Some(raw) = routing.due(&source(1), ms(5)).unwrap().cloned() {
+                routing.delivered(&source(1), raw.ticket, ms(5)).unwrap();
+            }
+        }
+        routing
+            .push(Record::Frame {
+                frame: frame(3, 1, 10, 272, 1),
+            })
+            .unwrap();
+        assert!(routing.due(&source(3), ms(10)).unwrap().is_none());
+        let work = push(&mut routing, 1, if linked { 2 } else { 1 }, 20, 1)
+            .pop()
+            .unwrap();
+        seat.enqueue(work, ms(20)).unwrap();
+        for _ in 0..8 {
+            seat.poll(&routing, ms(20)).unwrap();
+        }
+        assert_eq!(
+            key_events(&writes),
+            if linked { vec![] } else { vec![(42, 1)] },
+            "linked={linked}"
+        );
+    }
+}
+
+#[test]
+fn scoped_pointer_waiting_does_not_delay_unrelated_ordinary_typing() {
+    let mut routing = configured_projection(profile(false, false), true);
+    routing
+        .push(Record::Frame {
+            frame: frame(3, 1, 10, 272, 1),
+        })
+        .unwrap();
+    let ordinary = frame(1, 1, 20, 31, 1);
+    routing
+        .push(Record::Frame {
+            frame: ordinary.clone(),
+        })
+        .unwrap();
+    let output = routing
+        .due(&source(1), ms(20))
+        .unwrap()
+        .cloned()
+        .expect("independent ordinary typing is due now");
+    assert_eq!(output.frame.events, ordinary.events);
+    assert_eq!(output.due, ms(20));
+}
+
+#[test]
+fn scoped_independent_pointer_completion_and_recovery_do_not_pollute_keyboard_clock() {
+    for recover in [false, true] {
+        let mut routing = configured_projection(profile(false, false), true);
+        routing
+            .push(Record::Frame {
+                frame: frame(1, 1, 5, 31, 1),
+            })
+            .unwrap();
+        let output = routing.due(&source(1), ms(5)).unwrap().cloned().unwrap();
+        routing.delivered(&source(1), output.ticket, ms(5)).unwrap();
+        routing
+            .push(Record::Frame {
+                frame: frame(3, 1, 10, 272, 1),
+            })
+            .unwrap();
+        let at = if recover {
+            routing.push(Record::Tick { at: ms(20) }).unwrap();
+            routing.recover(&source(3));
+            30
+        } else {
+            routing.push(Record::Tick { at: ms(110) }).unwrap();
+            assert_eq!(routing.take_dispatches(ms(110)).len(), 1);
+            120
+        };
+        let ordinary = frame(1, 2, at, 31, 0);
+        routing
+            .push(Record::Frame {
+                frame: ordinary.clone(),
+            })
+            .unwrap();
+        let output = routing
+            .due(&source(1), ms(at))
+            .unwrap()
+            .cloned()
+            .expect("pointer offset must not move the ordinary keyboard release");
+        assert_eq!(output.frame.events, ordinary.events);
+        assert_eq!(output.due, ms(at), "recover={recover}");
+    }
+}
+
+fn button_provider(keyboard: bool) -> Device {
+    let mut provider = pointer();
+    provider.source = source(if keyboard { 5 } else { 4 });
+    provider.identity = if keyboard {
+        "keyboard-provider"
+    } else {
+        "button-provider"
+    }
+    .into();
+    provider.capabilities =
+        BTreeMap::from([(EV_KEY, if keyboard { vec![30, 273] } else { vec![273] })]);
+    provider
+}
+
+fn scoped_button_condition() -> Routing {
+    let mut config = profile(false, false);
+    config
+        .rules
+        .iter_mut()
+        .find(|rule| rule.id == "pointer-hold")
+        .unwrap()
+        .require_keys = vec![Key(273)];
+    for keyboard in [false, true] {
+        let provider = button_provider(keyboard);
+        let id = provider.identity.clone();
+        config.devices.insert(
+            id.clone(),
+            Selector {
+                identity: Some(provider.identity),
+                ..Default::default()
+            },
+        );
+        config.policy.allowed_devices.push(id);
+    }
+    let mut routing = configured_projection(config, true);
+    let provider = button_provider(false);
+    routing
+        .attach(provider.clone(), &ready(&provider), None, ms(0))
+        .unwrap();
+    routing
+        .push(Record::Frame {
+            frame: frame(4, 1, 5, 273, 1),
+        })
+        .unwrap();
+    let raw = routing.due(&source(4), ms(5)).unwrap().cloned().unwrap();
+    routing.delivered(&source(4), raw.ticket, ms(5)).unwrap();
+    routing
+        .push(Record::Frame {
+            frame: frame(3, 1, 10, 272, 1),
+        })
+        .unwrap();
+    routing
+}
+
+#[test]
+fn scoped_non_keyboard_conditions_share_report_order_and_clock_without_delaying_keyboards() {
+    let mut routing = scoped_button_condition();
+    let release = frame(4, 2, 20, 273, 0);
+    routing
+        .push(Record::Frame {
+            frame: release.clone(),
+        })
+        .unwrap();
+    assert!(routing.due(&source(4), ms(20)).unwrap().is_none());
+    let ordinary = frame(1, 1, 30, 31, 1);
+    routing
+        .push(Record::Frame {
+            frame: ordinary.clone(),
+        })
+        .unwrap();
+    let raw = routing.due(&source(1), ms(30)).unwrap().cloned().unwrap();
+    assert_eq!(raw.frame.events, ordinary.events);
+    routing.delivered(&source(1), raw.ticket, ms(30)).unwrap();
+    routing.push(Record::Tick { at: ms(110) }).unwrap();
+    assert_eq!(routing.take_dispatches(ms(110)).len(), 1);
+    assert!(routing.due(&source(4), ms(119)).unwrap().is_none());
+    let raw = routing.due(&source(4), ms(120)).unwrap().cloned().unwrap();
+    assert_eq!(raw.due, ms(120));
+    assert_eq!(raw.frame.events, release.events);
+}
+
+#[test]
+fn scoped_component_merges_and_splits_preserve_live_floors_before_fresh_input() {
+    let mut routing = scoped_button_condition();
+    routing.push(Record::Tick { at: ms(110) }).unwrap();
+    assert_eq!(routing.take_dispatches(ms(110)).len(), 1);
+    let provider = button_provider(true);
+    routing
+        .attach(provider.clone(), &ready(&provider), None, ms(111))
+        .unwrap();
+    let joined = frame(5, 1, 120, 273, 1);
+    routing
+        .push(Record::Frame {
+            frame: joined.clone(),
+        })
+        .unwrap();
+    assert!(
+        routing.due(&source(5), ms(120)).unwrap().is_none(),
+        "a fresh merged member must inherit the existing 100ms floor before staging"
+    );
+    let raw = routing.due(&source(5), ms(220)).unwrap().cloned().unwrap();
+    assert_eq!(raw.due, ms(220));
+    assert_eq!(raw.frame.events, joined.events);
+    routing.delivered(&source(5), raw.ticket, ms(220)).unwrap();
+    routing.recover(&source(5));
+    let ordinary = frame(1, 1, 230, 31, 1);
+    routing
+        .push(Record::Frame {
+            frame: ordinary.clone(),
+        })
+        .unwrap();
+    let raw = routing.due(&source(1), ms(230)).unwrap().cloned().unwrap();
+    assert_eq!(raw.due, ms(230));
+    assert_eq!(raw.frame.events, ordinary.events);
+    let release = frame(4, 2, 240, 273, 0);
+    routing
+        .push(Record::Frame {
+            frame: release.clone(),
+        })
+        .unwrap();
+    assert!(routing.due(&source(4), ms(240)).unwrap().is_none());
+    let raw = routing.due(&source(4), ms(340)).unwrap().cloned().unwrap();
+    assert_eq!(raw.due, ms(340));
+    assert_eq!(raw.frame.events, release.events);
 }
 #[test]
 fn an_unrelated_pending_pointer_does_not_stall_a_generated_keyboard_press() {
