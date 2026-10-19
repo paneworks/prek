@@ -392,6 +392,16 @@ make.recipe{ name="soak-lua", desc="one virtual hour of Lua timers/tasks/events 
                assert(tested.ok and (tested.out or ""):match("running 1 test"),"Lua soak failed or selected no test")
              end }
 
+make.recipe{ name="soak-routing", desc="one virtual hour of scoped touch routing at 125 Hz; bounded RSS and per-frame overhead (release)",
+             params={{"--seconds",desc="virtual seconds to run (default 3600, at least 60)"}},
+             run=function(a)
+               local seconds=a.seconds or "3600"
+               assert(seconds:match("^%d+$") and tonumber(seconds)>=60,"--seconds must be a whole number of at least 60")
+               local tested=oslo.run{"env","PREK_SOAK_SECONDS="..seconds,"cargo","test","--locked","--release","--test","routing_soak","--","--ignored","--nocapture",capture=true}
+               io.stdout:write(tested.out or ""); io.stderr:write(tested.err or "")
+               assert(tested.ok and (tested.out or ""):match("running 1 test"),"routing soak failed or selected no test")
+             end }
+
 make.recipe{ name="test-lua-lifetimes", desc="disposed subscription and timer capture release; no devices",
              run=function()
                local tested=oslo.run{"cargo","test","--locked","--lib","lua::lifetimes::",capture=true}
