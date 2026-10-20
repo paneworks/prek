@@ -97,7 +97,7 @@ fn map_in_bounds_only_a_listed_bezier_and_tolerates_a_missing_reply() {
             None,
         ),
     ] {
-        assert_eq!(animations_enabled(&option), enabled);
+        assert_eq!(super::super::animations::enabled(&option), enabled);
     }
     let monitors = serde_json::json!([]);
     let batch = |tail: &str| {

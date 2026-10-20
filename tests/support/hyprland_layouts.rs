@@ -23,6 +23,10 @@ fn context_reply(request: &[u8]) -> Option<String> {
             "monitor":0,"workspace":{"id":1},"at":[0,20],"size":[500,700]}])
         .to_string(),
         b"j/layers" | b"j/activewindow" => "{}".into(),
+        b"j/animations" => "[[],[]]".into(),
+        b"j/getoption animations:enabled" => {
+            "{\"option\":\"animations:enabled\",\"int\":1,\"set\":false}".into()
+        }
         _ => return None,
     })
 }

@@ -751,6 +751,15 @@ fn window_acceptance(
         .find(|window| window.id == target_id)
         .unwrap();
     assert!(initial_window.focused);
+    // The owned compositor disables animations, so stock goals are rendered.
+    assert!(
+        initial
+            .windows
+            .iter()
+            .filter(|window| [&target_id, &guard_id].contains(&&window.id))
+            .all(|window| window.visible),
+        "still owned windows on the shown workspace were not proven visible"
+    );
     let target_output = initial_window.output.clone();
     let source = r#"
 local p=require('prek')

@@ -132,16 +132,6 @@ pub(crate) struct Inventory {
     pub layers: Vec<Layer>,
     pub map_in: Option<Duration>,
 }
-/// The global `animations:enabled` switch from a stock `getoption` reply.
-fn animations_enabled(option: &Value) -> Option<bool> {
-    if option["option"] != "animations:enabled" {
-        return None;
-    }
-    option["int"]
-        .as_i64()
-        .map(|value| value != 0)
-        .or_else(|| option["bool"].as_bool())
-}
 /// Effective `layersIn` duration. The tick warps every value while animations
 /// or the node are disabled; otherwise `speed` tenths of a second, which only
 /// a listed cubic bezier guarantees; springs and unknown curves have none.
@@ -207,7 +197,7 @@ fn decode(bytes: &[u8], outputs: &[OutputState], inhibited: &mut bool) -> io::Re
     }
     let trailing: Vec<_> = replies.by_ref().take(3).collect();
     let map_in = match trailing.as_slice() {
-        [Ok(animations), Ok(option)] => map_in(animations, animations_enabled(option)),
+        [Ok(animations), Ok(option)] => map_in(animations, super::animations::enabled(option)),
         [Ok(animations)] | [Ok(animations), Err(_)] => map_in(animations, None),
         [Ok(_), Ok(_), _] => return Err(invalid("layer inventory has trailing replies")),
         _ => None,

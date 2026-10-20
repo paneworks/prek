@@ -64,6 +64,10 @@ impl Native {
             .to_string(),
             b"j/activewindow" => self.window(2).to_string(),
             b"j/layers" => "{}".into(),
+            b"j/animations" => "[[],[]]".into(),
+            b"j/getoption animations:enabled" => {
+                "{\"option\":\"animations:enabled\",\"int\":1,\"set\":false}".into()
+            }
             b"j/locked" => "{\"locked\":false}".into(),
             b"j/status" => {
                 serde_json::json!({"configProvider":if self.provider {"lua"}else{"hyprlang"}})

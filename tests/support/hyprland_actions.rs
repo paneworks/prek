@@ -118,6 +118,8 @@ impl Fixture {
                 },
                 b"j/locked" => serde_json::json!({"locked":behavior==4}).to_string(),
                 b"j/layers" => "{}".into(),
+                b"j/animations" => "[[],[]]".into(),
+                b"j/getoption animations:enabled" => "{\"option\":\"animations:enabled\",\"int\":1,\"set\":false}".into(),
                 b"j/activewindow" => if closed_copy.load(Ordering::Relaxed) || workspace==3 {"{}".into()} else {window.to_string()},
                 b"j/clients" => if closed_copy.load(Ordering::Relaxed) {"[]".into()} else {serde_json::json!([window]).to_string()},
                 b"j/monitors" => serde_json::json!([{"id":1,"name":"panel","disabled":false,

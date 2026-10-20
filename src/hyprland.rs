@@ -21,6 +21,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub(crate) mod animations;
 mod context;
 pub(crate) mod dispatch;
 pub mod layers;
@@ -343,9 +344,10 @@ impl Client {
     fn query_context(&self, until: Instant) -> io::Result<Vec<u8>> {
         // Both supported stock schemas accept read-only batches, whose JSON
         // replies are whitespace-separated. One connection avoids spending
-        // the context freshness budget on seven separate IPC round trips.
+        // the context freshness budget on nine separate IPC round trips.
         self.exchange(
-            "[[BATCH]]j/locked;j/monitors;j/clients;j/layers;j/activewindow;j/monitors;j/locked",
+            "[[BATCH]]j/locked;j/monitors;j/clients;j/layers;j/activewindow;j/monitors;\
+             j/animations;j/getoption animations:enabled;j/locked",
             until,
         )
     }

@@ -1387,7 +1387,16 @@ mapped focused window at the initial key event. They do not perform spatial
 hit testing or infer rendered geometry; a later focus change does not retarget
 them. App-content and other spatial scopes still require provider-proven
 rendered visibility and correct starting geometry. Stock IPC animation goals
-alone do not authorize app-content touch consumption.
+alone do not authorize app-content touch consumption. The stock sampler marks a
+window `visible` only when the same locked context batch shows that no window or
+workspace movement can animate. That means `animations:enabled` is off, or each
+of `windows`, `windowsIn`, `windowsOut`, `windowsMove`, `workspaces`,
+`workspacesIn`, `workspacesOut`, `specialWorkspace`, `specialWorkspaceIn` and
+`specialWorkspaceOut` appears once and is disabled. In that case the stock tick
+warps every value to its goal at the next frame. The window must also be
+unhidden, report its fullscreen state, sit on its monitor's active workspace
+with no special workspace shown, and not be covered by another fullscreen
+window there. With movement animations enabled, stock windows stay not visible.
 See [the keyboard recipe](../examples/lua/window_keys.lua) for exact-output
 global key rules; the touchscreen example uses app-content targeting.
 

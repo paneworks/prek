@@ -175,6 +175,8 @@ impl ContextSampler {
         let layers = next_reply(&mut replies)?;
         let active = next_reply(&mut replies)?;
         let final_monitors = next_reply(&mut replies)?;
+        let still =
+            super::animations::still(&next_reply(&mut replies)?, &next_reply(&mut replies)?);
         if locked(&next_reply(&mut replies)?)? {
             self.inhibited = true;
             return Err(invalid("compositor locked during context sampling"));
@@ -191,20 +193,10 @@ impl ContextSampler {
             &clients,
             &layers,
             &active,
-            generation,
-            revision,
-            captured_at,
+            still,
+            (generation, revision, captured_at),
         )?;
-        let final_outputs = parse(
-            &final_monitors,
-            &Value::Array(vec![]),
-            &Value::Object(Default::default()),
-            &Value::Object(Default::default()),
-            generation,
-            revision,
-            captured_at,
-        )?
-        .outputs;
+        let final_outputs = parse_outputs(&final_monitors)?;
         if snapshot.outputs != final_outputs {
             return Err(invalid("output topology changed during context sampling"));
         }
@@ -260,9 +252,8 @@ pub(super) fn parse_outputs(monitors: &Value) -> io::Result<Vec<OutputState>> {
         &Value::Array(vec![]),
         &serde_json::json!({}),
         &serde_json::json!({}),
-        1,
-        1,
-        Duration::ZERO,
+        false,
+        (1, 1, Duration::ZERO),
     )?
     .outputs)
 }
@@ -329,14 +320,14 @@ fn transform(value: i64) -> io::Result<Transform> {
         _ => return Err(invalid("unsupported output transform")),
     })
 }
+/// `still` is the stock animation evidence that goal geometry is rendered.
 fn parse(
     monitors: &Value,
     clients: &Value,
     layers: &Value,
     active: &Value,
-    generation: u64,
-    revision: u64,
-    captured_at: Duration,
+    still: bool,
+    (generation, revision, captured_at): (u64, u64, Duration),
 ) -> io::Result<Snapshot> {
     let monitors = monitors
         .as_array()
@@ -355,8 +346,10 @@ fn parse(
                 .ok_or_else(|| invalid("missing active workspace"))?,
             "id",
         )?;
+        // A shown special workspace covers the regular one.
+        let shown = (monitor["specialWorkspace"]["id"] == 0).then_some(workspace);
         if by_id
-            .insert(integer(monitor, "id")?, name.clone())
+            .insert(integer(monitor, "id")?, (name.clone(), shown))
             .is_some()
         {
             return Err(invalid("duplicate output identity"));
@@ -389,6 +382,7 @@ fn parse(
         .filter(|values| values.len() <= 4096)
         .ok_or_else(|| invalid("invalid client collection"))?;
     let mut windows = Vec::new();
+    let (mut covered, mut fullscreens) = (Vec::new(), Vec::new());
     let active_id = if active.as_object().is_some_and(|object| object.is_empty()) {
         None
     } else {
@@ -398,7 +392,7 @@ fn parse(
         if !flag(client, "mapped")? {
             continue;
         }
-        let output = by_id
+        let (output, shown) = by_id
             .get(&integer(client, "monitor")?)
             .ok_or_else(|| invalid("client has no known output"))?
             .clone();
@@ -408,6 +402,15 @@ fn parse(
                 .ok_or_else(|| invalid("missing client workspace"))?,
             "id",
         )?;
+        let fullscreen = client["fullscreen"]
+            .as_i64()
+            .map(|mode| mode != 0)
+            .or_else(|| client["fullscreen"].as_bool());
+        let exposed =
+            still && shown == Some(workspace) && client["hidden"] == false && fullscreen.is_some();
+        if exposed && fullscreen == Some(true) {
+            covered.push(workspace);
+        }
         let rect = Rect {
             origin: point(client, "at")?,
             size: point(client, "size")?,
@@ -421,13 +424,24 @@ fn parse(
             rect,
             content: rect,
             mapped: true,
-            // Stock IPC reports animation goals, not current rendered bounds.
-            // Retain that geometry for diagnostics, but never use it as proof
-            // of an eligible app-content target without a rendering provider.
-            visible: false,
+            // Stock IPC reports animation goals. They are rendered bounds
+            // only while no window or workspace movement can animate.
+            visible: exposed,
             focused: is_focused,
             z_order: None,
         });
+        fullscreens.push(fullscreen == Some(true));
+    }
+    // A fullscreen window hides every other window on its workspace.
+    for (window, fullscreen) in windows.iter_mut().zip(fullscreens) {
+        if covered
+            .iter()
+            .filter(|workspace| **workspace == window.workspace)
+            .count()
+            > usize::from(fullscreen)
+        {
+            window.visible = false;
+        }
     }
     let layers = layers
         .as_object()
@@ -529,7 +543,58 @@ mod tests {
         layers: &Value,
         active: &Value,
     ) -> io::Result<Snapshot> {
-        parse(monitors, clients, layers, active, 7, 1, Duration::ZERO)
+        parse(
+            monitors,
+            clients,
+            layers,
+            active,
+            false,
+            (7, 1, Duration::ZERO),
+        )
+    }
+    #[test]
+    fn still_animations_expose_only_uncovered_windows_on_the_shown_workspace() {
+        let mut shown = monitor();
+        shown["specialWorkspace"] = json!({"id": 0, "name": ""});
+        let client = |address: &str, workspace: i64, hidden: bool, fullscreen: i64| {
+            let mut client = window();
+            client["address"] = json!(address);
+            client["workspace"] = json!({"id": workspace});
+            client["hidden"] = json!(hidden);
+            client["fullscreen"] = json!(fullscreen);
+            client
+        };
+        let visible = |monitor: &Value, clients: Vec<Value>, still: bool| -> Vec<bool> {
+            let parsed = parse(
+                &json!([monitor]),
+                &json!(clients),
+                &json!({}),
+                &json!({}),
+                still,
+                (7, 1, Duration::ZERO),
+            )
+            .unwrap();
+            parsed.windows.iter().map(|w| w.visible).collect()
+        };
+        let tiled = vec![
+            client("0x1", 3, false, 0),
+            client("0x2", 3, true, 0),
+            client("0x3", 4, false, 0),
+            window(),
+        ];
+        assert_eq!(
+            visible(&shown, tiled.clone(), true),
+            [true, false, false, false]
+        );
+        assert_eq!(visible(&shown, tiled.clone(), false), [false; 4]);
+        assert_eq!(visible(&monitor(), tiled.clone(), true), [false; 4]);
+        let mut special = shown.clone();
+        special["specialWorkspace"] = json!({"id": -98, "name": "special:term"});
+        assert_eq!(visible(&special, tiled, true), [false; 4]);
+        let covered = vec![client("0x1", 3, false, 0), client("0x2", 3, false, 2)];
+        assert_eq!(visible(&shown, covered, true), [false, true]);
+        let twice = vec![client("0x1", 3, false, 1), client("0x2", 3, false, 2)];
+        assert_eq!(visible(&shown, twice, true), [false, false]);
     }
     #[test]
     fn transforms_preserve_pixel_dimensions_and_logical_origin() {

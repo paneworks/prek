@@ -45,6 +45,8 @@ impl Fixture {
                     serde_json::json!({"locked":behavior==4}).to_string()
                 },
                 b"j/clients"=>"[]".into(), b"j/layers"|b"j/activewindow"=>"{}".into(),
+                b"j/animations"=>"[[],[]]".into(),
+                b"j/getoption animations:enabled"=>"{\"option\":\"animations:enabled\",\"int\":1,\"set\":false}".into(),
                 b"j/monitors"=>serde_json::json!([{"id":1,"name":"panel","disabled":false,
                     "width":if behavior==3{1200}else{1080},"height":1920,"scale":2.0,"x":0,"y":0,"transform":0,
                     "activeWorkspace":{"id":1},"dpmsStatus":state_copy.load(Ordering::Relaxed)}]).to_string(),

@@ -261,6 +261,10 @@ fn context_sampling_fences_output_reappearance_and_geometry_changes() {
             b"j/locked" => "{\"locked\":false}".into(),
             b"j/clients" => "[]".into(),
             b"j/layers" | b"j/activewindow" => "{}".into(),
+            b"j/animations" => "[[],[]]".into(),
+            b"j/getoption animations:enabled" => {
+                "{\"option\":\"animations:enabled\",\"int\":1,\"set\":false}".into()
+            }
             b"j/monitors" => {
                 let phase = changing.load(Ordering::Relaxed);
                 if phase == 0 {
