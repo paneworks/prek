@@ -114,6 +114,21 @@ impl ContextSampler {
             workspaces,
         })
     }
+    /// Stock settings of the validated phone scrolling profile, read under
+    /// the same lock latch as desktop context.
+    pub fn sample_scroll_profile(
+        &mut self,
+        client: &Client,
+    ) -> io::Result<super::scrolling::profile::Settings> {
+        if self.inhibited {
+            return Err(invalid("a completed lock-provider transition is required"));
+        }
+        super::scrolling::profile::sample(
+            client,
+            Instant::now() + REQUEST_TIME,
+            &mut self.inhibited,
+        )
+    }
     pub(crate) fn sample_layers(
         &mut self,
         client: &Client,

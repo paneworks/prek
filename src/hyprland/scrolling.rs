@@ -264,5 +264,6 @@ fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
+pub mod profile;
 #[cfg(test)]
 mod tests;

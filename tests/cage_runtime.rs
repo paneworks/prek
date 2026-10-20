@@ -1056,7 +1056,37 @@ fn owned_monitor_scale(checking: &Client, instance: &str, name: &str, scale: f64
     let until = monotonic().unwrap() + Duration::from_secs(3);
     let mut sampler = ContextSampler::default();
     loop {
-        let snapshot = sampler.sample(checking, 1, SessionKind::User).unwrap();
+        let snapshot = match sampler.sample(checking, 1, SessionKind::User) {
+            Ok(snapshot) => snapshot,
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+                // Record which stock query is slow while the output reconfigures.
+                for query in [
+                    "monitors",
+                    "clients",
+                    "layers",
+                    "activewindow",
+                    "animations",
+                    "getoption animations:enabled",
+                    "locked",
+                ] {
+                    let started = std::time::Instant::now();
+                    let status =
+                        std::process::Command::new(std::env::var_os("PREK_CAGE_HYPRCTL").unwrap())
+                            .arg("-j")
+                            .args(query.split(' '))
+                            .env("HYPRLAND_INSTANCE_SIGNATURE", instance)
+                            .output()
+                            .map(|reply| reply.status.success());
+                    eprintln!("scale-timeout {query}: {:?} {status:?}", started.elapsed());
+                }
+                assert!(
+                    monotonic().unwrap() < until,
+                    "owned fractional scale context kept timing out"
+                );
+                continue;
+            }
+            Err(error) => panic!("{error}"),
+        };
         if snapshot.outputs.iter().any(|state| {
             state.geometry.name == name
                 && (state.geometry.scale as f32).to_bits() == (scale as f32).to_bits()
@@ -1220,6 +1250,9 @@ return {version=1}
             );
             std::thread::sleep(Duration::from_millis(5));
         };
+        if layout == "scrolling" && direction == "down" {
+            scroll_profile_acceptance(checking, instance, id, output);
+        }
         if layout == "scrolling" {
             reorder_acceptance(checking, binding, fence, app, instance, output, direction);
         }
@@ -1241,6 +1274,88 @@ return {version=1}
         output.join("hyprland-layouts.json"),
         serde_json::to_vec(&serde_json::json!({
             "status":"passed","workspace":id,"snapshots":receipts
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+/// The owned stock workspace is refused with its default gaps or borders,
+/// then yields a viewport matching its windows once both are zero.
+fn scroll_profile_acceptance(checking: &Client, instance: &str, id: i64, output: &Path) {
+    use prek::hyprland::scrolling::profile::{self, Refusal};
+    let eval = |command: String| {
+        let result = std::process::Command::new(std::env::var_os("PREK_CAGE_HYPRCTL").unwrap())
+            .args(["eval", &command])
+            .env("HYPRLAND_INSTANCE_SIGNATURE", instance)
+            .output()
+            .unwrap();
+        assert!(result.status.success());
+        assert_eq!(String::from_utf8(result.stdout).unwrap().trim(), "ok");
+    };
+    let mut sampler = ContextSampler::default();
+    let mut judge = || loop {
+        if let (snapshot, Some(layouts)) = sampler
+            .sample_with_layouts(checking, 1, SessionKind::User)
+            .unwrap()
+        {
+            let settings = sampler.sample_scroll_profile(checking).unwrap();
+            let workspace = layouts.workspaces.iter().find(|w| w.id == id).unwrap();
+            let state = snapshot
+                .outputs
+                .iter()
+                .find(|o| workspace.output.as_ref() == Some(&o.geometry.name))
+                .unwrap();
+            break (profile::viewport(workspace, state, &settings), settings);
+        }
+    };
+    let (initial, original) = judge();
+    let expected = if original.gaps_in != [0; 4] || original.gaps_out != [0; 4] {
+        Refusal::Gaps
+    } else {
+        Refusal::Border
+    };
+    assert_eq!(initial, Err(expected), "{original:?}");
+    eval("hl.config({general={gaps_in=0,gaps_out=0,border_size=0}})".into());
+    let until = monotonic().unwrap() + Duration::from_secs(3);
+    let (viewport, flat) = loop {
+        if let (Ok(viewport), settings) = judge() {
+            break (viewport, settings);
+        }
+        assert!(
+            monotonic().unwrap() < until,
+            "zero-gap profile never validated"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let (low, high) = viewport.bounds();
+    assert!(low <= viewport.offset() && viewport.offset() <= high);
+    let gaps = |[top, right, bottom, left]: [i64; 4]| {
+        format!("{{top={top},right={right},bottom={bottom},left={left}}}")
+    };
+    eval(format!(
+        "hl.config({{general={{gaps_in={},gaps_out={},border_size={}}}}})",
+        gaps(original.gaps_in),
+        gaps(original.gaps_out),
+        original.border
+    ));
+    let until = monotonic().unwrap() + Duration::from_secs(3);
+    while judge().1 != original {
+        assert!(
+            monotonic().unwrap() < until,
+            "profile settings were not restored"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    fs::write(
+        output.join("scroll-profile.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "status":"passed","workspace":id,
+            "initial_refusal":format!("{expected:?}"),
+            "original":{"gaps_in":original.gaps_in,"gaps_out":original.gaps_out,"border":original.border},
+            "flat":{"gaps_in":flat.gaps_in,"gaps_out":flat.gaps_out,"border":flat.border,
+                "reserved":flat.reserved.iter().map(|(name, area)| (name.clone(), area.to_vec())).collect::<Vec<_>>()},
+            "viewport":{"bounds":[low, high],"offset":viewport.offset()}
         }))
         .unwrap(),
     )

@@ -112,16 +112,50 @@ membership/goal direction/lifetimes, then restores dwindle. Its
 `hyprland-layouts.json` is metadata acceptance, **not** continuous G11 rendering
 or unmodified stock/native/physical routing acceptance.
 
+## Validated phone profile
+
+The user chose (2026-10-20) that G11 may require an explicitly validated
+phone-layout profile instead of arbitrary workspace/window rules. Stock IPC has
+no camera getter, but in this profile the window goal rectangles determine it.
+`ContextSampler::sample_scroll_profile` reads one batch bracketed by lock
+witnesses: `scrolling:direction`, `general:gaps_in`, `general:gaps_out`,
+`general:border_size`, `workspacerules` and each monitor's `reserved`
+`[left, top, right, bottom]`. `hyprland::scrolling::profile::viewport` refuses
+(`Refusal`) unless:
+
+- the active, non-special workspace on that output uses `scrolling`;
+- the direction is `down`;
+- inner and outer gaps and the border are zero;
+- there are no workspace rules;
+- every window is tiled: not hidden, floating, grouped or fullscreen;
+- the native columns list every window exactly once at its row.
+
+In 0.56.2 (`CSpace::recheckWorkArea`, `CScrollTapeController`,
+`CScrollingAlgorithm`), the work area is the monitor box minus `reserved` and
+`gaps_out`. Strip *i* starts at `workArea.y + usableH·Σwidth<i − offset` with
+height `usableH·width_i`. Only inner gaps and decorations shrink windows inside
+their strips, and the profile sets both to zero. So the camera offset is
+`workArea.y − top(strip 0)`. The validator then requires every window to sit at
+its derived strip top and height and the members of each strip to tile the work
+area's width. Short content must sit at its native centre,
+`round((content − viewport)/2)`; long content within `[0, content − viewport]`.
+Stock coordinates are truncated to integers, so each comparison allows 2
+logical pixels, and the resulting bounds carry that precision.
+
+The owned Lua-config Cage layout check validates this against the real
+compositor. With the fixture's default gaps/border the workspace is refused;
+after `hl.config` sets them to zero, it yields a viewport inside its bounds.
+The original settings are then restored, and the result is written to
+`scroll-profile.json`. Settings and profile are not yet attached to broker
+context, and `ScrollStack` stays unsupported.
+
 ## Remaining integration gates
 
 Before enabling G11:
 
-1. Obtain authoritative effective layout/direction, camera bounds and complete
-   column/window lifetime evidence. Preserve reserved areas, keyboard insets and
-   per-workspace overrides. Do not infer bounds from window count or only the
-   visible windows. Native Lua getters are not automatically query replies:
-   ordinary `eval` returns `ok`. The fixed REPL collector above obtains native
-   columns, not the missing effective camera/work-area fields.
+1. ~~Obtain authoritative effective layout/direction, camera bounds and complete
+   column/window lifetime evidence.~~ Supplied for the validated profile above;
+   other configurations are refused rather than inferred.
 2. Bind that evidence through broker/context to preclaim eligibility for the
    actual rendered empty strip. Wrong/unknown layouts and unsupported backends
    must refuse before ownership, not consume then discover failure.
