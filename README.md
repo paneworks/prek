@@ -583,9 +583,10 @@ Production takeover and continuous scrolling-layout effects remain pending.
 [Native app reordering](docs/hyprland-reorder.md) requires a complete frozen
 vertical scrolling-layout graph on the exact 0.56.2 Lua provider; it does not
 grant rendered app-content or physical input ownership.
-[Continuous viewport planning](docs/hyprland-scrolling.md) documents the bounded
-numerical G11 planner and the native authority/rendering gates still required;
-it does not enable scrolling actions.
+[Continuous viewport motion](docs/hyprland-scrolling.md) documents G11
+`scroll_stack`: a validated phone scrolling profile, a frozen workspace proof
+and guarded numeric 0.56.2 Lua moves. Touch routing and physical acceptance
+remain pending.
 `oslo make test-cage-lua-wayland-fix` runs the same mode/layer, input, power and
 window checks with an actual Lua-config compositor. Like the legacy variant,
 it explicitly uses the test-only Aquamarine startup patch, not stock acceptance.

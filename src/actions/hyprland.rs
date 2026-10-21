@@ -5,7 +5,10 @@ use crate::{
     config::{Screen, WindowAction},
     context::{OutputState, SessionKind, Snapshot, State, Window},
     context_transfer::{FRESHNESS, View},
-    hyprland::{Client, ContextSampler},
+    hyprland::{
+        Client, ContextSampler, layouts,
+        scrolling::{Attempt, SETTLE_TOLERANCE, Viewport, profile},
+    },
     ipc::monotonic,
     protocol::{Completion, Fence},
 };
@@ -29,6 +32,32 @@ impl Target {
             _ => None,
         }
     }
+}
+
+/// A workspace scroll frozen at offer: its output, workspace and native proof.
+#[derive(Clone)]
+pub(super) struct ScrollTarget {
+    output: OutputState,
+    workspace: i64,
+    scope: crate::protocol::ReorderScope,
+}
+impl ScrollTarget {
+    pub(super) fn same(&self, other: &Self) -> bool {
+        self.workspace == other.workspace
+            && self.scope == other.scope
+            && same_output(&self.output, &other.output)
+    }
+}
+/// The sampled native state the next scroll attempt is guarded against.
+pub(super) struct ScrollView {
+    pub(super) viewport: Viewport,
+    workspace: layouts::Workspace,
+}
+/// The outcome of one numeric scroll attempt.
+pub(super) enum Step {
+    Unsent,
+    Unconfirmed,
+    Settled(f64),
 }
 
 pub(super) fn supported(action: WindowAction) -> bool {
@@ -88,13 +117,13 @@ impl HyprlandAdapter {
     pub(super) fn ready(&self, now: Duration) -> bool {
         self.current(now).is_ok()
     }
-    pub(super) fn reorder_scope(
+    pub(super) fn native_scope(
         &self,
-        window: &str,
+        target: &crate::routing::native::Target,
         now: Duration,
     ) -> Option<crate::protocol::ReorderScope> {
         self.current(now).ok()?;
-        self.view.context.as_ref()?.reorder_scope(window)
+        self.view.context.as_ref()?.native_scope(target)
     }
     fn current(&self, now: Duration) -> io::Result<&Snapshot> {
         let provided = self
@@ -153,18 +182,149 @@ impl HyprlandAdapter {
             reorder_down: self.reorder_plan(id, WindowAction::ReorderDown),
         })
     }
+    fn native_layouts(&self) -> bool {
+        self.dialect == crate::hyprland::dispatch::Dialect::Lua
+            && (
+                self.client.version().major,
+                self.client.version().minor,
+                self.client.version().patch,
+            ) == (0, 56, 2)
+    }
+    pub(super) fn scroll_target(
+        &self,
+        output: &str,
+        workspace: i64,
+        now: Duration,
+    ) -> io::Result<ScrollTarget> {
+        let state = self
+            .current(now)?
+            .outputs
+            .iter()
+            .find(|state| {
+                state.geometry.name == output
+                    && state.screen == Screen::On
+                    && state.active_workspace == Some(workspace)
+            })
+            .ok_or_else(|| io::Error::other("frozen scroll output is unavailable"))?;
+        if !self.native_layouts() {
+            return Err(io::Error::other(
+                "scrolling requires verified Hyprland 0.56.2 Lua",
+            ));
+        }
+        let target = crate::routing::native::Target::Workspace(output.into(), workspace);
+        let scope = self
+            .native_scope(&target, now)
+            .ok_or_else(|| io::Error::other("workspace is outside the validated profile"))?;
+        Ok(ScrollTarget {
+            output: state.clone(),
+            workspace,
+            scope,
+        })
+    }
+    /// Samples the frozen target afresh: `None` once its output, proof or
+    /// profile changed.
+    pub(super) fn scroll_view(
+        &mut self,
+        target: &ScrollTarget,
+        until: Instant,
+    ) -> io::Result<Option<ScrollView>> {
+        let (snapshot, layouts) = self.sampler.sample_with_layouts_until(
+            &self.client,
+            self.view.fence.session,
+            SessionKind::User,
+            until,
+        )?;
+        let name = target.output.geometry.name.as_str();
+        let Some(layouts) = layouts.filter(|layouts| {
+            profile::scope(&snapshot, layouts, name, target.workspace).as_ref()
+                == Some(&target.scope)
+        }) else {
+            return Ok(None);
+        };
+        if !snapshot
+            .outputs
+            .iter()
+            .any(|output| same_output(output, &target.output))
+        {
+            return Ok(None);
+        }
+        let Ok(viewport) = profile::available(&snapshot, &layouts, name, target.workspace) else {
+            return Ok(None);
+        };
+        Ok(layouts
+            .workspaces
+            .into_iter()
+            .find(|workspace| {
+                workspace.id == target.workspace && workspace.output.as_deref() == Some(name)
+            })
+            .map(|workspace| ScrollView {
+                viewport,
+                workspace,
+            }))
+    }
+    /// One guarded numeric move from `view`, which must show the attempt's
+    /// source offset, then the re-derived native offset. Never retried.
+    pub(super) fn scroll_step(
+        &mut self,
+        target: &ScrollTarget,
+        view: &mut ScrollView,
+        attempt: Attempt,
+        expires: Duration,
+    ) -> Step {
+        let mut sent = false;
+        let result: io::Result<Step> = (|| {
+            let now = monotonic()?;
+            let Some(remaining) = expires
+                .checked_sub(now)
+                .filter(|remaining| !remaining.is_zero())
+            else {
+                return Ok(Step::Unsent);
+            };
+            let until = Instant::now() + remaining.min(Duration::from_millis(200));
+            if (view.viewport.offset() - attempt.from()).abs() > SETTLE_TOLERANCE
+                || self.client.dispatch_dialect_until(until)?
+                    != crate::hyprland::dispatch::Dialect::Lua
+            {
+                return Ok(Step::Unsent);
+            }
+            let request =
+                self.dialect
+                    .scroll(&target.output, &view.workspace, attempt.layout_move())?;
+            if monotonic()? >= expires || Instant::now() >= until {
+                return Ok(Step::Unsent);
+            }
+            let reply = self.client.exchange_effect(&request, until, &mut sent)?;
+            if reply != b"ok" && reply != b"ok\n" {
+                return Ok(Step::Unconfirmed);
+            }
+            loop {
+                if let Some(next) = self.scroll_view(target, until)?
+                    && (next.viewport.offset() - attempt.to()).abs() <= SETTLE_TOLERANCE
+                {
+                    let offset = next.viewport.offset();
+                    *view = next;
+                    return Ok(Step::Settled(offset));
+                }
+                if Instant::now() >= until || monotonic()? >= expires {
+                    return Ok(Step::Unconfirmed);
+                }
+                std::thread::sleep(
+                    Duration::from_millis(1).min(until.saturating_duration_since(Instant::now())),
+                );
+            }
+        })();
+        result.unwrap_or(if sent {
+            Step::Unconfirmed
+        } else {
+            Step::Unsent
+        })
+    }
     fn reorder_plan(
         &self,
         id: &str,
         action: WindowAction,
     ) -> Option<crate::hyprland::reorder::Plan> {
-        if self.dialect != crate::hyprland::dispatch::Dialect::Lua
-            || (
-                self.client.version().major,
-                self.client.version().minor,
-                self.client.version().patch,
-            ) != (0, 56, 2)
-        {
+        if !self.native_layouts() {
             return None;
         }
         let context = self.view.context.as_ref()?;
@@ -399,7 +559,7 @@ mod tests {
             address("0xffffffffffffffff:ffffffffffffffff").unwrap(),
             "0xffffffffffffffff"
         );
-        assert!(!supported(WindowAction::ScrollStack));
+        assert!(supported(WindowAction::ScrollStack));
         assert!(supported(WindowAction::ReorderUp));
         assert!(supported(WindowAction::ReorderDown));
     }

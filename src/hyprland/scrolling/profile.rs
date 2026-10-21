@@ -12,9 +12,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeSet, io};
 
-/// Stock coordinates are truncated to integers; two truncations bound the
-/// difference between an observed and a derived coordinate.
-const TOLERANCE: f64 = 2.0;
+/// Comparison slack for truncated stock coordinates.
+const TOLERANCE: f64 = super::SETTLE_TOLERANCE;
 const MAX_OUTPUTS: usize = 256;
 
 /// Why a workspace is outside the validated profile.
@@ -24,7 +23,9 @@ pub enum Refusal {
     Direction,
     Gaps,
     Border,
+    FocusFit,
     WorkspaceRules,
+    Width,
     Window,
     Columns,
     Geometry,
@@ -39,6 +40,8 @@ pub struct Settings {
     pub gaps_in: [i64; 4],
     pub gaps_out: [i64; 4],
     pub border: i64,
+    /// `scrolling:focus_fit_method`: 0 centres, 1 fits the focused strip.
+    pub focus_fit: i64,
     pub workspace_rules: usize,
     pub reserved: Vec<Reserved>,
 }
@@ -64,6 +67,7 @@ impl Settings {
                 .chain(&self.gaps_out)
                 .chain([&self.border])
                 .any(|value| !(0..=1_000_000).contains(value))
+            || !(0..=1).contains(&self.focus_fit)
             || self.workspace_rules > 4096
             || self.reserved.len() > MAX_OUTPUTS
             || self.reserved.iter().any(|reserved| {
@@ -80,9 +84,10 @@ impl Settings {
         Ok(())
     }
     /// Decodes `getoption` replies for direction, inner and outer gaps and
-    /// border size, the `workspacerules` list and the `monitors` list.
-    pub fn decode(replies: [&Value; 6]) -> io::Result<Self> {
-        let [direction, gaps_in, gaps_out, border, rules, monitors] = replies;
+    /// border size and focus fit method, the `workspacerules` list and the
+    /// `monitors` list.
+    pub fn decode(replies: [&Value; 7]) -> io::Result<Self> {
+        let [direction, gaps_in, gaps_out, border, fit, rules, monitors] = replies;
         fn option<'a>(reply: &'a Value, name: &str) -> io::Result<&'a Value> {
             (reply["option"] == name)
                 .then_some(reply)
@@ -136,6 +141,9 @@ impl Settings {
             border: option(border, "general:border_size")?["int"]
                 .as_i64()
                 .ok_or_else(|| invalid("invalid border size"))?,
+            focus_fit: option(fit, "scrolling:focus_fit_method")?["int"]
+                .as_i64()
+                .ok_or_else(|| invalid("invalid focus fit method"))?,
             workspace_rules: rules
                 .as_array()
                 .ok_or_else(|| invalid("invalid workspace rules"))?
@@ -155,7 +163,8 @@ pub(crate) fn sample(
 ) -> io::Result<Settings> {
     let bytes = client.exchange(
         "[[BATCH]]j/locked;j/getoption scrolling:direction;j/getoption general:gaps_in;\
-         j/getoption general:gaps_out;j/getoption general:border_size;j/workspacerules;\
+         j/getoption general:gaps_out;j/getoption general:border_size;\
+         j/getoption scrolling:focus_fit_method;j/workspacerules;\
          j/monitors;j/locked",
         until,
     )?;
@@ -164,7 +173,7 @@ pub(crate) fn sample(
 fn decode(bytes: &[u8], inhibited: &mut bool) -> io::Result<Settings> {
     let replies = serde_json::Deserializer::from_slice(bytes)
         .into_iter::<Value>()
-        .take(9)
+        .take(10)
         .collect::<Result<Vec<_>, _>>()
         .map_err(io::Error::other)?;
     let [
@@ -173,6 +182,7 @@ fn decode(bytes: &[u8], inhibited: &mut bool) -> io::Result<Settings> {
         gaps_in,
         gaps_out,
         border,
+        fit,
         rules,
         monitors,
         last,
@@ -186,7 +196,7 @@ fn decode(bytes: &[u8], inhibited: &mut bool) -> io::Result<Settings> {
     if *inhibited {
         return Err(invalid("profile batch witnessed compositor lock"));
     }
-    Settings::decode([direction, gaps_in, gaps_out, border, rules, monitors])
+    Settings::decode([direction, gaps_in, gaps_out, border, fit, rules, monitors])
 }
 
 /// The viewport of `workspace`, active on the lit `output` of one desktop
@@ -218,6 +228,39 @@ pub fn available(
     )
 }
 
+/// Fingerprint of what a scroll grant freezes, without the camera offset:
+/// output geometry, workspace, column order, widths and lifetimes, settings
+/// and content bounds.
+pub(crate) fn scope(
+    context: &Snapshot,
+    layouts: &layouts::Snapshot,
+    output: &str,
+    workspace: i64,
+) -> Option<crate::protocol::ReorderScope> {
+    let viewport = available(context, layouts, output, workspace).ok()?;
+    let state = context
+        .outputs
+        .iter()
+        .find(|state| state.geometry.name == output)?;
+    let native = layouts
+        .workspaces
+        .iter()
+        .find(|native| native.id == workspace && native.output.as_deref() == Some(output))?;
+    let value = serde_json::to_value((
+        context.generation,
+        &state.geometry,
+        state.geometry_generation,
+        workspace,
+        &native.columns,
+        &layouts.profile,
+        viewport.bounds(),
+    ))
+    .ok()?;
+    Some(crate::protocol::ReorderScope {
+        fingerprint: crate::hyprland::reorder::canonical_hash(b"prek.native.scroll.v1\0", value)?,
+    })
+}
+
 /// Derives the native viewport of `workspace` on `output`, or why the
 /// profile does not hold.
 pub fn viewport(
@@ -240,6 +283,9 @@ pub fn viewport(
     }
     if settings.border != 0 {
         return Err(Refusal::Border);
+    }
+    if settings.focus_fit != 1 {
+        return Err(Refusal::FocusFit);
     }
     if settings.workspace_rules != 0 {
         return Err(Refusal::WorkspaceRules);
@@ -275,6 +321,9 @@ pub fn viewport(
     {
         return Err(Refusal::Columns);
     }
+    if columns.iter().any(|column| column.width > 0.5) {
+        return Err(Refusal::Width);
+    }
     let reserved = settings
         .reserved
         .iter()
@@ -299,6 +348,7 @@ pub fn viewport(
     let offset = y - rect_of(&columns[0].members[0])?[1];
     let near = |a: f64, b: f64| (a - b).abs() <= TOLERANCE;
     let mut start = 0.0;
+    let mut ends = Vec::with_capacity(columns.len());
     for column in columns {
         let (top, extent) = (y + start - offset, height * column.width);
         let mut left = x;
@@ -313,6 +363,7 @@ pub fn viewport(
             return Err(Refusal::Geometry);
         }
         start += extent;
+        ends.push(start);
     }
     let content = start;
     let excess = content - height;
@@ -326,6 +377,7 @@ pub fn viewport(
         return Err(Refusal::Geometry);
     }
     Viewport::new(Direction::Down, height, content, offset.clamp(low, high))
+        .and_then(|viewport| viewport.fitted(ends))
         .map_err(|_| Refusal::Geometry)
 }
 

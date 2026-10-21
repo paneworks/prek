@@ -1,8 +1,11 @@
 # Continuous viewport motion
 
-G11 / P09.5 is **not enabled**. `ScrollStack` remains excluded from production
-action and claim gates. This document describes its numerical foundation, not
-an execution API or evidence of rendered gesture delivery.
+G11 / P09.5 `scroll_stack` is a supported session action on the
+[validated phone profile](#validated-phone-profile) only. A side-strip swipe
+claims input when that workspace's viewport is valid, freezes a workspace proof,
+and the [session executor](#session-executor) moves the native camera with
+guarded numeric moves. The model and real-compositor executor checks below
+are not evidence of touch routing or physical gesture delivery.
 
 ## Verified native contract
 
@@ -44,9 +47,11 @@ It allows at most one new attempt per 16 ms, including end. An attempt provides
 the source/destination offsets and the native numeric `layout_move` distance.
 It is **not** a dispatch command, grant, or permission to claim input.
 
-`settle` requires that exact outstanding attempt and an exact observed native
-offset. Missing, different or nonfinite observations retire the motion as
-uncertain: no retry or later progress is allowed. Repeated/foreign receipts do
+`settle` requires that exact outstanding attempt and an observed native offset
+within `SETTLE_TOLERANCE` (2 logical pixels, the error of truncated stock
+coordinates) of its destination; the destination then counts as reached.
+Missing, different or nonfinite observations retire the motion as uncertain:
+no retry or later progress is allowed. Repeated/foreign receipts do
 not settle another attempt. Cancellation drops pending progress without issuing
 a rollback; already queued effects still need settlement. Cancellation is not
 proof that an in-flight mutation was retracted.
@@ -126,7 +131,9 @@ witnesses: `scrolling:direction`, `general:gaps_in`, `general:gaps_out`,
 - the active, non-special workspace on that output uses `scrolling`;
 - the direction is `down`;
 - inner and outer gaps and the border are zero;
+- `scrolling:focus_fit_method` is 1 (fit, the stock default);
 - there are no workspace rules;
+- no column is wider than half the viewport (`width` ≤ 0.5);
 - every window is tiled: not hidden, floating, grouped or fullscreen;
 - the native columns list every window exactly once at its row.
 
@@ -158,28 +165,83 @@ needs that workspace to be active on a lit output of the same sample and
 refuses `Unsampled` without settings. A `ScrollStack` preclaim requires a
 `SideLeft`/`SideRight` rule with no window target, a desktop without a secure
 overlay, the permit output's active workspace and an available viewport. The
-permit itself already needs the Morf side-strip region. `ScrollStack` is still
-not a supported session action, so this check stays closed until the executor
-exists.
+permit itself already needs the Morf side-strip region.
+
+### Fit after every move
+
+A numeric move ends in `focusTargetUpdate(atCenter)`, which focuses the strip
+at the viewport centre with `FOCUS_REASON_DESKTOP_STATE_CHANGE`. That reason is
+a hard input focus, and refocusing the same window still emits `window.active`,
+so the scrolling layout runs `centerOrFitCol` on that strip after every move,
+whatever `follow_focus` says. Centring snaps the camera on each move, so the
+profile requires fit mode. Fit only moves the camera when the centre strip is
+partly hidden. With strips at most half the viewport that happens only in the
+2-pixel slack of `getStripAtCenter`. `Viewport::fitted(ends)` models this rule,
+so planned destinations already name the offset the compositor settles at.
+
+## Session executor
+
+The proof bound to a scroll is `routing::native::Target::Workspace(output,
+workspace)`. It is the same `ReorderScope` fingerprint type that reorder uses.
+`profile::scope` hashes the session generation, the output geometry, the
+workspace, its columns (order, widths and member lifetimes), the settings and
+the content bounds, but not the camera offset. So it stays stable while the
+camera moves and changes when a window, width or setting changes. The worker
+freezes it at preclaim; the broker checks it at dispatch and authorization, and
+the executor checks it at offer and grant.
+
+Each Begin/Update/End match is its own offer with its own grant. The executor
+keeps at most four motions, keyed by gesture:
+
+- **Begin:** samples the frozen target afresh and starts a `Motion` from its
+  viewport.
+- **Update/End:** report the cumulative logical `total.y` of the pan.
+- **Each granted ordinal:** makes at most one paced attempt. An update that a
+  newer granted ordinal of the same gesture supersedes makes none and
+  completes `Cancelled`.
+- **End:** keeps attempting within its grant until the last destination is
+  reached.
+- **Each attempt:** one guarded dispatch:
+  - The Lua chunk asserts that `hl.get_active_monitor()` is the frozen,
+    focused, lit output with that geometry, showing that workspace and no
+    special workspace.
+  - It asserts that the workspace still has the exact windows, goal rectangles,
+    app states, columns, widths and lifetimes of the last confirmed sample.
+  - Only then does it return `hl.dsp.layout("move <distance>")`.
+- **After a reply:** the executor re-samples, re-derives the offset with
+  `profile::available` and settles the attempt.
+- **A refused guard, a non-`ok` reply or a missing settlement:** completes
+  `Uncertain` and retires the motion without retry. Cancelling any ordinal also
+  retires it. Moves already sent are not rolled back.
+- **The broker:** drops a scroll update while two offers of its gesture are
+  still pending. Later progress carries the same cumulative travel, so a
+  fast-moving stream never reaches the 8-offer limit that resets the session.
+
+`tests/support/hyprland_scroll.rs` drives this executor against a fake 0.56.2
+socket: paced begin/update/end, both bounds and reversal, a refused guard, an
+unconfirmed move, a missing or foreign proof, cancellation, and a window added
+mid-gesture. `oslo make test-cage-lua-wayland-fix` then runs a 15-step
+begin/update/end scroll through the executor on the flat owned workspace of a
+real nested Hyprland. After each step it re-derives the native offset and checks
+it against the planner's fitted destination (`scroll-profile.json`, `executor`).
+This is executor and compositor evidence, not touch routing or physical
+acceptance.
 
 ## Remaining integration gates
-
-Before enabling G11:
 
 1. ~~Obtain authoritative effective layout/direction, camera bounds and complete
    column/window lifetime evidence.~~ Supplied for the validated profile above;
    other configurations are refused rather than inferred.
 2. ~~Bind that evidence through broker/context to preclaim eligibility for the
    actual rendered empty strip.~~ The profile travels with the graph, and the
-   preclaim check above refuses wrong or unknown layouts before ownership. It
-   opens only when `ScrollStack` becomes a supported session action.
-3. Freeze output/workspace/topology, column order/lifetimes and the actual config
-   provider. Guard the focused-workspace native operation atomically; never
-   focus a different target to make a global dispatcher apply to it.
-4. Wire begin/update/end/cancel, generation loss and bounded queues through the
-   session executor with fresh per-attempt grants. A numerical attempt is not a
-   grant. Do not retry a relative mutation after an uncertain write/receipt.
-5. Prove actual continuously rendered multiwindow movement with order/workspace
-   preserved, both bounds, reversal, cancellation, keyboard-visible geometry,
-   retarget refusal and ordinary app input. Keep test-only compositor dependency
-   fixes separate from unmodified stock/native/physical acceptance.
+   preclaim check refuses wrong or unknown layouts before ownership.
+3. ~~Freeze output/workspace/topology, column order/lifetimes and the actual
+   config provider, and guard the focused-workspace operation atomically.~~
+   The workspace proof and the Lua guard above.
+4. ~~Wire begin/update/end/cancel, generation loss and bounded queues through
+   the session executor with fresh per-attempt grants.~~ Executor above; a
+   relative move is never retried.
+5. Prove continuously rendered movement from actual touch input routed
+   through the worker on the Morf side strip, with keyboard-visible geometry
+   and ordinary app input unaffected. Then do physical acceptance on the
+   phone.

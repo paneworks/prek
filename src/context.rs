@@ -676,22 +676,30 @@ impl Authority {
             snapshot.hyprland_target_available(action, scope, window, output, workspace)
         }
     }
+    #[cfg(test)]
     pub(crate) fn reorder_scope(
         &self,
         window: &str,
         at: Duration,
     ) -> Option<crate::protocol::ReorderScope> {
+        self.native_scope(&crate::routing::native::Target::Window(window.into()), at)
+    }
+    pub(crate) fn native_scope(
+        &self,
+        target: &crate::routing::native::Target,
+        at: Duration,
+    ) -> Option<crate::protocol::ReorderScope> {
         #[cfg(target_os = "linux")]
         {
-            crate::hyprland::reorder::scope(
+            crate::hyprland::reorder::native_scope(
                 self.fresh(at).ok()?,
                 self.native_layouts.as_deref()?,
-                window,
+                target,
             )
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (window, at);
+            let _ = (target, at);
             None
         }
     }

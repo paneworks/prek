@@ -305,3 +305,126 @@ fn native_scale_guards_recover_binary32_identity_without_accepting_neighboring_s
         }
     }
 }
+
+fn scroll_workspace() -> crate::hyprland::layouts::Workspace {
+    use crate::hyprland::layouts::{Column, Position, Window as Native, Workspace};
+    let native = |id: &str, y: f64, index: usize| Native {
+        id: id.into(),
+        rect: [0., y, 540., 480.],
+        hidden: false,
+        floating: false,
+        grouped: false,
+        fullscreen: 0,
+        column: Some(Position { index, row: 0 }),
+    };
+    Workspace {
+        id: 3,
+        output: Some("panel".into()),
+        monitor: Some(0),
+        active: true,
+        special: false,
+        layout: "scrolling".into(),
+        windows: vec![
+            native("0x1234:abc", -100., 0),
+            native("0x5678:def", 380., 1),
+        ],
+        columns: ["0x1234:abc", "0x5678:def"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, id)| Column {
+                index,
+                width: 0.5,
+                members: vec![id.into()],
+            })
+            .collect(),
+    }
+}
+fn evaluate_scroll(request: &str, setup: &str, expected: bool) {
+    let expression = request.strip_prefix("/dispatch ").unwrap();
+    let script = format!(
+        r#"
+local factories,mutations=0,0
+local monitor={{name='panel',id=0,focused=true,x=0,y=0,width=1080,height=1920,scale=2,transform=0,dpms_status=true}}
+local ws={{id=3,active=true,special=false,tiled_layout='scrolling',monitor=monitor}}
+monitor.active_workspace=ws
+local columns={{}}
+local function window(address,stable,y,index)
+ local col=columns[index+1] or {{index=index,width=0.5,windows={{}}}}
+ columns[index+1]=col
+ local o={{address=address,stable_id=stable,mapped=true,workspace=ws,monitor=monitor,
+  at={{x=0,y=y}},size={{x=540,y=480}},hidden=false,floating=false,fullscreen=0,
+  layout={{column=col,index_in_column=0}}}}
+ col.windows[#col.windows+1]=o
+ return o
+end
+local windows={{window('0x1234',0xabc,-100,0),window('0x5678',0xdef,380,1)}}
+local hl={{dsp={{}}}}
+hl.get_active_monitor=function()return monitor end
+hl.get_workspace=function(id)assert(id==3);return ws end
+hl.get_workspace_windows=function(w)assert(w==ws);return windows end
+hl.dsp.layout=function(message)
+ assert(message=='move -12.5')
+ factories=factories+1
+ return function()mutations=mutations+1 end
+end
+hl.dispatch=function(f)assert(type(f)=='function');f()end
+{setup}
+local ok=pcall(function()hl.dispatch({expression})end)
+assert(ok=={expected})
+assert(factories=={count} and mutations=={count})
+return require('prek').config.new{{}}
+"#,
+        count = usize::from(expected)
+    );
+    crate::lua::Definition::compile(&script, "typed-hyprland-scroll.lua")
+        .unwrap_or_else(|error| panic!("native scroll setup={setup:?}: {error}"))
+        .validate()
+        .unwrap();
+}
+
+#[test]
+fn a_numeric_scroll_moves_only_the_focused_frozen_workspace_layout() {
+    let (_, output) = target("0x1234:abc");
+    let request = Dialect::Lua
+        .scroll(&output, &scroll_workspace(), -12.5)
+        .unwrap();
+    evaluate_scroll(&request, "", true);
+    for setup in [
+        "monitor.focused=false",
+        "monitor.name='other'",
+        "monitor.scale=1",
+        "monitor.dpms_status=false",
+        "monitor.active_special_workspace={id=-98}",
+        "ws.tiled_layout='dwindle'",
+        "ws.special=true",
+        "windows[1].at.y=-99",
+        "windows[1].stable_id=0x1",
+        "windows[2]=nil",
+        "columns[1].width=0.75",
+        "windows[2].floating=true",
+    ] {
+        evaluate_scroll(&request, setup, false);
+    }
+}
+
+#[test]
+fn numeric_scrolls_require_lua_a_finite_move_and_the_active_output_workspace() {
+    let (_, output) = target("0x1234:abc");
+    let workspace = scroll_workspace();
+    assert!(Dialect::Hyprlang.scroll(&output, &workspace, 10.).is_err());
+    for distance in [0., f64::NAN, f64::INFINITY, 2_000_000.] {
+        assert!(Dialect::Lua.scroll(&output, &workspace, distance).is_err());
+    }
+    let mut inactive = workspace.clone();
+    inactive.active = false;
+    let mut elsewhere = workspace.clone();
+    elsewhere.output = Some("other".into());
+    let mut selector = workspace.clone();
+    selector.windows[0].id = "active".into();
+    for workspace in [inactive, elsewhere, selector] {
+        assert!(Dialect::Lua.scroll(&output, &workspace, 10.).is_err());
+    }
+    let mut dark = output.clone();
+    dark.screen = Screen::Off;
+    assert!(Dialect::Lua.scroll(&dark, &workspace, 10.).is_err());
+}

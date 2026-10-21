@@ -31,10 +31,10 @@ fn invalid_bounds_offsets_and_begin_totals_are_refused() {
 }
 
 #[test]
-fn numerical_planning_does_not_enable_session_scroll_actions() {
+fn the_session_scroll_action_is_supported_beside_its_planner() {
     let action = crate::config::WindowAction::ScrollStack;
-    assert!(!action.supported_session());
-    assert!(!crate::protocol::supported_session_action(
+    assert!(action.supported_session());
+    assert!(crate::protocol::supported_session_action(
         &crate::config::Action::Hyprland { action }
     ));
 }
@@ -231,7 +231,7 @@ fn missing_inexact_and_nonfinite_receipts_retire_without_retry() {
     for observed in [
         None,
         Some(400.),
-        Some(449.99),
+        Some(447.99),
         Some(f64::NAN),
         Some(f64::INFINITY),
     ] {
@@ -290,4 +290,45 @@ fn every_clock_boundary_is_monotonic_and_overflow_precedes_any_attempt() {
     assert!(exhausted.take(at(0)).is_err());
     assert!(exhausted.in_flight().is_none());
     assert_eq!(exhausted.confirmed_offset(), 400.);
+}
+
+#[test]
+fn truncated_receipts_within_tolerance_settle_at_the_exact_destination() {
+    for observed in [448., 451.9] {
+        let mut motion = motion(Direction::Down, 400., -50.);
+        let attempt = motion.take(at(0)).unwrap().unwrap();
+        motion.settle(attempt, Some(observed), at(1)).unwrap();
+        assert_eq!(motion.state(), State::Active);
+        assert_eq!(motion.confirmed_offset(), 450.);
+    }
+}
+
+#[test]
+fn fitted_destinations_name_the_offset_the_compositor_fits_to() {
+    let ends: Vec<f64> = (1..=6).map(|strip| 400. * f64::from(strip)).collect();
+    let fitted = viewport(Direction::Down, 400.)
+        .fitted(ends.clone())
+        .unwrap();
+    for offset in [0., 123., 400., 1599.] {
+        assert_eq!(fitted.native(offset), offset);
+    }
+    assert_eq!(fitted.native(1.), 0.);
+    assert_eq!(fitted.native(401.5), 400.);
+    let mut still = Motion::begin(7, fitted.clone(), -1.5, at(0)).unwrap();
+    assert!(still.take(at(0)).unwrap().is_none());
+    let mut moving = Motion::begin(8, fitted, -10., at(0)).unwrap();
+    assert_eq!(moving.take(at(0)).unwrap().unwrap().to(), 410.);
+    let tall = Viewport::new(Direction::Down, 800., 2400., 0.)
+        .unwrap()
+        .fitted(vec![1000., 2400.])
+        .unwrap();
+    assert_eq!(tall.native(0.), 100.);
+    for ends in [
+        vec![],
+        vec![1200., 1200., 2400.],
+        vec![1200., 2000.],
+        vec![0., 2400.],
+    ] {
+        assert!(viewport(Direction::Down, 0.).fitted(ends).is_err());
+    }
 }

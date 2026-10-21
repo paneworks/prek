@@ -2,25 +2,32 @@
 //!
 //! This module opens no IPC connection and grants no execution authority.
 //! Callers must independently verify the layout, bounds, frozen target and
-//! per-attempt permission. Production `ScrollStack` remains unavailable.
+//! per-attempt permission; the session executor drives `ScrollStack` with it.
 use std::{io, time::Duration};
 
 pub const UPDATE_INTERVAL: Duration = Duration::from_millis(16);
+/// Stock IPC truncates coordinates to integers; two truncations bound the
+/// error of an observed native offset.
+pub const SETTLE_TOLERANCE: f64 = 2.0;
+/// Native strip-at-centre lookup accepts strips ending this close before it.
+const CENTER_SLOP: f64 = 2.0;
 const MAX_COORDINATE: f64 = 1_000_000.;
-
+const MAX_STRIPS: usize = 512;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Direction {
     Down,
     Up,
 }
-
 /// Native camera offset and effective logical extents, including layout rules.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Viewport {
     direction: Direction,
     offset: f64,
     min: f64,
     max: f64,
+    extent: f64,
+    content: f64,
+    fit: Option<Box<[f64]>>,
 }
 impl Viewport {
     pub fn new(
@@ -51,15 +58,54 @@ impl Viewport {
             offset,
             min,
             max,
+            extent: viewport_extent,
+            content: content_extent,
+            fit: None,
         })
     }
-    pub fn bounds(self) -> (f64, f64) {
+    /// After every move the compositor fits the strip at the viewport centre
+    /// into view (Hyprland 0.56.2 `focus_fit_method` 1). `ends` are the strip
+    /// ends along the content; destinations then name the fitted offset.
+    pub fn fitted(mut self, ends: Vec<f64>) -> io::Result<Self> {
+        if ends.is_empty()
+            || ends.len() > MAX_STRIPS
+            || ends
+                .windows(2)
+                .any(|pair| pair[0].partial_cmp(&pair[1]) != Some(std::cmp::Ordering::Less))
+            || !(ends[0].is_finite() && ends[0] > 0.)
+            || (ends[ends.len() - 1] - self.content).abs() > 1e-6
+        {
+            return Err(invalid("invalid native strip extents"));
+        }
+        self.fit = Some(ends.into_boxed_slice());
+        Ok(self)
+    }
+    pub fn bounds(&self) -> (f64, f64) {
         (self.min, self.max)
     }
-    pub fn offset(self) -> f64 {
+    pub fn offset(&self) -> f64 {
         self.offset
     }
-    fn desired(self, total_y: f64) -> io::Result<f64> {
+    /// The offset the compositor settles at after moving the camera to `offset`.
+    pub fn native(&self, offset: f64) -> f64 {
+        let Some(ends) = self.fit.as_deref().filter(|_| self.min < self.max) else {
+            return offset;
+        };
+        let center = offset + self.extent / 2.;
+        let index = ends
+            .iter()
+            .position(|end| *end >= center - CENTER_SLOP)
+            .unwrap_or(ends.len() - 1);
+        let (start, end) = (index.checked_sub(1).map_or(0., |i| ends[i]), ends[index]);
+        let low = end - self.extent;
+        let fitted = if low > start {
+            start - (self.extent - (end - start)) / 2.
+        } else {
+            offset.clamp(low, start)
+        };
+        fitted.clamp(self.min, self.max)
+    }
+    fn desired(&self, total_y: f64) -> io::Result<f64> {
         if !total_y.is_finite() || total_y.abs() > MAX_COORDINATE {
             return Err(invalid("invalid cumulative logical displacement"));
         }
@@ -67,10 +113,9 @@ impl Viewport {
             Direction::Down => -total_y,
             Direction::Up => total_y,
         };
-        Ok((self.offset + change).clamp(self.min, self.max))
+        Ok(self.native((self.offset + change).clamp(self.min, self.max)))
     }
 }
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Phase {
     Update,
@@ -138,9 +183,9 @@ impl Motion {
         }
         Ok(Self {
             gesture,
-            viewport,
             desired: viewport.desired(total_y)?,
             confirmed: viewport.offset,
+            viewport,
             ordinal: 1,
             sequence: 0,
             in_flight: None,
@@ -212,7 +257,8 @@ impl Motion {
         self.last_time = now;
         Ok(Some(attempt))
     }
-    /// Only an exact observed native offset confirms a mutation. Missing,
+    /// Only an observed native offset within `SETTLE_TOLERANCE` of the
+    /// destination confirms a mutation, which then counts as exact. Missing,
     /// mismatched or nonfinite observations retire the motion without retry.
     pub fn settle(
         &mut self,
@@ -226,7 +272,7 @@ impl Motion {
         }
         self.in_flight = None;
         self.last_time = now;
-        if observed_offset == Some(attempt.to) {
+        if observed_offset.is_some_and(|offset| (offset - attempt.to).abs() <= SETTLE_TOLERANCE) {
             self.confirmed = attempt.to;
             self.finish_if_settled();
         } else {

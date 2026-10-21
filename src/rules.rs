@@ -246,6 +246,17 @@ impl RouteIntent {
             .window()
             .map(|window| window.id.as_str())
     }
+    /// Native proof target, from the same selection its match event carries.
+    pub(crate) fn native_target(&self) -> Option<crate::routing::native::Target> {
+        let permit = self.candidate.permit.as_ref()?;
+        let output = permit.output();
+        crate::routing::native::target(
+            &self.rule.action,
+            self.window_id(),
+            output.map(|output| output.geometry.name.as_str()),
+            output.and_then(|output| output.active_workspace),
+        )
+    }
     pub fn hyprland_target_available(&self, authority: &Authority, at: Duration) -> bool {
         let Some(permit) = self.candidate.permit.as_ref() else {
             return false;

@@ -826,6 +826,7 @@ impl WindowAction {
                 | Self::MoveRightAndFollow
                 | Self::ReorderUp
                 | Self::ReorderDown
+                | Self::ScrollStack
         )
     }
     pub fn workspace_destination(self, from: i64) -> Option<i64> {

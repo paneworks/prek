@@ -371,6 +371,7 @@ struct Offered {
     snapshot: crate::context::Snapshot,
     output: Option<String>,
     window: Option<String>,
+    native: Option<crate::routing::native::Target>,
     deadline: Duration,
     granted: bool,
     grant_until: Option<Duration>,
@@ -482,6 +483,18 @@ impl Offered {
     }
 }
 impl ActionLedger {
+    /// A scroll update is dropped while two offers of its gesture are still
+    /// pending; later progress carries the same cumulative travel.
+    fn backlogged_scroll(&self, event: &crate::rules::Event) -> bool {
+        matches!(event, crate::rules::Event::Matched {
+            id,
+            stage: crate::rules::Stage::Update,
+            action: crate::config::Action::Hyprland {
+                action: crate::config::WindowAction::ScrollStack
+            },
+            ..
+        } if self.pending.range((*id, 0)..=(*id, u64::MAX)).count() >= 2)
+    }
     #[cfg(test)]
     fn offer(
         &mut self,
@@ -531,6 +544,7 @@ impl ActionLedger {
                 snapshot: snapshot.clone(),
                 output: output.clone(),
                 window: window.clone(),
+                native: crate::routing::native::event_target(event),
                 deadline: now + protocol::MAX_PACKET_AGE,
                 granted: false,
                 grant_until: None,
@@ -597,9 +611,9 @@ impl ActionLedger {
             if let Some(scope) = &offer.reorder_scope {
                 let current = context.and_then(|context| {
                     offer
-                        .window
-                        .as_deref()
-                        .and_then(|window| context.reorder_scope(window))
+                        .native
+                        .as_ref()
+                        .and_then(|target| context.native_scope(target))
                 });
                 if current.as_ref() != Some(scope) {
                     offer.reorder_scope = None;
@@ -1426,7 +1440,7 @@ impl Broker {
                 reorder_scope,
                 ..
             } if bound.observing => {
-                if bound.rules.busy() {
+                if bound.rules.busy() || bound.actions.backlogged_scroll(&event) {
                     self.connections.insert(index, connection);
                     return Ok(());
                 }
@@ -1532,9 +1546,8 @@ impl Broker {
                     ));
                 }
                 let reorder_scope = reorder_scope.filter(|scope| {
-                    window
-                        .as_deref()
-                        .and_then(|window| context.reorder_scope(window))
+                    crate::routing::native::event_target(&event)
+                        .and_then(|target| context.native_scope(&target))
                         .as_ref()
                         == Some(scope)
                 });

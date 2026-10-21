@@ -436,18 +436,14 @@ impl Stream {
             if reorder_scope.is_none() {
                 continue;
             }
-            let current = if let crate::rules::Event::Matched {
-                window: Some(window),
-                ..
-            } = event.as_ref()
-            {
+            let current = if let Some(target) = crate::routing::native::event_target(event) {
                 scopes
                     .entry((
                         subscription.seat.clone(),
                         subscription.fence.broker.0,
                         subscription.fence.configuration,
                         subscription.fence.session,
-                        window.clone(),
+                        target.clone(),
                     ))
                     .or_insert_with(|| {
                         seats
@@ -460,7 +456,7 @@ impl Stream {
                                         .capabilities
                                         .contains(&Capability::HyprlandActions)
                             })
-                            .and_then(|seat| seat.routing.authority().reorder_scope(window, now))
+                            .and_then(|seat| seat.routing.authority().native_scope(&target, now))
                     })
                     .as_ref()
             } else {

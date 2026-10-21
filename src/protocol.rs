@@ -129,6 +129,7 @@ pub fn supported_session_action(action: &crate::config::Action) -> bool {
                     | crate::config::WindowAction::MoveRightAndFollow
                     | crate::config::WindowAction::ReorderUp
                     | crate::config::WindowAction::ReorderDown
+                    | crate::config::WindowAction::ScrollStack
             }
             | crate::config::Action::Power {
                 action: crate::config::PowerAction::Wake | crate::config::PowerAction::Blank
@@ -513,10 +514,10 @@ impl Reply {
             reorder_scope: Some(_),
             ..
         } = self
-            && !matches!(event.as_ref(),Event::Matched{action,window:Some(_),..} if action.requires_hyprland())
+            && crate::routing::native::event_target(event).is_none()
         {
             return Err(invalid(
-                "native reorder scope has no matching window action",
+                "native scope has no matching window or workspace action",
             ));
         }
         if let Some(fence) = self.fence() {

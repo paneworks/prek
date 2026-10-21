@@ -29,6 +29,7 @@ fn settings() -> Settings {
         gaps_in: [0; 4],
         gaps_out: [0; 4],
         border: 0,
+        focus_fit: 1,
         workspace_rules: 0,
         reserved: vec![reserved("phone", [0.0, 40.0, 0.0, 0.0])],
     }
@@ -129,6 +130,7 @@ fn every_departure_from_the_profile_is_refused_with_its_reason() {
     refused(&|_, s| s.gaps_in = [0, 0, 0, 5], Refusal::Gaps);
     refused(&|_, s| s.gaps_out = [5; 4], Refusal::Gaps);
     refused(&|_, s| s.border = 2, Refusal::Border);
+    refused(&|_, s| s.focus_fit = 0, Refusal::FocusFit);
     refused(&|_, s| s.workspace_rules = 1, Refusal::WorkspaceRules);
     refused(&|w, _| w.windows[1].floating = true, Refusal::Window);
     refused(&|w, _| w.windows[1].fullscreen = 1, Refusal::Window);
@@ -143,6 +145,7 @@ fn every_departure_from_the_profile_is_refused_with_its_reason() {
     refused(&|w, _| w.windows[3].rect[1] += 3.0, Refusal::Geometry);
     refused(&|w, _| w.windows[2].rect[2] = 240.0, Refusal::Geometry);
     refused(&|w, _| w.columns[2].width = 0.25, Refusal::Geometry);
+    refused(&|w, _| w.columns[2].width = 0.6, Refusal::Width);
     let beyond = workspace(490.0);
     assert_eq!(viewport_of(beyond), Err(Refusal::Geometry));
 }
@@ -209,6 +212,7 @@ fn settings_are_bounded_and_strict_on_the_wire() {
     invalid(&|s| s.direction = "down\n".into());
     invalid(&|s| s.gaps_in[0] = -1);
     invalid(&|s| s.border = 1_000_001);
+    invalid(&|s| s.focus_fit = 2);
     invalid(&|s| s.workspace_rules = 4097);
     invalid(&|s| s.reserved.push(reserved("phone", [0.0; 4])));
     invalid(&|s| s.reserved[0].area[2] = f64::INFINITY);
@@ -220,10 +224,13 @@ fn settings_decode_stock_option_rule_and_monitor_replies() {
     let gaps_in = json!({"option":"general:gaps_in","css":"0 0 0 0","set":true});
     let gaps_out = json!({"option":"general:gaps_out","custom":"1 2 3 4","set":true});
     let border = json!({"option":"general:border_size","int":0,"set":false});
+    let fit = json!({"option":"scrolling:focus_fit_method","int":1,"set":false});
     let rules = json!([]);
     let monitors = json!([{"name":"phone","reserved":[0,40,0,12]}]);
-    let decoded =
-        Settings::decode([&direction, &gaps_in, &gaps_out, &border, &rules, &monitors]).unwrap();
+    let decoded = Settings::decode([
+        &direction, &gaps_in, &gaps_out, &border, &fit, &rules, &monitors,
+    ])
+    .unwrap();
     assert_eq!(decoded.direction, "down");
     assert_eq!(decoded.gaps_out, [1, 2, 3, 4]);
     assert_eq!(
@@ -236,12 +243,16 @@ fn settings_decode_stock_option_rule_and_monitor_replies() {
         json!("no such option"),
     ] {
         assert!(
-            Settings::decode([&direction, &gaps_in, &bad, &border, &rules, &monitors]).is_err()
+            Settings::decode([&direction, &gaps_in, &bad, &border, &fit, &rules, &monitors])
+                .is_err()
         );
     }
     let reserved = json!([{"name":"phone","reserved":[0,40,0]}]);
     assert!(
-        Settings::decode([&direction, &gaps_in, &gaps_out, &border, &rules, &reserved]).is_err()
+        Settings::decode([
+            &direction, &gaps_in, &gaps_out, &border, &fit, &rules, &reserved
+        ])
+        .is_err()
     );
 }
 #[test]
@@ -252,6 +263,7 @@ fn the_profile_batch_is_bracketed_by_lock_witnesses_and_exact() {
         r#"{"option":"general:gaps_in","css":"0 0 0 0","set":true}"#,
         r#"{"option":"general:gaps_out","css":"0 0 0 0","set":true}"#,
         r#"{"option":"general:border_size","int":0,"set":true}"#,
+        r#"{"option":"scrolling:focus_fit_method","int":1,"set":true}"#,
         "[]",
         r#"[{"name":"phone","reserved":[0,40,0,0]}]"#,
     ]
@@ -266,4 +278,88 @@ fn the_profile_batch_is_bracketed_by_lock_witnesses_and_exact() {
     let locked = r#"{"locked":true}"#;
     assert!(decode(batch(unlocked, locked, "").as_bytes(), &mut inhibited).is_err());
     assert!(inhibited);
+}
+fn sample(offset: f64) -> (Snapshot, layouts::Snapshot) {
+    let context = Snapshot {
+        generation: 1,
+        revision: 1,
+        captured_at: std::time::Duration::from_secs(1),
+        state: crate::context::State::Desktop,
+        outputs: vec![phone()],
+        windows: vec![],
+        regions: vec![],
+        secure_overlay: false,
+    };
+    let native = layouts::Snapshot {
+        generation: 1,
+        revision: 1,
+        continuity: 1,
+        captured_at: context.captured_at,
+        workspaces: vec![workspace(offset)],
+        profile: Some(settings()),
+    };
+    (context, native)
+}
+#[test]
+fn the_scroll_proof_ignores_the_camera_but_not_the_columns_or_settings() {
+    let (context, native) = sample(240.0);
+    let original = scope(&context, &native, "phone", 1).unwrap();
+    let (moved, scrolled) = sample(0.0);
+    assert_eq!(scope(&moved, &scrolled, "phone", 1), Some(original.clone()));
+    let mut replaced = native.clone();
+    replaced.workspaces[0].windows[0].id = "e".into();
+    replaced.workspaces[0].columns[0].members[0] = "e".into();
+    let other = scope(&context, &replaced, "phone", 1);
+    assert!(other.is_some() && other != Some(original.clone()));
+    let mut changed = native.clone();
+    changed.profile.as_mut().unwrap().reserved[0].area[3] = 1.0;
+    assert_ne!(
+        scope(&context, &changed, "phone", 1),
+        Some(original.clone())
+    );
+    let mut other = context.clone();
+    other.generation = 2;
+    assert_ne!(scope(&other, &native, "phone", 1), Some(original));
+    let mut refused = native.clone();
+    refused.profile.as_mut().unwrap().border = 1;
+    assert_eq!(scope(&context, &refused, "phone", 1), None);
+}
+#[test]
+fn scroll_preclaim_needs_a_windowless_side_strip_on_a_plain_desktop() {
+    use crate::config::{Action, Scope, WindowAction};
+    let (context, native) = sample(240.0);
+    let action = Action::Hyprland {
+        action: WindowAction::ScrollStack,
+    };
+    let available = |context: &Snapshot, native: Option<&layouts::Snapshot>, scope, window| {
+        crate::hyprland::reorder::available(
+            context,
+            native,
+            &action,
+            scope,
+            window,
+            Some("phone"),
+            Some(1),
+        )
+    };
+    for side in [Scope::SideLeft, Scope::SideRight] {
+        assert!(available(&context, Some(&native), side, None));
+    }
+    assert!(!available(&context, Some(&native), Scope::AppContent, None));
+    assert!(!available(
+        &context,
+        Some(&native),
+        Scope::SideLeft,
+        Some("a")
+    ));
+    assert!(!available(&context, None, Scope::SideLeft, None));
+    let mut overlay = context.clone();
+    overlay.secure_overlay = true;
+    assert!(!available(&overlay, Some(&native), Scope::SideLeft, None));
+    let mut locked = context.clone();
+    locked.state = crate::context::State::Locked;
+    assert!(!available(&locked, Some(&native), Scope::SideLeft, None));
+    let mut wide = native.clone();
+    wide.workspaces[0].columns[0].width = 0.75;
+    assert!(!available(&context, Some(&wide), Scope::SideLeft, None));
 }

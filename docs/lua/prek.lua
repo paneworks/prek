@@ -392,6 +392,7 @@
 ---@field gaps_in integer[] `general:gaps_in` as `{top, right, bottom, left}`.
 ---@field gaps_out integer[] `general:gaps_out` as `{top, right, bottom, left}`.
 ---@field border integer `general:border_size`.
+---@field focus_fit integer `scrolling:focus_fit_method`: 0 centres, 1 fits.
 ---@field workspace_rules integer Number of workspace rules.
 ---@field reserved prek.NativeReservedArea[]
 ---@class (exact) prek.NativeLayouts

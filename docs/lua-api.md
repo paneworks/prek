@@ -853,6 +853,7 @@ The returned `NativeLayouts` contains:
   It copies the stock settings of the
   [validated phone profile](hyprland-scrolling.md#validated-phone-profile):
   `direction`, `gaps_in`/`gaps_out` as `{top, right, bottom, left}`, `border`,
+  `focus_fit` (`scrolling:focus_fit_method`, 1 = fit),
   the `workspace_rules` count and each output's `reserved = {output, area}` with
   `area = {left, top, right, bottom}`. It is read after the graph, so it does not
   share its capture time.
@@ -869,9 +870,9 @@ budget; it is not yet worker preclaim evidence.
 
 These are **animation goals, not rendered hit tests**. No effective camera
 offset/work area, arbitrary workspace-rule resolution, empty-strip scope, input
-ownership or execution grant is implied. G11 remains disabled until its separate
-authority/execution/rendering gates pass. See
-[continuous viewport integration](hyprland-scrolling.md).
+ownership or execution grant is implied. G11 uses the attached `profile`
+through its own preclaim, proof and executor, not through this view. See
+[continuous viewport motion](hyprland-scrolling.md).
 
 | Type | Fields |
 | --- | --- |
@@ -1324,7 +1325,11 @@ approved registry; callable pointers are never serialized into configuration.
 `move_left_and_follow` and `move_right_and_follow` actions on a routing broker.
 The native 0.56.2 Lua provider additionally supports experimental `reorder_up`
 and `reorder_down` with a complete frozen vertical scrolling-layout graph;
-see [the selection and execution contract](hyprland-reorder.md).
+see [the selection and execution contract](hyprland-reorder.md). A rule whose
+action is `scroll_stack` on a `side_left`/`side_right` strip moves the
+validated phone workspace continuously; see
+[continuous viewport motion](hyprland-scrolling.md). Handlers resolving to
+`scroll_stack` stay unavailable because they carry no workspace proof.
 Use `--lua --hyprland` for approved named handlers returning
 `actions.hyprland {action=...}`. `--commands` and `--power` are independent
 permissions and are required only for their effect families. The protected

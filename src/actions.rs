@@ -27,6 +27,7 @@ pub use power::PowerAdapter;
 pub const MAX_RUNNING: usize = 8;
 const MAX_PENDING: usize = 64;
 const MAX_GESTURES: usize = 4096;
+const MAX_SCROLLS: usize = 4;
 struct Pending {
     event: Box<Event>,
     expires: Option<Duration>,
@@ -34,6 +35,7 @@ struct Pending {
     resolved: Option<Vec<Action>>,
     power_target: Option<crate::context::OutputState>,
     window_target: Option<hyprland::Target>,
+    scroll_target: Option<hyprland::ScrollTarget>,
     morf_target: Option<morf::Target>,
     reorder_scope: Option<protocol::ReorderScope>,
     reorder_granted: bool,
@@ -50,11 +52,25 @@ struct Native {
     until: Duration,
     cancelled: bool,
 }
+/// One continuous workspace scroll and the state its next attempt is
+/// guarded against.
+struct Scroll {
+    target: hyprland::ScrollTarget,
+    view: hyprland::ScrollView,
+    motion: crate::hyprland::scrolling::Motion,
+}
 type ExecutionKey = ([u64; 2], u64, u64, u64, u64);
 struct ExecutionGroup {
     remaining: usize,
     result: Completion,
     multiple_effects: bool,
+}
+fn native_scope(
+    adapter: Option<&HyprlandAdapter>,
+    event: &Event,
+    now: Duration,
+) -> Option<protocol::ReorderScope> {
+    adapter?.native_scope(&crate::routing::native::event_target(event)?, now)
 }
 fn execution_key(fence: Fence, id: u64, ordinal: u64) -> ExecutionKey {
     (
@@ -84,6 +100,7 @@ pub struct Executor {
     morf: Option<MorfAdapter>,
     native: BTreeMap<(u64, u64), Native>,
     native_seen: BTreeMap<u64, u64>,
+    scrolls: BTreeMap<u64, Scroll>,
 }
 impl Executor {
     pub fn new(
@@ -119,6 +136,7 @@ impl Executor {
             morf: None,
             native: BTreeMap::new(),
             native_seen: BTreeMap::new(),
+            scrolls: BTreeMap::new(),
         })
     }
     pub fn transition(&mut self, fence: Fence) -> io::Result<()> {
@@ -143,6 +161,7 @@ impl Executor {
         self.morf = None;
         self.native.clear();
         self.native_seen.clear();
+        self.scrolls.clear();
         self.groups.clear();
         // Already dispatched commands cannot be undone. Keep reaping them,
         // counting them against the bound, and discard their old completions.
@@ -224,8 +243,35 @@ impl Executor {
             } else {
                 None
             };
-        let window_target = if protocol::action_capabilities(action)
-            .contains(&Capability::HyprlandActions)
+        let scroll = matches!(
+            action,
+            Action::Hyprland {
+                action: crate::config::WindowAction::ScrollStack
+            }
+        );
+        let scroll_target = if scroll {
+            let Event::Matched {
+                window: None,
+                output: Some(output),
+                workspace: Some(workspace),
+                ..
+            } = event.as_ref()
+            else {
+                return Err(protocol::invalid(
+                    "scrolling requires a frozen output workspace and no window",
+                ));
+            };
+            Some(
+                self.hyprland
+                    .as_ref()
+                    .ok_or_else(|| protocol::invalid("Hyprland adapter unavailable"))?
+                    .scroll_target(output, *workspace, now)?,
+            )
+        } else {
+            None
+        };
+        let window_target = if !scroll
+            && protocol::action_capabilities(action).contains(&Capability::HyprlandActions)
         {
             let adapter = self
                 .hyprland
@@ -279,18 +325,8 @@ impl Executor {
         }
         let (id, ordinal) = (*id, *ordinal);
         self.seen.insert(id, ordinal);
-        let reorder_scope = reorder_scope.filter(|scope| match event.as_ref() {
-            Event::Matched {
-                window: Some(window),
-                ..
-            } => {
-                self.hyprland
-                    .as_ref()
-                    .and_then(|adapter| adapter.reorder_scope(window, now))
-                    .as_ref()
-                    == Some(scope)
-            }
-            _ => false,
+        let reorder_scope = reorder_scope.filter(|scope| {
+            native_scope(self.hyprland.as_ref(), &event, now).as_ref() == Some(scope)
         });
         if matches!(event.as_ref(),Event::Matched{action,..} if crate::routing::native::required(action))
             && reorder_scope.is_none()
@@ -307,6 +343,7 @@ impl Executor {
                 resolved: None,
                 power_target,
                 window_target,
+                scroll_target,
                 morf_target,
                 reorder_scope,
                 reorder_granted: false,
@@ -359,16 +396,10 @@ impl Executor {
         let now = monotonic()?;
         for pending in self.pending.values_mut() {
             if let Some(scope) = pending.reorder_scope.as_ref() {
-                let current = match pending.event.as_ref() {
-                    Event::Matched {
-                        window: Some(window),
-                        ..
-                    } if result.is_ok() => self
-                        .hyprland
-                        .as_ref()
-                        .and_then(|adapter| adapter.reorder_scope(window, now)),
-                    _ => None,
-                };
+                let current = result
+                    .is_ok()
+                    .then(|| native_scope(self.hyprland.as_ref(), &pending.event, now))
+                    .flatten();
                 if current.as_ref() != Some(scope) {
                     pending.reorder_scope = None;
                     pending.reorder_granted = false;
@@ -517,16 +548,7 @@ impl Executor {
             return Ok(());
         }
         pending.expires = Some(expires);
-        let current = match pending.event.as_ref() {
-            Event::Matched {
-                window: Some(window),
-                ..
-            } => self
-                .hyprland
-                .as_ref()
-                .and_then(|adapter| adapter.reorder_scope(window, now)),
-            _ => None,
-        };
+        let current = native_scope(self.hyprland.as_ref(), &pending.event, now);
         pending.reorder_granted = reorder_scope.is_some()
             && reorder_scope == pending.reorder_scope
             && current == reorder_scope;
@@ -627,6 +649,7 @@ impl Executor {
         if self.seen.get(&id).is_none_or(|seen| ordinal > *seen) {
             return Err(protocol::invalid("cancellation has no offered action"));
         }
+        self.scrolls.remove(&id);
         if self.native_seen.contains_key(&id) {
             let send = self.cancelled.get(&id).is_none_or(|old| *old < ordinal);
             for ((gesture, _), native) in &mut self.native {
@@ -659,6 +682,123 @@ impl Executor {
         }
         self.remember_cancellation(id, ordinal);
         Ok(())
+    }
+    /// One granted ordinal of a continuous workspace scroll. Begin freezes a
+    /// fresh viewport; each ordinal then makes at most one paced attempt, and
+    /// end keeps attempting toward its last destination within the grant.
+    fn execute_scroll(
+        &mut self,
+        id: u64,
+        ordinal: u64,
+        pending: &Pending,
+    ) -> io::Result<Completion> {
+        use crate::{
+            gestures::{Space, TouchGesture},
+            hyprland::scrolling::{Motion, Phase, State},
+            rules::Evidence,
+        };
+        let Event::Matched {
+            stage, evidence, ..
+        } = pending.event.as_ref()
+        else {
+            unreachable!("offers were validated");
+        };
+        let expires = pending.expires.unwrap();
+        let total = match evidence {
+            Evidence::Touch {
+                space: Space::Logical,
+                gesture: TouchGesture::Pan { total, .. },
+            } => Some(total.y),
+            _ => None,
+        };
+        let (Some(adapter), Some(target), Some(total), true, true) = (
+            self.hyprland.as_mut(),
+            pending.scroll_target.as_ref(),
+            total,
+            pending.reorder_granted,
+            hyprland::supported(crate::config::WindowAction::ScrollStack),
+        ) else {
+            self.scrolls.remove(&id);
+            return Ok(Completion::Unavailable);
+        };
+        let now = monotonic()?;
+        match stage {
+            Stage::Begin if !self.scrolls.contains_key(&id) && self.scrolls.len() < MAX_SCROLLS => {
+                let until = std::time::Instant::now()
+                    + expires.saturating_sub(now).min(Duration::from_millis(200));
+                let Some(view) = adapter.scroll_view(target, until)? else {
+                    return Ok(Completion::Unavailable);
+                };
+                let motion = Motion::begin(id, view.viewport.clone(), total, now)?;
+                self.scrolls.insert(
+                    id,
+                    Scroll {
+                        target: target.clone(),
+                        view,
+                        motion,
+                    },
+                );
+            }
+            Stage::Update | Stage::End => {
+                let phase = if *stage == Stage::End {
+                    Phase::End
+                } else {
+                    Phase::Update
+                };
+                if !self
+                    .scrolls
+                    .get_mut(&id)
+                    .filter(|scroll| scroll.target.same(target))
+                    .is_some_and(|scroll| {
+                        scroll.motion.progress(ordinal, phase, total, now).is_ok()
+                    })
+                {
+                    self.scrolls.remove(&id);
+                    return Ok(Completion::Unavailable);
+                }
+            }
+            _ => return Ok(Completion::Unavailable),
+        }
+        if *stage == Stage::Update
+            && self
+                .pending
+                .range((id, ordinal + 1)..=(id, u64::MAX))
+                .any(|(_, newer)| newer.expires.is_some())
+        {
+            return Ok(Completion::Cancelled);
+        }
+        let scroll = self.scrolls.get_mut(&id).unwrap();
+        let mut result = Completion::Cancelled;
+        while monotonic()? < expires {
+            let Some(attempt) = scroll.motion.take(monotonic()?)? else {
+                if scroll.motion.state() != State::Ending {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+                continue;
+            };
+            let step = adapter.scroll_step(&scroll.target, &mut scroll.view, attempt, expires);
+            let observed = match step {
+                hyprland::Step::Settled(offset) => Some(offset),
+                _ => None,
+            };
+            scroll.motion.settle(attempt, observed, monotonic()?)?;
+            match step {
+                hyprland::Step::Settled(_) => result = Completion::Applied,
+                hyprland::Step::Unsent if result != Completion::Applied => {
+                    result = Completion::Unavailable
+                }
+                hyprland::Step::Unsent => {}
+                hyprland::Step::Unconfirmed => result = Completion::Uncertain,
+            }
+            if scroll.motion.state() != State::Ending {
+                break;
+            }
+        }
+        if *stage == Stage::End || !matches!(scroll.motion.state(), State::Active | State::Ending) {
+            self.scrolls.remove(&id);
+        }
+        Ok(result)
     }
     fn remember_cancellation(&mut self, id: u64, ordinal: u64) {
         // Only seen identities can be canceled, so this shares the existing
@@ -694,6 +834,16 @@ impl Executor {
             let Event::Matched { stage, action, .. } = pending.event.as_ref() else {
                 unreachable!("offers were validated");
             };
+            if matches!(
+                action,
+                Action::Hyprland {
+                    action: crate::config::WindowAction::ScrollStack
+                }
+            ) {
+                let result = self.execute_scroll(id, ordinal, &pending)?;
+                self.complete(id, ordinal, result)?;
+                continue;
+            }
             if matches!(action, Action::Lua { .. }) && pending.resolved.is_none() {
                 if pending.resolving {
                     self.pending.insert((id, ordinal), pending);

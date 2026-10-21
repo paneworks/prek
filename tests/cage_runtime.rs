@@ -1251,7 +1251,7 @@ return {version=1}
             std::thread::sleep(Duration::from_millis(5));
         };
         if layout == "scrolling" && direction == "down" {
-            scroll_profile_acceptance(checking, instance, id, output);
+            scroll_profile_acceptance(checking, binding, fence, instance, id, output);
         }
         if layout == "scrolling" {
             reorder_acceptance(checking, binding, fence, app, instance, output, direction);
@@ -1282,7 +1282,14 @@ return {version=1}
 
 /// The owned stock workspace is refused with its default gaps or borders,
 /// then yields a viewport matching its windows once both are zero.
-fn scroll_profile_acceptance(checking: &Client, instance: &str, id: i64, output: &Path) {
+fn scroll_profile_acceptance(
+    checking: &Client,
+    binding: &Binding,
+    fence: Fence,
+    instance: &str,
+    id: i64,
+    output: &Path,
+) {
     use prek::hyprland::scrolling::profile::{self, Refusal};
     let eval = |command: String| {
         let result = std::process::Command::new(std::env::var_os("PREK_CAGE_HYPRCTL").unwrap())
@@ -1344,6 +1351,7 @@ fn scroll_profile_acceptance(checking: &Client, instance: &str, id: i64, output:
     };
     let (low, high) = viewport.bounds();
     assert!(low <= viewport.offset() && viewport.offset() <= high);
+    let executed = scroll_executor_acceptance(checking, binding, fence, instance, id);
     let gaps = |[top, right, bottom, left]: [i64; 4]| {
         format!("{{top={top},right={right},bottom={bottom},left={left}}}")
     };
@@ -1369,11 +1377,185 @@ fn scroll_profile_acceptance(checking: &Client, instance: &str, id: i64, output:
             "original":{"gaps_in":original.gaps_in,"gaps_out":original.gaps_out,"border":original.border},
             "flat":{"gaps_in":flat.gaps_in,"gaps_out":flat.gaps_out,"border":flat.border,
                 "reserved":flat.reserved},
-            "viewport":{"bounds":[low, high],"offset":viewport.offset()}
+            "viewport":{"bounds":[low, high],"offset":viewport.offset()},
+            "executor":executed
         }))
         .unwrap(),
     )
     .unwrap();
+}
+
+/// Drives a continuous executor scroll over the flat owned workspace and
+/// checks every settled native offset against the planner's destination.
+fn scroll_executor_acceptance(
+    checking: &Client,
+    binding: &Binding,
+    fence: Fence,
+    instance: &str,
+    id: i64,
+) -> serde_json::Value {
+    use prek::{
+        actions::Executor,
+        config::{Action, Direction, WindowAction},
+        gestures::{Phase, Point, Space, TouchGesture},
+        hyprland::scrolling::profile,
+        protocol::{Completion, Mode, Request},
+        rules::{Event, Evidence, Stage},
+    };
+    let mut sampler = ContextSampler::default();
+    let mut sample = || {
+        let until = monotonic().unwrap() + Duration::from_secs(3);
+        loop {
+            if let (snapshot, Some(layouts)) = sampler
+                .sample_with_layouts(checking, 1, SessionKind::User)
+                .unwrap()
+                && layouts.profile.is_some()
+            {
+                return (snapshot, layouts);
+            }
+            assert!(
+                monotonic().unwrap() < until,
+                "owned scroll graph unavailable"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    let view = |snapshot: Snapshot, layouts: prek::hyprland::layouts::Snapshot| View {
+        fence,
+        sampled_at: snapshot.captured_at,
+        state: snapshot.state,
+        context: Some(Box::new(ProvidedContext {
+            binding: binding.clone(),
+            snapshot,
+            layouts: Some(layouts),
+        })),
+        error: None,
+        morf: vec![],
+        morf_rendered: vec![],
+    };
+    let (snapshot, layouts) = sample();
+    let name = layouts
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.id == id)
+        .and_then(|workspace| workspace.output.clone())
+        .unwrap();
+    let start = profile::available(&snapshot, &layouts, &name, id).unwrap();
+    let (low, high) = start.bounds();
+    let sign = if start.offset() - 200. >= low {
+        1.
+    } else {
+        -1.
+    };
+    let mut executor = Executor::new(
+        fence,
+        "seat0".into(),
+        Mode::Route,
+        BTreeSet::from([Capability::HyprlandActions]),
+    )
+    .unwrap();
+    let runtime = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap());
+    executor
+        .sync_hyprland_context(&runtime, instance, view(snapshot, layouts))
+        .unwrap();
+    let (mut channel, mut broker) = Channel::pair().unwrap();
+    let totals: Vec<f64> = (1..=10)
+        .map(|step| 20. * f64::from(step))
+        .chain((1..=5).map(|step| 200. - 20. * f64::from(step)))
+        .map(|total| sign * total)
+        .collect();
+    let mut steps = Vec::new();
+    for (index, total) in totals.iter().copied().enumerate() {
+        let ordinal = index as u64 + 1;
+        let (stage, phase) = match index {
+            0 => (Stage::Begin, Phase::Begin),
+            _ if index + 1 == totals.len() => (Stage::End, Phase::End),
+            _ => (Stage::Update, Phase::Update),
+        };
+        let (snapshot, layouts) = sample();
+        let current = view(snapshot, layouts);
+        let scope = current
+            .context
+            .as_ref()
+            .unwrap()
+            .scroll_scope(&name, id)
+            .unwrap();
+        executor.update_hyprland_context(current).unwrap();
+        let now = monotonic().unwrap();
+        let event = Box::new(Event::Matched {
+            version: 1,
+            rule: "G11_left".into(),
+            id: 41,
+            ordinal,
+            source: Source {
+                device: 702,
+                generation: 1,
+                seat: "seat0".into(),
+            },
+            at: now,
+            config_generation: 1,
+            session_generation: 1,
+            stage,
+            action: Action::Hyprland {
+                action: WindowAction::ScrollStack,
+            },
+            evidence: Evidence::Touch {
+                space: Space::Logical,
+                gesture: TouchGesture::Pan {
+                    fingers: 1,
+                    phase,
+                    direction: Direction::Vertical,
+                    total: Point { x: 0., y: total },
+                    delta: Point {
+                        x: 0.,
+                        y: 20. * sign,
+                    },
+                    velocity: Point { x: 0., y: 0. },
+                    centroid: Point { x: 4., y: 300. },
+                    swipe: true,
+                },
+            },
+            window: None,
+            output: Some(name.clone()),
+            workspace: Some(id),
+        });
+        executor
+            .offer_scoped(fence, event, Some(scope.clone()), now)
+            .unwrap();
+        executor
+            .grant_scoped(
+                fence,
+                41,
+                ordinal,
+                now + Duration::from_millis(250),
+                Some(scope),
+                now,
+            )
+            .unwrap();
+        executor.execute_ready(monotonic().unwrap()).unwrap();
+        executor.flush(&mut channel).unwrap();
+        let mut completion = None;
+        while let Some(packet) = broker.receive::<Request>().unwrap() {
+            if let Request::Complete { result, .. } = packet.message {
+                completion = Some(result);
+            }
+        }
+        assert_eq!(completion, Some(Completion::Applied), "scroll step {index}");
+        let (snapshot, layouts) = sample();
+        let observed = profile::available(&snapshot, &layouts, &name, id)
+            .unwrap()
+            .offset();
+        let expected = start.native((start.offset() - total).clamp(low, high));
+        assert!(
+            (observed - expected).abs() <= 2.,
+            "scroll step {index}: observed {observed}, expected {expected}"
+        );
+        steps.push(serde_json::json!({
+            "ordinal":ordinal,"total":total,"expected":expected,"observed":observed
+        }));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    serde_json::json!({"start":start.offset(),"bounds":[low, high],"steps":steps})
 }
 
 fn reorder_acceptance(

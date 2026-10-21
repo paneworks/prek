@@ -195,64 +195,72 @@ impl Plan {
         expected.matches(context, layouts)
     }
     pub(super) fn native_guard(&self) -> String {
-        let mut expected = String::new();
-        for window in &self.workspace.windows {
-            let (address, stable) = window.id.split_once(':').unwrap();
-            let [x, y, width, height] = window.rect;
-            let position = window
-                .column
-                .map_or_else(|| "false".into(), |p| format!("{{{}, {}}}", p.index, p.row));
-            write!(expected,"{{address='{address}',stable=0x{stable},rect={{{x:?},{y:?},{width:?},{height:?}}},hidden={},floating={},grouped={},fullscreen={},column={position}}},",window.hidden,window.floating,window.grouped,window.fullscreen).unwrap();
-        }
-        let mut columns = String::new();
-        for column in &self.workspace.columns {
-            write!(
-                columns,
-                "{{index={},width={:?},members={{",
-                column.index, column.width
-            )
-            .unwrap();
-            for id in &column.members {
-                let (address, stable) = id.split_once(':').unwrap();
-                write!(columns, "{{address='{address}',stable=0x{stable}}},").unwrap();
-            }
-            columns.push_str("}},");
-        }
-        let id = self.workspace.id;
-        let monitor = self.workspace.monitor.unwrap();
         let (neighbor, stable) = self.neighbor.split_once(':').unwrap();
         format!(
-            r#"
+            "{}local v=native['{neighbor}'];assert(v and v.stable_id==0x{stable},'Prek reorder neighbor retired')\n",
+            workspace_guard(&self.workspace, "reorder")
+        )
+    }
+}
+/// Lua asserting that `workspace` still has exactly these mapped windows,
+/// goal rectangles, app states, column order, widths and lifetimes. It
+/// leaves the observed windows in `native`, keyed by address.
+pub(super) fn workspace_guard(workspace: &layouts::Workspace, purpose: &str) -> String {
+    let mut expected = String::new();
+    for window in &workspace.windows {
+        let (address, stable) = window.id.split_once(':').unwrap();
+        let [x, y, width, height] = window.rect;
+        let position = window
+            .column
+            .map_or_else(|| "false".into(), |p| format!("{{{}, {}}}", p.index, p.row));
+        write!(expected,"{{address='{address}',stable=0x{stable},rect={{{x:?},{y:?},{width:?},{height:?}}},hidden={},floating={},grouped={},fullscreen={},column={position}}},",window.hidden,window.floating,window.grouped,window.fullscreen).unwrap();
+    }
+    let mut columns = String::new();
+    for column in &workspace.columns {
+        write!(
+            columns,
+            "{{index={},width={:?},members={{",
+            column.index, column.width
+        )
+        .unwrap();
+        for id in &column.members {
+            let (address, stable) = id.split_once(':').unwrap();
+            write!(columns, "{{address='{address}',stable=0x{stable}}},").unwrap();
+        }
+        columns.push_str("}},");
+    }
+    let id = workspace.id;
+    let monitor = workspace.monitor.unwrap();
+    format!(
+        r#"
 local ws=hl.get_workspace({id})
-assert(ws and ws.active and not ws.special and ws.tiled_layout=='scrolling' and ws.monitor and ws.monitor.id=={monitor},'Prek reorder workspace changed')
+assert(ws and ws.active and not ws.special and ws.tiled_layout=='scrolling' and ws.monitor and ws.monitor.id=={monitor},'Prek {purpose} workspace changed')
 local expected={{{expected}}}
 local current=hl.get_workspace_windows(ws)
-assert(#current==#expected,'Prek reorder membership changed')
+assert(#current==#expected,'Prek {purpose} membership changed')
 local native={{}}
 for _,o in ipairs(current) do native[o.address]=o end
 for _,e in ipairs(expected) do
  local o=native[e.address]
- assert(o and o.stable_id==e.stable and o.mapped and o.workspace and o.workspace.id=={id} and o.monitor and o.monitor.id=={monitor},'Prek reorder lifetime changed')
+ assert(o and o.stable_id==e.stable and o.mapped and o.workspace and o.workspace.id=={id} and o.monitor and o.monitor.id=={monitor},'Prek {purpose} lifetime changed')
  local p,s=o.at,o.size
- assert(p.x==e.rect[1] and p.y==e.rect[2] and s.x==e.rect[3] and s.y==e.rect[4],'Prek reorder geometry changed')
- assert(o.hidden==e.hidden and o.floating==e.floating and (o.group~=nil)==e.grouped and o.fullscreen==e.fullscreen,'Prek reorder app state changed')
+ assert(p.x==e.rect[1] and p.y==e.rect[2] and s.x==e.rect[3] and s.y==e.rect[4],'Prek {purpose} geometry changed')
+ assert(o.hidden==e.hidden and o.floating==e.floating and (o.group~=nil)==e.grouped and o.fullscreen==e.fullscreen,'Prek {purpose} app state changed')
  local layout=o.layout;local col=layout and layout.column
- if e.column then assert(col and col.index==e.column[1] and layout.index_in_column==e.column[2],'Prek reorder position changed')
- else assert(not col,'Prek reorder tiling changed') end
+ if e.column then assert(col and col.index==e.column[1] and layout.index_in_column==e.column[2],'Prek {purpose} position changed')
+ else assert(not col,'Prek {purpose} tiling changed') end
 end
 local columns={{{columns}}}
 for _,e in ipairs(columns) do
  local col=native[e.members[1].address].layout.column
- assert(col.index==e.index and col.width==e.width and #col.windows==#e.members,'Prek reorder column changed')
+ assert(col.index==e.index and col.width==e.width and #col.windows==#e.members,'Prek {purpose} column changed')
  for i,member in ipairs(e.members) do
   local o=col.windows[i]
-  assert(o and o.address==member.address and o.stable_id==member.stable,'Prek reorder column lifetime changed')
+  assert(o and o.address==member.address and o.stable_id==member.stable,'Prek {purpose} column lifetime changed')
  end
 end
-local v=native['{neighbor}'];assert(v and v.stable_id==0x{stable},'Prek reorder neighbor retired')
 "#
-        )
-    }
+    )
 }
 fn eligible(window: &layouts::Window) -> bool {
     !window.hidden
@@ -292,6 +300,19 @@ pub(crate) fn scope(
         fingerprint: canonical_hash(b"prek.native.reorder.v1\0", value)?,
     })
 }
+/// The native proof of a reorder window or a scrolled workspace.
+pub(crate) fn native_scope(
+    context: &Snapshot,
+    layouts: &layouts::Snapshot,
+    target: &crate::routing::native::Target,
+) -> Option<crate::protocol::ReorderScope> {
+    match target {
+        crate::routing::native::Target::Window(window) => scope(context, layouts, window),
+        crate::routing::native::Target::Workspace(output, workspace) => {
+            super::scrolling::profile::scope(context, layouts, output, *workspace)
+        }
+    }
+}
 pub(super) fn continuity_signature(
     context: &Snapshot,
     layouts: &layouts::Snapshot,
@@ -311,7 +332,7 @@ pub(super) fn continuity_signature(
     let value = serde_json::to_value((context.generation, outputs, windows, workspaces)).ok()?;
     canonical_hash(b"prek.native.continuity.v1\0", value)
 }
-fn canonical_hash(domain: &[u8], mut value: serde_json::Value) -> Option<[u8; 32]> {
+pub(super) fn canonical_hash(domain: &[u8], mut value: serde_json::Value) -> Option<[u8; 32]> {
     fn normalize(value: &mut serde_json::Value) {
         match value {
             serde_json::Value::Number(number) if number.as_f64() == Some(0.) => {

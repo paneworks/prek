@@ -41,8 +41,26 @@ pub struct ProvidedContext {
 impl ProvidedContext {
     /// Describe the native graph of an existing trusted window target.
     pub fn reorder_scope(&self, window: &str) -> Option<crate::protocol::ReorderScope> {
+        self.native_scope(&crate::routing::native::Target::Window(window.into()))
+    }
+    /// Describe the native proof of scrolling `workspace` on `output`.
+    pub fn scroll_scope(
+        &self,
+        output: &str,
+        workspace: i64,
+    ) -> Option<crate::protocol::ReorderScope> {
+        self.native_scope(&crate::routing::native::Target::Workspace(
+            output.into(),
+            workspace,
+        ))
+    }
+    /// Describe the native proof of a reorder window or scrolled workspace.
+    pub(crate) fn native_scope(
+        &self,
+        target: &crate::routing::native::Target,
+    ) -> Option<crate::protocol::ReorderScope> {
         self.validate_layouts().ok()?;
-        crate::hyprland::reorder::scope(&self.snapshot, self.layouts.as_ref()?, window)
+        crate::hyprland::reorder::native_scope(&self.snapshot, self.layouts.as_ref()?, target)
     }
     pub(crate) fn hyprland_target_available(
         &self,

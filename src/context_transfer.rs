@@ -321,6 +321,7 @@ pub(crate) mod tests {
                 gaps_in: [0; 4],
                 gaps_out: [0; 4],
                 border: 0,
+                focus_fit: 1,
                 workspace_rules: 0,
                 reserved: vec![Reserved {
                     output: "fixture-output".into(),

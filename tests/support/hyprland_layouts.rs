@@ -31,6 +31,7 @@ pub(super) fn profile_reply(request: &[u8]) -> Option<String> {
             option(name, serde_json::json!({"css":"0 0 0 0"}))
         }
         Some(name @ "general:border_size") => option(name, serde_json::json!({"int":0})),
+        Some(name @ "scrolling:focus_fit_method") => option(name, serde_json::json!({"int":1})),
         None if request == "j/workspacerules" => "[]".into(),
         _ => return None,
     })

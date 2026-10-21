@@ -7,6 +7,8 @@ mod layouts;
 mod power;
 #[path = "support/hyprland_reorder.rs"]
 mod reorder;
+#[path = "support/hyprland_scroll.rs"]
+mod scroll;
 #[path = "support/hyprland_actions.rs"]
 mod window_actions;
 use std::{
