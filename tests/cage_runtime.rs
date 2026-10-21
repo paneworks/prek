@@ -760,6 +760,9 @@ fn window_acceptance(
             .all(|window| window.visible),
         "still owned windows on the shown workspace were not proven visible"
     );
+    if std::env::var("PREK_CAGE_CONFIG_PROVIDER").as_deref() == Ok("lua") {
+        inherited_stillness(checking, &instance, &[&target_id, &guard_id], output);
+    }
     let target_output = initial_window.output.clone();
     let source = r#"
 local p=require('prek')
@@ -1274,6 +1277,52 @@ return {version=1}
         output.join("hyprland-layouts.json"),
         serde_json::to_vec(&serde_json::json!({
             "status":"passed","workspace":id,"snapshots":receipts
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+/// With animations on, disabling only the `windows` and `workspaces` parents
+/// still proves goal geometry rendered; enabling `windows` withdraws it.
+fn inherited_stillness(checking: &Client, instance: &str, ids: &[&String], output: &Path) {
+    let eval = |command: &str| {
+        let result = std::process::Command::new(std::env::var_os("PREK_CAGE_HYPRCTL").unwrap())
+            .args(["eval", command])
+            .env("HYPRLAND_INSTANCE_SIGNATURE", instance)
+            .output()
+            .unwrap();
+        assert!(result.status.success());
+        assert_eq!(String::from_utf8(result.stdout).unwrap().trim(), "ok");
+    };
+    let mut sampler = ContextSampler::default();
+    let mut visible = || -> Vec<bool> {
+        sampler
+            .sample(checking, 1, SessionKind::User)
+            .unwrap()
+            .windows
+            .iter()
+            .filter(|window| ids.contains(&&window.id))
+            .map(|window| window.visible)
+            .collect()
+    };
+    eval(
+        "hl.animation({leaf=\"windows\",enabled=false}) \
+         hl.animation({leaf=\"workspaces\",enabled=false}) \
+         hl.config({animations={enabled=true}})",
+    );
+    let parents = visible();
+    eval("hl.animation({leaf=\"windows\",enabled=true,speed=1,bezier=\"default\"})");
+    let moving = visible();
+    eval("hl.config({animations={enabled=false}})");
+    let restored = visible();
+    assert_eq!(parents, vec![true; ids.len()], "disabled parents");
+    assert_eq!(moving, vec![false; ids.len()], "enabled windows node");
+    assert_eq!(restored, vec![true; ids.len()], "animations off again");
+    fs::write(
+        output.join("inherited-stillness.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "status":"passed","parents_disabled":parents,"windows_enabled":moving,"off":restored
         }))
         .unwrap(),
     )
