@@ -52,7 +52,7 @@ fn map_in_bounds_only_a_listed_bezier_and_tolerates_a_missing_reply() {
         serde_json::json!([
             [
                 {"name":"global","overridden":true,"bezier":"default","enabled":true,"speed":10.0,"style":""},
-                {"name":name,"overridden":false,"bezier":bezier,"enabled":true,"speed":speed,"style":"slide"}
+                {"name":name,"overridden":true,"bezier":bezier,"enabled":true,"speed":speed,"style":"slide"}
             ],
             [{"name":"default","X0":0.05,"Y0":0.9,"X1":0.1,"Y1":1.05}]
         ])
@@ -129,4 +129,29 @@ fn map_in_bounds_only_a_listed_bezier_and_tolerates_a_missing_reply() {
         .is_err()
     );
     assert!(!inhibited);
+}
+#[test]
+fn map_in_reads_the_stock_reply_through_inherited_layer_configuration() {
+    use crate::hyprland::animations::tests::{configure, stock};
+    let (mut reply, off) = stock();
+    let on = Some(true);
+    assert_eq!(map_in(&reply, on), Some(Duration::from_micros(300_500)));
+    assert_eq!(
+        map_in(&reply, super::super::animations::enabled(&off)),
+        Some(Duration::ZERO)
+    );
+    let layers_in = reply[0]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|node| node["name"] == "layersIn")
+        .unwrap();
+    layers_in["overridden"] = serde_json::json!(false);
+    layers_in["speed"] = serde_json::json!(0.0);
+    layers_in["bezier"] = serde_json::json!("");
+    assert_eq!(map_in(&reply, on), Some(Duration::from_micros(800_500)));
+    configure(&mut reply, "layers", false);
+    assert_eq!(map_in(&reply, on), Some(Duration::ZERO));
+    configure(&mut reply, "layers", true);
+    assert_eq!(map_in(&reply, on), Some(Duration::from_micros(100_500)));
 }

@@ -3,7 +3,8 @@
 `reorder_up` and `reorder_down` are experimental Hyprland actions for the exact
 0.56.2 Lua provider and its native scrolling layout. Production input takeover
 remains disabled. App-content targets need the still-window proof (animations
-off, or every window/workspace movement node disabled). Physical ownership,
+off, or every window/workspace movement node disabled, directly or through its
+nearest configured ancestor). Physical ownership,
 phone behavior and the complete G08 acceptance matrix remain separate gates.
 
 ## Frozen selection

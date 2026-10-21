@@ -833,6 +833,8 @@ make.recipe{ name = "test-hyprland", desc = "bound Hyprland queries, window and 
                sh.cargo("test", "--locked", "--lib", "hyprland::dispatch::tests")
                sh.cargo("test", "--locked", "--lib", "hyprland::scrolling::")
                sh.cargo("test", "--locked", "--lib", "hyprland::layouts::tests")
+               sh.cargo("test", "--locked", "--lib", "hyprland::animations::")
+               sh.cargo("test", "--locked", "--lib", "hyprland::layers::")
                sh.cargo("test", "--locked", "--lib", "hyprland::reorder::tests")
                sh.cargo("test", "--locked", "--lib", "routing::tests::native_claims::")
                sh.cargo("test", "--locked", "--lib", "service::tests::native_reorder::")

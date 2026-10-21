@@ -1406,7 +1406,9 @@ window `visible` only when the same locked context batch shows that no window or
 workspace movement can animate. That means `animations:enabled` is off, or each
 of `windows`, `windowsIn`, `windowsOut`, `windowsMove`, `workspaces`,
 `workspacesIn`, `workspacesOut`, `specialWorkspace`, `specialWorkspaceIn` and
-`specialWorkspaceOut` appears once and is disabled. In that case the stock tick
+`specialWorkspaceOut` appears once and uses a disabled configuration. A node
+that was never configured inherits its nearest overridden ancestor, so
+disabling `windows` and `workspaces` is enough. In that case the stock tick
 warps every value to its goal at the next frame. The window must also be
 unhidden, report its fullscreen state, sit on its monitor's active workspace
 with no special workspace shown, and not be covered by another fullscreen

@@ -1369,6 +1369,45 @@ fn scroll_profile_acceptance(
         );
         std::thread::sleep(Duration::from_millis(5));
     }
+    let stock = |args: &[&str]| -> serde_json::Value {
+        let result = std::process::Command::new(std::env::var_os("PREK_CAGE_HYPRCTL").unwrap())
+            .args(args)
+            .env("HYPRLAND_INSTANCE_SIGNATURE", instance)
+            .output()
+            .unwrap();
+        assert!(result.status.success());
+        serde_json::from_slice(&result.stdout).unwrap()
+    };
+    eval(
+        "hl.curve(\"prekin\",{type=\"bezier\",points={{0.2,0.9},{0.3,1.0}}}) \
+         hl.animation({leaf=\"layersIn\",enabled=true,speed=3,bezier=\"prekin\"})"
+            .into(),
+    );
+    let animated = stock(&["-j", "animations"]);
+    let global = stock(&["-j", "getoption", "animations:enabled"]);
+    eval("hl.animation({leaf=\"layersIn\",enabled=false})".into());
+    let layers_in = animated[0]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["name"] == "layersIn")
+        .unwrap();
+    assert_eq!(
+        (&layers_in["enabled"], &layers_in["bezier"]),
+        (&serde_json::json!(true), &serde_json::json!("prekin"))
+    );
+    assert!(
+        animated[1]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|curve| curve["name"] == "prekin")
+    );
+    fs::write(
+        output.join("layer-animations.json"),
+        serde_json::to_vec(&serde_json::json!({"animations":animated,"option":global})).unwrap(),
+    )
+    .unwrap();
     fs::write(
         output.join("scroll-profile.json"),
         serde_json::to_vec(&serde_json::json!({

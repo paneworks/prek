@@ -87,7 +87,10 @@ also reads stock `animations` and `getoption animations:enabled`, and
 (`AnimationManager::tick`, both versions) warps every value while the global
 switch or the `layersIn` node is off, so the bound is then zero. Otherwise a
 listed `layersIn` cubic bezier lasts `speed` tenths of a second (rounded up for
-the two-decimal reply). Springs, unknown curves and values over ten seconds
+the two-decimal reply). Stock replies print each node's own values, so a
+`layersIn` that was never configured uses its nearest overridden ancestor
+(`layers`, then `global`, stock speed 8). The captured 0.56.2 reply in
+`src/hyprland/animations/stock-0.56.2.json` checks this. Springs, unknown curves and values over ten seconds
 give no bound. If
 `mapped_ns + map_in_ns + 100ms <= started_ns`, the projection's `basis` is
 `settled_stock_layer`, where `started_ns` precedes the first layer sample.

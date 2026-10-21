@@ -139,14 +139,7 @@ pub(crate) fn map_in(value: &Value, enabled: Option<bool>) -> Option<Duration> {
     let [nodes, beziers] = value.as_array()?.as_slice() else {
         return None;
     };
-    let mut matching = nodes
-        .as_array()?
-        .iter()
-        .filter(|node| node["name"] == "layersIn");
-    let node = matching.next()?;
-    if matching.next().is_some() {
-        return None;
-    }
+    let node = super::animations::effective(nodes.as_array()?, "layersIn")?;
     if !node["enabled"].as_bool()? || enabled == Some(false) {
         return Some(Duration::ZERO);
     }
