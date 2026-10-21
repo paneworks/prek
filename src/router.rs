@@ -215,6 +215,8 @@ pub struct Recovery {
     pub source: Source,
     pub neutral_events: Vec<RawEvent>,
     pub destroy_virtual_and_release_grab: bool,
+    /// Where routing decided to recover this source, for diagnostics.
+    pub origin: Option<&'static std::panic::Location<'static>>,
 }
 
 #[derive(Debug)]
@@ -962,6 +964,7 @@ impl Router {
             source: self.device.source.clone(),
             neutral_events: self.delivered.releases(),
             destroy_virtual_and_release_grab: true,
+            origin: None,
         })
     }
 }

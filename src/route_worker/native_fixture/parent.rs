@@ -226,6 +226,12 @@ impl Parent {
                     fence,
                     source,
                 } => {
+                    if !self.finishing {
+                        return Err(invalid(format!(
+                            "managed worker released device {} before the fixture finished",
+                            source.device
+                        )));
+                    }
                     if worker != self.supervisor.worker_identity()
                         || fence != self.fence
                         || !self.released.insert(source)

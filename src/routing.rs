@@ -1354,6 +1354,7 @@ impl Routing {
     pub(crate) fn has_source(&self, source: &Source) -> bool {
         self.routes.contains_key(source)
     }
+    #[track_caller]
     pub fn recover(&mut self, source: &Source) {
         let domain = self
             .routes
@@ -1398,8 +1399,9 @@ impl Routing {
             })
             .sum();
         if let Some(mut route) = self.routes.remove(source)
-            && let Some(recovery) = route.router.recover()
+            && let Some(mut recovery) = route.router.recover()
         {
+            recovery.origin = Some(std::panic::Location::caller());
             self.recoveries.push(recovery);
         }
         self.won

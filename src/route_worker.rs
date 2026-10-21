@@ -332,6 +332,13 @@ impl Stream {
     }
     fn retire(&mut self, recovery: crate::router::Recovery, now: Duration) {
         if let Some(output) = self.outputs.remove(&recovery.source) {
+            eprintln!(
+                "routing worker: retired output for device {} (recovered at {})",
+                recovery.source.device,
+                recovery
+                    .origin
+                    .map_or_else(|| "unknown".into(), |origin| origin.to_string())
+            );
             Self::retire_output(recovery, output, now);
         }
     }
