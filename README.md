@@ -399,6 +399,10 @@ configuration and choose a binding explicitly.
 
 The phone preset describes the intended Morf/Hyprland gesture bindings and
 ownership policies. It does not enable a service or install those bindings yet.
+Its Morf keyboard gestures (G05–G07) apply on the desktop only. On the lock
+screen and greeter, touches pass through to the Morf shell's own keyboard
+gestures, because those shells take no Prek controls. Only the screen-off wake
+and clock-background blank (G16, G17) are claimed there.
 The desktop example is disabled until you enable its rule. Desktop shape templates
 include V, circle and zigzag without active action
 bindings. `check` validates syntax, units, references, bounded nesting, system

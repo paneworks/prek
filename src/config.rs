@@ -1633,11 +1633,7 @@ impl Config {
                         priority: 100 + index as i32,
                         devices: vec!["touch".into()],
                         seats: vec![],
-                        contexts: if matches!(scope, Scope::Keyboard | Scope::PhysicalBottom) {
-                            vec![Context::Desktop, Context::Locked, Context::Greeter]
-                        } else {
-                            vec![Context::Desktop]
-                        },
+                        contexts: vec![Context::Desktop],
                         scope,
                         output: None,
                         screen: Some(Screen::On),
@@ -2042,6 +2038,25 @@ mod tests {
         assert!(config.validate().is_err());
         config.rules[1].priority = 1;
         assert!(config.validate().is_ok());
+    }
+    #[test]
+    fn phone_keyboard_gestures_leave_lock_and_greeter_to_their_shells() {
+        let config = Config::preset("phone").unwrap();
+        let contexts = |id: &str| {
+            config
+                .rules
+                .iter()
+                .find(|rule| rule.id == id)
+                .unwrap()
+                .contexts
+                .clone()
+        };
+        for id in ["G05", "G06", "G07"] {
+            assert_eq!(contexts(id), [Context::Desktop], "{id}");
+        }
+        for id in ["G16", "G17"] {
+            assert_eq!(contexts(id), [Context::Locked, Context::Greeter], "{id}");
+        }
     }
     #[test]
     fn t51_tappable_keyboard_cannot_be_unconditionally_reserved() {
