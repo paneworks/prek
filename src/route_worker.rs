@@ -429,6 +429,10 @@ impl Stream {
     fn expire_subscriptions(&mut self, now: Duration) -> io::Result<()> {
         if let Some(scopes) = self.subscriptions.expire(now) {
             for scope in scopes {
+                eprintln!(
+                    "routing worker: seat {} lost its context: subscription transfer expired",
+                    scope.seat
+                );
                 self.teardown(&scope.seat, now);
                 self.queue(Message::Outcome {
                     report: Report::ContextLost {
@@ -454,6 +458,10 @@ impl Stream {
                 })
             {
                 for subscription in identities {
+                    eprintln!(
+                        "routing worker: seat {} lost its context: {error}",
+                        subscription.seat
+                    );
                     self.teardown(&subscription.seat, now);
                     self.queue(Message::Outcome {
                         report: Report::ContextLost { subscription },
@@ -486,6 +494,10 @@ impl Stream {
                 let now = monotonic()?;
                 if deadline.is_some_and(|deadline| now >= deadline) {
                     for subscription in update.seats {
+                        eprintln!(
+                            "routing worker: seat {} lost its context: subscription transfer completed late",
+                            subscription.seat
+                        );
                         self.teardown(&subscription.seat, now);
                         self.queue(Message::Outcome {
                             report: Report::ContextLost {
@@ -931,9 +943,17 @@ impl InputSink for Stream {
                 now >= seat.expires
                     || seat.routing.authority().state(now) != crate::context::State::Desktop
             })
-            .map(|(name, seat)| (name.clone(), identity(&seat.subscription)))
+            .map(|(name, seat)| {
+                let reason = if now >= seat.expires {
+                    format!("lease expired {} ms ago", (now - seat.expires).as_millis())
+                } else {
+                    format!("state {:?}", seat.routing.authority().state(now))
+                };
+                (name.clone(), identity(&seat.subscription), reason)
+            })
             .collect();
-        for (name, subscription) in expired {
+        for (name, subscription, reason) in expired {
+            eprintln!("routing worker: seat {name} lost its context: {reason}");
             self.teardown(&name, now);
             self.queue(Message::Outcome {
                 report: Report::ContextLost { subscription },

@@ -34,14 +34,14 @@ finish() {
   status=failed
   if (( result == 0 )); then status=passed; fi
   printf '{"status":"%s","exit_code":%d}\n' "$status" "$result" > "$run/status.json"
-  printf '\nResult: %s (exit %d). Logs: %s\n' "$status" "$result" "$run"
+  printf '\nResult: %s (exit %d). Load: %s. Logs: %s\n' "$status" "$result" "$(cut -d' ' -f1-3 /proc/loadavg)" "$run"
   exit "$result"
 }
 trap finish EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 printf '{"status":"running"}\n' > "$run/status.json"
-printf 'Isolated kernel routing gates. Started: %s\nLogs: %s\n' "$(date -u +%FT%TZ)" "$run"
+printf 'Isolated kernel routing gates. Started: %s (load %s)\nLogs: %s\n' "$(date -u +%FT%TZ)" "$(cut -d' ' -f1-3 /proc/loadavg)" "$run"
 git -C "$repo" rev-parse HEAD
 git -C "$repo" status --short
 nix --option eval-cache false --extra-experimental-features 'nix-command flakes' \

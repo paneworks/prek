@@ -29,7 +29,20 @@ impl Parent {
             if self.neutral_drains.contains_key(source) {
                 continue;
             }
-            let frames = receiver.drain_complete()?;
+            let frames = receiver.drain_complete().map_err(|error| {
+                let role = if self.endpoints[source].descriptor.is_generated_keyboard() {
+                    "generated keyboard"
+                } else {
+                    "raw mirror"
+                };
+                io::Error::new(
+                    error.kind(),
+                    format!(
+                        "managed {role} output {} read: {error}",
+                        self.endpoints[source].path.display()
+                    ),
+                )
+            })?;
             for frame in &frames {
                 if frame.events.last()
                     != Some(&RawEvent {
@@ -233,6 +246,15 @@ impl Parent {
                     return Err(invalid(
                         "managed key work leaked into external action dispatch",
                     ));
+                }
+                Message::Outcome {
+                    report: Report::ContextLost { .. },
+                } => {
+                    return Err(invalid(format!(
+                        "managed worker tore down its seat; last renewal {} ms ago, revision {}",
+                        self.renewed.elapsed().as_millis(),
+                        self.revision
+                    )));
                 }
                 Message::Outcome { .. } => {}
                 _ => return Err(invalid("unexpected managed worker control response")),
