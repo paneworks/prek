@@ -267,9 +267,17 @@ def main():
             layout_observations = []
             def map_in_ns(animations, option):
                 nodes, beziers = animations
-                matching = [node for node in nodes if node["name"] == "layersIn"]
-                if len(matching) != 1:
-                    return None
+                parents = dict(layersIn="layers", layers="global")
+                name = "layersIn"
+                while True:
+                    matching = [node for node in nodes if node["name"] == name]
+                    if len(matching) != 1:
+                        return None
+                    if matching[0]["overridden"]:
+                        break
+                    if name not in parents:
+                        return None
+                    name = parents[name]
                 globally = option.get("int", option.get("bool"))
                 if not matching[0]["enabled"] or globally in (0, False):
                     return 0
