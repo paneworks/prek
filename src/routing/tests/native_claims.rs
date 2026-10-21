@@ -330,16 +330,29 @@ fn a_side_strip_swipe_freezes_the_scrolled_workspace_proof_for_every_stage() {
 }
 
 #[test]
-fn a_swipe_outside_the_strip_or_off_the_profile_claims_nothing_native() {
-    for case in ["outside", "wide"] {
+fn a_swipe_starting_outside_the_strip_or_off_the_profile_claims_nothing_native() {
+    for case in ["outside", "into", "wide"] {
         let (mut routing, scope) = side_strip(if case == "wide" { 0.75 } else { 0.5 });
         assert_eq!(scope.is_none(), case == "wide");
-        let x = if case == "outside" { 2000 } else { 40 };
+        let x = if case == "wide" { 40 } else { 2000 };
         touch(&mut routing, 1, 0, x, 1000);
         let mut delivered = drain(&mut routing, 0).len();
         routing.push(Record::Tick { at: ms(130) }).unwrap();
         delivered += drain(&mut routing, 130).len();
-        movement(&mut routing, 2, 140, 1300, 1);
+        if case == "into" {
+            frame(
+                &mut routing,
+                2,
+                140,
+                &[
+                    (EV_ABS, ABS_MT_SLOT, 0),
+                    (EV_ABS, ABS_MT_POSITION_X, 40),
+                    (EV_ABS, ABS_MT_POSITION_Y, 1300),
+                ],
+            );
+        } else {
+            movement(&mut routing, 2, 140, 1300, 1);
+        }
         delivered += drain(&mut routing, 140).len();
         up(&mut routing, 3, 180, 1);
         delivered += drain(&mut routing, 180).len();
