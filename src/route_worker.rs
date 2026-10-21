@@ -59,6 +59,16 @@ struct Output {
     in_flight: Option<u64>,
     sequence: u64,
 }
+#[cfg(feature = "native-test-harness")]
+impl Drop for Output {
+    fn drop(&mut self) {
+        eprintln!(
+            "routing worker: dropping output {}\n{}",
+            self.virtual_device.descriptor().marker,
+            std::backtrace::Backtrace::force_capture()
+        );
+    }
+}
 struct NativePreparation {
     descriptor: Descriptor,
     readiness: Readiness,
