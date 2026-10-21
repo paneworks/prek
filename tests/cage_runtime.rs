@@ -1553,6 +1553,7 @@ fn scroll_executor_acceptance(
         .map(|total| sign * total)
         .collect();
     let mut steps = Vec::new();
+    let mut latencies = Vec::new();
     for (index, total) in totals.iter().copied().enumerate() {
         let ordinal = index as u64 + 1;
         let (stage, phase) = match index {
@@ -1620,7 +1621,9 @@ fn scroll_executor_acceptance(
                 now,
             )
             .unwrap();
-        executor.execute_ready(monotonic().unwrap()).unwrap();
+        let started = monotonic().unwrap();
+        executor.execute_ready(started).unwrap();
+        let elapsed = monotonic().unwrap() - started;
         executor.flush(&mut channel).unwrap();
         let mut completion = None;
         while let Some(packet) = broker.receive::<Request>().unwrap() {
@@ -1638,12 +1641,19 @@ fn scroll_executor_acceptance(
             (observed - expected).abs() <= 2.,
             "scroll step {index}: observed {observed}, expected {expected}"
         );
+        latencies.push(elapsed);
         steps.push(serde_json::json!({
-            "ordinal":ordinal,"total":total,"expected":expected,"observed":observed
+            "ordinal":ordinal,"total":total,"expected":expected,"observed":observed,
+            "execute_us":elapsed.as_micros()
         }));
         std::thread::sleep(Duration::from_millis(20));
     }
-    serde_json::json!({"start":start.offset(),"bounds":[low, high],"steps":steps})
+    latencies.sort();
+    let percentile = |q: usize| latencies[(latencies.len() - 1) * q / 100].as_micros();
+    serde_json::json!({
+        "start":start.offset(),"bounds":[low, high],"steps":steps,
+        "execute_us":{"p50":percentile(50),"p90":percentile(90),"max":percentile(100)}
+    })
 }
 
 fn reorder_acceptance(
