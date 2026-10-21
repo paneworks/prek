@@ -414,8 +414,9 @@ expand permitted devices or seats.
 
 The configured engine compiles a whole replacement before activating it, retains
 the last good configuration on failure, cancels previous candidates and reconciles
-held keys/contacts without inventing presses. Live ownership handoff and the
-daemon's `reload` command are not implemented yet.
+held keys/contacts without inventing presses. `prek reload` asks a privileged
+broker to do this with its system file. Live ownership handoff is not
+implemented yet.
 
 Rules name device selectors, contexts, scopes, required keys/layers, delivery,
 trigger and action. `require_keys` combines devices on the same permitted seat;

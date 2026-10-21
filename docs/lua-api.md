@@ -864,9 +864,10 @@ Native collection gets at most 50 ms inside the existing combined 200 ms context
 budget. Mapped windows, goals, outputs, workspaces, graph membership and sample
 identities must match; incomplete or mismatched graphs are not published.
 Large views use the existing bounded chunked context transfer without truncating
-window/member lists. This inspection-only graph is excluded from private
-recognition packets, preserving their existing complete core context and size
-budget; it is not yet worker preclaim evidence.
+window/member lists. The graph is kept out of private recognition packets,
+which keep their existing core context and size budget. The private worker
+receives it through its own chunked subscription, where it is preclaim evidence
+only for the native G08 reorder and G11 scroll proofs.
 
 These are **animation goals, not rendered hit tests**. No effective camera
 offset/work area, arbitrary workspace-rule resolution, empty-strip scope, input
