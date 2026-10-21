@@ -96,6 +96,16 @@ fn pump(stream: &mut Stream, health: &mut Heartbeat, sources: &[Source]) -> io::
 }
 
 pub(super) fn run() -> io::Result<()> {
+    let mut held = None;
+    let result = serve(&mut held);
+    if let Err(error) = &result {
+        eprintln!("managed worker failed: {error}");
+    }
+    drop(held);
+    result
+}
+
+fn serve(held: &mut Option<Owned>) -> io::Result<()> {
     let mut health = Heartbeat::connect()?;
     let channel = health
         .take_control()
@@ -130,7 +140,10 @@ pub(super) fn run() -> io::Result<()> {
         return Err(invalid("managed consumer differs from its supervisor"));
     }
     let registry = kernel::authorized();
-    let mut stream = Stream::with_registry(configuration(&devices)?, channel, registry)?;
+    let Owned { stream, readers } = held.insert(Owned {
+        stream: Stream::with_registry(configuration(&devices)?, channel, registry)?,
+        readers: Vec::new(),
+    });
     let mut physical = Vec::new();
     for device in &devices {
         stream.push(Record::Device {
@@ -214,7 +227,7 @@ pub(super) fn run() -> io::Result<()> {
     }
     let deadline = Instant::now() + WAIT;
     while !stream.seats.contains_key("seat0") {
-        control::live(&mut stream, &mut health)?;
+        control::live(stream, &mut health)?;
         if Instant::now() >= deadline {
             return Err(invalid("managed subscription timed out"));
         }
@@ -223,16 +236,11 @@ pub(super) fn run() -> io::Result<()> {
     stream.seats.get_mut("seat0").unwrap().keys =
         Some(keys::Slot::new(fence, consumer.clone(), prepared)?);
     if !matches!(
-        control::request(&mut fixture, &mut stream, &mut health)?,
+        control::request(&mut fixture, stream, &mut health)?,
         Request::Arm {}
     ) {
         return Err(invalid("managed worker expected arm"));
     }
-    let mut owned = Owned {
-        stream,
-        readers: Vec::new(),
-    };
-    let Owned { stream, readers } = &mut owned;
     for (device, endpoint) in devices.iter().zip(&inputs) {
         let reader = endpoint.receiver_as(&device.source)?;
         if !reader.keys().is_empty() {
