@@ -3,13 +3,19 @@
 //! goal rectangles determine it: a downward scrolling layout without gaps,
 //! borders or workspace rules, whose tiled windows exactly tile their strips.
 use super::{Direction, Viewport};
-use crate::{context::OutputState, hyprland::layouts::Workspace};
+use crate::{
+    config::Screen,
+    context::{OutputState, Snapshot},
+    hyprland::layouts::{self, Workspace},
+};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::io;
+use std::{collections::BTreeSet, io};
 
 /// Stock coordinates are truncated to integers; two truncations bound the
 /// difference between an observed and a derived coordinate.
 const TOLERANCE: f64 = 2.0;
+const MAX_OUTPUTS: usize = 256;
 
 /// Why a workspace is outside the validated profile.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -22,20 +28,57 @@ pub enum Refusal {
     Window,
     Columns,
     Geometry,
+    Unsampled,
 }
 
 /// Stock settings that fix the profile, read in one locked batch.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Settings {
     pub direction: String,
     pub gaps_in: [i64; 4],
     pub gaps_out: [i64; 4],
     pub border: i64,
     pub workspace_rules: usize,
-    /// Output name and its reserved `[left, top, right, bottom]`.
-    pub reserved: Vec<(String, [f64; 4])>,
+    pub reserved: Vec<Reserved>,
+}
+
+/// An output's reserved `[left, top, right, bottom]` area.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Reserved {
+    pub output: String,
+    pub area: [f64; 4],
 }
 impl Settings {
+    /// Rejects values outside stock bounds and repeated outputs.
+    pub fn validate(&self) -> io::Result<()> {
+        let text = |value: &str, limit| {
+            !value.is_empty() && value.len() <= limit && !value.chars().any(char::is_control)
+        };
+        let mut outputs = BTreeSet::new();
+        if !text(&self.direction, 64)
+            || self
+                .gaps_in
+                .iter()
+                .chain(&self.gaps_out)
+                .chain([&self.border])
+                .any(|value| !(0..=1_000_000).contains(value))
+            || self.workspace_rules > 4096
+            || self.reserved.len() > MAX_OUTPUTS
+            || self.reserved.iter().any(|reserved| {
+                !text(&reserved.output, 256)
+                    || !outputs.insert(reserved.output.as_str())
+                    || reserved
+                        .area
+                        .iter()
+                        .any(|n| !(n.is_finite() && (0.0..=1_000_000.0).contains(n)))
+            })
+        {
+            return Err(invalid("invalid scrolling profile settings"));
+        }
+        Ok(())
+    }
     /// Decodes `getoption` replies for direction, inner and outer gaps and
     /// border size, the `workspacerules` list and the `monitors` list.
     pub fn decode(replies: [&Value; 6]) -> io::Result<Self> {
@@ -59,7 +102,7 @@ impl Settings {
         };
         let reserved = monitors
             .as_array()
-            .filter(|monitors| monitors.len() <= 256)
+            .filter(|monitors| monitors.len() <= MAX_OUTPUTS)
             .ok_or_else(|| invalid("invalid monitor collection"))?
             .iter()
             .map(|monitor| {
@@ -77,10 +120,13 @@ impl Settings {
                         .filter(|n| n.is_finite() && (0.0..=1_000_000.0).contains(n))
                         .ok_or_else(|| invalid("invalid reserved area"))?;
                 }
-                Ok((name.to_owned(), area))
+                Ok(Reserved {
+                    output: name.to_owned(),
+                    area,
+                })
             })
             .collect::<io::Result<_>>()?;
-        Ok(Self {
+        let settings = Self {
             direction: option(direction, "scrolling:direction")?["str"]
                 .as_str()
                 .ok_or_else(|| invalid("invalid scrolling direction"))?
@@ -95,7 +141,9 @@ impl Settings {
                 .ok_or_else(|| invalid("invalid workspace rules"))?
                 .len(),
             reserved,
-        })
+        };
+        settings.validate()?;
+        Ok(settings)
     }
 }
 
@@ -139,6 +187,35 @@ fn decode(bytes: &[u8], inhibited: &mut bool) -> io::Result<Settings> {
         return Err(invalid("profile batch witnessed compositor lock"));
     }
     Settings::decode([direction, gaps_in, gaps_out, border, rules, monitors])
+}
+
+/// The viewport of `workspace`, active on the lit `output` of one desktop
+/// sample, from that sample's native graph and attached settings.
+pub fn available(
+    context: &Snapshot,
+    layouts: &layouts::Snapshot,
+    output: &str,
+    workspace: i64,
+) -> Result<Viewport, Refusal> {
+    let state = context
+        .outputs
+        .iter()
+        .find(|state| {
+            state.geometry.name == output
+                && state.screen == Screen::On
+                && state.active_workspace == Some(workspace)
+        })
+        .ok_or(Refusal::Layout)?;
+    let native = layouts
+        .workspaces
+        .iter()
+        .find(|native| native.id == workspace && native.output.as_deref() == Some(output))
+        .ok_or(Refusal::Layout)?;
+    viewport(
+        native,
+        state,
+        layouts.profile.as_ref().ok_or(Refusal::Unsampled)?,
+    )
 }
 
 /// Derives the native viewport of `workspace` on `output`, or why the
@@ -201,8 +278,8 @@ pub fn viewport(
     let reserved = settings
         .reserved
         .iter()
-        .find(|(name, _)| *name == output.geometry.name)
-        .map(|(_, area)| *area)
+        .find(|reserved| reserved.output == output.geometry.name)
+        .map(|reserved| reserved.area)
         .ok_or(Refusal::Geometry)?;
     let rect = output.rect();
     let [left, top, right, bottom] = reserved;

@@ -384,12 +384,23 @@
 ---@field layout string
 ---@field windows prek.NativeLayoutWindow[]
 ---@field columns prek.NativeLayoutColumn[]
+---@class (exact) prek.NativeReservedArea
+---@field output string
+---@field area number[] Reserved `{left, top, right, bottom}` in logical pixels.
+---@class (exact) prek.NativeScrollProfile
+---@field direction string Global `scrolling:direction`.
+---@field gaps_in integer[] `general:gaps_in` as `{top, right, bottom, left}`.
+---@field gaps_out integer[] `general:gaps_out` as `{top, right, bottom, left}`.
+---@field border integer `general:border_size`.
+---@field workspace_rules integer Number of workspace rules.
+---@field reserved prek.NativeReservedArea[]
 ---@class (exact) prek.NativeLayouts
 ---@field fence prek.Fence
 ---@field generation prek.Identity
 ---@field revision prek.Identity
 ---@field captured_at prek.MonotonicTime
 ---@field workspaces prek.NativeLayoutWorkspace[]
+---@field profile? prek.NativeScrollProfile Present only beside an active scrolling workspace.
 
 ---@alias prek.Space 'normalized'|'logical'|'millimetres'|'relative'
 ---@alias prek.CancelReason 'event_loss'|'backward_time'|'invalid_frame'|'source_changed'|'disconnected'|'mapping_changed'

@@ -831,7 +831,7 @@ make.recipe{ name="test-cage-rendering",desc="bounded real capture pixel decoder
 make.recipe{ name = "test-hyprland", desc = "bound Hyprland queries, window and power adapter models",
              run = function()
                sh.cargo("test", "--locked", "--lib", "hyprland::dispatch::tests")
-               sh.cargo("test", "--locked", "--lib", "hyprland::scrolling::tests")
+               sh.cargo("test", "--locked", "--lib", "hyprland::scrolling::")
                sh.cargo("test", "--locked", "--lib", "hyprland::layouts::tests")
                sh.cargo("test", "--locked", "--lib", "hyprland::reorder::tests")
                sh.cargo("test", "--locked", "--lib", "routing::tests::native_claims::")

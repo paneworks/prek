@@ -341,17 +341,32 @@ pub(crate) fn available(
     output: Option<&str>,
     workspace: Option<i64>,
 ) -> bool {
-    if let crate::config::Action::Hyprland {
-        action: action @ (WindowAction::ReorderUp | WindowAction::ReorderDown),
-    } = action
-    {
-        action.supported_session()
-            && context.hyprland_window_target_available(scope, window, output, workspace)
-            && window.zip(layouts).is_some_and(|(window, layouts)| {
-                Plan::freeze(context, layouts, window, *action).is_ok()
-            })
-    } else {
-        context.hyprland_target_available(action, scope, window, output, workspace)
+    match action {
+        crate::config::Action::Hyprland {
+            action: action @ (WindowAction::ReorderUp | WindowAction::ReorderDown),
+        } => {
+            action.supported_session()
+                && context.hyprland_window_target_available(scope, window, output, workspace)
+                && window.zip(layouts).is_some_and(|(window, layouts)| {
+                    Plan::freeze(context, layouts, window, *action).is_ok()
+                })
+        }
+        crate::config::Action::Hyprland {
+            action: action @ WindowAction::ScrollStack,
+        } => {
+            action.supported_session()
+                && matches!(scope, Scope::SideLeft | Scope::SideRight)
+                && window.is_none()
+                && context.state == crate::context::State::Desktop
+                && !context.secure_overlay
+                && output.zip(workspace).zip(layouts).is_some_and(
+                    |((output, workspace), layouts)| {
+                        super::scrolling::profile::available(context, layouts, output, workspace)
+                            .is_ok()
+                    },
+                )
+        }
+        _ => context.hyprland_target_available(action, scope, window, output, workspace),
     }
 }
 

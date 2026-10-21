@@ -18,6 +18,8 @@ pub struct Snapshot {
     pub continuity: u64,
     pub captured_at: Duration,
     pub workspaces: Vec<Workspace>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<super::scrolling::profile::Settings>,
 }
 impl Snapshot {
     /// Validate the graph against the same conservatively stamped desktop sample.
@@ -37,6 +39,9 @@ impl Snapshot {
             ));
         }
         validate_workspaces(&self.workspaces)?;
+        if let Some(profile) = &self.profile {
+            profile.validate()?;
+        }
         let mut count = 0;
         for workspace in &self.workspaces {
             if let Some(name) = &workspace.output {

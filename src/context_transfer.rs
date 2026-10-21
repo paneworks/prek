@@ -258,7 +258,10 @@ impl Assembly {
 pub(crate) mod tests {
     use super::*;
     pub(crate) fn native_view(at: Duration, count: usize) -> View {
-        use crate::hyprland::layouts::{Column, Position, Snapshot as Layouts, Window, Workspace};
+        use crate::hyprland::{
+            layouts::{Column, Position, Snapshot as Layouts, Window, Workspace},
+            scrolling::profile::{Reserved, Settings},
+        };
         let mut view = view(at);
         let context = view.context.as_mut().unwrap();
         let original = context.snapshot.windows[0].clone();
@@ -313,6 +316,17 @@ pub(crate) mod tests {
                 windows,
                 columns,
             }],
+            profile: Some(Settings {
+                direction: "down".into(),
+                gaps_in: [0; 4],
+                gaps_out: [0; 4],
+                border: 0,
+                workspace_rules: 0,
+                reserved: vec![Reserved {
+                    output: "fixture-output".into(),
+                    area: [0.0; 4],
+                }],
+            }),
         });
         view
     }
@@ -321,7 +335,7 @@ pub(crate) mod tests {
     fn native_layout_graph_is_bound_to_the_exact_desktop_sample() {
         let original = native_view(Duration::from_secs(1), 2);
         original.validate().unwrap();
-        for case in 0..13 {
+        for case in 0..14 {
             let mut changed = original.clone();
             let context = changed.context.as_mut().unwrap();
             let layouts = context.layouts.as_mut().unwrap();
@@ -340,6 +354,7 @@ pub(crate) mod tests {
                 9 => layouts.workspaces[0].active = false,
                 10 => layouts.workspaces.clear(),
                 11 => context.snapshot.windows[0].mapped = false,
+                12 => layouts.profile.as_mut().unwrap().reserved[0].area[1] = f64::NAN,
                 _ => context.binding.uid = 0,
             }
             assert!(changed.validate().is_err(), "case {case}");

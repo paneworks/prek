@@ -1294,19 +1294,33 @@ fn scroll_profile_acceptance(checking: &Client, instance: &str, id: i64, output:
         assert_eq!(String::from_utf8(result.stdout).unwrap().trim(), "ok");
     };
     let mut sampler = ContextSampler::default();
-    let mut judge = || loop {
-        if let (snapshot, Some(layouts)) = sampler
-            .sample_with_layouts(checking, 1, SessionKind::User)
-            .unwrap()
-        {
-            let settings = sampler.sample_scroll_profile(checking).unwrap();
-            let workspace = layouts.workspaces.iter().find(|w| w.id == id).unwrap();
-            let state = snapshot
-                .outputs
-                .iter()
-                .find(|o| workspace.output.as_ref() == Some(&o.geometry.name))
-                .unwrap();
-            break (profile::viewport(workspace, state, &settings), settings);
+    let mut judge = || {
+        let until = monotonic().unwrap() + Duration::from_secs(3);
+        loop {
+            if let (snapshot, Some(layouts)) = sampler
+                .sample_with_layouts(checking, 1, SessionKind::User)
+                .unwrap()
+                && let Some(settings) = layouts.profile.clone()
+            {
+                assert_eq!(sampler.sample_scroll_profile(checking).unwrap(), settings);
+                let workspace = layouts.workspaces.iter().find(|w| w.id == id).unwrap();
+                let state = snapshot
+                    .outputs
+                    .iter()
+                    .find(|o| workspace.output.as_ref() == Some(&o.geometry.name))
+                    .unwrap();
+                let viewport = profile::viewport(workspace, state, &settings);
+                assert_eq!(
+                    profile::available(&snapshot, &layouts, &state.geometry.name, id),
+                    viewport
+                );
+                break (viewport, settings);
+            }
+            assert!(
+                monotonic().unwrap() < until,
+                "scroll profile was never attached"
+            );
+            std::thread::sleep(Duration::from_millis(5));
         }
     };
     let (initial, original) = judge();
@@ -1354,7 +1368,7 @@ fn scroll_profile_acceptance(checking: &Client, instance: &str, id: i64, output:
             "initial_refusal":format!("{expected:?}"),
             "original":{"gaps_in":original.gaps_in,"gaps_out":original.gaps_out,"border":original.border},
             "flat":{"gaps_in":flat.gaps_in,"gaps_out":flat.gaps_out,"border":flat.border,
-                "reserved":flat.reserved.iter().map(|(name, area)| (name.clone(), area.to_vec())).collect::<Vec<_>>()},
+                "reserved":flat.reserved},
             "viewport":{"bounds":[low, high],"offset":viewport.offset()}
         }))
         .unwrap(),

@@ -50,10 +50,13 @@ impl Native {
             "monitor":0,"workspace":{"id":1},"at":[0,20+self.slot(index)*100],"size":[100,80]})
     }
     fn reply(&mut self, request: &[u8]) -> String {
+        if let Some(reply) = super::layouts::profile_reply(request) {
+            return reply;
+        }
         match request {
             b"j/monitors" => serde_json::json!([{"id":0,"name":"panel","disabled":false,
                 "width":1000,"height":800,"scale":1,"x":0,"y":0,"transform":0,
-                "activeWorkspace":{"id":1},"dpmsStatus":true}])
+                "activeWorkspace":{"id":1},"dpmsStatus":true,"reserved":[0,0,0,0]}])
             .to_string(),
             b"j/clients" => serde_json::json!(
                 (0..3)

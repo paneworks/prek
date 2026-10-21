@@ -84,6 +84,7 @@ pub(crate) fn fixture(down: bool) -> (Snapshot, layouts::Snapshot) {
                 })
                 .collect(),
         }],
+        profile: None,
     };
     let core = Snapshot {
         generation: 1,

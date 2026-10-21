@@ -250,15 +250,16 @@ impl RouteIntent {
         let Some(permit) = self.candidate.permit.as_ref() else {
             return false;
         };
-        let (Some(window), Some(output)) = (permit.window(), permit.desktop_output()) else {
+        let Some(output) = permit.desktop_output() else {
             return false;
         };
+        let window = permit.window();
         authority.hyprland_target_available(
             &self.rule.action,
             self.rule.scope,
-            Some(&window.id),
+            window.map(|window| window.id.as_str()),
             Some(&output.geometry.name),
-            Some(window.workspace),
+            window.map_or(output.active_workspace, |window| Some(window.workspace)),
             at,
         )
     }

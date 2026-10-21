@@ -146,8 +146,21 @@ The owned Lua-config Cage layout check validates this against the real
 compositor. With the fixture's default gaps/border the workspace is refused;
 after `hl.config` sets them to zero, it yields a viewport inside its bounds.
 The original settings are then restored, and the result is written to
-`scroll-profile.json`. Settings and profile are not yet attached to broker
-context, and `ScrollStack` stays unsupported.
+`scroll-profile.json`.
+
+When an active, non-special workspace uses the scrolling layout,
+`sample_with_layouts` reads the same batch inside the optional 50 ms budget
+and attaches it as `layouts.profile`. A lock seen by it invalidates the whole
+desktop context, just like the graph; any other failure only omits the
+profile. The settings travel with the graph to the worker and to
+`context.layouts()`. `profile::available(context, layouts, output, workspace)`
+needs that workspace to be active on a lit output of the same sample and
+refuses `Unsampled` without settings. A `ScrollStack` preclaim requires a
+`SideLeft`/`SideRight` rule with no window target, a desktop without a secure
+overlay, the permit output's active workspace and an available viewport. The
+permit itself already needs the Morf side-strip region. `ScrollStack` is still
+not a supported session action, so this check stays closed until the executor
+exists.
 
 ## Remaining integration gates
 
@@ -156,9 +169,10 @@ Before enabling G11:
 1. ~~Obtain authoritative effective layout/direction, camera bounds and complete
    column/window lifetime evidence.~~ Supplied for the validated profile above;
    other configurations are refused rather than inferred.
-2. Bind that evidence through broker/context to preclaim eligibility for the
-   actual rendered empty strip. Wrong/unknown layouts and unsupported backends
-   must refuse before ownership, not consume then discover failure.
+2. ~~Bind that evidence through broker/context to preclaim eligibility for the
+   actual rendered empty strip.~~ The profile travels with the graph, and the
+   preclaim check above refuses wrong or unknown layouts before ownership. It
+   opens only when `ScrollStack` becomes a supported session action.
 3. Freeze output/workspace/topology, column order/lifetimes and the actual config
    provider. Guard the focused-workspace native operation atomically; never
    focus a different target to make a global dispatcher apply to it.

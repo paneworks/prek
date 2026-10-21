@@ -65,9 +65,23 @@ impl ContextSampler {
             continuity: 0,
             captured_at: snapshot.captured_at,
             workspaces,
+            profile: None,
         };
         if layouts.validate_context(&snapshot).is_err() {
             return Ok((snapshot, None));
+        }
+        if layouts.workspaces.iter().any(|workspace| {
+            workspace.active && !workspace.special && workspace.layout == "scrolling"
+        }) {
+            layouts.profile = match super::scrolling::profile::sample(
+                client,
+                layout_until,
+                &mut self.inhibited,
+            ) {
+                Ok(settings) => Some(settings),
+                Err(error) if self.inhibited => return Err(error),
+                Err(_) => None,
+            };
         }
         let signature = super::reorder::continuity_signature(&snapshot, &layouts)
             .ok_or_else(|| invalid("native continuity exceeds canonical context bound"))?;
@@ -112,6 +126,7 @@ impl ContextSampler {
             continuity: 0,
             captured_at,
             workspaces,
+            profile: None,
         })
     }
     /// Stock settings of the validated phone scrolling profile, read under

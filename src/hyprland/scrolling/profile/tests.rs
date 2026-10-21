@@ -30,7 +30,13 @@ fn settings() -> Settings {
         gaps_out: [0; 4],
         border: 0,
         workspace_rules: 0,
-        reserved: vec![("phone".into(), [0.0, 40.0, 0.0, 0.0])],
+        reserved: vec![reserved("phone", [0.0, 40.0, 0.0, 0.0])],
+    }
+}
+fn reserved(output: &str, area: [f64; 4]) -> Reserved {
+    Reserved {
+        output: output.into(),
+        area,
     }
 }
 fn window(id: &str, rect: [f64; 4], index: usize, row: usize) -> Window {
@@ -141,6 +147,74 @@ fn every_departure_from_the_profile_is_refused_with_its_reason() {
     assert_eq!(viewport_of(beyond), Err(Refusal::Geometry));
 }
 #[test]
+fn availability_needs_the_lit_active_workspace_and_attached_settings() {
+    let context = Snapshot {
+        generation: 1,
+        revision: 1,
+        captured_at: std::time::Duration::from_secs(1),
+        state: crate::context::State::Desktop,
+        outputs: vec![phone()],
+        windows: vec![],
+        regions: vec![],
+        secure_overlay: false,
+    };
+    let native = layouts::Snapshot {
+        generation: 1,
+        revision: 1,
+        continuity: 1,
+        captured_at: context.captured_at,
+        workspaces: vec![workspace(240.0)],
+        profile: Some(settings()),
+    };
+    assert_eq!(
+        available(&context, &native, "phone", 1).unwrap().offset(),
+        240.0
+    );
+    assert_eq!(
+        available(&context, &native, "phone", 2),
+        Err(Refusal::Layout)
+    );
+    assert_eq!(
+        available(&context, &native, "other", 1),
+        Err(Refusal::Layout)
+    );
+    let mut dark = context.clone();
+    dark.outputs[0].screen = Screen::Off;
+    assert_eq!(available(&dark, &native, "phone", 1), Err(Refusal::Layout));
+    let mut moved = context.clone();
+    moved.outputs[0].active_workspace = Some(2);
+    assert_eq!(available(&moved, &native, "phone", 1), Err(Refusal::Layout));
+    let mut unsampled = native.clone();
+    unsampled.profile = None;
+    assert_eq!(
+        available(&context, &unsampled, "phone", 1),
+        Err(Refusal::Unsampled)
+    );
+}
+#[test]
+fn settings_are_bounded_and_strict_on_the_wire() {
+    let original = settings();
+    original.validate().unwrap();
+    let text = serde_json::to_string(&original).unwrap();
+    assert_eq!(serde_json::from_str::<Settings>(&text).unwrap(), original);
+    let mut extra: Value = serde_json::from_str(&text).unwrap();
+    extra["camera"] = json!(0);
+    assert!(serde_json::from_value::<Settings>(extra).is_err());
+    let invalid = |change: &dyn Fn(&mut Settings)| {
+        let mut settings = settings();
+        change(&mut settings);
+        assert!(settings.validate().is_err(), "{settings:?}");
+    };
+    invalid(&|s| s.direction.clear());
+    invalid(&|s| s.direction = "down\n".into());
+    invalid(&|s| s.gaps_in[0] = -1);
+    invalid(&|s| s.border = 1_000_001);
+    invalid(&|s| s.workspace_rules = 4097);
+    invalid(&|s| s.reserved.push(reserved("phone", [0.0; 4])));
+    invalid(&|s| s.reserved[0].area[2] = f64::INFINITY);
+    invalid(&|s| s.reserved[0].output.clear());
+}
+#[test]
 fn settings_decode_stock_option_rule_and_monitor_replies() {
     let direction = json!({"option":"scrolling:direction","str":"down","set":true});
     let gaps_in = json!({"option":"general:gaps_in","css":"0 0 0 0","set":true});
@@ -152,7 +226,10 @@ fn settings_decode_stock_option_rule_and_monitor_replies() {
         Settings::decode([&direction, &gaps_in, &gaps_out, &border, &rules, &monitors]).unwrap();
     assert_eq!(decoded.direction, "down");
     assert_eq!(decoded.gaps_out, [1, 2, 3, 4]);
-    assert_eq!(decoded.reserved, [("phone".into(), [0.0, 40.0, 0.0, 12.0])]);
+    assert_eq!(
+        decoded.reserved,
+        [reserved("phone", [0.0, 40.0, 0.0, 12.0])]
+    );
     for bad in [
         json!({"option":"general:gaps_out","css":"0 0 0","set":true}),
         json!({"option":"general:gaps_in","css":"0 0 0 0","set":true}),

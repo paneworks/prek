@@ -1,26 +1,52 @@
 use super::*;
-use prek::hyprland::ContextSampler;
+use prek::hyprland::{ContextSampler, scrolling::profile};
 use std::sync::Mutex;
 
 fn document() -> String {
     serde_json::json!({"schema":1,"workspaces":[{
         "id":1,"output":"panel","monitor":0,"active":true,"special":false,
         "layout":"scrolling","windows":[{
-            "id":"0x1234:abc","rect":[0,20,500,700],"hidden":false,"floating":false,
+            "id":"0x1234:abc","rect":[0,200,1000,400],"hidden":false,"floating":false,
             "grouped":false,"fullscreen":0,"column":{"index":0,"row":0}
         }],"columns":[{"index":0,"width":0.5,"members":["0x1234:abc"]}]
     }]})
     .to_string()
 }
 
+/// Stock replies for the phone scrolling profile batch: flat and downward.
+pub(super) fn profile_reply(request: &[u8]) -> Option<String> {
+    let option = |name: &str, value: serde_json::Value| {
+        let mut reply = serde_json::json!({"option":name,"set":true});
+        reply
+            .as_object_mut()
+            .unwrap()
+            .extend(value.as_object().unwrap().clone());
+        reply.to_string()
+    };
+    let request = std::str::from_utf8(request).ok()?;
+    let name = request.strip_prefix("j/getoption ");
+    Some(match name {
+        Some(name @ "scrolling:direction") => option(name, serde_json::json!({"str":"down"})),
+        Some(name @ ("general:gaps_in" | "general:gaps_out")) => {
+            option(name, serde_json::json!({"css":"0 0 0 0"}))
+        }
+        Some(name @ "general:border_size") => option(name, serde_json::json!({"int":0})),
+        None if request == "j/workspacerules" => "[]".into(),
+        _ => return None,
+    })
+}
+
 fn context_reply(request: &[u8]) -> Option<String> {
+    if let Some(reply) = profile_reply(request) {
+        return Some(reply);
+    }
     Some(match request {
         b"j/monitors" => serde_json::json!([{"id":0,"name":"panel","disabled":false,
             "width":1000,"height":800,"scale":1,"x":0,"y":0,"transform":0,
-            "activeWorkspace":{"id":1},"dpmsStatus":true}])
+            "activeWorkspace":{"id":1},"dpmsStatus":true,"reserved":[0,0,0,0]}])
         .to_string(),
         b"j/clients" => serde_json::json!([{"address":"0x1234","stableId":"abc","mapped":true,
-            "monitor":0,"workspace":{"id":1},"at":[0,20],"size":[500,700]}])
+            "monitor":0,"workspace":{"id":1},"at":[0,200],"size":[1000,400]}])
         .to_string(),
         b"j/layers" | b"j/activewindow" => "{}".into(),
         b"j/animations" => "[[],[]]".into(),
@@ -65,6 +91,13 @@ fn combined_layout_sampling_matches_and_conservatively_stamps_the_owning_snapsho
             layouts.validate_context(&context).unwrap();
             assert_eq!(layouts.captured_at, context.captured_at);
             assert_eq!(layouts.revision, context.revision);
+            let settings = layouts.profile.as_ref().unwrap();
+            assert_eq!((settings.direction.as_str(), settings.border), ("down", 0));
+            let viewport = profile::available(&context, &layouts, "panel", 1).unwrap();
+            assert_eq!(
+                (viewport.bounds(), viewport.offset()),
+                ((-200., -200.), -200.)
+            );
         }
     }
 }

@@ -2210,6 +2210,7 @@ mod tests {
                             })
                             .collect(),
                     }],
+                    profile: None,
                 };
                 routing
                     .authority_mut()

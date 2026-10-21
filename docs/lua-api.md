@@ -848,6 +848,14 @@ The returned `NativeLayouts` contains:
 - `columns`: ordered scrolling records with native `index`, normalized primary
   `width` fraction and ordered `members` containing exact window lifetime IDs.
   Native column indices/member rows start at **zero**; Lua arrays start at one.
+- `profile`: present only when an active, non-special workspace uses the
+  scrolling layout and one more locked batch succeeded within the same budget.
+  It copies the stock settings of the
+  [validated phone profile](hyprland-scrolling.md#validated-phone-profile):
+  `direction`, `gaps_in`/`gaps_out` as `{top, right, bottom, left}`, `border`,
+  the `workspace_rules` count and each output's `reserved = {output, area}` with
+  `area = {left, top, right, bottom}`. It is read after the graph, so it does not
+  share its capture time.
 
 Copies can be changed locally; subsequent queries still return the original
 host data. Receiving, copying or retaining a view never renews its 250 ms lease.
