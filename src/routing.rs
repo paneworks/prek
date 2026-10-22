@@ -1281,6 +1281,17 @@ impl Routing {
         self.engine.recognition_ready(ready, now)?;
         self.push_at(Record::Tick { at }, now)
     }
+    /// Applies an authority installed through `authority_mut` before the next input.
+    pub(crate) fn sync_authority(&mut self, now: Duration) -> io::Result<()> {
+        if self.engine.authority().generation() == self.authority_generation {
+            return Ok(());
+        }
+        let at = self.engine.input_at();
+        if at > now {
+            return Err(io::Error::other("authority sync clock regressed"));
+        }
+        self.push_at(Record::Tick { at }, now)
+    }
     pub(crate) fn input_states(&self, at: Duration) -> Vec<crate::input_events::Event> {
         self.engine.input_states(at)
     }

@@ -637,6 +637,7 @@ impl Stream {
             }
             let seat = self.seats.get_mut(&subscription.seat).unwrap();
             *seat.routing.authority_mut() = prepared.remove(&subscription.seat).unwrap();
+            seat.routing.sync_authority(now)?;
             let mut capabilities = subscription.capabilities.clone();
             if !seat.keys.as_ref().is_some_and(|keys| keys.available(now)) {
                 capabilities.remove(&protocol::Capability::SyntheticInput);

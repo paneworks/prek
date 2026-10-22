@@ -125,6 +125,12 @@ struct Fixture {
 }
 impl Fixture {
     fn new(config: Config, owner: Subscription) -> Self {
+        let mut fixture = Self::subscribed(config, owner);
+        fixture.attach();
+        fixture.initial = fixture.drain();
+        fixture
+    }
+    fn subscribed(config: Config, owner: Subscription) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let directory = std::env::temp_dir().join(format!(
             "prek-route-bridge-{}-{}",
@@ -157,8 +163,6 @@ impl Fixture {
             initial: vec![],
         };
         fixture.subscribe(fixture.owner.clone(), 1);
-        fixture.attach();
-        fixture.initial = fixture.drain();
         fixture
     }
     fn attach(&mut self) {

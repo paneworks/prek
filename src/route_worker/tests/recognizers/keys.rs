@@ -414,6 +414,26 @@ fn blocked_raw_reports_wait_for_progress_or_the_write_budget_not_an_expired_due_
 }
 
 #[test]
+fn a_generated_keyboard_ready_before_any_source_keeps_its_key_lane() {
+    let mut owner = owner();
+    owner.capabilities = BTreeSet::from([
+        Capability::Context,
+        Capability::Observations,
+        Capability::SyntheticInput,
+    ]);
+    let mut fixture = Fixture::subscribed(profile(), owner);
+    let (slot, _, _) = slot(&fixture);
+    fixture.stream.seats.get_mut("seat0").unwrap().keys = Some(slot);
+    for _ in 0..2 {
+        fixture.stream.refresh_keys(monotonic().unwrap()).unwrap();
+    }
+    let now = monotonic().unwrap();
+    let seat = &fixture.stream.seats["seat0"];
+    assert!(seat.keys.as_ref().unwrap().available(now));
+    assert!(seat.routing.key_lane(fixture.owner.fence, now));
+}
+
+#[test]
 fn subscription_permission_is_not_execution_availability_without_a_ready_output() {
     let mut fixture = Fixture::new(profile(), owner());
     let seat = &fixture.stream.seats["seat0"];
