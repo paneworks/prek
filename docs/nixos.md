@@ -190,6 +190,49 @@ requires a stable initialized udev publication. See the
 [source re-entry contract](evdev-boundary.md#discovery-and-source-re-entry) for
 replacement handling and remaining hardware/consumer gates.
 
+## Route stock-Hyprland devices
+
+1. Find the device's exact kernel name with `grep '^N: Name=' /proc/bus/input/devices`.
+   Interfaces that share one name, such as a KVM's keyboard and mouse, are
+   selected together.
+2. Try it for one minute from a terminal inside your Hyprland session, then
+   read `target/takeover-trial/latest/broker.log`:
+
+   ```sh
+   ./tests/run-takeover-trial.sh --device "<name>" --seconds 60
+   ```
+
+3. Enable it:
+
+   ```nix
+   services.prek = {
+     enable = true;
+     mode = "route";
+     allowPhysicalTakeover = true;
+     luaConfig = ''
+       local p = require("prek")
+       return p.config.new {
+         mode = "route",
+         policy = {allowed_devices={"keyboard"}},
+         devices = {keyboard={name="<name>",hyprland={repeat_rate=35,repeat_delay=300}}},
+       }
+     '';
+   };
+   ```
+
+After you log in and `prek-session` registers, the broker mirrors each allowed
+device, copies the device's visible Hyprland settings and the declared
+`hyprland` options to the mirror, and takes the device over once it has been
+neutral and idle for 100 ms. `journalctl -u prek.service -b | grep -E 'taken
+over|stays with'` shows each outcome.
+
+Only stock Hyprland is a supported consumer. Console keyboards, devices with
+nonzero axis fuzz (most touchpads) and unclassified absolute pointers stay with
+Hyprland. A runtime rule change briefly releases routed devices until each is
+neutral and idle again, and settings Hyprland cannot show are trusted from its
+write reply. To roll back, `sudo systemctl stop prek.service` releases every
+grab and removes the mirrors; then set `mode = "observe"` or `enable = false`.
+
 ## Check, stop and recover
 
 Build the system through its usual configuration workflow before activation.
@@ -209,9 +252,9 @@ launcher waits within its bounded recovery budget; stopping only the broker is
 not an agent-stop command. Stop the owning `prek-session` process as well when
 shutting down the integration. One-shot agents must be restarted from the
 compositor's own startup hook. Do not launch a second agent while the first remains registered. Observation does not consume input,
-so stopping it preserves ordinary application delivery. Physical routing,
-failure-neutralization and rollback acceptance remain separate implementation
-and hardware gates.
+so stopping it preserves ordinary application delivery. Stopping a route broker
+releases its grabs and destroys its mirrors, returning each device to Hyprland;
+rollback on real hardware has not been accepted yet.
 
 Installed references, editor definitions, examples and three Lua presets are
 under `/run/current-system/sw/share/prek` and `share/doc/prek`. Copy a preset into
