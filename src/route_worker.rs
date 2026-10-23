@@ -32,6 +32,7 @@ mod keys;
 #[doc(hidden)]
 pub mod native_fixture;
 mod recognizers;
+mod takeover;
 
 struct Seat {
     subscription: Subscription,
@@ -132,6 +133,8 @@ pub struct Stream {
     closing_outputs: Vec<(crate::router::Recovery, Output)>,
     key_holds: BTreeMap<String, Duration>,
     refused: BTreeSet<Source>,
+    committed: BTreeMap<Source, takeover::Committed>,
+    last_input: BTreeMap<Source, Duration>,
     key_generation: u64,
     key_failure: Option<io::Error>,
 }
@@ -346,6 +349,8 @@ impl Stream {
             closing_outputs: Vec::new(),
             key_holds: BTreeMap::new(),
             refused: BTreeSet::new(),
+            committed: BTreeMap::new(),
+            last_input: BTreeMap::new(),
             key_generation: 0,
             key_failure: None,
         })
@@ -673,6 +678,78 @@ impl Stream {
         self.revision = update.revision;
         Ok(())
     }
+    /// Creates and publishes a source's mirror with its readiness probes.
+    fn prepare_output(
+        &mut self,
+        raw: &mut RawDevice,
+        device: &Device,
+        health: &Heartbeat,
+        now: Duration,
+    ) -> io::Result<()> {
+        let subscription = self.seats[&device.source.seat].subscription.clone();
+        let consumer = subscription
+            .consumer
+            .clone()
+            .ok_or_else(|| invalid("takeover has no bound consumer"))?;
+        let id = raw.input_id();
+        let identity = KernelIdentity {
+            bus: id.bus_type().0,
+            vendor: id.vendor(),
+            product: id.product(),
+            version: id.version(),
+        };
+        let descriptor = if matches!(consumer, crate::transport::Consumer::Hyprland { .. })
+            && device.capabilities.contains_key(&20)
+        {
+            Descriptor::mirror_with_compositor_repeat(
+                device,
+                identity,
+                &BTreeMap::new(),
+                BTreeMap::new(),
+            )
+        } else {
+            Descriptor::mirror(device, identity, None, &BTreeMap::new(), BTreeMap::new())
+        }
+        .map_err(invalid)?;
+        let publication = self.registry.prepare_for_worker(descriptor, health)?;
+        let preparation = NativePreparation::new(&publication, consumer, now)?;
+        let feedback = preparation
+            .descriptor
+            .capabilities
+            .contains_key(&17)
+            .then(|| linux::feedback::LedFeedback::new(raw, &preparation.descriptor))
+            .transpose()?;
+        let state_probe = linux::StateProbe::new(raw)?;
+        let output = Virtual::create(publication)?;
+        if self.releases.len() >= 4096 {
+            return Err(invalid("too many pending reader releases"));
+        }
+        self.releases.insert(
+            device.source.clone(),
+            (subscription.fence, health.worker_identity()),
+        );
+        self.outputs.insert(
+            device.source.clone(),
+            Output {
+                fence: subscription.fence,
+                admission: crate::morf::admission::Gate::new(
+                    health.worker_identity(),
+                    subscription.fence,
+                    device.source.clone(),
+                ),
+                virtual_device: output,
+                state_probe: Some(state_probe),
+                feedback,
+                readiness: Some(preparation.readiness),
+                consumer: None,
+                offered: Duration::ZERO,
+                started: now,
+                in_flight: None,
+                sequence: 0,
+            },
+        );
+        Ok(())
+    }
     /// Keeps a source with its original consumer, before any mirror exists,
     /// while its seat has no consumer or the consumer refuses takeover.
     fn refuse_takeover(&mut self, device: &Device) -> bool {
@@ -689,11 +766,7 @@ impl Stream {
         let Err(error) = native_boundary(consumer) else {
             return false;
         };
-        eprintln!(
-            "routing worker: {} stays with its original consumer: {error}",
-            device.name
-        );
-        self.refused.insert(device.source.clone());
+        self.refuse_output(device, &error);
         true
     }
     fn collect(&mut self, name: &str, now: Duration, input_at: Option<Duration>) -> io::Result<()> {
@@ -865,63 +938,15 @@ impl InputSink for Stream {
                 return Ok(ReaderDisposition::Keep);
             }
             let health = health.ok_or_else(|| invalid("routing requires supervisor ownership"))?;
-            let id = raw.input_id();
-            let descriptor = Descriptor::mirror(
-                device,
-                KernelIdentity {
-                    bus: id.bus_type().0,
-                    vendor: id.vendor(),
-                    product: id.product(),
-                    version: id.version(),
-                },
-                None,
-                &BTreeMap::new(),
-                BTreeMap::new(),
-            )
-            .map_err(invalid)?;
-            let publication = self.registry.prepare_for_worker(descriptor, health)?;
-            let subscription = self.seats[&device.source.seat].subscription.clone();
-            let preparation =
-                NativePreparation::new(&publication, subscription.consumer.clone().unwrap(), now)?;
-            let feedback = preparation
-                .descriptor
-                .capabilities
-                .contains_key(&17)
-                .then(|| linux::feedback::LedFeedback::new(raw, &preparation.descriptor))
-                .transpose()?;
-            let state_probe = linux::StateProbe::new(raw)?;
-            let output = Virtual::create(publication)?;
-            if self.releases.len() >= 4096 {
-                return Err(invalid("too many pending reader releases"));
+            if let Err(error) = self.prepare_output(raw, device, health, now) {
+                self.refuse_output(device, &error);
+                return Ok(ReaderDisposition::Keep);
             }
-            self.releases.insert(
-                device.source.clone(),
-                (subscription.fence, health.worker_identity()),
-            );
-            self.outputs.insert(
-                device.source.clone(),
-                Output {
-                    fence: subscription.fence,
-                    admission: crate::morf::admission::Gate::new(
-                        health.worker_identity(),
-                        subscription.fence,
-                        device.source.clone(),
-                    ),
-                    virtual_device: output,
-                    state_probe: Some(state_probe),
-                    feedback,
-                    readiness: Some(preparation.readiness),
-                    consumer: None,
-                    offered: Duration::ZERO,
-                    started: now,
-                    in_flight: None,
-                    sequence: 0,
-                },
-            );
         }
         let output = self.outputs.get_mut(&device.source).unwrap();
         if now.saturating_sub(output.started) >= Duration::from_secs(5) {
-            return Err(invalid("virtual device readiness timed out before grab"));
+            self.refuse_output(device, &"virtual device readiness timed out before grab");
+            return Ok(ReaderDisposition::Keep);
         }
         self.offer_transport(&device.source, now)?;
         let output = self.outputs.get_mut(&device.source).unwrap();
@@ -953,19 +978,39 @@ impl InputSink for Stream {
             output.admission.cancel_pending();
             return Ok(ReaderDisposition::Keep);
         }
-        consumer_boundary(
+        if let Err(error) = consumer_boundary(
             output.readiness.as_mut().unwrap(),
             output.virtual_device.descriptor(),
             evidence,
             output.feedback.is_some(),
             now,
-        )?;
-        if !output.admission.allowed(monotonic()?)
-            && let Some(activation) = output.admission.request(now).map_err(invalid)?
-        {
-            self.queue(Message::MorfReady { activation })?;
+        ) {
+            self.refuse_output(device, &error);
+            return Ok(ReaderDisposition::Keep);
         }
-        Ok(ReaderDisposition::Keep)
+        if !output.admission.allowed(monotonic()?) {
+            if let Some(activation) = output.admission.request(now).map_err(invalid)? {
+                self.queue(Message::MorfReady { activation })?;
+            }
+            return Ok(ReaderDisposition::Keep);
+        }
+        let quiet_since = self
+            .last_input
+            .get(&device.source)
+            .map_or(output.started, |at| (*at).max(output.started));
+        if now.saturating_sub(quiet_since) < takeover::QUIET {
+            return Ok(ReaderDisposition::Keep);
+        }
+        match takeover::Kernel::new(raw) {
+            Ok(mut cutover) => self.take_over(device, &mut cutover),
+            Err(error) => {
+                self.refuse_output(device, &error);
+                Ok(ReaderDisposition::Keep)
+            }
+        }
+    }
+    fn reader_cutover(&mut self, source: &Source, _through: u64, _at: Duration) -> io::Result<()> {
+        self.attach_takeover(source)
     }
     fn push(&mut self, record: Record) -> io::Result<()> {
         let now = monotonic()?;
@@ -982,10 +1027,15 @@ impl InputSink for Stream {
         if let Record::Tick { at } = record {
             self.apply_pending(at, monotonic()?)?;
         }
+        if let Record::Frame { frame } = &record {
+            self.last_input.insert(frame.source.clone(), frame.at);
+        }
         if let Record::Remove { source, .. } = record {
             self.outputs.remove(&source);
             self.grabbed.remove(&source);
             self.refused.remove(&source);
+            self.committed.remove(&source);
+            self.last_input.remove(&source);
         }
         Ok(())
     }

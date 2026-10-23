@@ -4,6 +4,7 @@ mod composed;
 mod keys;
 mod native_reorder;
 mod subscriptions;
+mod takeover;
 use super::*;
 use crate::{
     config::{Action, Delivery, Millis, Scope, Selector, Trigger},

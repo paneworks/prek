@@ -92,6 +92,27 @@ can transfer between devices, a rollback preserved all ordinary input, or a
 neutral snapshot is atomic. Those are remaining live handoff gates, not reasons
 to enable CLI routing after a model pass.
 
+### Neutral idle takeover from stock Hyprland
+
+For the stock Hyprland consumer the routing worker accepts an inferred
+consumer-neutral boundary instead of a consumer acknowledgement, since stock
+Hyprland exposes no per-device held state or processed-event cursor. After the
+mirror's metadata, live consumer evidence, LED feedback and Morf admission pass,
+the worker arms only when the source probe is neutral and no original input has
+been read for 100 ms. One attempt then prepares the witness (pending events are
+observed and the attempt waits again), grabs, and classifies. The readiness gate
+is finished at the instant before the grab, which precedes every retained event.
+
+A prefix that leaves a key, switch or contact active releases the grab before
+commit and returns the whole prefix and tail through the observation loop;
+committing would leave Hyprland holding that key with nothing to release it.
+With an empty tail the release is lossless. A tail read in the same few
+microseconds is not delivered to Hyprland after release; re-injecting it cannot
+help, because the kernel already applied those transitions and drops events
+that do not toggle its state. A failed grab, classification or readiness check
+refuses that source until it is removed. A committed cut attaches the route when
+the reader loop announces the delivered prefix.
+
 Input-core grab acquisition does not itself wait for an RCU grace period.
 Release does, and the console keyboard handler's `start` callback refreshes
 LEDs; it does not reconstruct held keys. See the upstream
