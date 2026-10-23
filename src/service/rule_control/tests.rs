@@ -980,3 +980,36 @@ fn rule_retirement_removes_unsent_offers_and_cancels_delivered_work() {
     assert!(!ledger.pending.contains_key(&(1, 1)) && ledger.pending[&(2, 1)].cancelled);
     assert_eq!(ledger.seen.len(), 2);
 }
+
+#[test]
+fn runtime_rules_negotiate_with_observation_and_route_brokers_under_policy() {
+    let mut config = Config::preset("desktop").unwrap();
+    config.policy.allow_runtime_rules = true;
+    let caps = BTreeSet::from([
+        Capability::RuntimeRules,
+        Capability::LuaEvents,
+        Capability::Context,
+        Capability::Observations,
+    ]);
+    assert!(
+        registration_capabilities(None, Some(&config), true, false, true, Role::Agent, &caps)
+            .is_ok()
+    );
+    config.mode = crate::config::Mode::Route;
+    for (allowed, expected) in [(true, true), (false, false)] {
+        config.policy.allow_runtime_rules = allowed;
+        assert_eq!(
+            registration_capabilities(
+                Some(&config),
+                Some(&config),
+                true,
+                false,
+                true,
+                Role::Agent,
+                &caps
+            )
+            .is_ok(),
+            expected
+        );
+    }
+}

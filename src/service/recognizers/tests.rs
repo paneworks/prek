@@ -380,6 +380,23 @@ fn public_negotiation_requires_source_bindings_policy_and_the_owning_agent() {
     config.policy.allow_input_events = true;
     config.mode = crate::config::Mode::Route;
     assert!(
+        registration_capabilities(None, Some(&config), true, true, true, Role::Agent, &caps)
+            .is_err()
+    );
+    assert!(
+        registration_capabilities(
+            Some(&config),
+            Some(&config),
+            true,
+            true,
+            true,
+            Role::Agent,
+            &caps
+        )
+        .is_ok()
+    );
+    config.policy.allow_input_events = false;
+    assert!(
         registration_capabilities(
             Some(&config),
             Some(&config),

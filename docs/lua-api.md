@@ -274,8 +274,9 @@ acknowledgement. The broker retires old queued matches and action offers before
 activation, correlates the private worker receipt, and verifies identity, lock,
 freshness and receipt time again before publishing acceptance. Source/session
 changes discard unsent requests and reset registration-scoped rule state.
-Routing-mode mutation remains unavailable pending production transport/handoff
-integration. Broker policy/protocol checks and helper/worker model IPC are tested;
+A route broker negotiates the same transactions. Its worker refuses physical
+takeover, so no routed source exists yet; an accepted routing-mode transaction
+retires every route on the seat. Broker policy/protocol checks and helper/worker model IPC are tested;
 real login, kernel routing and phone acceptance remain required.
 
 `examples/lua/rule_transactions.lua` demonstrates an acknowledged disable
@@ -359,8 +360,8 @@ layer cannot claim a key/contact that was already held; fresh input is required.
 Physical press/toggle state survives runtime edits, so reset restores that
 state without inventing presses. A source reload follows ordinary held-state
 reconciliation. Routing embeddings must also complete transport recovery and
-establish fresh neutral readiness; the production broker currently permits
-mutation in observation mode only. Actual routing-mode transitions remain pending.
+establish fresh neutral readiness. A route broker permits the same mutation, but
+its worker refuses physical takeover, so no routed source exists yet.
 
 `examples/lua/layer_transactions.lua` activates a layer after permission is
 granted, then restores physical control after its configured key rule ends.

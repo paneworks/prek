@@ -62,6 +62,7 @@ enum Command {
     Broker {
         #[arg(long)]
         config: PathBuf,
+        /// Route supervises a routing worker; physical takeover is still refused per device.
         #[arg(long, default_value = "observe", value_parser = ["observe", "route"])]
         mode: String,
         /// Trusted actual Hyprland executable (the ELF, rather than a wrapper).
@@ -157,6 +158,12 @@ enum Command {
         config: PathBuf,
         #[arg(long)]
         json: bool,
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=3600))]
+        duration: Option<u64>,
+    },
+    /// Internal routing worker; requires a bound supervisor control channel.
+    #[command(hide = true)]
+    RouteWorker {
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..=3600))]
         duration: Option<u64>,
     },
@@ -415,22 +422,18 @@ fn run(command: Command) -> io::Result<()> {
             runtime_dir,
             json,
             duration,
-        } => {
-            if mode != "observe" {
-                return Err(io::Error::other(
-                    "broker routing is unavailable: takeover and adapter gates are pending",
-                ));
-            }
-            run_broker(
-                &config,
-                &runtime_dir,
-                &compositor_executable,
-                morf_executable.as_deref(),
-                &logind_library,
+        } => run_broker(
+            &config,
+            &runtime_dir,
+            &compositor_executable,
+            morf_executable.as_deref(),
+            &logind_library,
+            BrokerWorker {
+                route: mode == "route",
                 json,
                 duration,
-            )
-        }
+            },
+        ),
         Command::Session {
             reconnect,
             reconnect_child,
@@ -523,6 +526,24 @@ fn run(command: Command) -> io::Result<()> {
                 ));
             }
             supervise_observer(&path, json, duration)
+        }
+        Command::RouteWorker { duration } => {
+            let mut health = prek::supervisor::Heartbeat::connect()?;
+            health.progress()?;
+            let mut channel = health.take_control().ok_or_else(|| {
+                io::Error::other("routing worker requires a broker control channel")
+            })?;
+            let config = prek::worker::bootstrap(&mut channel, &mut health)?;
+            eprintln!(
+                "Routing worker: every source stays with its original consumer until native takeover is implemented."
+            );
+            let mut stream = prek::route_worker::Stream::new(config, channel)?;
+            linux::observe_supervised(
+                &[],
+                duration.map(Duration::from_secs),
+                &mut stream,
+                &mut health,
+            )
         }
         Command::ObserveWorker {
             config: path,
@@ -831,6 +852,14 @@ fn run(command: Command) -> io::Result<()> {
     }
 }
 
+/// The supervised device worker a broker launches.
+#[cfg(target_os = "linux")]
+struct BrokerWorker {
+    route: bool,
+    json: bool,
+    duration: Option<u64>,
+}
+
 #[cfg(target_os = "linux")]
 fn run_broker(
     config_path: &std::path::Path,
@@ -838,9 +867,13 @@ fn run_broker(
     compositor: &std::path::Path,
     morf: Option<&std::path::Path>,
     library: &std::path::Path,
-    json: bool,
-    duration: Option<u64>,
+    worker: BrokerWorker,
 ) -> io::Result<()> {
+    let BrokerWorker {
+        route,
+        json,
+        duration,
+    } = worker;
     use nix::{
         libc,
         poll::{PollFd, PollFlags, PollTimeout, poll},
@@ -862,6 +895,12 @@ fn run_broker(
     let (text, config, runtime_definition) = (compiled.text, compiled.config, compiled.runtime);
     // Compile before touching runtime state or starting the device worker.
     prek::worker::preflight(&config)?;
+    if route && config.mode != prek::config::Mode::Route {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "broker --mode route requires a route configuration",
+        ));
+    }
     let signals = TerminationSignals::install()?;
     let mut sleep = prek::sleep_watch::Watch::open(library)?;
     let (delay, sleep_generation) = loop {
@@ -895,14 +934,21 @@ fn run_broker(
             allowed_seats: config.policy.allowed_seats.iter().cloned().collect(),
         },
     )?;
+    if route {
+        broker.enable_routing(config.clone())?;
+    }
     broker.install_lua_source(runtime_definition.as_ref())?;
     let mut command = std::process::Command::new(std::env::current_exe()?);
-    command
-        .arg("observe-worker")
-        .arg("--config")
-        .arg(config_path);
-    if json {
-        command.arg("--json");
+    if route {
+        command.arg("route-worker");
+    } else {
+        command
+            .arg("observe-worker")
+            .arg("--config")
+            .arg(config_path);
+        if json {
+            command.arg("--json");
+        }
     }
     if let Some(duration) = duration {
         command.arg("--duration").arg(duration.to_string());
@@ -915,7 +961,9 @@ fn run_broker(
     );
     let ((compiler, control, broker), supervisor) = lifetime.parts();
     broker.bind_input_worker(supervisor, control)?;
-    broker.enable_observations();
+    if !route {
+        broker.enable_observations();
+    }
     let mut refresh = monotonic()?;
     let mut revision = 0u64;
     let mut subscriptions = prek::subscription_transfer::Sender::default();

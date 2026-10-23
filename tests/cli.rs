@@ -640,7 +640,7 @@ fn reconnecting_cli_reexecutes_only_against_its_missing_owned_endpoint_and_stops
 }
 
 #[test]
-fn broker_route_mode_refuses_before_runtime_or_device_access() {
+fn broker_route_mode_requires_administrator_policy_before_runtime_or_device_access() {
     let directory = Directory::new();
     let runtime = directory.0.join("broker-runtime");
     let output = run(&[
@@ -657,7 +657,10 @@ fn broker_route_mode_refuses_before_runtime_or_device_access() {
         runtime.to_str().unwrap(),
     ]);
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("broker routing is unavailable"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("broker requires administrator device policy")
+    );
     assert!(!runtime.exists());
 }
 
@@ -1536,6 +1539,18 @@ fn t01_help_requires_no_desktop_or_input_access() {
     assert!(text.contains("doctor"));
     assert!(text.contains("run"));
     assert!(!text.contains("observe-worker"));
+    assert!(!text.contains("route-worker"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn unbound_route_worker_refuses_before_configuration_or_device_access() {
+    let result = run(&["route-worker"]);
+    assert!(!result.status.success());
+    assert!(result.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("worker health descriptor is missing")
+    );
 }
 
 #[cfg(target_os = "linux")]

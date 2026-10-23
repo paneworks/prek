@@ -325,7 +325,6 @@ fn registration_capabilities(
                 && power
                 && capabilities.contains(&Capability::Context)
             || *capability == Capability::RuntimeRules
-                && routing.is_none()
                 && baseline.is_some_and(|config| config.policy.allow_runtime_rules)
                 && capabilities.contains(&Capability::LuaEvents)
                 && capabilities.contains(&Capability::Context)
@@ -340,11 +339,11 @@ fn registration_capabilities(
                 && capabilities.contains(&Capability::Context)
                 && capabilities.contains(&Capability::Observations)
             || *capability == Capability::CustomRecognizers
-                && routing.is_none()
                 && lua
                 && recognizers
                 && baseline.is_some_and(|config| {
-                    config.mode == crate::config::Mode::Observe && config.policy.allow_input_events
+                    config.policy.allow_input_events
+                        && (routing.is_some() || config.mode == crate::config::Mode::Observe)
                 })
                 && capabilities.contains(&Capability::LuaEvents)
                 && capabilities.contains(&Capability::Context)

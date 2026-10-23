@@ -208,13 +208,6 @@ impl Fixture {
             .attach(device.clone(), &gate.finish(now).unwrap(), None, now)
             .unwrap();
         self.stream.grabbed.insert(device.source.clone());
-        self.stream
-            .queue(Message::Outcome {
-                report: Report::Ready {
-                    subscription: self.owner.identity(),
-                },
-            })
-            .unwrap();
         let input = self.stream.seats["seat0"]
             .routing
             .input_states(now)
@@ -779,4 +772,48 @@ fn retired_transport_cannot_offer_new_callbacks_or_accept_old_replies() {
             report: Report::Dispatch { .. }
         }
     )));
+}
+
+#[test]
+fn a_refused_takeover_leaves_the_source_without_a_mirror_until_it_is_removed() {
+    let mut fixture = Fixture::subscribed(profile(), owner());
+    let published = fs::read_dir(&fixture.directory).unwrap().count();
+    assert!(fixture.stream.refuse_takeover(&device()));
+    assert!(fixture.stream.refuse_takeover(&device()));
+    assert!(fixture.stream.outputs.is_empty());
+    assert!(fixture.stream.releases.is_empty());
+    assert_eq!(fs::read_dir(&fixture.directory).unwrap().count(), published);
+    assert!(fixture.stream.refused.contains(&device().source));
+    fixture
+        .stream
+        .push(Record::Remove {
+            source: device().source,
+            at: monotonic().unwrap(),
+        })
+        .unwrap();
+    assert!(!fixture.stream.refused.contains(&device().source));
+}
+
+#[test]
+fn a_new_routing_seat_reports_ready_before_its_other_outcomes() {
+    let fixture = Fixture::new(profile(), owner());
+    let outcomes: Vec<_> = fixture
+        .initial
+        .iter()
+        .filter_map(|message| match message {
+            Message::Outcome { report } => Some(report),
+            _ => None,
+        })
+        .collect();
+    assert!(matches!(
+        outcomes.first(),
+        Some(Report::Ready { subscription }) if subscription.seat == "seat0"
+    ));
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|report| matches!(report, Report::Ready { .. }))
+            .count(),
+        1
+    );
 }

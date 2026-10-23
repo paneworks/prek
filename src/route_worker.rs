@@ -1,8 +1,7 @@
 //! Configured routing in the sole descriptor-owning supervised worker.
 //!
-//! This integration is under construction and is not wired into the CLI. The
-//! broker continues to refuse route mode until handoff, recovery, and action
-//! execution have been validated together.
+//! `prek broker --mode route` runs it as `route-worker`. Physical takeover is
+//! refused per device before any virtual mirror exists.
 use crate::{
     config::{Config, Mode},
     configuration::{Assembly, Command},
@@ -97,9 +96,20 @@ fn consumer_boundary(
     gate.metadata(descriptor, now).map_err(invalid)?;
     gate.consumer(evidence, now).map_err(invalid)?;
     gate.feedback(feedback, now).map_err(invalid)?;
+    native_boundary(&evidence.consumer)
+}
+/// Refuses physical takeover: no consumer prefix/drain/neutral/rollback boundary exists.
+fn native_boundary(consumer: &crate::transport::Consumer) -> io::Result<()> {
+    let kind = match consumer {
+        crate::transport::Consumer::Hyprland { .. } => "Hyprland",
+        crate::transport::Consumer::ConsoleKeyboard { .. } => "console keyboard",
+        crate::transport::Consumer::IsolatedReceiver { .. } => "isolated receiver",
+    };
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "native consumer prefix/drain/neutral/rollback boundary is not implemented; leave source ungrabbed",
+        format!(
+            "native {kind} consumer prefix/drain/neutral/rollback boundary is not implemented; leave source ungrabbed"
+        ),
     ))
 }
 pub struct Stream {
@@ -121,6 +131,7 @@ pub struct Stream {
     closing_keys: Vec<keys::Slot>,
     closing_outputs: Vec<(crate::router::Recovery, Output)>,
     key_holds: BTreeMap<String, Duration>,
+    refused: BTreeSet<Source>,
     key_generation: u64,
     key_failure: Option<io::Error>,
 }
@@ -334,6 +345,7 @@ impl Stream {
             closing_keys: Vec::new(),
             closing_outputs: Vec::new(),
             key_holds: BTreeMap::new(),
+            refused: BTreeSet::new(),
             key_generation: 0,
             key_failure: None,
         })
@@ -636,6 +648,11 @@ impl Stream {
                         keys: None,
                     },
                 );
+                self.queue(Message::Outcome {
+                    report: Report::Ready {
+                        subscription: subscription.identity(),
+                    },
+                })?;
             }
             let seat = self.seats.get_mut(&subscription.seat).unwrap();
             *seat.routing.authority_mut() = prepared.remove(&subscription.seat).unwrap();
@@ -655,6 +672,29 @@ impl Stream {
         self.prune_reports(now)?;
         self.revision = update.revision;
         Ok(())
+    }
+    /// Keeps a source with its original consumer, before any mirror exists,
+    /// while its seat has no consumer or the consumer refuses takeover.
+    fn refuse_takeover(&mut self, device: &Device) -> bool {
+        if self.refused.contains(&device.source) {
+            return true;
+        }
+        let Some(consumer) = self
+            .seats
+            .get(&device.source.seat)
+            .and_then(|seat| seat.subscription.consumer.as_ref())
+        else {
+            return true;
+        };
+        let Err(error) = native_boundary(consumer) else {
+            return false;
+        };
+        eprintln!(
+            "routing worker: {} stays with its original consumer: {error}",
+            device.name
+        );
+        self.refused.insert(device.source.clone());
+        true
     }
     fn collect(&mut self, name: &str, now: Duration, input_at: Option<Duration>) -> io::Result<()> {
         self.collect_input(name, now, input_at, None)
@@ -821,6 +861,9 @@ impl InputSink for Stream {
             return Ok(ReaderDisposition::Keep);
         }
         if !self.outputs.contains_key(&device.source) {
+            if self.refuse_takeover(device) {
+                return Ok(ReaderDisposition::Keep);
+            }
             let health = health.ok_or_else(|| invalid("routing requires supervisor ownership"))?;
             let id = raw.input_id();
             let descriptor = Descriptor::mirror(
@@ -942,6 +985,7 @@ impl InputSink for Stream {
         if let Record::Remove { source, .. } = record {
             self.outputs.remove(&source);
             self.grabbed.remove(&source);
+            self.refused.remove(&source);
         }
         Ok(())
     }

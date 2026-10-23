@@ -111,8 +111,9 @@ allowlist. It reports versioned rule matches, skipped candidates and cancellatio
 without exposing the raw input stream. Matches include a gesture ID, event ordinal,
 configuration/session generations and the proposed action. Repeats share a gesture
 ID and have distinct ordinals. Observation evaluates each rule; it makes no claim
-about exclusive arbitration or input consumption. `--mode route` currently refuses
-before device takeover.
+about exclusive arbitration or input consumption. `run --mode route` refuses before
+device takeover; `broker --mode route` supervises the routing worker, which refuses
+physical takeover of every device, so input stays with its original consumer.
 
 Configured observation runs in a supervised worker. Only that worker opens input
 devices; the parent watches a private health channel. The input loop reports
@@ -218,14 +219,14 @@ and refused, and packet order/time plus broker/configuration/session generations
 are fenced. A private kernel lease permits one broker per runtime directory.
 Bad, disconnected or stalled clients lose their queued replies and seat ownership;
 the device worker continues independently. Startup, control traffic and device
-supervision have native process tests; privileged kernel acceptance remains a separate gate. Route mode still refuses before
-runtime/device takeover.
+supervision have native process tests; privileged kernel acceptance remains a separate gate. Route mode refuses
+physical takeover per device before creating any virtual mirror.
 
 Supervised virtual devices carry their worker's process birth and supervision
 epoch in the private runtime registry. Complete metadata is published atomically.
 Cleanup after a reaped worker preserves other lifetimes; restart cleanup also
 checks kernel process handles before reclaiming orphaned records. Live and
-unmanaged publications remain intact. These APIs do not enable route mode.
+unmanaged publications remain intact. These APIs do not enable physical takeover.
 
 Event loss cancels that source's recognition. Configured `run`/`broker` observation
 rescans the allowlist every 250 ms, waits for initialized udev metadata and reopens
