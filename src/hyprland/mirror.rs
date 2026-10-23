@@ -333,7 +333,7 @@ impl Client {
             return Ok(());
         }
         let (_, mirror) = identity(descriptor.class, &descriptor.name);
-        let request = request(self.dispatch_dialect_until(until)?, &mirror, &settings)?;
+        let request = request(self.config_dialect_until(until)?, &mirror, &settings)?;
         let reply = self.exchange(&request, until)?;
         let reply = String::from_utf8_lossy(&reply);
         if reply.split("\n\n\n").all(|part| part.trim() == "ok") {

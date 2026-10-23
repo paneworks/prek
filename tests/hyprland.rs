@@ -345,6 +345,62 @@ fn stock_compositor_queries_use_the_verified_live_socket() {
 mod kernel_fixture;
 
 #[test]
+fn mirror_settings_are_written_in_the_running_config_provider() {
+    use prek::{
+        input::EV_KEY,
+        transport::{Descriptor, KernelIdentity},
+    };
+    use std::{collections::BTreeMap, sync::Mutex};
+    for (version, provider, write) in [
+        (
+            "0.55.4",
+            "lua",
+            r#"r/eval hl.device({name="\112\114\101\107\045"#,
+        ),
+        ("0.55.4", "hyprlang", "keyword device[prek-virtual-"),
+        ("0.54.3", "lua", "keyword device[prek-virtual-"),
+    ] {
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&writes);
+        let server = Server::with_version(
+            move |request| {
+                let request = String::from_utf8_lossy(request).into_owned();
+                if request == "j/devices" {
+                    r#"{"keyboards":[],"mice":[],"touch":[],"switches":[],"tablets":[]}"#.into()
+                } else if request == "j/status" {
+                    serde_json::json!({ "configProvider": provider }).to_string()
+                } else if let Some(option) = request.strip_prefix("j/getoption ") {
+                    serde_json::json!({"option":option,"str":"","set":false}).to_string()
+                } else {
+                    seen.lock().unwrap().push(request);
+                    "ok".into()
+                }
+            },
+            Duration::ZERO,
+            version,
+        );
+        let mut original = kernel_fixture::fixture(false);
+        original.capabilities.insert(EV_KEY, (1..=255).collect());
+        let identity = KernelIdentity {
+            bus: 3,
+            vendor: original.vendor,
+            product: original.product,
+            version: 1,
+        };
+        let declared = BTreeMap::from([("repeat_rate".into(), "35".into())]);
+        let mirror = Descriptor::mirror(&original, identity, None, &BTreeMap::new(), declared);
+        server.client().configure_mirror(&mirror.unwrap()).unwrap();
+        let writes = writes.lock().unwrap();
+        assert_eq!(writes.len(), 1, "{version} {provider}: {writes:?}");
+        assert!(
+            writes[0].starts_with(write),
+            "{version} {provider}: {writes:?}"
+        );
+        assert!(writes[0].contains("repeat_rate"), "{writes:?}");
+    }
+}
+
+#[test]
 #[ignore = "requires the disposable stock-compositor VM and root-owned runtime registry"]
 fn stock_compositor_accepts_virtual_keyboard_and_verifies_its_keymap() {
     use prek::{

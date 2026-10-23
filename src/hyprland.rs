@@ -432,6 +432,13 @@ impl Client {
         }
         Ok(dispatch::Dialect::Hyprlang)
     }
+    /// Provider that parses device settings; 0.54 predates the Lua provider.
+    pub(crate) fn config_dialect_until(&self, until: Instant) -> io::Result<dispatch::Dialect> {
+        if self.version.minor == 54 {
+            return Ok(dispatch::Dialect::Hyprlang);
+        }
+        dispatch::Dialect::parse(&self.query_until("status", until)?["configProvider"])
+    }
     pub(crate) fn lock_state(&self) -> io::Result<bool> {
         self.query("locked")?
             .get("locked")
