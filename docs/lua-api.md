@@ -1200,6 +1200,14 @@ every listed `keys` code and every listed `absolute_axes` code (numeric
 `EV_ABS` codes, for example `53`/`54` for multi-touch X/Y), and which has every
 listed input `properties` code.
 
+A selector's `hyprland` table declares Hyprland per-device options, in hyprlang
+spelling (`repeat_rate`, `natural_scroll`, `tap-to-click`, `kb_layout`, ...), that
+Prek applies to the routed virtual copy of every matching allowed device. Stock
+Hyprland cannot report most per-device settings, so only the copy's keyboard
+`kb_*` fields and `scroll_factor` are verified; undeclared options fall back to
+Hyprland's global values. Values are at most 256 characters without control
+characters or `[]#;=$"'\{}`, and matching selectors must not disagree.
+
 A `shapes` template has a `name`, 2–2048 `points`, a `threshold`
 (minimum similarity in `(0, 1]`) and a `margin` (minimum lead over the runner-up
 in `(0, 1]`; a smaller lead is ambiguous and produces no match). Optional

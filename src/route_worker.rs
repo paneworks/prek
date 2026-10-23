@@ -698,17 +698,18 @@ impl Stream {
             product: id.product(),
             version: id.version(),
         };
-        let descriptor = if matches!(consumer, crate::transport::Consumer::Hyprland { .. })
-            && device.capabilities.contains_key(&20)
-        {
-            Descriptor::mirror_with_compositor_repeat(
-                device,
-                identity,
-                &BTreeMap::new(),
-                BTreeMap::new(),
-            )
+        let hyprland = matches!(consumer, crate::transport::Consumer::Hyprland { .. });
+        let settings = if hyprland {
+            self.config
+                .hyprland_device_settings(device)
+                .map_err(io::Error::other)?
         } else {
-            Descriptor::mirror(device, identity, None, &BTreeMap::new(), BTreeMap::new())
+            BTreeMap::new()
+        };
+        let descriptor = if hyprland && device.capabilities.contains_key(&20) {
+            Descriptor::mirror_with_compositor_repeat(device, identity, &BTreeMap::new(), settings)
+        } else {
+            Descriptor::mirror(device, identity, None, &BTreeMap::new(), settings)
         }
         .map_err(invalid)?;
         let publication = self.registry.prepare_for_worker(descriptor, health)?;

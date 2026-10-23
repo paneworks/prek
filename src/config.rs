@@ -255,7 +255,70 @@ pub struct Selector {
     pub keys: Vec<Key>,
     pub absolute_axes: Vec<u16>,
     pub properties: Vec<u16>,
+    /// Hyprland per-device options applied to this device's routed mirror.
+    #[serde(deserialize_with = "scalar_strings")]
+    pub hyprland: BTreeMap<String, String>,
 }
+/// Reads string, integer, float or boolean values as their text.
+fn scalar_strings<'de, D>(deserializer: D) -> Result<BTreeMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Scalar {
+        Text(String),
+        Integer(i64),
+        Float(f64),
+        Boolean(bool),
+    }
+    Ok(BTreeMap::<String, Scalar>::deserialize(deserializer)?
+        .into_iter()
+        .map(|(option, value)| {
+            let value = match value {
+                Scalar::Text(text) => text,
+                Scalar::Integer(number) => number.to_string(),
+                Scalar::Float(number) => number.to_string(),
+                Scalar::Boolean(flag) => flag.to_string(),
+            };
+            (option, value)
+        })
+        .collect())
+}
+/// Hyprland per-device options a selector may declare, in hyprlang spelling.
+pub const HYPRLAND_DEVICE_OPTIONS: &[&str] = &[
+    "kb_rules",
+    "kb_model",
+    "kb_layout",
+    "kb_variant",
+    "kb_options",
+    "repeat_rate",
+    "repeat_delay",
+    "numlock_by_default",
+    "resolve_binds_by_sym",
+    "sensitivity",
+    "accel_profile",
+    "scroll_points",
+    "natural_scroll",
+    "scroll_factor",
+    "left_handed",
+    "middle_button_emulation",
+    "tap-to-click",
+    "tap-and-drag",
+    "drag_lock",
+    "drag_3fg",
+    "disable_while_typing",
+    "clickfinger_behavior",
+    "tap_button_map",
+    "scroll_method",
+    "scroll_button",
+    "scroll_button_lock",
+    "rotation",
+    "flip_x",
+    "flip_y",
+    "output",
+    "transform",
+];
 impl Selector {
     pub fn matches(&self, device: &Device) -> bool {
         !device.virtual_device
@@ -1072,6 +1135,34 @@ impl Config {
         config.validate()?;
         Ok(config)
     }
+    /// Declared Hyprland options for a device, merged over its allowed
+    /// selectors; a conflicting value is an error.
+    pub fn hyprland_device_settings(
+        &self,
+        device: &Device,
+    ) -> Result<BTreeMap<String, String>, String> {
+        let mut settings = BTreeMap::new();
+        for id in &self.policy.allowed_devices {
+            let Some(selector) = self
+                .devices
+                .get(id)
+                .filter(|selector| selector.matches(device))
+            else {
+                continue;
+            };
+            for (option, value) in &selector.hyprland {
+                if settings
+                    .insert(option.clone(), value.clone())
+                    .is_some_and(|old| old != *value)
+                {
+                    return Err(format!(
+                        "devices.{id}.hyprland.{option} conflicts with another matching selector"
+                    ));
+                }
+            }
+        }
+        Ok(settings)
+    }
     pub fn validate(&self) -> Result<(), ConfigError> {
         let fail = |message: String| Err(ConfigError(message));
         if self.version != SCHEMA_VERSION {
@@ -1154,6 +1245,20 @@ impl Config {
             if id.is_empty() || !selector.constrained() {
                 return fail(format!(
                     "devices.{id}: selector requires identity, path or capability constraints"
+                ));
+            }
+            if selector.hyprland.len() > 64
+                || selector.hyprland.iter().any(|(option, value)| {
+                    !HYPRLAND_DEVICE_OPTIONS.contains(&option.as_str())
+                        || value.is_empty()
+                        || value.len() > 256
+                        || value.chars().any(|character| {
+                            character.is_control() || "[]#;=$\"'\\{}".contains(character)
+                        })
+                })
+            {
+                return fail(format!(
+                    "devices.{id}.hyprland: unsupported per-device option or value"
                 ));
             }
         }
@@ -2174,5 +2279,97 @@ mod tests {
         config.shape_capture.mouse_minimum_size_counts = f64::NAN;
         assert!(config.validate().is_err());
         assert!(Config::parse("version=1\n[shape_capture]\nunknown=1\n").is_err());
+    }
+    #[test]
+    fn selector_hyprland_options_read_scalars_and_refuse_unknown_or_unsafe_values() {
+        let selector: Selector = toml::from_str(
+            "keys=['KEY_A']\n[hyprland]\nrepeat_rate=35\nnatural_scroll=true\nsensitivity=-0.5\nkb_layout='de'\n",
+        )
+        .unwrap();
+        assert_eq!(
+            selector.hyprland,
+            BTreeMap::from([
+                ("kb_layout".into(), "de".into()),
+                ("natural_scroll".into(), "true".into()),
+                ("repeat_rate".into(), "35".into()),
+                ("sensitivity".into(), "-0.5".into()),
+            ])
+        );
+        let mut config = Config::preset("desktop").unwrap();
+        config.devices.insert("routed".into(), selector);
+        config.validate().unwrap();
+        let text = toml::to_string_pretty(&config).unwrap();
+        assert_eq!(Config::parse(&text).unwrap(), config);
+        for (option, value) in [
+            ("enabled", "0"),
+            ("keybinds", "0"),
+            ("kb_layout", "de;exec"),
+            ("kb_layout", "de]"),
+            ("kb_layout", ""),
+            ("output", "$monitor"),
+        ] {
+            let mut changed = config.clone();
+            changed
+                .devices
+                .get_mut("routed")
+                .unwrap()
+                .hyprland
+                .insert(option.into(), value.into());
+            assert!(changed.validate().is_err(), "{option}={value}");
+        }
+    }
+    #[test]
+    fn declared_hyprland_settings_merge_over_allowed_matching_selectors_only() {
+        let mut device = crate::transport::tests::touch();
+        device.name = "Routed keyboard".into();
+        let mut config = Config::preset("desktop").unwrap();
+        let selector = |options: &[(&str, &str)]| Selector {
+            name: Some("Routed keyboard".into()),
+            hyprland: options
+                .iter()
+                .map(|(option, value)| (option.to_string(), value.to_string()))
+                .collect(),
+            ..Selector::default()
+        };
+        config
+            .devices
+            .insert("first".into(), selector(&[("repeat_rate", "35")]));
+        config.devices.insert(
+            "second".into(),
+            selector(&[("repeat_rate", "35"), ("repeat_delay", "300")]),
+        );
+        config
+            .devices
+            .insert("unallowed".into(), selector(&[("kb_layout", "de")]));
+        config.policy.allowed_devices = vec!["first".into(), "second".into()];
+        assert_eq!(
+            config.hyprland_device_settings(&device).unwrap(),
+            BTreeMap::from([
+                ("repeat_delay".into(), "300".into()),
+                ("repeat_rate".into(), "35".into()),
+            ])
+        );
+        config
+            .devices
+            .insert("second".into(), selector(&[("repeat_rate", "40")]));
+        assert!(config.hyprland_device_settings(&device).is_err());
+        device.name = "Other keyboard".into();
+        assert!(config.hyprland_device_settings(&device).unwrap().is_empty());
+    }
+    #[test]
+    fn lua_selectors_declare_hyprland_options_with_native_scalars() {
+        let config = crate::lua::compile(
+            "local p=require('prek')\nreturn p.config.new{devices={routed={keys={'KEY_A'},hyprland={repeat_rate=35,natural_scroll=true,kb_layout='de'}}}}\n",
+            "hyprland-device.lua",
+        )
+        .unwrap();
+        assert_eq!(
+            config.devices["routed"].hyprland,
+            BTreeMap::from([
+                ("kb_layout".into(), "de".into()),
+                ("natural_scroll".into(), "true".into()),
+                ("repeat_rate".into(), "35".into()),
+            ])
+        );
     }
 }

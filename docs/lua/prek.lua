@@ -48,6 +48,7 @@
 ---@field keys? prek.Key[] Required capabilities, not held-key conditions.
 ---@field absolute_axes? integer[]
 ---@field properties? integer[]
+---@field hyprland? table<string, string> Hyprland per-device options (hyprlang names) applied to this device's routed virtual copy.
 
 ---@class (exact) prek.Policy
 ---@field allowed_devices? string[]
