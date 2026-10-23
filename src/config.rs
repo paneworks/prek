@@ -259,6 +259,14 @@ pub struct Selector {
     #[serde(deserialize_with = "scalar_strings")]
     pub hyprland: BTreeMap<String, String>,
 }
+/// A Hyprland per-device value that is safe in hyprlang and Lua requests.
+pub(crate) fn hyprland_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && !value
+            .chars()
+            .any(|character| character.is_control() || "[]#;=$\"'\\{}".contains(character))
+}
 /// Reads string, integer, float or boolean values as their text.
 fn scalar_strings<'de, D>(deserializer: D) -> Result<BTreeMap<String, String>, D::Error>
 where
@@ -1249,12 +1257,7 @@ impl Config {
             }
             if selector.hyprland.len() > 64
                 || selector.hyprland.iter().any(|(option, value)| {
-                    !HYPRLAND_DEVICE_OPTIONS.contains(&option.as_str())
-                        || value.is_empty()
-                        || value.len() > 256
-                        || value.chars().any(|character| {
-                            character.is_control() || "[]#;=$\"'\\{}".contains(character)
-                        })
+                    !HYPRLAND_DEVICE_OPTIONS.contains(&option.as_str()) || !hyprland_value(value)
                 })
             {
                 return fail(format!(

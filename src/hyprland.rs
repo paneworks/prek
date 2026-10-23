@@ -1,6 +1,7 @@
 //! Bounded IPC against a verified Hyprland process. Socket/process ownership is
 //! checked here; active logind seat/session authority belongs to registration.
-//! Queries never grab devices, inject events, or change compositor settings.
+//! Queries never grab devices, inject events, or change compositor settings;
+//! only `configure_mirror` writes per-device settings, for a mirror's own name.
 
 use crate::transport::{Class, Consumer, ConsumerEvidence, Descriptor};
 use nix::libc;
@@ -26,6 +27,7 @@ mod context;
 pub(crate) mod dispatch;
 pub mod layers;
 pub mod layouts;
+mod mirror;
 pub(crate) mod reorder;
 pub mod scrolling;
 pub use context::ContextSampler;
@@ -472,35 +474,18 @@ impl Client {
     ) -> io::Result<Option<ConsumerEvidence>> {
         descriptor.validate().map_err(invalid)?;
         let inventory = self.inventory()?;
-        let (group, name) = match descriptor.class {
-            Class::Keyboard | Class::Buttons => ("keyboards", internal_name(&descriptor.name)),
-            Class::Mouse | Class::Touchpad => ("mice", internal_name(&descriptor.name)),
-            Class::Touchscreen => ("touch", internal_name(&descriptor.name)),
-            Class::Switches => ("switches", descriptor.name.clone()),
-        };
-        let matches: Vec<_> = inventory[group]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|device| {
-                let candidate = device["name"].as_str().unwrap();
-                candidate == name
-                    || candidate
-                        .strip_prefix(&format!("{name}-"))
-                        .is_some_and(|suffix| {
-                            !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
-                        })
-            })
-            .collect();
-        if matches.is_empty() {
+        let (group, name) = mirror::identity(descriptor.class, &descriptor.name);
+        let Some(entry) = mirror::unique(&inventory, group, &name)? else {
             return Ok(None);
-        }
-        if matches.len() != 1 || matches[0]["name"].as_str() != Some(&name) {
-            return Err(invalid(
-                "virtual compositor identity is ambiguous or renamed",
-            ));
-        }
-        let settings = verified_settings(matches[0], descriptor)?;
+        };
+        let original = match descriptor.physical_origin() {
+            Some(original) => {
+                let (group, name) = mirror::identity(descriptor.class, &original.name);
+                mirror::unique(&inventory, group, &name)?
+            }
+            None => None,
+        };
+        let settings = verified_settings(entry, original, descriptor)?;
         Ok(Some(ConsumerEvidence {
             consumer: self.consumer(),
             marker: descriptor.marker.clone(),
@@ -575,37 +560,71 @@ fn validate_inventory(value: &Value) -> io::Result<()> {
     }
     Ok(())
 }
+/// The `j/devices` field showing a setting's effective value, if stock IPC shows it.
+fn visible_field(class: Class, key: &str) -> Option<&'static str> {
+    match (class, key) {
+        (Class::Keyboard | Class::Buttons, "kb_rules") => Some("rules"),
+        (Class::Keyboard | Class::Buttons, "kb_model") => Some("model"),
+        (Class::Keyboard | Class::Buttons, "kb_layout") => Some("layout"),
+        (Class::Keyboard | Class::Buttons, "kb_variant") => Some("variant"),
+        (Class::Keyboard | Class::Buttons, "kb_options") => Some("options"),
+        (Class::Mouse | Class::Touchpad, "scroll_factor") => Some("scrollFactor"),
+        _ => None,
+    }
+}
+fn same_setting(actual: &Value, expected: &str) -> bool {
+    match actual {
+        Value::String(text) => text == expected,
+        Value::Number(number) => expected
+            .parse::<f64>()
+            .ok()
+            .zip(number.as_f64())
+            .is_some_and(|(expected, actual)| (expected - actual).abs() < 0.005),
+        _ => false,
+    }
+}
+/// Verifies the declared settings stock IPC shows, accepts the ones it cannot
+/// show, and requires every other visible setting to match the original.
 fn verified_settings(
     device: &Value,
+    original: Option<&Value>,
     descriptor: &Descriptor,
 ) -> io::Result<BTreeMap<String, String>> {
-    let mut settings = BTreeMap::new();
     for (key, expected) in &descriptor.consumer_settings {
-        let field = match (descriptor.class, key.as_str()) {
-            (Class::Keyboard | Class::Buttons, "kb_rules") => "rules",
-            (Class::Keyboard | Class::Buttons, "kb_model") => "model",
-            (Class::Keyboard | Class::Buttons, "kb_layout") => "layout",
-            (Class::Keyboard | Class::Buttons, "kb_variant") => "variant",
-            (Class::Keyboard | Class::Buttons, "kb_options") => "options",
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "required device setting is not verifiable through stock compositor IPC",
+        if let Some(field) = visible_field(descriptor.class, key) {
+            let actual = device
+                .get(field)
+                .ok_or_else(|| invalid("required compositor setting is missing"))?;
+            if !same_setting(actual, expected) {
+                return Err(invalid(
+                    "effective compositor setting differs from device policy",
                 ));
             }
-        };
-        let actual = device
-            .get(field)
-            .and_then(Value::as_str)
-            .ok_or_else(|| invalid("required compositor setting is missing"))?;
-        if actual != expected {
-            return Err(invalid(
-                "effective compositor setting differs from device policy",
-            ));
         }
-        settings.insert(key.clone(), actual.into());
     }
-    Ok(settings)
+    if let Some(original) = original {
+        for key in [
+            "kb_rules",
+            "kb_model",
+            "kb_layout",
+            "kb_variant",
+            "kb_options",
+            "scroll_factor",
+        ] {
+            let Some(field) = visible_field(descriptor.class, key) else {
+                continue;
+            };
+            if descriptor.consumer_settings.contains_key(key) {
+                continue;
+            }
+            if device.get(field) != original.get(field) {
+                return Err(invalid(
+                    "mirror compositor setting differs from its original device",
+                ));
+            }
+        }
+    }
+    Ok(descriptor.consumer_settings.clone())
 }
 
 #[cfg(test)]

@@ -113,6 +113,20 @@ that do not toggle its state. A failed grab, classification or readiness check
 refuses that source until it is removed. A committed cut attaches the route when
 the reader loop announces the delivered prefix.
 
+Before offering consumer evidence for a mirror, the broker writes its Hyprland
+per-device settings once, under the mirror's own device name: the original's
+visible name-specific settings (XKB fields that differ from the global
+`input:kb_*` values, an explicit mouse `scroll_factor`) plus the selector's
+declared `hyprland` options, as one `keyword device[...]` batch for hyprlang or one
+`r/eval hl.device{...}` for Lua, both applied before the reply. Evidence then
+requires the declared settings stock IPC shows, and every other visible setting
+to equal the original's. Declared settings stock IPC cannot show are trusted from
+the write receipt. A failed write or check leaves the mirror without evidence,
+so the worker refuses that source at its readiness deadline. A compositor
+configuration reload discards runtime device entries; a reverted visible
+setting fails the next evidence check, but invisible settings stay reverted
+until a reload fence re-applies them.
+
 Input-core grab acquisition does not itself wait for an RCU grace period.
 Release does, and the console keyboard handler's `start` callback refreshes
 LEDs; it does not reconstruct held keys. See the upstream

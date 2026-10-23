@@ -1,5 +1,6 @@
 //! Authenticated, bounded broker control plane. Device descriptors belong to a
-//! separate supervised worker; this service performs no desktop actions.
+//! separate supervised worker; this service performs no desktop actions and
+//! writes compositor settings only for its own mirror devices.
 //! Desktop context comes from the bound compositor, never client snapshots.
 //! Membership alone never establishes an unlocked desktop.
 
@@ -121,6 +122,8 @@ pub struct Policy {
 }
 struct Bound {
     transport_started: bool,
+    /// Mirror markers whose Hyprland device settings were applied, or refused.
+    mirrors: BTreeMap<String, bool>,
     client: Client,
     registration: Registration,
     seat: String,
@@ -1624,7 +1627,42 @@ impl Broker {
             ));
         }
         bound.registration.check(&self.logind, &bound.client)?;
-        let Some(evidence) = bound.client.device_evidence(descriptor, monotonic()?)? else {
+        if !generated {
+            if bound.mirrors.len() >= 256 && !bound.mirrors.contains_key(&descriptor.marker) {
+                return Err(protocol::invalid("too many prepared mirror devices"));
+            }
+            let configured = match bound.mirrors.get(&descriptor.marker) {
+                Some(configured) => *configured,
+                None => {
+                    let result = bound.client.configure_mirror(descriptor);
+                    if let Err(error) = &result {
+                        eprintln!(
+                            "mirror {} keeps no consumer evidence: {error}",
+                            descriptor.name
+                        );
+                    }
+                    bound
+                        .mirrors
+                        .insert(descriptor.marker.clone(), result.is_ok());
+                    result.is_ok()
+                }
+            };
+            if !configured {
+                return Ok(None);
+            }
+        }
+        let evidence = match bound.client.device_evidence(descriptor, monotonic()?) {
+            Ok(evidence) => evidence,
+            Err(error) if !generated => {
+                eprintln!(
+                    "mirror {} keeps no consumer evidence: {error}",
+                    descriptor.name
+                );
+                None
+            }
+            Err(error) => return Err(error),
+        };
+        let Some(evidence) = evidence else {
             return Ok(None);
         };
         bound.registration.check(&self.logind, &bound.client)?;
@@ -1846,6 +1884,7 @@ impl Broker {
                     }
                     connection.bound = Some(Bound {
                         transport_started: false,
+                        mirrors: BTreeMap::new(),
                         client,
                         registration,
                         seat: seat.clone(),

@@ -165,6 +165,14 @@ impl Descriptor {
         }
     }
 
+    /// The physical device this descriptor mirrors.
+    pub(crate) fn physical_origin(&self) -> Option<&Device> {
+        match &self.origin {
+            Origin::Physical(original) => Some(original),
+            Origin::GeneratedKeyboard => None,
+        }
+    }
+
     pub(crate) fn isolated_fixture(&self) -> bool {
         match &self.origin {
             Origin::Physical(original) => {
