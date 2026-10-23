@@ -1,7 +1,8 @@
 //! Configured routing in the sole descriptor-owning supervised worker.
 //!
 //! `prek broker --mode route` runs it as `route-worker`. Physical takeover is
-//! refused per device before any virtual mirror exists.
+//! admitted only from stock Hyprland, at a neutral idle cut; every other source
+//! is refused before any virtual mirror exists.
 use crate::{
     config::{Config, Mode},
     configuration::{Assembly, Command},
@@ -99,10 +100,11 @@ fn consumer_boundary(
     gate.feedback(feedback, now).map_err(invalid)?;
     native_boundary(&evidence.consumer)
 }
-/// Refuses physical takeover: no consumer prefix/drain/neutral/rollback boundary exists.
+/// Admits physical takeover only from stock Hyprland, through the neutral idle
+/// cut in `takeover`; other consumers have no prefix/drain/neutral/rollback boundary.
 fn native_boundary(consumer: &crate::transport::Consumer) -> io::Result<()> {
     let kind = match consumer {
-        crate::transport::Consumer::Hyprland { .. } => "Hyprland",
+        crate::transport::Consumer::Hyprland { .. } => return Ok(()),
         crate::transport::Consumer::ConsoleKeyboard { .. } => "console keyboard",
         crate::transport::Consumer::IsolatedReceiver { .. } => "isolated receiver",
     };

@@ -103,7 +103,8 @@ The [runtime rule example](../examples/lua/custom_runtime.lua) uses
 `allow_runtime_rules=true`. Lua preparation, broker preparation and native
 activation each check original declaration approval; only an accepted native
 receipt advances the rule revision. Route brokers negotiate it too; their worker
-refuses physical takeover, so this is not production routing admission.
+routes only stock-Hyprland devices it took over at a neutral idle cut, which is
+not yet accepted on real hardware.
 
 An owning observation session uses `prek session --lua --recognizers`; protected
 system policy must enable `allow_input_events` and the selected devices. This

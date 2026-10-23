@@ -96,32 +96,34 @@ fn native_preparation_binds_feedback_and_readiness_to_the_actual_publication() {
 }
 
 #[test]
-fn complete_model_snapshots_do_not_authorize_any_native_consumer_takeover() {
+fn only_stock_hyprland_has_a_native_consumer_takeover_boundary() {
     let fixture = Fixture::new();
     let publication = fixture.registry.prepare_isolated(descriptor()).unwrap();
-    for consumer in [
-        consumer(),
-        Consumer::ConsoleKeyboard {
-            handler: "kbd0".into(),
-        },
-        Consumer::IsolatedReceiver { pid: 10, start: 20 },
+    for (consumer, admitted) in [
+        (consumer(), true),
+        (
+            Consumer::ConsoleKeyboard {
+                handler: "kbd0".into(),
+            },
+            false,
+        ),
+        (Consumer::IsolatedReceiver { pid: 10, start: 20 }, false),
     ] {
         let mut preparation =
             NativePreparation::new(&publication, consumer.clone(), Duration::ZERO).unwrap();
         preparation.readiness.neutral(true, Duration::ZERO).unwrap();
         let evidence = evidence(&preparation.descriptor, consumer);
-        assert_eq!(
-            consumer_boundary(
-                &mut preparation.readiness,
-                &preparation.descriptor,
-                &evidence,
-                true,
-                Duration::ZERO
-            )
-            .unwrap_err()
-            .kind(),
-            io::ErrorKind::Unsupported
+        let boundary = consumer_boundary(
+            &mut preparation.readiness,
+            &preparation.descriptor,
+            &evidence,
+            true,
+            Duration::ZERO,
         );
+        match admitted {
+            true => boundary.unwrap(),
+            false => assert_eq!(boundary.unwrap_err().kind(), io::ErrorKind::Unsupported),
+        }
         assert!(preparation.readiness.finish(Duration::ZERO).is_ok());
     }
 }
@@ -132,18 +134,14 @@ fn source_neutrality_is_not_promoted_to_a_consumer_neutral_acknowledgement() {
     let publication = fixture.registry.prepare_isolated(descriptor()).unwrap();
     let mut preparation = NativePreparation::new(&publication, consumer(), Duration::ZERO).unwrap();
     let evidence = evidence(&preparation.descriptor, consumer());
-    assert_eq!(
-        consumer_boundary(
-            &mut preparation.readiness,
-            &preparation.descriptor,
-            &evidence,
-            true,
-            Duration::ZERO
-        )
-        .unwrap_err()
-        .kind(),
-        io::ErrorKind::Unsupported
-    );
+    consumer_boundary(
+        &mut preparation.readiness,
+        &preparation.descriptor,
+        &evidence,
+        true,
+        Duration::ZERO,
+    )
+    .unwrap();
     assert!(preparation.readiness.finish(Duration::ZERO).is_err());
 }
 

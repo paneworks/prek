@@ -24,8 +24,8 @@ recovery. The Linux backend now publishes pre-add metadata, creates per-source
 uinput devices and writes bounded complete frames. The private worker has a
 [bounded, descriptor-bound LED feedback bridge](docs/feedback.md), with independent
 queries and source writes; its synthetic kernel challenge still needs a user-run
-receipt. Real consumer readiness, policy arbitration
-and supervised input takeover are still pending. Devices with nonzero axis fuzz,
+receipt. Supervised takeover from stock Hyprland at a neutral idle cut is
+implemented but not yet accepted on real hardware. Devices with nonzero axis fuzz,
 and repeat-capable devices whose consumer is not Hyprland, are refused until
 transparent forwarding is verified for those capabilities; a Hyprland-consumed
 keyboard is mirrored without kernel repeat.
@@ -113,8 +113,10 @@ without exposing the raw input stream. Matches include a gesture ID, event ordin
 configuration/session generations and the proposed action. Repeats share a gesture
 ID and have distinct ordinals. Observation evaluates each rule; it makes no claim
 about exclusive arbitration or input consumption. `run --mode route` refuses before
-device takeover; `broker --mode route` supervises the routing worker, which refuses
-physical takeover of every device, so input stays with its original consumer.
+device takeover; `broker --mode route` supervises the routing worker, which takes
+over an allowed device consumed by stock Hyprland only at a neutral idle cut and
+leaves every other device with its original consumer. See the
+[neutral idle takeover](docs/evdev-boundary.md#neutral-idle-takeover-from-stock-hyprland).
 
 Configured observation runs in a supervised worker. Only that worker opens input
 devices; the parent watches a private health channel. The input loop reports
@@ -221,7 +223,8 @@ are fenced. A private kernel lease permits one broker per runtime directory.
 Bad, disconnected or stalled clients lose their queued replies and seat ownership;
 the device worker continues independently. Startup, control traffic and device
 supervision have native process tests; privileged kernel acceptance remains a separate gate. Route mode refuses
-physical takeover per device before creating any virtual mirror.
+physical takeover from any consumer other than stock Hyprland before creating a
+virtual mirror.
 
 Supervised virtual devices carry their worker's process birth and supervision
 epoch in the private runtime registry. Complete metadata is published atomically.

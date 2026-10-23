@@ -111,7 +111,7 @@
     ],
     "result": "nil for pending or a strict phase/data table; cancellation returns nil",
     "root_acceptance": "pending user-launched live tests",
-    "routing": "negotiable; physical takeover refused",
+    "routing": "negotiable; stock Hyprland takeover only",
     "source": "private canonical declaration, exact rule binding and complete approved snapshot parity",
     "system_permission": "policy.allow_input_events",
     "ticket_bytes": 65536,
@@ -611,7 +611,7 @@
     "production_broker": "observation_or_route_mode",
     "receipt_time_ms": 250,
     "revision_type": "decimal_string",
-    "routing": "negotiable; physical takeover refused",
+    "routing": "negotiable; stock Hyprland takeover only",
     "system_permission": "policy.allow_runtime_rules",
     "transaction_bytes": 32768,
     "transport": "explicit authorized host opt-in"

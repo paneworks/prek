@@ -167,7 +167,7 @@ impl Report {
             }
         }
         if config.mode == Mode::Route {
-            add("routing_pending", None, None, "Routing remains disabled: configured takeover, complete consumer readiness and action/context integration are pending".into());
+            add("routing_pending", None, None, "Routing runs only under `prek broker --mode route`, takes over stock-Hyprland devices at a neutral idle cut and is not yet accepted on real hardware".into());
         }
         Self {
             version: 1,
