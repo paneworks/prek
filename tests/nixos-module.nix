@@ -64,7 +64,20 @@ let
     compositorExecutable = lib.mkForce null;
   };
   defaultCompositor = evaluate { compositorExecutable = lib.mkForce null; };
-  cases = { inherit minimal inline fromFile sessionDisabled reconnectDisabled wrappedConfig defaultCompositor; };
+  route = evaluate {
+    mode = "route";
+    allowPhysicalTakeover = true;
+    runtimeDirectory = "prek-route";
+    luaConfig = ''
+      local p = require("prek")
+      return p.config.new {
+        mode = "route",
+        policy = {allowed_devices={"keyboard"}},
+        devices = {keyboard={keys={"KEY_A"},hyprland={repeat_rate=35}}},
+      }
+    '';
+  };
+  cases = { inherit minimal inline fromFile sessionDisabled reconnectDisabled wrappedConfig defaultCompositor route; };
   snapshot = cfg: {
     unit = cfg.systemd.services.prek.serviceConfig;
     configuration = toString cfg.services.prek.configurationPackage;

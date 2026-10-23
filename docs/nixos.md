@@ -117,8 +117,15 @@ same bounded dotted-identifier contract as the runtime. Alternatively set
 `configFile = ./prek/config.lua`; its sibling `modules/` directory is copied with
 it. File-based and inline configuration cannot be combined. Source files are
 copied as regular files into an immutable tree and checked with the selected
-`prek check` during the build. A route-mode configuration is rejected. Lua still
-compiles in Prek's disposable unprivileged compiler when the root broker starts.
+`prek check` during the build, which also requires the configuration's mode to
+match `services.prek.mode`. Lua still compiles in Prek's disposable unprivileged
+compiler when the root broker starts.
+
+`mode = "route"` takes over the configuration's allowed devices consumed by stock
+Hyprland at a neutral idle cut, from boot, so it also requires
+`allowPhysicalTakeover = true`. It widens the unit to `char-input rw` (LED
+feedback), `/dev/uinput rw` and a writable `/run/prek` device registry. Try one
+device with `tests/run-takeover-trial.sh` before enabling it here.
 
 The generated tree is available as `services.prek.configurationPackage`, with
 `config.lua`, `modules/` and `validation.json`. The service reads its store path
@@ -186,8 +193,8 @@ replacement handling and remaining hardware/consumer gates.
 ## Check, stop and recover
 
 Build the system through its usual configuration workflow before activation.
-Invalid Lua/modules, incompatible configuration choices and route mode fail
-before this module can activate a replacement service.
+Invalid Lua/modules, incompatible configuration choices, a mode mismatch and an
+unconfirmed route mode fail before this module can activate a replacement service.
 
 ```sh
 systemctl status prek.service

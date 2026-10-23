@@ -18,14 +18,15 @@ def main():
         unit = case["unit"]
         args = shlex.split(unit["ExecStart"])
         assert args[:2] == [str(binary), "broker"], (name, args)
-        assert args[args.index("--mode") + 1] == "observe"
+        mode = "route" if name == "route" else "observe"
+        assert args[args.index("--mode") + 1] == mode
         assert args[args.index("--logind-library") + 1].startswith("/nix/store/")
         root = Path(case["configuration"])
         assert args[args.index("--config") + 1] == str(root / "config.lua")
         result = json.loads(subprocess.check_output(
             [binary, "check", "--config", root / "config.lua", "--json"], timeout=10))
         assert result == json.loads((root / "validation.json").read_text())
-        assert result["mode"] == "observe"
+        assert result["mode"] == mode
         assert case["restartTriggers"] == [str(root)]
         assert not case["userManagerAgent"]
         assert case["installedPackage"] and case["udevPackage"] and case["linkedData"]
@@ -42,7 +43,13 @@ def main():
         assert ("--reconnect" in launcher.read_text()) == (name != "reconnectDisabled")
         assert ("--logind-library" in launcher.read_text()) == (name != "reconnectDisabled")
         assert unit["KillMode"] == "control-group" and unit["TimeoutStopSec"] == 5
-        assert unit["DeviceAllow"] == ["char-input r"]
+        if name == "route":
+            assert unit["DeviceAllow"] == ["char-input rw", "/dev/uinput rw"]
+            assert unit["RuntimeDirectory"] == ["prek-route", "prek"]
+            assert unit["ReadWritePaths"] == ["/run/prek-route", "/run/prek"]
+        else:
+            assert unit["DeviceAllow"] == ["char-input r"]
+            assert len(unit["ReadWritePaths"]) == len(unit["RuntimeDirectory"]) == 1
         assert unit["NoNewPrivileges"] and unit["ProtectHome"] == "read-only"
         # /proc visibility is needed for verified PID/start/executable matching.
         assert "ProtectProc" not in unit and "PrivateUsers" not in unit

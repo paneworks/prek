@@ -1,6 +1,7 @@
 { config, lib, pkgs, utils, ... }:
 let
   cfg = config.services.prek;
+  route = cfg.mode == "route";
   inherit (lib) mkEnableOption mkIf mkOption types;
   moduleName = name:
     builtins.match "[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)*" name != null
@@ -40,7 +41,7 @@ let
     ''
   ) cfg.luaModules) + ''
     ${lib.getExe cfg.package} check --config "$out/config.lua" --json > "$out/validation.json"
-    jq -e '.status == "valid" and .mode == "observe"' "$out/validation.json" > /dev/null
+    jq -e --arg mode ${lib.escapeShellArg cfg.mode} '.status == "valid" and .mode == $mode' "$out/validation.json" > /dev/null
   '');
   compositor = pkgs.runCommand "prek-compositor-identity" {
     nativeBuildInputs = [ pkgs.binutils ];
@@ -78,7 +79,7 @@ let
   '';
 in {
   options.services.prek = {
-    enable = mkEnableOption "Prek's supervised input observation broker";
+    enable = mkEnableOption "Prek's supervised input broker";
     package = mkOption {
       type = types.package;
       description = "Prek package; the flake module supplies this flake's package for the host architecture.";
@@ -86,7 +87,12 @@ in {
     mode = mkOption {
       type = types.enum [ "observe" "route" ];
       default = "observe";
-      description = "Broker mode. Route remains unavailable until production takeover gates pass.";
+      description = "Broker mode; must match the configuration's mode. Route takes over the configuration's allowed devices consumed by stock Hyprland at a neutral idle cut and requires allowPhysicalTakeover.";
+    };
+    allowPhysicalTakeover = mkOption {
+      type = types.bool;
+      default = false;
+      description = "Confirm that route mode may grab the configuration's allowed physical devices from boot; required when mode is route.";
     };
     luaConfig = mkOption {
       type = types.nullOr types.lines;
@@ -156,7 +162,7 @@ in {
   };
   config = mkIf cfg.enable {
     assertions = [
-      { assertion = cfg.mode == "observe"; message = "services.prek: production route mode is unavailable; takeover/recovery gates remain pending."; }
+      { assertion = !route || cfg.allowPhysicalTakeover; message = "services.prek: route mode grabs the configuration's allowed devices; set allowPhysicalTakeover = true to confirm."; }
       { assertion = cfg.configFile == null || cfg.luaConfig == null && cfg.luaModules == { }; message = "services.prek: choose configFile or inline luaConfig/luaModules."; }
       { assertion = lib.all moduleName (builtins.attrNames cfg.luaModules); message = "services.prek.luaModules: use bounded dotted identifiers outside the reserved prek namespace."; }
       { assertion = cfg.session.lua || !(cfg.session.input || cfg.session.recognizers || cfg.session.ruleMutations); message = "services.prek.session: input, recognizers and ruleMutations require lua."; }
@@ -167,7 +173,7 @@ in {
     environment.pathsToLink = [ "/share/prek" "/share/doc/prek" ];
     services.udev.packages = [ cfg.package ];
     systemd.services.prek = {
-      description = "Prek supervised input observation broker";
+      description = if route then "Prek supervised input routing broker" else "Prek supervised input observation broker";
       wantedBy = [ "multi-user.target" ];
       wants = [ "systemd-logind.service" ];
       after = [ "systemd-logind.service" "systemd-udevd.service" ];
@@ -177,7 +183,8 @@ in {
         ExecStart = utils.escapeSystemdExecArgs brokerArgs;
         Restart = "on-failure";
         RestartSec = 2;
-        RuntimeDirectory = cfg.runtimeDirectory;
+        RuntimeDirectory = [ cfg.runtimeDirectory ]
+          ++ lib.optional (route && cfg.runtimeDirectory != "prek") "prek";
         RuntimeDirectoryMode = "0755";
         KillMode = "control-group";
         TimeoutStopSec = 5;
@@ -185,7 +192,7 @@ in {
         NoNewPrivileges = true;
         CapabilityBoundingSet = [ "CAP_DAC_READ_SEARCH" "CAP_SETUID" "CAP_SETGID" "CAP_KILL" "CAP_SYS_PTRACE" ];
         DevicePolicy = "closed";
-        DeviceAllow = [ "char-input r" ];
+        DeviceAllow = if route then [ "char-input rw" "/dev/uinput rw" ] else [ "char-input r" ];
         PrivateTmp = true;
         ProtectSystem = "strict";
         ProtectHome = "read-only";
@@ -194,7 +201,8 @@ in {
         ProtectControlGroups = true;
         RestrictSUIDSGID = true;
         RestrictAddressFamilies = [ "AF_UNIX" ];
-        ReadWritePaths = [ "/run/${cfg.runtimeDirectory}" ];
+        ReadWritePaths = [ "/run/${cfg.runtimeDirectory}" ]
+          ++ lib.optional (route && cfg.runtimeDirectory != "prek") "/run/prek";
       };
     };
   };
