@@ -106,9 +106,16 @@ allowed_seats = ["seat0"]
 name = "$device"
 CONFIG
 "$prek" check --config "$run/config.toml" --json > "$run/check.json"
-pid=$(hyprctl -j instances | jq -er --arg instance "$HYPRLAND_INSTANCE_SIGNATURE" \
-  '.[] | select(.instance == $instance) | .pid')
-compositor=$(readlink -f "/proc/$pid/exe")
+if ! pid=$(hyprctl -j instances | jq -er --arg instance "$HYPRLAND_INSTANCE_SIGNATURE" \
+  '.[] | select(.instance == $instance) | .pid'); then
+  echo "No running Hyprland has instance $HYPRLAND_INSTANCE_SIGNATURE." >&2
+  exit 1
+fi
+# A compositor holding capabilities is not dumpable, so only root can read its exe link.
+if ! compositor=$(sudo readlink -e "/proc/$pid/exe"); then
+  echo "Could not resolve the executable of Hyprland pid $pid." >&2
+  exit 1
+fi
 logind=$(readlink -f "${PREK_TRIAL_LOGIND:-/run/current-system/sw/lib/libsystemd.so.0}")
 printf 'Compositor: %s (pid %s)\nlibsystemd: %s\n' "$compositor" "$pid" "$logind"
 sudo install -d -m 0755 -o root -g root "$trial"

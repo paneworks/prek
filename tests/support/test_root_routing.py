@@ -864,6 +864,7 @@ esac
             self.assertIn('name = "Prek test keyboard"', (run / "config.toml").read_text())
             sudo = calls.read_text().splitlines()
             self.assertEqual(sudo[0], "-v")
+            self.assertIn(f"readlink -e /proc/{os.getpid()}/exe", sudo)
             broker = next(line for line in sudo if " broker " in line)
             self.assertIn("--mode route", broker)
             self.assertIn("--duration 10", broker)
