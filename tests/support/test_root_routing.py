@@ -757,6 +757,96 @@ os._exit(0)
                     pass
                 os.close(child_fd)
 
+    def test_takeover_trial_runs_one_bounded_broker_and_session_then_removes_its_rule(self):
+        for opens_socket in (True, False):
+            with self.subTest(opens_socket=opens_socket):
+                self.takeover_trial(opens_socket)
+
+    def takeover_trial(self, opens_socket):
+        trial = Path(__file__).resolve().parents[1] / "run-takeover-trial.sh"
+        with tempfile.TemporaryDirectory() as temporary:
+            repo, mocks, run_root = Path(temporary), Path(temporary) / "bin", Path(temporary) / "run"
+            (repo / "tests").mkdir()
+            (run_root / "udev/rules.d").mkdir(parents=True)
+            mocks.mkdir()
+            script = repo / "tests/run-takeover-trial.sh"
+            shutil.copyfile(trial, script)
+            devices = repo / "devices"
+            devices.write_text('N: Name="Prek test keyboard"\n')
+            calls = repo / "sudo-calls"
+            prek = mocks / "prek-package"
+            (prek / "bin").mkdir(parents=True)
+            (prek / "lib/udev/rules.d").mkdir(parents=True)
+            (prek / "lib/udev/rules.d/70-prek.rules").write_text("# rule\n")
+            scripts = {
+                # Unprivileged stand-ins: sudo runs the remaining argv as this user.
+                "sudo": f"""#!/bin/sh
+printf '%s\\n' "$*" >> '{calls}'
+[ "$1" = -n ] && shift
+[ "$1" = -v ] && exit 0
+exec "$@"
+""",
+                "git": "#!/bin/sh\nexit 0\n",
+                "udevadm": "#!/bin/sh\nexit 0\n",
+                "hyprctl": "#!/bin/sh\necho '[]'\n",
+                "jq": f"#!/bin/sh\necho {os.getpid()}\n",
+                "install": """#!/bin/sh
+directory=0
+while [ $# -gt 2 ]; do
+  case "$1" in -d) directory=1; shift ;; -m|-o|-g) shift 2 ;; *) break ;; esac
+done
+if [ "$directory" = 1 ]; then mkdir -p "$1"; else cp "$1" "$2"; fi
+""",
+                "nix": f"""#!/bin/sh
+while [ $# -gt 0 ]; do
+  if [ "$1" = --out-link ]; then ln -s '{prek}' "$2"; fi
+  shift
+done
+""",
+            }
+            for name, text in scripts.items():
+                (mocks / name).write_text(text)
+                (mocks / name).chmod(0o755)
+            bind = (f"'{sys.executable}' -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "
+                    '"$2/control.sock"') if opens_socket else "exit 3"
+            (prek / "bin/prek").write_text(f"""#!/bin/sh
+case "$1" in
+  check) echo '{{"status":"valid","mode":"route","rules":0,"selectors":1,"version":1}}' ;;
+  broker)
+    while [ "$1" != --runtime-dir ]; do shift; done
+    mkdir -p "$2"
+    {bind}
+    echo "routing worker: Prek test keyboard taken over at a neutral idle cut" >&2
+    sleep 1 ;;
+  session) sleep 0.2 ;;
+esac
+""")
+            (prek / "bin/prek").chmod(0o755)
+            env = {**os.environ, "PATH": f"{mocks}:{os.environ['PATH']}", "HYPRLAND_INSTANCE_SIGNATURE": "test",
+                   "PREK_TRIAL_INPUT_DEVICES": str(devices), "PREK_TRIAL_LOGIND": sys.executable,
+                   "PREK_TRIAL_RUN_ROOT": str(run_root)}
+            result = subprocess.run(["bash", str(script), "--device", "Prek test keyboard", "--seconds", "10"],
+                                    env=env, capture_output=True, text=True, timeout=60)
+            run = (repo / "target/takeover-trial/latest").resolve(strict=True)
+            self.assertFalse((run_root / "udev/rules.d/70-prek-trial.rules").exists())
+            self.assertFalse((run_root / "prek-trial").exists())
+            if not opens_socket:
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(json.loads((run / "status.json").read_text())["status"], "failed")
+                self.assertIn("exited with status 3 before opening its socket", (run / "console.log").read_text())
+                self.assertFalse((run / "session.log").exists())
+                return
+            self.assertEqual(result.returncode, 0, (run / "console.log").read_text())
+            self.assertEqual(json.loads((run / "status.json").read_text()), {"status": "passed", "exit_code": 0})
+            self.assertIn("taken over at a neutral idle cut", (run / "console.log").read_text())
+            self.assertIn('name = "Prek test keyboard"', (run / "config.toml").read_text())
+            sudo = calls.read_text().splitlines()
+            self.assertEqual(sudo[0], "-v")
+            broker = next(line for line in sudo if " broker " in line)
+            self.assertIn("--mode route", broker)
+            self.assertIn("--duration 10", broker)
+            self.assertIn(f"--compositor-executable {os.path.realpath(sys.executable)}", broker)
+
     def test_launcher_authenticates_first_and_retains_failed_build_logs(self):
         launcher = Path(__file__).resolve().parents[1] / "run-root-routing.sh"
         with tempfile.TemporaryDirectory() as temporary:

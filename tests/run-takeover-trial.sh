@@ -32,7 +32,9 @@ if ((EUID == 0)) || [[ -z $device ]] || ! [[ $seconds =~ ^[0-9]+$ ]] || ((second
   exit 2
 fi
 : "${HYPRLAND_INSTANCE_SIGNATURE:?Run from a terminal inside your Hyprland session}"
-if ! grep -Fxq "N: Name=\"$device\"" /proc/bus/input/devices; then
+devices=${PREK_TRIAL_INPUT_DEVICES:-/proc/bus/input/devices}
+run_root=${PREK_TRIAL_RUN_ROOT:-/run}
+if ! grep -Fxq "N: Name=\"$device\"" "$devices"; then
   echo "No input device is named exactly \"$device\"." >&2
   exit 2
 fi
@@ -44,8 +46,8 @@ mkdir -p "$repo/target/takeover-trial"
 run=$(mktemp -d "$repo/target/takeover-trial/run-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")
 ln -sfn -- "$run" "$repo/target/takeover-trial/latest"
 exec > >(tee -a "$run/console.log") 2>&1
-rule=/run/udev/rules.d/70-prek-trial.rules
-trial=/run/prek-trial
+rule=$run_root/udev/rules.d/70-prek-trial.rules
+trial=$run_root/prek-trial
 broker=""
 session=""
 finish() {
@@ -91,7 +93,7 @@ CONFIG
 pid=$(hyprctl -j instances | jq -er --arg instance "$HYPRLAND_INSTANCE_SIGNATURE" \
   '.[] | select(.instance == $instance) | .pid')
 compositor=$(readlink -f "/proc/$pid/exe")
-logind=$(readlink -f /run/current-system/sw/lib/libsystemd.so.0)
+logind=$(readlink -f "${PREK_TRIAL_LOGIND:-/run/current-system/sw/lib/libsystemd.so.0}")
 printf 'Compositor: %s (pid %s)\nlibsystemd: %s\n' "$compositor" "$pid" "$logind"
 sudo install -d -m 0755 -o root -g root "$trial"
 sudo install -m 0644 -o root -g root "$run/config.toml" "$trial/config.toml"
@@ -102,12 +104,23 @@ sudo "$prek" broker --mode route --config "$trial/config.toml" --runtime-dir "$t
   --compositor-executable "$compositor" --logind-library "$logind" --json --duration "$seconds" \
   > "$run/broker.log" 2>&1 &
 broker=$!
+socket="$trial/runtime/control.sock"
 for _ in $(seq 100); do
-  if sudo -n test -S "$trial/runtime/control.sock"; then break; fi
-  if ! kill -0 "$broker" 2>/dev/null; then wait "$broker"; fi
+  if sudo -n test -S "$socket"; then break; fi
+  if ! kill -0 "$broker" 2>/dev/null; then
+    status=0
+    wait "$broker" || status=$?
+    broker=""
+    echo "The broker exited with status $status before opening its socket; see $run/broker.log." >&2
+    exit 1
+  fi
   sleep 0.1
 done
-"$prek" session --socket "$trial/runtime/control.sock" --observations --context \
+if ! sudo -n test -S "$socket"; then
+  echo "The broker did not open its socket within 10 s; see $run/broker.log." >&2
+  exit 1
+fi
+"$prek" session --socket "$socket" --observations --context \
   --duration "$((seconds - 2))" \
   > "$run/session.log" 2>&1 &
 session=$!

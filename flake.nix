@@ -360,6 +360,7 @@
             cp ${./tests/support/root_routing.py} receipts/tests/support/root_routing.py
             cp ${./tests/support/test_root_routing.py} receipts/tests/support/test_root_routing.py
             cp ${./tests/run-root-routing.sh} receipts/tests/run-root-routing.sh
+            cp ${./tests/run-takeover-trial.sh} receipts/tests/run-takeover-trial.sh
             python3 -m unittest discover -s receipts/tests/support -p test_root_routing.py -v > "$out" 2>&1
             bash -n ${./tests/run-root-routing.sh}
             shellcheck ${./tests/run-root-routing.sh}
