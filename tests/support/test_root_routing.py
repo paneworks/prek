@@ -242,6 +242,14 @@ class KernelReceipt(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 root.managed_result(managed_output(hybrid=[value]))
 
+    def test_hybrid_generated_keyboard_may_share_only_the_device_number_of_its_source(self):
+        value = managed_hybrid()
+        value["generated_source"] = dict(device=1, generation=2, seat="seat0")
+        for frame in value["mixed_generated"]:
+            frame["source"] = value["generated_source"]
+        accepted = root.managed_hybrid(managed_output(hybrid=[value]), managed_phases())
+        self.assertEqual(accepted["generated_source"], value["generated_source"])
+
     def test_old_managed_and_root_receipts_cannot_claim_native_hybrid_evidence(self):
         with self.assertRaises(ValueError):
             root.managed_result(managed_output(version=3))

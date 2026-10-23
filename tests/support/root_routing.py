@@ -301,7 +301,7 @@ def managed_hybrid(stdout, phases):
         return times
     source(value["source"])
     source(value["generated_source"])
-    if value["source"]["device"] == value["generated_source"]["device"]:
+    if equal(value["source"], value["generated_source"]):
         raise ValueError("managed hybrid counterpart aliases its generated keyboard")
     counterpart = value["counterpart"]
     capabilities = {"0": [0], "1": [30, 31, 32], "2": [0]}
