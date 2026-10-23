@@ -170,6 +170,36 @@ fn modeled_subscription_does_not_accept_a_compositor_consumer() {
 }
 
 #[test]
+fn a_finished_worker_channel_is_read_to_its_end_and_then_stays_closed() {
+    let (mut channel, mut worker) = Channel::pair().unwrap();
+    let message = Message::Configuration {
+        generation: 1,
+        error: None,
+    };
+    assert!(worker.send(&message, monotonic().unwrap()).unwrap());
+    drop(worker);
+    let mut closed = false;
+    assert!(
+        parent::receive(&mut channel, true, &mut closed)
+            .unwrap()
+            .is_some()
+    );
+    for _ in 0..2 {
+        assert!(
+            parent::receive(&mut channel, true, &mut closed)
+                .unwrap()
+                .is_none()
+        );
+        assert!(closed);
+    }
+    let (mut channel, worker) = Channel::pair().unwrap();
+    drop(worker);
+    let mut closed = false;
+    assert!(parent::receive(&mut channel, false, &mut closed).is_err());
+    assert!(!closed);
+}
+
+#[test]
 fn fixture_protocol_rejects_extra_fields_and_unknown_messages() {
     for value in [
         serde_json::json!({"fixture":"step","id":1,"frames":1,"extra":true}),

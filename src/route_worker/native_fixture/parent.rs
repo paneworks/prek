@@ -21,6 +21,7 @@ struct Parent {
     neutral_drains: BTreeMap<Source, crate::keys::drain::Request>,
     released: BTreeSet<Source>,
     finishing: bool,
+    closed: bool,
     reaped: bool,
 }
 impl Parent {
@@ -181,13 +182,7 @@ impl Parent {
         if self.supervisor.check()?.is_some() && !self.finishing {
             return Err(invalid("managed worker exited before its fixture finished"));
         }
-        loop {
-            let packet = match self.channel.receive::<Message>() {
-                Ok(Some(packet)) => packet,
-                Ok(None) => break,
-                Err(error) if self.finishing && crate::ipc::is_transport_loss(&error) => break,
-                Err(error) => return Err(error),
-            };
+        while let Some(packet) = receive(&mut self.channel, self.finishing, &mut self.closed)? {
             match packet.message {
                 Message::SoftwareResult {
                     fence,
@@ -396,6 +391,24 @@ impl Drop for Parent {
     }
 }
 
+/// Reads the worker channel to its end once the worker closes it after `Finish`.
+pub(super) fn receive(
+    channel: &mut Channel,
+    finishing: bool,
+    closed: &mut bool,
+) -> io::Result<Option<crate::protocol::Packet<Message>>> {
+    if *closed {
+        return Ok(None);
+    }
+    match channel.receive::<Message>() {
+        Err(error) if finishing && crate::ipc::is_transport_loss(&error) => {
+            *closed = true;
+            Ok(None)
+        }
+        result => result,
+    }
+}
+
 fn edges(frames: &[Frame]) -> Vec<(u16, i32)> {
     frames
         .iter()
@@ -514,6 +527,7 @@ pub(super) fn run() -> io::Result<()> {
         neutral_drains: BTreeMap::new(),
         released: BTreeSet::new(),
         finishing: false,
+        closed: false,
         reaped: false,
     };
     control::send(
