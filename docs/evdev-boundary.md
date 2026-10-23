@@ -123,9 +123,10 @@ requires the declared settings stock IPC shows, and every other visible setting
 to equal the original's. Declared settings stock IPC cannot show are trusted from
 the write receipt. A failed write or check leaves the mirror without evidence,
 so the worker refuses that source at its readiness deadline. A compositor
-configuration reload discards runtime device entries; a reverted visible
-setting fails the next evidence check, but invisible settings stay reverted
-until a reload fence re-applies them.
+configuration reload discards runtime device entries. The broker reads the
+compositor's verified event socket and re-applies the settings of each session's
+64 most recent mirrors after `configreloaded`, or after losing that stream; until
+then a reverted visible setting fails the next evidence check.
 
 Input-core grab acquisition does not itself wait for an RCU grace period.
 Release does, and the console keyboard handler's `start` callback refreshes

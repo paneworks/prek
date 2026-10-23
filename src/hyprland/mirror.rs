@@ -211,7 +211,61 @@ pub(super) fn unique<'a>(
     Ok(Some(matches[0]))
 }
 
+/// The verified compositor's event stream, read for configuration reloads.
+pub struct Events {
+    stream: UnixStream,
+    line: Vec<u8>,
+}
+impl Events {
+    /// Whether the compositor reported a configuration reload since the last call.
+    pub fn reloaded(&mut self) -> io::Result<bool> {
+        let mut reloaded = false;
+        let mut buffer = [0u8; 4096];
+        for _ in 0..64 {
+            match self.stream.read(&mut buffer) {
+                Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+                Ok(read) => {
+                    for &byte in &buffer[..read] {
+                        if byte == b'\n' {
+                            reloaded |= self.line.starts_with(b"configreloaded>>");
+                            self.line.clear();
+                        } else if self.line.len() < 64 {
+                            self.line.push(byte);
+                        }
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(reloaded),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(reloaded)
+    }
+}
+
 impl Client {
+    /// Subscribes to the bound compositor's event socket after verifying its peer.
+    pub fn events(&self) -> io::Result<Events> {
+        let path = PathBuf::from(format!("/proc/self/fd/{}", self.directory.as_raw_fd()))
+            .join(".socket2.sock");
+        let stream = connect(&path, Instant::now() + REQUEST_TIME)?;
+        let stat = fs::symlink_metadata(&path)?;
+        let peer = credentials(&stream)?;
+        let executable = fs::metadata(format!("/proc/{}/exe", self.pid))?;
+        if !stat.file_type().is_socket()
+            || stat.uid() != self.uid
+            || peer.pid != self.pid as i32
+            || peer.uid != self.uid
+            || birth(self.pid)? != self.start
+            || (executable.dev(), executable.ino()) != self.executable
+        {
+            return Err(denied("compositor event socket binding differs"));
+        }
+        Ok(Events {
+            stream,
+            line: Vec::new(),
+        })
+    }
     /// Copies the original's visible name-specific settings and the declared
     /// `consumer_settings` onto a physical mirror's Hyprland device name.
     pub fn configure_mirror(&self, descriptor: &Descriptor) -> io::Result<()> {

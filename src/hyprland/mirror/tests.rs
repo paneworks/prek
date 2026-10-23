@@ -164,3 +164,26 @@ fn evidence_verifies_visible_declarations_and_mirror_parity_with_its_original() 
     assert!(verified_settings(&entry("us", "caps:escape"), Some(&original), &plain).is_ok());
     assert!(verified_settings(&entry("de", "caps:escape"), Some(&original), &plain).is_err());
 }
+
+#[test]
+fn a_reload_is_reported_once_even_when_its_line_arrives_in_pieces() {
+    let (stream, mut compositor) = UnixStream::pair().unwrap();
+    stream.set_nonblocking(true).unwrap();
+    let mut events = Events {
+        stream,
+        line: Vec::new(),
+    };
+    assert!(!events.reloaded().unwrap());
+    compositor
+        .write_all(b"workspace>>2\nactivewindow>>kitty,shell\nconfigrel")
+        .unwrap();
+    assert!(!events.reloaded().unwrap());
+    compositor.write_all(b"oaded>>\nworkspace>>3\n").unwrap();
+    assert!(events.reloaded().unwrap());
+    assert!(!events.reloaded().unwrap());
+    let long = format!("windowtitle>>{}\n", "x".repeat(4096));
+    compositor.write_all(long.as_bytes()).unwrap();
+    assert!(!events.reloaded().unwrap());
+    drop(compositor);
+    assert!(events.reloaded().is_err());
+}

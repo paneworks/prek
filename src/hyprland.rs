@@ -28,6 +28,7 @@ pub(crate) mod dispatch;
 pub mod layers;
 pub mod layouts;
 mod mirror;
+pub use mirror::Events;
 pub(crate) mod reorder;
 pub mod scrolling;
 pub use context::ContextSampler;

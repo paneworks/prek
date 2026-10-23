@@ -122,8 +122,10 @@ pub struct Policy {
 }
 struct Bound {
     transport_started: bool,
-    /// Mirror markers whose Hyprland device settings were applied, or refused.
-    mirrors: BTreeMap<String, bool>,
+    /// Recent mirrors and whether their Hyprland device settings are applied.
+    mirrors: VecDeque<(crate::transport::Descriptor, bool)>,
+    /// Compositor reloads discard runtime mirror settings.
+    events: Option<crate::hyprland::Events>,
     client: Client,
     registration: Registration,
     seat: String,
@@ -1628,11 +1630,13 @@ impl Broker {
         }
         bound.registration.check(&self.logind, &bound.client)?;
         if !generated {
-            if bound.mirrors.len() >= 256 && !bound.mirrors.contains_key(&descriptor.marker) {
-                return Err(protocol::invalid("too many prepared mirror devices"));
-            }
-            let configured = match bound.mirrors.get(&descriptor.marker) {
-                Some(configured) => *configured,
+            let known = bound
+                .mirrors
+                .iter()
+                .find(|(known, _)| known.marker == descriptor.marker)
+                .map(|(_, configured)| *configured);
+            let configured = match known {
+                Some(configured) => configured,
                 None => {
                     let result = bound.client.configure_mirror(descriptor);
                     if let Err(error) = &result {
@@ -1641,9 +1645,15 @@ impl Broker {
                             descriptor.name
                         );
                     }
+                    if bound.mirrors.len() >= 64 {
+                        bound.mirrors.pop_front();
+                    }
                     bound
                         .mirrors
-                        .insert(descriptor.marker.clone(), result.is_ok());
+                        .push_back((descriptor.clone(), result.is_ok()));
+                    if result.is_ok() && bound.events.is_none() {
+                        bound.events = bound.client.events().ok();
+                    }
                     result.is_ok()
                 }
             };
@@ -1734,7 +1744,41 @@ impl Broker {
     }
     /// One incoming message/registration per step prevents a subscriber from
     /// monopolizing supervision. All sends are nonblocking and bounded.
+    /// Re-applies mirror device settings after a compositor configuration
+    /// reload, or after losing the event stream that would report one.
+    fn reapply_mirrors(&mut self) {
+        for bound in self
+            .connections
+            .iter_mut()
+            .filter_map(|connection| connection.bound.as_mut())
+        {
+            if !bound.mirrors.iter().any(|(_, configured)| *configured) {
+                continue;
+            }
+            let reloaded = match bound.events.as_mut().map(crate::hyprland::Events::reloaded) {
+                Some(Ok(reloaded)) => reloaded,
+                Some(Err(_)) | None => {
+                    bound.events = bound.client.events().ok();
+                    bound.events.is_some()
+                }
+            };
+            if !reloaded {
+                continue;
+            }
+            for (descriptor, configured) in &mut bound.mirrors {
+                let result = bound.client.configure_mirror(descriptor);
+                if let Err(error) = &result {
+                    eprintln!(
+                        "mirror {} lost its device settings after a compositor reload: {error}",
+                        descriptor.name
+                    );
+                }
+                *configured = result.is_ok();
+            }
+        }
+    }
     pub fn step(&mut self, now: Duration) -> io::Result<()> {
+        self.reapply_mirrors();
         if let Some(channel) = self.endpoint.accept()?
             && self.connections.len() < MAX_CLIENTS
         {
@@ -1884,7 +1928,8 @@ impl Broker {
                     }
                     connection.bound = Some(Bound {
                         transport_started: false,
-                        mirrors: BTreeMap::new(),
+                        mirrors: VecDeque::new(),
+                        events: None,
                         client,
                         registration,
                         seat: seat.clone(),
