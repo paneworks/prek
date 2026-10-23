@@ -1116,18 +1116,31 @@ impl Virtual {
             ));
         }
         let spec = &self.publication.descriptor;
+        // Repeat-setting echoes never reach a mirror whose consumer repeats keys itself.
+        let filtered: Vec<_>;
+        let events = if spec.compositor_repeat && frame.events.iter().any(|event| event.kind == 20)
+        {
+            filtered = frame
+                .events
+                .iter()
+                .copied()
+                .filter(|event| event.kind != 20)
+                .collect();
+            &filtered[..]
+        } else {
+            &frame.events[..]
+        };
         if frame.source != spec.source
             || self
                 .sequence
                 .is_some_and(|sequence| frame.sequence <= sequence)
-            || frame
-                .events
+            || events
                 .last()
                 .is_none_or(|event| event.kind != EV_SYN || event.code != SYN_REPORT)
-            || frame.events[..frame.events.len().saturating_sub(1)]
+            || events[..events.len().saturating_sub(1)]
                 .iter()
                 .any(|event| event.kind == EV_SYN)
-            || frame.events.iter().any(|event| {
+            || events.iter().any(|event| {
                 event.kind != EV_SYN
                     && !spec
                         .capabilities
@@ -1139,7 +1152,7 @@ impl Virtual {
                 "frame source/sequence/boundaries/capabilities do not match output",
             ));
         }
-        self.pending = Some(Batch::events(&frame.events)?);
+        self.pending = Some(Batch::events(events)?);
         self.sequence = Some(frame.sequence);
         Ok(())
     }
@@ -1701,5 +1714,68 @@ mod tests {
             );
         }
         assert!(supported_backend(&descriptor()).is_ok());
+    }
+
+    #[test]
+    fn a_compositor_repeat_mirror_drops_repeat_setting_events_from_its_frames() {
+        let registry = Temporary::new();
+        let files = Temporary::new();
+        let mut device = crate::transport::tests::touch();
+        device.identity = "test:keyboard".into();
+        device.name = "Prek test keyboard".into();
+        device.physical = "fixture/keyboard".into();
+        device.path.clear();
+        device.properties.clear();
+        device.axes.clear();
+        device.capabilities = BTreeMap::from([(0, vec![0]), (1, vec![30]), (20, vec![0, 1])]);
+        let identity = KernelIdentity {
+            bus: 3,
+            vendor: 1,
+            product: 2,
+            version: 1,
+        };
+        let descriptor = Descriptor::mirror_with_compositor_repeat(
+            &device,
+            identity,
+            &BTreeMap::new(),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        assert!(supported_backend(&descriptor).is_ok());
+        let publication = registry.registry().prepare_isolated(descriptor).unwrap();
+        let path = files.path.join("output");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+        let mut output = Virtual::ordinary_file_fixture(publication, file).unwrap();
+        let event = |kind, code, value| RawEvent { kind, code, value };
+        let frame = Frame {
+            source: output.descriptor().source.clone(),
+            at: std::time::Duration::ZERO,
+            sequence: 1,
+            events: vec![
+                event(20, 0, 250),
+                event(1, 30, 1),
+                event(EV_SYN, SYN_REPORT, 0),
+            ],
+        };
+        output.enqueue(&frame).unwrap();
+        assert!(matches!(output.flush().unwrap(), Flush::Complete));
+        let kinds: Vec<u16> = fs::read(&path)
+            .unwrap()
+            .chunks_exact(size_of::<libc::input_event>())
+            .map(|chunk| {
+                u16::from_ne_bytes(
+                    chunk[offset_of!(libc::input_event, type_)..][..2]
+                        .try_into()
+                        .unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(kinds, [1, EV_SYN]);
     }
 }

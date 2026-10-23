@@ -110,6 +110,9 @@ pub struct Descriptor {
     #[serde(with = "crate::input::numeric_map")]
     pub axes: BTreeMap<u16, Axis>,
     pub repeat: Option<Repeat>,
+    /// The consumer generates key repeat itself; the mirror omits EV_REP.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub compositor_repeat: bool,
     /// Pre-add registry data. Never import arbitrary original udev properties.
     pub udev: BTreeMap<String, String>,
     /// Required consumer settings, keyed by the virtual identity. Supplied by
@@ -221,12 +224,13 @@ impl Descriptor {
     /// requested device after its policy checks have passed.
     pub fn validate(&self) -> Result<(), &'static str> {
         let mut expected = match &self.origin {
-            Origin::Physical(original) => Self::mirror(
+            Origin::Physical(original) => Self::mirrored(
                 original,
                 self.identity,
                 self.repeat,
                 &self.udev,
                 self.consumer_settings.clone(),
+                self.compositor_repeat,
             )?,
             Origin::GeneratedKeyboard => {
                 Self::generated_keyboard(self.source.clone(), self.consumer_settings.clone())?
@@ -302,6 +306,7 @@ impl Descriptor {
             properties: Vec::new(),
             axes: BTreeMap::new(),
             repeat: None,
+            compositor_repeat: false,
             udev: BTreeMap::from([
                 ("ID_INPUT".into(), "1".into()),
                 ("ID_INPUT_KEY".into(), "1".into()),
@@ -321,6 +326,28 @@ impl Descriptor {
         repeat: Option<Repeat>,
         udev: &BTreeMap<String, String>,
         consumer_settings: BTreeMap<String, String>,
+    ) -> Result<Self, &'static str> {
+        Self::mirrored(original, identity, repeat, udev, consumer_settings, false)
+    }
+
+    /// Mirrors a kernel-repeating keyboard for a consumer that generates its
+    /// own repeat: the mirror advertises no EV_REP.
+    pub fn mirror_with_compositor_repeat(
+        original: &Device,
+        identity: KernelIdentity,
+        udev: &BTreeMap<String, String>,
+        consumer_settings: BTreeMap<String, String>,
+    ) -> Result<Self, &'static str> {
+        Self::mirrored(original, identity, None, udev, consumer_settings, true)
+    }
+
+    fn mirrored(
+        original: &Device,
+        identity: KernelIdentity,
+        repeat: Option<Repeat>,
+        udev: &BTreeMap<String, String>,
+        consumer_settings: BTreeMap<String, String>,
+        compositor_repeat: bool,
     ) -> Result<Self, &'static str> {
         if original.virtual_device
             || original.physical.starts_with("prek/")
@@ -419,14 +446,23 @@ impl Descriptor {
         } else {
             return Err("device has no supported input capabilities");
         };
-        if original.capabilities.contains_key(&20) != repeat.is_some()
-            || original
-                .capabilities
-                .get(&20)
-                .is_some_and(|codes| codes.as_slice() != [0, 1])
+        let kernel_repeat = original.capabilities.contains_key(&20);
+        if original
+            .capabilities
+            .get(&20)
+            .is_some_and(|codes| codes.as_slice() != [0, 1])
+            || if compositor_repeat {
+                !kernel_repeat || repeat.is_some() || !original.capabilities.contains_key(&EV_KEY)
+            } else {
+                kernel_repeat != repeat.is_some()
+            }
             || repeat.is_some_and(|value| value.period_ms > 60_000 || value.delay_ms > 60_000)
         {
             return Err("repeat capabilities require verified repeat settings");
+        }
+        let mut capabilities = original.capabilities.clone();
+        if compositor_repeat {
+            capabilities.remove(&20);
         }
         if consumer_settings.len() > 64
             || consumer_settings
@@ -472,10 +508,11 @@ impl Descriptor {
             marker,
             identity,
             class,
-            capabilities: original.capabilities.clone(),
+            capabilities,
             properties: original.properties.clone(),
             axes: original.axes.clone(),
             repeat,
+            compositor_repeat,
             udev: properties,
             consumer_settings,
         })
@@ -1076,5 +1113,56 @@ pub(crate) mod tests {
                 allowed
             );
         }
+    }
+
+    #[test]
+    fn a_compositor_repeating_keyboard_mirrors_without_kernel_repeat() {
+        let mut device = touch();
+        device.properties.clear();
+        device.axes.clear();
+        device.capabilities =
+            BTreeMap::from([(0, vec![0]), (1, vec![30]), (17, vec![0]), (20, vec![0, 1])]);
+        let identity = descriptor().identity;
+        assert!(
+            Descriptor::mirror(&device, identity, None, &BTreeMap::new(), BTreeMap::new()).is_err()
+        );
+        let mirror = Descriptor::mirror_with_compositor_repeat(
+            &device,
+            identity,
+            &BTreeMap::new(),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        assert!(mirror.compositor_repeat && mirror.repeat.is_none());
+        assert!(!mirror.capabilities.contains_key(&20));
+        assert!(!mirror.feedback_required() || mirror.capabilities.contains_key(&17));
+        mirror.validate().unwrap();
+        let value = serde_json::to_value(&mirror).unwrap();
+        assert_eq!(value["compositor_repeat"], true);
+        assert_eq!(serde_json::from_value::<Descriptor>(value).unwrap(), mirror);
+        let mut forged = mirror.clone();
+        forged.compositor_repeat = false;
+        assert!(forged.validate().is_err());
+        device.capabilities.remove(&20);
+        assert!(
+            Descriptor::mirror_with_compositor_repeat(
+                &device,
+                identity,
+                &BTreeMap::new(),
+                BTreeMap::new()
+            )
+            .is_err()
+        );
+        let plain =
+            Descriptor::mirror(&device, identity, None, &BTreeMap::new(), BTreeMap::new()).unwrap();
+        assert!(
+            serde_json::to_value(&plain)
+                .unwrap()
+                .get("compositor_repeat")
+                .is_none()
+        );
+        let mut forged = plain;
+        forged.compositor_repeat = true;
+        assert!(forged.validate().is_err());
     }
 }

@@ -88,6 +88,15 @@ refused: their consumer can subsequently select nonzero values.
 The descriptor requires the complete implicit `REP_DELAY`/`REP_PERIOD` pair;
 `EV_REP` is not a partial code bitmap readable through `EVIOCGBIT(EV_REP)`.
 
+Stock Hyprland is the one accepted exception. libinput discards kernel repeat
+events and Hyprland generates repeat from its own `repeat_rate`/`repeat_delay`,
+so a kernel-repeating keyboard whose consumer is Hyprland is mirrored without
+`EV_REP` (`Descriptor::mirror_with_compositor_repeat`, flagged
+`compositor_repeat`). The mirror has no software repeat timer; forwarded
+`EV_KEY` value 2 events still reach other evdev readers, and `EV_REP` setting
+echoes are dropped before writing. Console keyboards and other consumers stay
+refused.
+
 The user-launched root runner includes one **negative characterization** case,
 `kernel::tests::repeat::isolated_uinput_repeat_timer_and_consumer_settings_are_not_transparent`.
 Its raw-uinput constructor exists only in `cfg(test)`; no production flag or

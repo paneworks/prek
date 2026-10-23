@@ -25,9 +25,10 @@ uinput devices and writes bounded complete frames. The private worker has a
 [bounded, descriptor-bound LED feedback bridge](docs/feedback.md), with independent
 queries and source writes; its synthetic kernel challenge still needs a user-run
 receipt. Real consumer readiness, policy arbitration
-and supervised input takeover are still pending. Devices with repeat support or
-nonzero axis fuzz are refused until transparent forwarding is verified for those
-capabilities.
+and supervised input takeover are still pending. Devices with nonzero axis fuzz,
+and repeat-capable devices whose consumer is not Hyprland, are refused until
+transparent forwarding is verified for those capabilities; a Hyprland-consumed
+keyboard is mirrored without kernel repeat.
 Production routing remains disabled.
 
 The configured routing core connects rule candidates to reserve/buffer/observe
