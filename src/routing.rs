@@ -547,6 +547,9 @@ impl Routing {
         intents.extend(outcomes.iter().map(|outcome| outcome.intent.clone()));
         self.capture_native(intents.iter().chain(claims.iter()), now);
         if let (Some(source), Some(frame)) = (source, frame) {
+            if let Some(route) = self.routes.get_mut(&source) {
+                route.router.read_at(now);
+            }
             if self
                 .routes
                 .get(&source)

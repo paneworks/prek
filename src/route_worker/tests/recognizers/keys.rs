@@ -768,6 +768,27 @@ fn input_held_through_a_revoked_generated_drain_is_delivered_after_it() {
 }
 
 #[test]
+fn input_read_late_is_delivered_after_its_read_in_order() {
+    let mut fixture = Fixture::new(profile(), super::owner());
+    let raw = physical_file(&mut fixture, &device(), "raw-late");
+    let first = raw_frame(&device(), 1, &[(48, 1)]);
+    std::thread::sleep(Duration::from_millis(5));
+    let second = raw_frame(&device(), 2, &[(48, 0)]);
+    std::thread::sleep(Duration::from_millis(40));
+    fixture.stream.push(Record::Frame { frame: first }).unwrap();
+    fixture
+        .stream
+        .push(Record::Frame { frame: second })
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_millis(200);
+    while events(&raw).len() < 2 && std::time::Instant::now() < deadline {
+        fixture.stream.flush().unwrap();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(events(&raw), [(48, 1), (48, 0)]);
+}
+
+#[test]
 fn runtime_route_replacement_accepts_the_fresh_reader_incarnation() {
     let mut fixture = Fixture::new(profile(), owner());
     let (slot, _descriptor, path) = slot(&fixture);

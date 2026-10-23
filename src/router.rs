@@ -243,7 +243,7 @@ pub struct Router {
     pending_keyboard: Option<keyboard::pending::Journal>,
     key_barrier: Option<crate::input::InputPosition>,
     key_offset_floor: Duration,
-    deferred: Option<(Duration, Duration)>,
+    read_at: Option<Duration>,
     positions: BTreeMap<u64, InputSpan>,
     input_marks: BTreeMap<u64, u64>,
 }
@@ -297,7 +297,7 @@ impl Router {
             positions: BTreeMap::new(),
             key_barrier: None,
             key_offset_floor: Duration::ZERO,
-            deferred: None,
+            read_at: None,
             input_marks: BTreeMap::new(),
         })
     }
@@ -425,22 +425,6 @@ impl Router {
 
     fn schedule(&mut self, frame: Frame) -> Result<(), Fault> {
         self.capacity(frame.events.len())?;
-        if let Some((start, until)) = self.deferred {
-            if frame.at >= until {
-                self.deferred = None;
-            } else {
-                let Some(planned) = frame.at.checked_add(self.offset) else {
-                    return self.fail(Fault::Overflow);
-                };
-                let offset = self.offset.max(until - frame.at);
-                if start.saturating_sub(planned) > self.limits.scheduler_slack
-                    || offset > self.limits.offset
-                {
-                    return self.fail(Fault::MissedDelivery);
-                }
-                self.offset = offset;
-            }
-        }
         let Some(due) = frame.at.checked_add(self.offset) else {
             return self.fail(Fault::Overflow);
         };
@@ -649,6 +633,7 @@ impl Router {
             return Err(Fault::InvalidCandidate);
         }
         self.advance(frame.at)?;
+        self.absorb_read_lag(frame.at)?;
         let joining = matches!(retention,Retention::Continue(token)
             if self.chain_ownership(token,frame.at).is_some());
         if completed && !joining {
@@ -920,8 +905,24 @@ impl Router {
         self.delivery_clock(at)?;
         Ok(self.queue.front().filter(|entry| entry.due <= at))
     }
-    /// Retimes input the caller withheld from `start` until `until`: queued
-    /// frames and later frames older than `until` keep their cadence after it.
+    /// Records when the caller read the next pushed frame.
+    pub(crate) fn read_at(&mut self, now: Duration) {
+        self.read_at = Some(now);
+    }
+    /// Delays the epoch by the read lag of a frame just pushed at `at`.
+    fn absorb_read_lag(&mut self, at: Duration) -> Result<(), Fault> {
+        let Some(read) = self.read_at.take() else {
+            return Ok(());
+        };
+        let lag = read.saturating_sub(at);
+        if lag > self.limits.offset {
+            return self.fail(Fault::MissedDelivery);
+        }
+        self.offset = self.offset.max(lag);
+        Ok(())
+    }
+    /// Retimes queued frames the caller withheld from `start` until `until`,
+    /// keeping their cadence after it.
     pub(crate) fn defer(&mut self, start: Duration, until: Duration) -> Result<(), Fault> {
         if self.stopped {
             return Err(Fault::Stopped);
@@ -948,7 +949,6 @@ impl Router {
             }
             self.offset = offset;
         }
-        self.deferred = Some((start, until));
         Ok(())
     }
     fn delivery_clock(&mut self, at: Duration) -> Result<(), Fault> {
@@ -1628,18 +1628,10 @@ mod tests {
         assert_eq!(deliver(&mut router, 60).unwrap().sequence, 1);
         assert!(router.due_after_input(ms(89)).unwrap().is_none());
         assert_eq!(deliver(&mut router, 90).unwrap().sequence, 2);
-        let mut router = self::router(Limits::default());
-        router.defer(ms(10), ms(50)).unwrap();
-        router.push(down(1, 20, 0, 10), None, ms(20)).unwrap();
-        router.push(up(2, 35, 0), None, ms(35)).unwrap();
-        let dues: Vec<_> = router.queue.iter().map(|entry| entry.due).collect();
-        assert_eq!(dues, [ms(50), ms(65)]);
-        assert_eq!(deliver(&mut router, 50).unwrap().sequence, 1);
-        assert_eq!(deliver(&mut router, 65).unwrap().sequence, 2);
     }
 
     #[test]
-    fn deferral_cannot_hide_input_missed_before_the_hold_or_exceed_the_offset() {
+    fn deferral_cannot_hide_a_queued_frame_missed_before_the_hold_or_exceed_the_offset() {
         let mut router = router(Limits::default());
         router.push(down(1, 0, 0, 10), None, ms(0)).unwrap();
         assert_eq!(router.defer(ms(30), ms(40)), Err(Fault::MissedDelivery));
@@ -1647,12 +1639,32 @@ mod tests {
         router.push(down(1, 0, 0, 10), None, ms(0)).unwrap();
         assert_eq!(router.defer(ms(10), ms(400)), Err(Fault::MissedDelivery));
         let mut router = self::router(Limits::default());
-        router.defer(ms(50), ms(60)).unwrap();
+        assert_eq!(router.defer(ms(60), ms(50)), Err(Fault::BackwardTime));
+    }
+
+    #[test]
+    fn late_reads_keep_their_cadence_without_extending_queued_frames() {
+        let mut router = router(Limits::default());
+        router.read_at(ms(50));
+        router.push(down(1, 20, 0, 10), None, ms(20)).unwrap();
+        router.read_at(ms(50));
+        router.push(up(2, 35, 0), None, ms(35)).unwrap();
+        let dues: Vec<_> = router.queue.iter().map(|entry| entry.due).collect();
+        assert_eq!(dues, [ms(50), ms(65)]);
+        assert_eq!(deliver(&mut router, 50).unwrap().sequence, 1);
+        assert_eq!(deliver(&mut router, 65).unwrap().sequence, 2);
+        let mut router = self::router(Limits::default());
+        router.push(down(1, 0, 0, 10), None, ms(0)).unwrap();
+        router.read_at(ms(15));
+        router.push(up(2, 10, 0), None, ms(10)).unwrap();
+        let dues: Vec<_> = router.queue.iter().map(|entry| entry.due).collect();
+        assert_eq!(dues, [ms(0), ms(15)]);
+        assert_eq!(router.due_after_input(ms(21)), Err(Fault::MissedDelivery));
+        let mut router = self::router(Limits::default());
+        router.read_at(ms(310));
         assert_eq!(
-            router.push(down(1, 10, 0, 10), None, ms(10)),
+            router.push(down(1, 0, 0, 10), None, ms(0)),
             Err(Fault::MissedDelivery)
         );
-        let mut router = self::router(Limits::default());
-        assert_eq!(router.defer(ms(60), ms(50)), Err(Fault::BackwardTime));
     }
 }

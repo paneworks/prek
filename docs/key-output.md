@@ -262,7 +262,10 @@ may leave before unresolved suffixes, but prefix readiness still requires a full
 write acknowledgement. Per-report release clocks preserve earlier timeout
 deadlines; a later decision cannot hide missed delivery. Ordinary fallback uses
 the maximum required epoch offset, not accumulated delays, and preserves original
-inter-report cadence. Buffered and scheduled input share capacity limits. Recovery
+inter-report cadence. A report read after its kernel timestamp raises that epoch
+offset to its read lag, so it is due no earlier than its read; lag beyond the
+300 ms offset limit faults as missed delivery, and already queued reports keep
+their original budget. Buffered and scheduled input share capacity limits. Recovery
 discards unwritten input and neutralizes only acknowledged output.
 
 On hybrid nodes, independent keyboard/button edges and their adjacent scan metadata
@@ -779,8 +782,8 @@ Local cancellation retains same-seat cleanup barriers within the existing
 250 ms drain bound. The slot's separate consumer-drain acknowledgement still
 fences final writer removal and original-reader release. Same-seat input
 withheld during that drain is retimed after it with its cadence intact, within
-the 300 ms offset limit; input already late when the drain began still faults as
-missed delivery.
+the 300 ms offset limit; a queued report already past its delivery slack when the
+drain began still faults as missed delivery.
 
 Queued software operations capture a key-domain boundary after the last accepted
 input frame. Earlier raw reports finish first; later ordered reports wait for the

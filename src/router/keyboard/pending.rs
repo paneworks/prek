@@ -1023,6 +1023,7 @@ impl Router {
             .copied()
             .collect();
         let sequence = frame.sequence;
+        let frame_at = frame.at;
         tail_frame.active = tail_active;
         tail_frame.absolute_before = absolute_before;
         let journal = self.pending_keyboard.get_or_insert_with(Journal::default);
@@ -1046,6 +1047,7 @@ impl Router {
         }
         self.last_sequence = Some(sequence);
         self.last_at = at;
+        self.absorb_read_lag(frame_at)?;
         Ok(domains)
     }
 
