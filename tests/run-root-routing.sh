@@ -5,7 +5,7 @@ repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 if [[ ${1:-} == --help ]]; then
   cat <<'HELP'
 Usage: ./tests/run-root-routing.sh
-Launch as your regular user, without sudo. The built runner prompts when ready.
+Launch as your regular user, without sudo. Prompts for sudo before building.
 Runs fourteen routing, eight recovery, two transport-characterization, one
 generated-keyboard and one managed-worker gate (version-9 receipt, 26 cases).
 The managed gate logs nine kernel phases, single-counterpart keyboard/relative
@@ -31,6 +31,7 @@ exec > >(tee -a "$run/console.log") 2>&1
 finish() {
   result=$?
   trap - EXIT
+  if [[ -n ${keepalive:-} ]]; then kill "$keepalive" 2>/dev/null || true; fi
   status=failed
   if (( result == 0 )); then status=passed; fi
   printf '{"status":"%s","exit_code":%d}\n' "$status" "$result" > "$run/status.json"
@@ -42,6 +43,10 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 printf '{"status":"running"}\n' > "$run/status.json"
 printf 'Isolated kernel routing gates. Started: %s (load %s)\nLogs: %s\n' "$(date -u +%FT%TZ)" "$(cut -d' ' -f1-3 /proc/loadavg)" "$run"
+# Authenticates once, then keeps the sudo timestamp valid until exit.
+sudo -v
+while sleep 60; do sudo -n -v || exit; done </dev/null >/dev/null 2>&1 &
+keepalive=$!
 git -C "$repo" rev-parse HEAD
 git -C "$repo" status --short
 nix --option eval-cache false --extra-experimental-features 'nix-command flakes' \

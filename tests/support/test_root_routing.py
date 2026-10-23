@@ -749,19 +749,24 @@ os._exit(0)
                     pass
                 os.close(child_fd)
 
-    def test_launcher_retains_failed_build_logs_before_authentication(self):
+    def test_launcher_authenticates_first_and_retains_failed_build_logs(self):
         launcher = Path(__file__).resolve().parents[1] / "run-root-routing.sh"
         with tempfile.TemporaryDirectory() as temporary:
             repo = Path(temporary)
             (repo / "tests").mkdir()
             script = repo / "tests/run-root-routing.sh"
             shutil.copyfile(launcher, script)
-            # Both mocks are unprivileged commands. Nix fails before a runner
-            # exists, so no authentication or root process can be launched.
+            calls, mocks = repo / "sudo-calls", repo / "bin"
+            mocks.mkdir()
+            (mocks / "sudo").write_text(f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{calls}'\n")
+            (mocks / "sudo").chmod(0o755)
+            # All mocks are unprivileged commands. Nix fails before a runner
+            # exists, so only the up-front credential check is requested.
             shell = "git(){ return 0; }; nix(){ echo 'deliberate pre-build refusal'; return 77; }; export -f git nix; exec bash \"$1\""
-            result = subprocess.run(["bash", "-c", shell, "--", str(script)],
+            result = subprocess.run(["bash", "-c", shell, "--", str(script)], env={**os.environ, "PATH": f"{mocks}:{os.environ['PATH']}"},
                                     capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 77)
+            self.assertEqual(calls.read_text(), "-v\n")
             retained = (repo / "target/root-routing/latest").resolve(strict=True)
             self.assertEqual(json.loads((retained / "status.json").read_text()), {"status":"failed", "exit_code":77})
             self.assertIn("deliberate pre-build refusal", (retained / "console.log").read_text())

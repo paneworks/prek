@@ -6,8 +6,8 @@ From a terminal in this checkout, run as your normal user:
 ./tests/run-root-routing.sh
 ```
 
-The script first builds an immutable Nix runner, then prompts for sudo. Only
-its fixed probe is elevated. All four test executables, the importer and udev tool are
+The script prompts for sudo at launch and keeps it cached while it builds an
+immutable Nix runner. Only its fixed probe is elevated. All four test executables, the importer and udev tool are
 pinned store paths; neither a caller-selected command nor user output path is
 passed to root. `/dev/uinput` must already exist. The probe does not load modules
 or enable production routing.
