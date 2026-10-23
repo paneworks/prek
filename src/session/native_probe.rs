@@ -73,6 +73,42 @@ fn session_preflight() {
 }
 
 #[test]
+#[ignore = "explicit unprivileged display-session controller check"]
+fn controller_preflight() {
+    let uid = unsafe { libc::geteuid() };
+    let pid = std::env::var("PREK_COMPOSITOR_PID")
+        .expect("set PREK_COMPOSITOR_PID to the running compositor")
+        .parse()
+        .unwrap();
+    let (path, library) = load().unwrap();
+    let compositor = Process::open(pid, uid).unwrap();
+    let own = library.process_session(&compositor);
+    assert_eq!(
+        own.as_ref().err().and_then(io::Error::raw_os_error),
+        Some(libc::ENODATA),
+        "the compositor already has a login session: {own:?}"
+    );
+    let cgroup = library.process_cgroup(&compositor).unwrap();
+    assert!(user_manager_cgroup(&cgroup, uid), "{cgroup}");
+    let session = allocated(|out| unsafe { (library.uid_display)(uid, out) }).unwrap();
+    let controller = controller(&session).unwrap();
+    let name = CString::new(controller.as_str()).unwrap();
+    let owner = crate::sleep_watch::connection_pid(&library.library, &name).unwrap();
+    assert_eq!(
+        owner, compositor.pid,
+        "{controller} belongs to another process"
+    );
+    compositor.check().unwrap();
+    println!(
+        "PREK_CONTROLLER_PREFLIGHT={}",
+        serde_json::json!({
+            "version": 1, "library": fs::canonicalize(path).unwrap(), "compositor": pid,
+            "cgroup": cgroup, "session": session, "controller": controller,
+        })
+    );
+}
+
+#[test]
 fn candidates_are_absolute_nonempty_and_bounded_before_opening() {
     for paths in [
         vec![],

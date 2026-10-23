@@ -419,6 +419,17 @@ fn open_watch(library: &Path, address: &CStr, uid: u32) -> io::Result<Watch> {
     )
 }
 #[test]
+fn a_private_bus_reports_the_process_behind_a_connection_name() {
+    let library = std::env::var_os("PREK_TEST_SYSTEMD_LIBRARY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/run/current-system/systemd/lib/libsystemd.so.0"));
+    let daemon = PrivateBus::start();
+    let library = crate::session::Library::open_fixture(&library).unwrap();
+    let bus = Connection::open(Api::load(&library).unwrap(), &daemon.address).unwrap();
+    assert_eq!(bus.pid(c"org.freedesktop.DBus").unwrap(), daemon.child.id());
+    assert!(bus.pid(c":1.999999").is_err());
+}
+#[test]
 fn actual_private_bus_pins_owner_preserves_queued_boundaries_and_owns_delay_descriptors() {
     let library = std::env::var_os("PREK_TEST_SYSTEMD_LIBRARY")
         .map(PathBuf::from)

@@ -151,8 +151,15 @@ verified context and Lua enabled. An authority-free guardian re-executes retired
 agents in that same login session; every replacement registers afresh. It inherits `XDG_RUNTIME_DIR` and
 `HYPRLAND_INSTANCE_SIGNATURE` from that session. It does not create a systemd
 user service: the shared user manager does not prove owning logind membership,
-and its agents are deliberately rejected. A compositor run without an active
-logind user session also cannot establish production registration. Local Cage
+and its agents are deliberately rejected.
+
+With uwsm (`programs.hyprland.withUWSM`), Hyprland itself runs as a user service
+outside any login session. The broker then binds it to your active local display
+session only while logind records that exact Hyprland process as the session's
+controller, and requires the agent to share Hyprland's systemd unit. A startup
+hook does that; do not wrap `prek-session` in `uwsm app`, which moves it to its
+own unit. Any other compositor without an active logind user session cannot
+establish production registration. Local Cage
 acceptance uses explicit model seat authority and separate owned sockets.
 
 `services.prek.session.input = true` adds `--input`; the protected Lua policy
@@ -195,8 +202,8 @@ replacement handling and remaining hardware/consumer gates.
 1. Find the device's exact kernel name with `grep '^N: Name=' /proc/bus/input/devices`.
    Interfaces that share one name, such as a KVM's keyboard and mouse, are
    selected together.
-2. Try it for one minute from a terminal inside your Hyprland session, then
-   read `target/takeover-trial/latest/broker.log`:
+2. Try it for one minute from any terminal while Hyprland runs (the trial starts
+   its agent through Hyprland), then read `target/takeover-trial/latest/broker.log`:
 
    ```sh
    ./tests/run-takeover-trial.sh --device "<name>" --seconds 60

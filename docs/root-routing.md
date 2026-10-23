@@ -200,8 +200,11 @@ probe. Ordinary builds and Cage runs execute neither root script automatically.
 ## Physical takeover trial
 
 `tests/run-takeover-trial.sh --device "<exact kernel name>" [--seconds N]` is the
-first test on a real device. Run it as your user from a terminal inside your
-Hyprland session; it asks for sudo before building. It writes a route
+first test on a real device. Run it as your user from any terminal while your
+Hyprland session runs; it asks for sudo before building. When
+`HYPRLAND_INSTANCE_SIGNATURE` is unset it uses the only running instance, and it
+starts the session agent through Hyprland's exec, so the agent shares the
+compositor's login session or, under uwsm, its systemd unit. It writes a route
 configuration with one selector for that name and no rules, installs it
 root-owned under `/run/prek-trial`, temporarily installs Prek's udev metadata
 rule under `/run/udev/rules.d`, then runs a route broker and a session agent for

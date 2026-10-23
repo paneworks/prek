@@ -758,11 +758,11 @@ os._exit(0)
                 os.close(child_fd)
 
     def test_takeover_trial_runs_one_bounded_broker_and_session_then_removes_its_rule(self):
-        for opens_socket in (True, False):
-            with self.subTest(opens_socket=opens_socket):
-                self.takeover_trial(opens_socket)
+        for opens_socket, instance in ((True, "test"), (True, None), (False, "test")):
+            with self.subTest(opens_socket=opens_socket, instance=instance):
+                self.takeover_trial(opens_socket, instance)
 
-    def takeover_trial(self, opens_socket):
+    def takeover_trial(self, opens_socket, instance):
         trial = Path(__file__).resolve().parents[1] / "run-takeover-trial.sh"
         with tempfile.TemporaryDirectory() as temporary:
             repo, mocks, run_root = Path(temporary), Path(temporary) / "bin", Path(temporary) / "run"
@@ -773,7 +773,7 @@ os._exit(0)
             shutil.copyfile(trial, script)
             devices = repo / "devices"
             devices.write_text('N: Name="Prek test keyboard"\n')
-            calls = repo / "sudo-calls"
+            calls, dispatches, agent = repo / "sudo-calls", repo / "hyprctl-calls", repo / "agent-instance"
             prek = mocks / "prek-package"
             (prek / "bin").mkdir(parents=True)
             (prek / "lib/udev/rules.d").mkdir(parents=True)
@@ -788,8 +788,24 @@ exec "$@"
 """,
                 "git": "#!/bin/sh\nexit 0\n",
                 "udevadm": "#!/bin/sh\nexit 0\n",
-                "hyprctl": "#!/bin/sh\necho '[]'\n",
-                "jq": f"#!/bin/sh\necho {os.getpid()}\n",
+                # Hyprland's exec is simulated by running the dispatched agent script.
+                "hyprctl": f"""#!/bin/sh
+printf '%s\\n' "$*" >> '{dispatches}'
+case "$1" in
+  dispatch)
+    "$(printf '%s' "$2" | sed -n 's/^hl\\.dsp\\.exec_cmd("\\(.*\\)")$/\\1/p')" >/dev/null 2>&1 &
+    echo ok ;;
+  *) echo '[]' ;;
+esac
+""",
+                "jq": f"""#!/bin/sh
+cat > /dev/null
+case "$*" in
+  *configProvider*) echo lua ;;
+  *'exactly one'*) echo discovered ;;
+  *) echo {os.getpid()} ;;
+esac
+""",
                 "install": """#!/bin/sh
 directory=0
 while [ $# -gt 2 ]; do
@@ -818,13 +834,16 @@ case "$1" in
     {bind}
     echo "routing worker: Prek test keyboard taken over at a neutral idle cut" >&2
     sleep 1 ;;
-  session) sleep 0.2 ;;
+  session) echo "$HYPRLAND_INSTANCE_SIGNATURE" > '{agent}'; sleep 0.2 ;;
 esac
 """)
             (prek / "bin/prek").chmod(0o755)
-            env = {**os.environ, "PATH": f"{mocks}:{os.environ['PATH']}", "HYPRLAND_INSTANCE_SIGNATURE": "test",
+            env = {**os.environ, "PATH": f"{mocks}:{os.environ['PATH']}", "XDG_RUNTIME_DIR": temporary,
                    "PREK_TRIAL_INPUT_DEVICES": str(devices), "PREK_TRIAL_LOGIND": sys.executable,
                    "PREK_TRIAL_RUN_ROOT": str(run_root)}
+            env.pop("HYPRLAND_INSTANCE_SIGNATURE", None)
+            if instance:
+                env["HYPRLAND_INSTANCE_SIGNATURE"] = instance
             result = subprocess.run(["bash", str(script), "--device", "Prek test keyboard", "--seconds", "10"],
                                     env=env, capture_output=True, text=True, timeout=60)
             run = (repo / "target/takeover-trial/latest").resolve(strict=True)
@@ -839,6 +858,9 @@ esac
             self.assertEqual(result.returncode, 0, (run / "console.log").read_text())
             self.assertEqual(json.loads((run / "status.json").read_text()), {"status": "passed", "exit_code": 0})
             self.assertIn("taken over at a neutral idle cut", (run / "console.log").read_text())
+            self.assertEqual(agent.read_text().strip(), instance or "discovered")
+            self.assertEqual((run / "session.status").read_text().strip(), "0")
+            self.assertIn(f'dispatch hl.dsp.exec_cmd("{run}/agent.sh")', dispatches.read_text().splitlines())
             self.assertIn('name = "Prek test keyboard"', (run / "config.toml").read_text())
             sudo = calls.read_text().splitlines()
             self.assertEqual(sudo[0], "-v")

@@ -15,6 +15,12 @@ use std::{
 const LOGIN: &CStr = c"org.freedesktop.login1";
 const OBJECT: &CStr = c"/org/freedesktop/login1";
 const MANAGER: &CStr = c"org.freedesktop.login1.Manager";
+const SYSTEM_BUS: &CStr = c"unix:path=/run/dbus/system_bus_socket";
+
+/// Process ID the system bus recorded when the unique connection `name` connected.
+pub(crate) fn connection_pid(library: &crate::session::Library, name: &CStr) -> io::Result<u32> {
+    Connection::open(Api::load(library)?, SYSTEM_BUS)?.pid(name)
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Snapshot {
@@ -125,11 +131,7 @@ pub struct Watch {
 }
 impl Watch {
     pub fn open(library: &Path) -> io::Result<Self> {
-        Self::open_inner(
-            crate::session::Library::open(library)?,
-            c"unix:path=/run/dbus/system_bus_socket",
-            0,
-        )
+        Self::open_inner(crate::session::Library::open(library)?, SYSTEM_BUS, 0)
     }
     fn open_inner(library: crate::session::Library, address: &CStr, uid: u32) -> io::Result<Self> {
         let api = Api::load(&library)?;

@@ -135,7 +135,7 @@
               for candidate in target/*/release/deps/prek-* target/release/deps/prek-*; do
                 if [ -f "$candidate" ] && [ -x "$candidate" ] && \
                   "$candidate" --list | ${pkgs.ripgrep}/bin/rg -Fx 'morf::handoff::tests::live::owned_native_handoff: test'; then
-                  for probe in library_preflight session_preflight; do
+                  for probe in library_preflight session_preflight controller_preflight; do
                     "$candidate" --list --ignored | ${pkgs.ripgrep}/bin/rg -Fx "session::native_probe::$probe: test"
                   done
                   "$candidate" --list --ignored | ${pkgs.ripgrep}/bin/rg -Fx \

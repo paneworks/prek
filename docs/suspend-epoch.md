@@ -37,7 +37,8 @@ an accepted broker registration, not source readiness or effect permission.
 Fresh re-execution must still pass every broker policy, logind, executable,
 compositor and provider check. Policy rejection and orderly exit stop the
 launcher. The shared systemd user manager is not a substitute for owning logind
-membership. See [launcher bounds and stopping](nixos.md#start-the-owning-session-agent).
+membership; only a compositor's own unit qualifies, while logind records that
+compositor as its display session's controller. See [launcher bounds and stopping](nixos.md#start-the-owning-session-agent).
 
 ## Authoritative logind preparation
 

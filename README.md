@@ -146,7 +146,10 @@ Start `session` from the compositor's own login session. It uses
 `HYPRLAND_INSTANCE_SIGNATURE`, or an explicit `--instance`, and maintains a
 250 ms acknowledged heartbeat. A second agent for the same seat is refused;
 `status` uses a separate authenticated inspection role. A shared user-manager
-process without session membership is refused. Both commands accept `--socket`
+process without session membership is refused, except beside a compositor that
+its user manager runs outside any session (as uwsm does): there the agent must
+share the compositor's systemd unit, and logind must record that exact
+compositor as the controller of the user's display session. Both commands accept `--socket`
 for a different broker endpoint. Status reports the active agent's current
 context, snapshot revision and any context/reload error. Device ownership/latency
 counters and desktop action dispatch remain pending.
@@ -445,9 +448,10 @@ snapshots, target removal, relevant geometry changes and overlays cancel it.
 Compositor visibility is distinct from a mapped window on another workspace.
 The model requires 250 ms snapshot freshness and a one-second provider lease.
 The Linux session library supplies verified socket/process/logind membership
-for agents launched inside the compositor's session. Action integration,
-delegation for shared user services and real lock-provider registration remain
-pending. The lockscreen/greeter UI and authentication remain Morf's responsibility.
+for agents launched inside the compositor's session, or inside the systemd unit
+of a uwsm-style compositor that logind records as the display session's
+controller. Action integration, delegation for other shared user services and
+real lock-provider registration remain pending. The lockscreen/greeter UI and authentication remain Morf's responsibility.
 
 ## Recording and replay
 

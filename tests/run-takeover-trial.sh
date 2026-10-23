@@ -5,7 +5,8 @@ repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 usage() {
   cat <<'HELP'
 Usage: ./tests/run-takeover-trial.sh --device "<exact kernel device name>" [--seconds N]
-Launch as your regular user from a terminal inside your Hyprland session.
+Launch as your regular user while your Hyprland session runs; any terminal
+works, and the session agent is started through Hyprland itself.
 Prompts for sudo before building. Routes only the named device through a
 temporary route broker for N seconds (default 60, 10..300) with no rules, so
 input should behave exactly as before. The broker takes the device over only
@@ -15,6 +16,7 @@ Temporarily installs Prek's udev metadata rule under /run/udev/rules.d and a
 root-owned trial configuration under /run/prek-trial; both are removed on exit.
 Device names: grep '^N: Name=' /proc/bus/input/devices
 Logs: target/takeover-trial/latest/{console.log,broker.log,session.log,status.json}
+The checkout path may contain only letters, digits and _ . / -.
 HELP
 }
 device=""
@@ -31,7 +33,16 @@ if ((EUID == 0)) || [[ -z $device ]] || ! [[ $seconds =~ ^[0-9]+$ ]] || ((second
   usage >&2
   exit 2
 fi
-: "${HYPRLAND_INSTANCE_SIGNATURE:?Run from a terminal inside your Hyprland session}"
+: "${XDG_RUNTIME_DIR:?Run as your regular user with a runtime directory}"
+if [[ -z ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
+  HYPRLAND_INSTANCE_SIGNATURE=$(hyprctl -j instances | jq -er \
+    'if length == 1 then .[0].instance else error("expected exactly one running Hyprland") end')
+  export HYPRLAND_INSTANCE_SIGNATURE
+fi
+if [[ $repo =~ [^A-Za-z0-9_./-] ]]; then
+  echo "The checkout path \"$repo\" has characters Hyprland's exec cannot pass safely." >&2
+  exit 2
+fi
 devices=${PREK_TRIAL_INPUT_DEVICES:-/proc/bus/input/devices}
 run_root=${PREK_TRIAL_RUN_ROOT:-/run}
 if ! grep -Fxq "N: Name=\"$device\"" "$devices"; then
@@ -49,11 +60,16 @@ exec > >(tee -a "$run/console.log") 2>&1
 rule=$run_root/udev/rules.d/70-prek-trial.rules
 trial=$run_root/prek-trial
 broker=""
-session=""
+prek=""
 finish() {
   result=$?
   trap - EXIT
-  if [[ -n $session ]]; then kill "$session" 2>/dev/null || true; fi
+  if [[ -f $run/session.pid && ! -f $run/session.status ]]; then
+    agent=$(cat "$run/session.pid")
+    if [[ $(tr '\0' ' ' < "/proc/$agent/cmdline" 2>/dev/null) == "$prek session "* ]]; then
+      kill "$agent" 2>/dev/null || true
+    fi
+  fi
   if [[ -n $broker ]]; then kill -TERM "$broker" 2>/dev/null || true; wait "$broker" 2>/dev/null || true; fi
   sudo -n rm -f "$rule" 2>/dev/null && sudo -n udevadm control --reload-rules 2>/dev/null || true
   sudo -n rm -rf "$trial" 2>/dev/null || true
@@ -120,14 +136,45 @@ if ! sudo -n test -S "$socket"; then
   echo "The broker did not open its socket within 10 s; see $run/broker.log." >&2
   exit 1
 fi
-"$prek" session --socket "$socket" --observations --context \
-  --duration "$((seconds - 2))" \
+# Hyprland starts the agent so it runs in the compositor's own session or unit.
+cat > "$run/agent.sh" <<AGENT
+#!/bin/sh
+"$prek" session --socket "$socket" --observations --context --duration $((seconds - 2)) \\
   > "$run/session.log" 2>&1 &
-session=$!
+echo \$! > "$run/session.pid"
+wait \$!
+echo \$? > "$run/session.status"
+AGENT
+chmod 0755 "$run/agent.sh"
+provider=$(hyprctl -j status | jq -r '.configProvider // "hyprlang"')
+if [[ $provider == lua ]]; then
+  reply=$(hyprctl dispatch "hl.dsp.exec_cmd(\"$run/agent.sh\")")
+else
+  reply=$(hyprctl dispatch exec "$run/agent.sh")
+fi
+if [[ $reply != ok ]]; then
+  echo "Hyprland ($provider) refused to start the session agent: $reply" >&2
+  exit 1
+fi
+for _ in $(seq 50); do
+  if [[ -s $run/session.pid ]]; then break; fi
+  sleep 0.1
+done
+if [[ ! -s $run/session.pid ]]; then
+  echo "Hyprland did not start the session agent within 5 s." >&2
+  exit 1
+fi
 printf '\nType and use "%s" normally for %d seconds. If it stops responding,\n' "$device" "$seconds"
 printf 'wait for the timer or press Ctrl-C; the broker then releases it.\n\n'
-wait "$session" || echo "session agent exited with status $?"
-session=""
+for _ in $(seq "$((seconds * 10 + 100))"); do
+  if [[ -s $run/session.status ]]; then break; fi
+  sleep 0.1
+done
+agent_status=$(cat "$run/session.status" 2>/dev/null || echo unknown)
+if [[ $agent_status != 0 ]]; then
+  echo "session agent exited with status $agent_status:"
+  tail -n 5 "$run/session.log" || true
+fi
 wait "$broker"
 broker=""
 grep -E 'taken over|stays with its original consumer|keeps no consumer evidence|lost its device settings' \

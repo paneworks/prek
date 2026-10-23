@@ -1,8 +1,10 @@
 //! Active-seat registration from kernel socket credentials and logind.
 //!
 //! A UID or a client-supplied session name is insufficient. The agent must be
-//! inside the verified compositor's actual login session. Shared user services
-//! need a separate broker-authorized delegation protocol, not implemented here.
+//! inside the verified compositor's actual login session. A compositor that a
+//! user manager runs outside any session, such as under uwsm, is bound to the
+//! user's display session only while logind records that exact process as the
+//! session's controller, and its agent must share the compositor's cgroup.
 //! Registration proves membership and activity, never an unlocked desktop.
 //! Callers must still obtain lock-provider evidence and recheck registration
 //! before accepting context or dispatching an action.
@@ -16,7 +18,7 @@ use nix::libc;
 use std::{
     ffi::CString,
     fs::{self, File, OpenOptions},
-    io,
+    io::{self, Read},
     mem::size_of,
     os::{
         fd::{AsFd, AsRawFd, FromRawFd, OwnedFd},
@@ -244,6 +246,7 @@ impl Drop for Library {
     }
 }
 type PidString = unsafe extern "C" fn(libc::pid_t, *mut *mut libc::c_char) -> i32;
+type UidString = unsafe extern "C" fn(libc::uid_t, *mut *mut libc::c_char) -> i32;
 type SessionString = unsafe extern "C" fn(*const libc::c_char, *mut *mut libc::c_char) -> i32;
 type SessionUid = unsafe extern "C" fn(*const libc::c_char, *mut libc::uid_t) -> i32;
 type SessionBool = unsafe extern "C" fn(*const libc::c_char) -> i32;
@@ -254,6 +257,8 @@ type SeatActive =
 /// its path or taking over logind's device-controller role.
 pub struct Logind {
     pid_session: PidString,
+    pid_cgroup: PidString,
+    uid_display: UidString,
     session_seat: SessionString,
     session_class: SessionString,
     session_type: SessionString,
@@ -262,7 +267,7 @@ pub struct Logind {
     session_active: SessionBool,
     session_remote: SessionBool,
     seat_active: SeatActive,
-    _library: Library,
+    library: Library,
 }
 impl Logind {
     pub fn open(library: &Path) -> io::Result<Self> {
@@ -279,6 +284,8 @@ impl Logind {
         }
         Ok(Self {
             pid_session: symbol!("sd_pid_get_session", PidString),
+            pid_cgroup: symbol!("sd_pid_get_cgroup", PidString),
+            uid_display: symbol!("sd_uid_get_display", UidString),
             session_seat: symbol!("sd_session_get_seat", SessionString),
             session_class: symbol!("sd_session_get_class", SessionString),
             session_type: symbol!("sd_session_get_type", SessionString),
@@ -287,12 +294,40 @@ impl Logind {
             session_active: symbol!("sd_session_is_active", SessionBool),
             session_remote: symbol!("sd_session_is_remote", SessionBool),
             seat_active: symbol!("sd_seat_get_active", SeatActive),
-            _library: library,
+            library,
         })
     }
     fn process_session(&self, process: &Process) -> io::Result<String> {
         process.check()?;
         allocated(|out| unsafe { (self.pid_session)(process.pid as libc::pid_t, out) })
+    }
+    fn process_cgroup(&self, process: &Process) -> io::Result<String> {
+        process.check()?;
+        allocated(|out| unsafe { (self.pid_cgroup)(process.pid as libc::pid_t, out) })
+    }
+    /// Display session and cgroup of a compositor its user manager runs outside
+    /// any session; the controller is resolved to a process at registration.
+    fn controlled_session(
+        &self,
+        peer: &Peer,
+        compositor: &Process,
+    ) -> io::Result<(String, Option<String>, Option<String>)> {
+        let cgroup = self.process_cgroup(compositor)?;
+        if !user_manager_cgroup(&cgroup, compositor.uid) {
+            return Err(denied(
+                "compositor is outside both a login session and its user manager",
+            ));
+        }
+        let agent = self.process_session(&peer.process);
+        if !matches!(&agent, Err(error) if error.raw_os_error() == Some(libc::ENODATA))
+            || self.process_cgroup(&peer.process)? != cgroup
+        {
+            return Err(denied("agent is outside the compositor's systemd unit"));
+        }
+        let session =
+            allocated(|out| unsafe { (self.uid_display)(compositor.uid as libc::uid_t, out) })?;
+        let controller = controller(&session)?;
+        Ok((session, Some(controller), Some(cgroup)))
     }
     fn facts(&self, peer: &Peer, compositor: &Process) -> io::Result<Facts> {
         peer.check()?;
@@ -300,10 +335,18 @@ impl Logind {
         if peer.uid() != compositor.uid {
             return Err(denied("agent UID differs from compositor"));
         }
-        let session = self.process_session(compositor)?;
-        if self.process_session(&peer.process)? != session {
-            return Err(denied("agent is outside the compositor's login session"));
-        }
+        let (session, controller, cgroup) = match self.process_session(compositor) {
+            Err(error) if error.raw_os_error() == Some(libc::ENODATA) => {
+                self.controlled_session(peer, compositor)?
+            }
+            session => {
+                let session = session?;
+                if self.process_session(&peer.process)? != session {
+                    return Err(denied("agent is outside the compositor's login session"));
+                }
+                (session, None, None)
+            }
+        };
         let key = CString::new(session.as_str()).map_err(|_| invalid("invalid session ID"))?;
         let value =
             |function: SessionString| allocated(|out| unsafe { function(key.as_ptr(), out) });
@@ -326,6 +369,8 @@ impl Logind {
             state: value(self.session_state)?,
             active: checked(unsafe { (self.session_active)(key.as_ptr()) })? == 1,
             remote: checked(unsafe { (self.session_remote)(key.as_ptr()) })? != 0,
+            controller,
+            cgroup,
         };
         facts.validate(compositor.uid)?;
         peer.check()?;
@@ -343,6 +388,15 @@ impl Logind {
             return Err(denied("compositor process was replaced"));
         }
         let facts = self.facts(&peer, &compositor)?;
+        // Unique bus names are never reused, so rechecks compare only the name.
+        if let Some(name) = &facts.controller {
+            let name = CString::new(name.as_str()).map_err(|_| invalid("invalid bus name"))?;
+            if crate::sleep_watch::connection_pid(&self.library, &name)? != compositor.pid {
+                return Err(denied(
+                    "the display session's controller is not the compositor",
+                ));
+            }
+        }
         // Independent reads bracket registration; no partial or inconsistent
         // seat switch grants a binding. Later changes revoke this lifetime.
         if self.facts(&peer, &compositor)? != facts {
@@ -406,6 +460,55 @@ fn allocated(call: impl FnOnce(*mut *mut libc::c_char) -> i32) -> io::Result<Str
     value
 }
 
+fn user_manager_cgroup(cgroup: &str, uid: u32) -> bool {
+    cgroup
+        .strip_prefix(&format!("/user.slice/user-{uid}.slice/user@{uid}.service/"))
+        .is_some_and(|unit| !unit.is_empty())
+}
+
+/// Controller bus name of `session` from logind's root-owned session state.
+fn controller(session: &str) -> io::Result<String> {
+    const LIMIT: u64 = 16 * 1024;
+    if session.is_empty()
+        || session.len() > 64
+        || !session.bytes().all(|b| b.is_ascii_alphanumeric())
+    {
+        return Err(invalid("invalid session ID"));
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(format!("/run/systemd/sessions/{session}"))?;
+    let stat = file.metadata()?;
+    if !stat.is_file() || stat.uid() != 0 || stat.mode() & 0o022 != 0 || stat.len() > LIMIT {
+        return Err(denied("logind session state is not protected"));
+    }
+    let mut state = String::new();
+    file.take(LIMIT).read_to_string(&mut state)?;
+    controller_name(&state)
+}
+fn controller_name(state: &str) -> io::Result<String> {
+    let mut names = state
+        .lines()
+        .filter_map(|line| line.strip_prefix("CONTROLLER="));
+    let unique = |name: &str| {
+        name.strip_prefix(':')
+            .and_then(|name| name.split_once('.'))
+            .is_some_and(|(left, right)| {
+                [left, right].iter().all(|part| {
+                    (1..=10).contains(&part.len()) && part.bytes().all(|b| b.is_ascii_digit())
+                })
+            })
+    };
+    match (names.next(), names.next()) {
+        (Some(name), None) if unique(name) => Ok(name.to_owned()),
+        (None, _) => Err(denied(
+            "the compositor does not control the display session",
+        )),
+        _ => Err(invalid("logind session controller is malformed")),
+    }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 struct Facts {
     session: String,
@@ -418,6 +521,8 @@ struct Facts {
     state: String,
     active: bool,
     remote: bool,
+    controller: Option<String>,
+    cgroup: Option<String>,
 }
 impl Facts {
     fn validate(&self, expected_uid: u32) -> io::Result<()> {
@@ -532,6 +637,8 @@ mod tests {
             state: "active".into(),
             active: true,
             remote: false,
+            controller: None,
+            cgroup: None,
         };
         valid().validate(1000).unwrap();
         for change in 0..7 {
@@ -548,6 +655,38 @@ mod tests {
             assert!(facts.validate(1000).is_err());
         }
         assert!(valid().validate(1001).is_err());
+    }
+    #[test]
+    fn a_sessionless_compositor_needs_its_user_manager_and_exactly_one_controller() {
+        let unit = "/user.slice/user-1000.slice/user@1000.service/session.slice/wayland-wm@hyprland.desktop.service";
+        assert!(user_manager_cgroup(unit, 1000));
+        for cgroup in [
+            "/user.slice/user-1000.slice/user@1000.service/",
+            "/user.slice/user-1000.slice/session-2.scope",
+            "/system.slice/display-manager.service",
+        ] {
+            assert!(!user_manager_cgroup(cgroup, 1000), "{cgroup}");
+        }
+        assert!(!user_manager_cgroup(unit, 1001));
+        let state =
+            "# This is private data. Do not parse.\nUID=1000\nCONTROLLER=:1.20096\nDEVICES=13:66\n";
+        assert_eq!(controller_name(state).unwrap(), ":1.20096");
+        assert_eq!(
+            controller_name("UID=1000\n").unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        for state in [
+            "CONTROLLER=:1.2\nCONTROLLER=:1.3\n",
+            "CONTROLLER=org.example\n",
+            "CONTROLLER=:1.\n",
+            "CONTROLLER=:1.2 \n",
+        ] {
+            assert_eq!(
+                controller_name(state).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+        assert!(controller("../5157").is_err());
     }
     #[test]
     fn library_path_requires_explicit_system_policy() {

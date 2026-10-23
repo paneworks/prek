@@ -122,6 +122,12 @@ impl Connection {
         Ok(text.to_owned())
     }
     pub fn uid(&self, name: &CStr) -> io::Result<u32> {
+        self.number(c"GetConnectionUnixUser", name)
+    }
+    pub fn pid(&self, name: &CStr) -> io::Result<u32> {
+        self.number(c"GetConnectionUnixProcessID", name)
+    }
+    fn number(&self, method: &CStr, name: &CStr) -> io::Result<u32> {
         let mut reply = std::ptr::null_mut();
         let result = unsafe {
             (self.api.call)(
@@ -129,7 +135,7 @@ impl Connection {
                 c"org.freedesktop.DBus".as_ptr(),
                 c"/org/freedesktop/DBus".as_ptr(),
                 c"org.freedesktop.DBus".as_ptr(),
-                c"GetConnectionUnixUser".as_ptr(),
+                method.as_ptr(),
                 std::ptr::null_mut(),
                 &mut reply,
                 c"s".as_ptr(),
@@ -137,9 +143,9 @@ impl Connection {
             )
         };
         let reply = Reply::result(result, reply, self.api)?;
-        let mut uid = 0u32;
-        reply.basic(c"u", b'u', (&mut uid as *mut u32).cast())?;
-        Ok(uid)
+        let mut value = 0u32;
+        reply.basic(c"u", b'u', (&mut value as *mut u32).cast())?;
+        Ok(value)
     }
 }
 impl Drop for Connection {
