@@ -6,8 +6,8 @@ if [[ ${1:-} == --help ]]; then
   cat <<'HELP'
 Usage: ./tests/run-root-routing.sh
 Launch as your regular user, without sudo. Prompts for sudo before building.
-Runs fourteen routing, eight recovery, two transport-characterization, one
-generated-keyboard and one managed-worker gate (version-9 receipt, 26 cases).
+Runs fifteen routing, eight recovery, two transport-characterization, one
+generated-keyboard and one managed-worker gate (version-10 receipt, 27 cases).
 The managed gate logs nine kernel phases, single-counterpart keyboard/relative
 projection and cadence-preserving fallback, software admission, idle lease expiry,
 consumer neutral drain and worker cleanup. Native hybrid MT/compositor and

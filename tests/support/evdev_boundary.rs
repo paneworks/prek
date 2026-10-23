@@ -211,3 +211,25 @@ fn witness_without_prefix_preserves_a_postgrab_held_key() {
     assert_eq!(keys, [(30, 1), (30, 0)]);
     assert!(receiver.raw.is_grabbed());
 }
+
+#[test]
+#[ignore = "requires user-launched isolated root routing runner"]
+fn an_active_switch_keeps_the_source_out_of_a_neutral_handoff() {
+    // SW_CAMERA_LENS_COVER.
+    const LENS_COVER: u16 = 9;
+    let registry = authorized();
+    let mut device = fixture(false);
+    device
+        .capabilities
+        .insert(prek::input::EV_SW, vec![LENS_COVER]);
+    let mut source =
+        Virtual::create(registry.prepare_isolated(descriptor(&device)).unwrap()).unwrap();
+    let reader = Receiver::open(&source, &device.source);
+    assert!(reader.raw.is_grabbed());
+    let probe = StateProbe::new(&reader.raw).unwrap();
+    assert!(probe.is_neutral(&device).unwrap());
+    send(&mut source, 1, &[(prek::input::EV_SW, LENS_COVER, 1)]);
+    assert!(!probe.is_neutral(&device).unwrap());
+    send(&mut source, 2, &[(prek::input::EV_SW, LENS_COVER, 0)]);
+    assert!(probe.is_neutral(&device).unwrap());
+}

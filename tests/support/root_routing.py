@@ -15,6 +15,7 @@ import uuid
 
 PREFIX = "PREK_ROOT_ROUTING_RECEIPT="
 EXPECTED = {
+    "evdev_boundary::an_active_switch_keeps_the_source_out_of_a_neutral_handoff",
     "evdev_boundary::clock_change_with_backlog_reports_loss_before_fresh_input",
     "evdev_boundary::pregrab_backlog_and_postgrab_input_share_the_reader_queue",
     "evdev_boundary::witness_prefix_retains_concurrent_motion_after_the_grab",
@@ -419,7 +420,7 @@ def receipt(stdout):
     if len(values) != 1 or not isinstance(values[0], dict):
         raise ValueError("expected exactly one complete isolated kernel receipt")
     value = values[0]
-    expected = dict(version=9, status="passed", uid=0, passed=len(ALL_EXPECTED),
+    expected = dict(version=10, status="passed", uid=0, passed=len(ALL_EXPECTED),
                     routing_passed=len(EXPECTED), recovery_passed=len(RECOVERY_EXPECTED),
                     repeat_characterization_passed=1, repeat_passthrough_tested=False,
                     fuzz_characterization_passed=1, fuzz_passthrough_tested=False,
@@ -629,7 +630,7 @@ def run(args):
             raise RuntimeError("isolated device metadata remains; preserving it for inspection")
         if registry_snapshot(registry) != original_registry:
             raise RuntimeError("unrelated registry state changed; preserving it for inspection")
-    print(PREFIX + json.dumps(dict(version=9, status="passed", uid=0, kernel=os.uname().release,
+    print(PREFIX + json.dumps(dict(version=10, status="passed", uid=0, kernel=os.uname().release,
           tests=sorted(ALL_EXPECTED), passed=len(ALL_EXPECTED), routing_passed=len(EXPECTED), recovery_passed=8, physical_devices_opened=0,
           repeat_characterization_passed=1, repeat_passthrough_tested=False,
           fuzz_characterization_passed=1, fuzz_passthrough_tested=False,

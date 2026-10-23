@@ -162,7 +162,7 @@ def managed_output(phases=None, drains=None, software=None, hybrid=None, **chang
 
 class KernelReceipt(unittest.TestCase):
     def value(self):
-        return dict(version=9, status="passed", uid=0, kernel=os.uname().release,
+        return dict(version=10, status="passed", uid=0, kernel=os.uname().release,
                     tests=sorted(root.ALL_EXPECTED), passed=len(root.ALL_EXPECTED),
                     routing_passed=len(root.EXPECTED), recovery_passed=8, physical_devices_opened=0,
                     repeat_characterization_passed=1, repeat_passthrough_tested=False,
@@ -849,7 +849,7 @@ class RootRunModel(unittest.TestCase):
     def test_model_success_correlates_all_executables_and_removes_controls(self):
         with self.model() as (args, path, registry, rules, commands, output):
             root.run(args)
-            self.assertEqual(root.receipt(output.getvalue())["passed"], 26)
+            self.assertEqual(root.receipt(output.getvalue())["passed"], 27)
             self.assertEqual({entry.name for entry in path.iterdir()}, {"devices", "rules"})
             self.assertEqual(list(rules.iterdir()), [])
             self.assertEqual((registry / "foreign-record").read_text(), "preserved")

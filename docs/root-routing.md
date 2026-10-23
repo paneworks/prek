@@ -105,11 +105,12 @@ writes or injected worker-failure recovery. The production consumer boundary and
 public synthetic-input grant remain closed. Building/inventory checking this
 fixture is not a kernel execution result; its body is user-launched only.
 
-Fourteen routing gates cover keyboard/mouse/touchpad forwarding, keyboard LED feedback,
+Fifteen routing gates cover keyboard/mouse/touchpad forwarding, keyboard LED feedback,
 including the actual bounded source-write bridge, intact partial hardware frames,
 queued key releases and recovery after a wrapped uinput feedback ring,
 configured touch consumption/fallback and cadence, reader error/panic teardown,
-four evdev boundary experiments and sole-reader prefix/cutover/tail ordering.
+five evdev boundary experiments (one keeps an active camera-lens-cover switch out
+of a neutral handoff) and sole-reader prefix/cutover/tail ordering.
 Desktop context in configured routing tests
 is explicitly modeled. The tests do not establish stock-compositor retirement,
 physical takeover, live broker admission or phone acceptance.
@@ -160,8 +161,8 @@ Logs belong to your regular user under `target/root-routing/run-*`; `latest`
 points to that attempt. `console.log` records build, wrapper and cleanup output;
 `kernel.log` retains root probe stdout. `status.json` records running/passed/failed
 and the final exit code. `receipt.json` is written only after checking one complete
-version-9 root receipt, the exact fourteen routing, eight recovery, two transport
-characterization, one generated-keyboard and one managed-worker inventory, all twenty-six tests actually executed and passed,
+version-10 root receipt, the exact fifteen routing, eight recovery, two transport
+characterization, one generated-keyboard and one managed-worker inventory, all twenty-seven tests actually executed and passed,
 cleanup flags and the explicit scope limits. The recovery summary must match its
 eight per-case results. The repeat case must supply its complete typed observation
 record and exactly one passing test result; the receipt explicitly retains
@@ -187,7 +188,7 @@ cannot pass. Tell the agent when the script finishes so it can inspect these fil
 
 `oslo make test-root-routing` runs the unprivileged parser, actual owned-process
 and temporary-directory safety tests plus explicitly modeled privileged
-orchestration. It does not execute the twenty-six kernel cases or establish root
+orchestration. It does not execute the twenty-seven kernel cases or establish root
 acceptance. The Nix `root-routing-receipts` check also lints the launchers.
 `oslo make build-root-routing` builds the immutable runner without launching it.
 `oslo make test-native-managed-model` runs pure fixture models, compiles the
