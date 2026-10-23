@@ -717,6 +717,57 @@ fn teardown_drains_generated_releases_before_dropping_its_publication() {
 }
 
 #[test]
+fn input_held_through_a_revoked_generated_drain_is_delivered_after_it() {
+    for queued in [false, true] {
+        let mut fixture = Fixture::new(profile(), owner());
+        let (slot, _, generated) = slot(&fixture);
+        let raw = physical_file(&mut fixture, &device(), "raw-revoked");
+        fixture.stream.seats.get_mut("seat0").unwrap().keys = Some(slot);
+        fixture.stream.refresh_keys(monotonic().unwrap()).unwrap();
+        fixture.key(1, true);
+        for _ in 0..3 {
+            fixture.stream.flush().unwrap();
+        }
+        assert_eq!(events(&generated), [(42, 1)]);
+        let held = raw_frame(&device(), 2, &[(30, 0), (48, 1), (48, 0)]);
+        let mut revoked = fixture.owner.clone();
+        revoked.capabilities.remove(&Capability::SyntheticInput);
+        fixture.subscribe(revoked, 2);
+        fixture.stream.refresh_keys(monotonic().unwrap()).unwrap();
+        assert!(fixture.stream.key_drain_pending("seat0"));
+        let mut held = Some(held);
+        if queued {
+            let frame = held.take().unwrap();
+            fixture.stream.push(Record::Frame { frame }).unwrap();
+        }
+        let request = fixture
+            .drain()
+            .into_iter()
+            .find_map(|message| match message {
+                Message::KeyDrain { request } => Some(request),
+                _ => None,
+            })
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(!events(&raw).ends_with(&[(48, 1), (48, 0)]));
+        fixture.send(Command::KeyDrained {
+            request,
+            at: monotonic().unwrap(),
+        });
+        fixture.stream.refresh_keys(monotonic().unwrap()).unwrap();
+        assert!(!fixture.stream.key_drain_pending("seat0"));
+        if let Some(frame) = held {
+            fixture.stream.push(Record::Frame { frame }).unwrap();
+        }
+        for _ in 0..3 {
+            fixture.stream.flush().unwrap();
+        }
+        assert_eq!(events(&generated), [(42, 1), (42, 0)]);
+        assert!(events(&raw).ends_with(&[(48, 1), (48, 0)]));
+    }
+}
+
+#[test]
 fn runtime_route_replacement_accepts_the_fresh_reader_incarnation() {
     let mut fixture = Fixture::new(profile(), owner());
     let (slot, _descriptor, path) = slot(&fixture);

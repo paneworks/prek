@@ -777,7 +777,10 @@ registration deadlines. Fresh metadata cannot revive an expired lease. Active
 leases advertise wake deadlines even with no input frames or pending writes.
 Local cancellation retains same-seat cleanup barriers within the existing
 250 ms drain bound. The slot's separate consumer-drain acknowledgement still
-fences final writer removal and original-reader release.
+fences final writer removal and original-reader release. Same-seat input
+withheld during that drain is retimed after it with its cadence intact, within
+the 300 ms offset limit; input already late when the drain began still faults as
+missed delivery.
 
 Queued software operations capture a key-domain boundary after the last accepted
 input frame. Earlier raw reports finish first; later ordered reports wait for the

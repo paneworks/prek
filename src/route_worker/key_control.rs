@@ -111,7 +111,28 @@ impl Stream {
                 keys.poll(&mut seat.routing, now)?;
             }
         }
+        self.track_key_holds(now)?;
         self.offer_key_drains()
+    }
+    /// Retimes a seat's withheld input once its generated drain completes.
+    fn track_key_holds(&mut self, now: Duration) -> io::Result<()> {
+        let seats: BTreeSet<_> = self
+            .key_holds
+            .keys()
+            .chain(self.seats.keys())
+            .cloned()
+            .chain(self.closing_keys.iter().map(|keys| keys.seat().to_owned()))
+            .collect();
+        for seat in seats {
+            if self.key_drain_pending(&seat) {
+                self.key_holds.entry(seat).or_insert(now);
+            } else if let Some(start) = self.key_holds.remove(&seat)
+                && let Some(owner) = self.seats.get_mut(&seat)
+            {
+                owner.routing.defer_input(start, now)?;
+            }
+        }
+        Ok(())
     }
     pub(super) fn service_keys(&mut self, health: Option<&Heartbeat>) -> io::Result<()> {
         let now = monotonic()?;

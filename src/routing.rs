@@ -1124,6 +1124,24 @@ impl Routing {
             .due_after_input(now)
             .map_err(fault)
     }
+    /// Retimes every route's input withheld from `start` until `until`.
+    pub(crate) fn defer_input(&mut self, start: Duration, until: Duration) -> io::Result<()> {
+        let sources: Vec<_> = self.routes.keys().cloned().collect();
+        for source in sources {
+            let result = self
+                .routes
+                .get_mut(&source)
+                .unwrap()
+                .router
+                .defer(start, until)
+                .map_err(fault);
+            if let Err(error) = result {
+                self.recover(&source);
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
     pub(crate) fn delivered_after_input(
         &mut self,
         source: &Source,

@@ -243,6 +243,7 @@ pub struct Router {
     pending_keyboard: Option<keyboard::pending::Journal>,
     key_barrier: Option<crate::input::InputPosition>,
     key_offset_floor: Duration,
+    deferred: Option<(Duration, Duration)>,
     positions: BTreeMap<u64, InputSpan>,
     input_marks: BTreeMap<u64, u64>,
 }
@@ -296,6 +297,7 @@ impl Router {
             positions: BTreeMap::new(),
             key_barrier: None,
             key_offset_floor: Duration::ZERO,
+            deferred: None,
             input_marks: BTreeMap::new(),
         })
     }
@@ -423,6 +425,22 @@ impl Router {
 
     fn schedule(&mut self, frame: Frame) -> Result<(), Fault> {
         self.capacity(frame.events.len())?;
+        if let Some((start, until)) = self.deferred {
+            if frame.at >= until {
+                self.deferred = None;
+            } else {
+                let Some(planned) = frame.at.checked_add(self.offset) else {
+                    return self.fail(Fault::Overflow);
+                };
+                let offset = self.offset.max(until - frame.at);
+                if start.saturating_sub(planned) > self.limits.scheduler_slack
+                    || offset > self.limits.offset
+                {
+                    return self.fail(Fault::MissedDelivery);
+                }
+                self.offset = offset;
+            }
+        }
         let Some(due) = frame.at.checked_add(self.offset) else {
             return self.fail(Fault::Overflow);
         };
@@ -901,6 +919,37 @@ impl Router {
     pub(crate) fn due_after_input(&mut self, at: Duration) -> Result<Option<&Scheduled>, Fault> {
         self.delivery_clock(at)?;
         Ok(self.queue.front().filter(|entry| entry.due <= at))
+    }
+    /// Retimes input the caller withheld from `start` until `until`: queued
+    /// frames and later frames older than `until` keep their cadence after it.
+    pub(crate) fn defer(&mut self, start: Duration, until: Duration) -> Result<(), Fault> {
+        if self.stopped {
+            return Err(Fault::Stopped);
+        }
+        if until < start {
+            return self.fail(Fault::BackwardTime);
+        }
+        if let Some(first) = self.queue.front() {
+            if start.saturating_sub(first.due) > self.limits.scheduler_slack {
+                return self.fail(Fault::MissedDelivery);
+            }
+            let shift = until.saturating_sub(first.due);
+            let Some(offset) = self.offset.checked_add(shift) else {
+                return self.fail(Fault::Overflow);
+            };
+            if offset > self.limits.offset {
+                return self.fail(Fault::MissedDelivery);
+            }
+            for entry in &mut self.queue {
+                let Some(due) = entry.due.checked_add(shift) else {
+                    return self.fail(Fault::Overflow);
+                };
+                entry.due = due;
+            }
+            self.offset = offset;
+        }
+        self.deferred = Some((start, until));
+        Ok(())
     }
     fn delivery_clock(&mut self, at: Duration) -> Result<(), Fault> {
         if self.stopped {
@@ -1566,5 +1615,44 @@ mod tests {
         router.cancel(1, 1, ms(20)).unwrap();
         assert_eq!(deliver(&mut router, 20).unwrap().sequence, 1);
         assert_eq!(deliver(&mut router, 40).unwrap().sequence, 2);
+    }
+
+    #[test]
+    fn deferred_input_keeps_its_cadence_after_the_hold() {
+        let mut router = router(Limits::default());
+        router.push(down(1, 0, 0, 10), None, ms(0)).unwrap();
+        router.defer(ms(5), ms(60)).unwrap();
+        router.push(up(2, 30, 0), None, ms(30)).unwrap();
+        let dues: Vec<_> = router.queue.iter().map(|entry| entry.due).collect();
+        assert_eq!(dues, [ms(60), ms(90)]);
+        assert_eq!(deliver(&mut router, 60).unwrap().sequence, 1);
+        assert!(router.due_after_input(ms(89)).unwrap().is_none());
+        assert_eq!(deliver(&mut router, 90).unwrap().sequence, 2);
+        let mut router = self::router(Limits::default());
+        router.defer(ms(10), ms(50)).unwrap();
+        router.push(down(1, 20, 0, 10), None, ms(20)).unwrap();
+        router.push(up(2, 35, 0), None, ms(35)).unwrap();
+        let dues: Vec<_> = router.queue.iter().map(|entry| entry.due).collect();
+        assert_eq!(dues, [ms(50), ms(65)]);
+        assert_eq!(deliver(&mut router, 50).unwrap().sequence, 1);
+        assert_eq!(deliver(&mut router, 65).unwrap().sequence, 2);
+    }
+
+    #[test]
+    fn deferral_cannot_hide_input_missed_before_the_hold_or_exceed_the_offset() {
+        let mut router = router(Limits::default());
+        router.push(down(1, 0, 0, 10), None, ms(0)).unwrap();
+        assert_eq!(router.defer(ms(30), ms(40)), Err(Fault::MissedDelivery));
+        let mut router = self::router(Limits::default());
+        router.push(down(1, 0, 0, 10), None, ms(0)).unwrap();
+        assert_eq!(router.defer(ms(10), ms(400)), Err(Fault::MissedDelivery));
+        let mut router = self::router(Limits::default());
+        router.defer(ms(50), ms(60)).unwrap();
+        assert_eq!(
+            router.push(down(1, 10, 0, 10), None, ms(10)),
+            Err(Fault::MissedDelivery)
+        );
+        let mut router = self::router(Limits::default());
+        assert_eq!(router.defer(ms(60), ms(50)), Err(Fault::BackwardTime));
     }
 }

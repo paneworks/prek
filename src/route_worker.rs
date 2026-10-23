@@ -120,6 +120,7 @@ pub struct Stream {
     pending_bytes: usize,
     closing_keys: Vec<keys::Slot>,
     closing_outputs: Vec<(crate::router::Recovery, Output)>,
+    key_holds: BTreeMap<String, Duration>,
     key_generation: u64,
     key_failure: Option<io::Error>,
 }
@@ -332,6 +333,7 @@ impl Stream {
             pending_bytes: 0,
             closing_keys: Vec::new(),
             closing_outputs: Vec::new(),
+            key_holds: BTreeMap::new(),
             key_generation: 0,
             key_failure: None,
         })
