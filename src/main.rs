@@ -2761,6 +2761,14 @@ fn read_config(path: &std::path::Path) -> io::Result<String> {
     Ok(text)
 }
 
+/// A configuration ancestor directory only root can change: root-owned and
+/// either unwritable by group and others, or sticky like `/nix/store`, so no
+/// other user can rename or replace its root-owned entries.
+#[cfg(target_os = "linux")]
+fn protected_ancestor(uid: u32, mode: u32) -> bool {
+    uid == 0 && (mode & 0o022 == 0 || mode & 0o1000 != 0)
+}
+
 #[cfg(target_os = "linux")]
 fn read_system_config(path: &std::path::Path) -> io::Result<String> {
     use std::os::unix::fs::MetadataExt;
@@ -2775,7 +2783,7 @@ fn read_system_config(path: &std::path::Path) -> io::Result<String> {
         .flat_map(std::path::Path::ancestors)
     {
         let stat = std::fs::metadata(directory)?;
-        if !stat.is_dir() || stat.uid() != 0 || stat.mode() & 0o022 != 0 {
+        if !stat.is_dir() || !protected_ancestor(stat.uid(), stat.mode()) {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "broker configuration requires protected root-owned parent directories",
@@ -2870,4 +2878,17 @@ fn run(_command: Command) -> io::Result<()> {
         io::ErrorKind::Unsupported,
         "the input monitor requires Linux",
     ))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    #[test]
+    fn sticky_root_directories_like_the_nix_store_protect_root_owned_configuration() {
+        assert!(super::protected_ancestor(0, 0o40755));
+        assert!(super::protected_ancestor(0, 0o41775));
+        assert!(super::protected_ancestor(0, 0o41777));
+        assert!(!super::protected_ancestor(0, 0o40775));
+        assert!(!super::protected_ancestor(0, 0o40757));
+        assert!(!super::protected_ancestor(30000, 0o41775));
+    }
 }
