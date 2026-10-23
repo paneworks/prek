@@ -171,6 +171,10 @@ impl Stream {
             .seats
             .get_mut(&source.seat)
             .ok_or_else(|| invalid("takeover seat is gone"))?;
+        eprintln!(
+            "routing worker: {} taken over at a neutral idle cut",
+            device.name
+        );
         seat.routing.attach(device, &ready, None, at)?;
         self.grabbed.insert(source.clone());
         Ok(())

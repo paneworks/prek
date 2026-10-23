@@ -195,3 +195,17 @@ custom harness and checks its inventory without invoking the kernel body.
 
 The separate `tests/run-root-handoff.sh` remains the native Morf/root/logind
 probe. Ordinary builds and Cage runs execute neither root script automatically.
+
+## Physical takeover trial
+
+`tests/run-takeover-trial.sh --device "<exact kernel name>" [--seconds N]` is the
+first test on a real device. Run it as your user from a terminal inside your
+Hyprland session; it asks for sudo before building. It writes a route
+configuration with one selector for that name and no rules, installs it
+root-owned under `/run/prek-trial`, temporarily installs Prek's udev metadata
+rule under `/run/udev/rules.d`, then runs a route broker and a session agent for
+N seconds (default 60, at most 300). Every device with that exact name is
+routed: each is taken over only after it is neutral and idle for 100 ms, and the
+broker releases it when it exits. Input should behave exactly as before. Logs
+are under `target/takeover-trial/latest/`; `broker.log` records each takeover
+or the reason a device stayed with Hyprland.

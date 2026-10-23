@@ -363,6 +363,8 @@
             python3 -m unittest discover -s receipts/tests/support -p test_root_routing.py -v > "$out" 2>&1
             bash -n ${./tests/run-root-routing.sh}
             shellcheck ${./tests/run-root-routing.sh}
+            bash -n ${./tests/run-takeover-trial.sh}
+            shellcheck ${./tests/run-takeover-trial.sh}
             bash -n ${self.packages.${system}.root-routing-test}/bin/prek-root-routing-test
             shellcheck ${self.packages.${system}.root-routing-test}/bin/prek-root-routing-test
           '';

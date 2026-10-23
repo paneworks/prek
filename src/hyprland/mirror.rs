@@ -180,13 +180,9 @@ pub(super) fn identity(class: Class, name: &str) -> (&'static str, String) {
     }
 }
 
-/// The only inventory entry named exactly `name`; a `-N` duplicate is an error.
-pub(super) fn unique<'a>(
-    inventory: &'a Value,
-    group: &str,
-    name: &str,
-) -> io::Result<Option<&'a Value>> {
-    let matches: Vec<_> = inventory[group]
+/// Inventory entries with exactly the Hyprland `name` or its `-N` duplicates.
+pub(super) fn named<'a>(inventory: &'a Value, group: &str, name: &str) -> Vec<&'a Value> {
+    inventory[group]
         .as_array()
         .unwrap()
         .iter()
@@ -199,7 +195,16 @@ pub(super) fn unique<'a>(
                         !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
                     })
         })
-        .collect();
+        .collect()
+}
+
+/// The only inventory entry named exactly `name`; a `-N` duplicate is an error.
+pub(super) fn unique<'a>(
+    inventory: &'a Value,
+    group: &str,
+    name: &str,
+) -> io::Result<Option<&'a Value>> {
+    let matches = named(inventory, group, name);
     if matches.is_empty() {
         return Ok(None);
     }
@@ -209,6 +214,35 @@ pub(super) fn unique<'a>(
         ));
     }
     Ok(Some(matches[0]))
+}
+
+/// One of the same-named entries that may be the mirrored original, when all
+/// of them show the same visible settings.
+pub(super) fn original<'a>(
+    class: Class,
+    inventory: &'a Value,
+    name: &str,
+) -> io::Result<Option<&'a Value>> {
+    let (group, name) = identity(class, name);
+    let candidates = named(inventory, group, &name);
+    let fields = [
+        "rules",
+        "model",
+        "layout",
+        "variant",
+        "options",
+        "scrollFactor",
+    ];
+    if candidates.windows(2).any(|pair| {
+        fields
+            .iter()
+            .any(|field| pair[0].get(field) != pair[1].get(field))
+    }) {
+        return Err(invalid(
+            "same-named original devices show different compositor settings",
+        ));
+    }
+    Ok(candidates.first().copied())
 }
 
 /// The verified compositor's event stream, read for configuration reloads.
@@ -290,8 +324,7 @@ impl Client {
             return Err(invalid("compositor device batch is incomplete"));
         }
         validate_inventory(inventory)?;
-        let (group, name) = identity(descriptor.class, &original.name);
-        let mut settings = match unique(inventory, group, &name)? {
+        let mut settings = match self::original(descriptor.class, inventory, &original.name)? {
             Some(entry) => visible(descriptor.class, entry, globals)?,
             None => BTreeMap::new(),
         };

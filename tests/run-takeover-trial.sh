@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# User-launched physical takeover trial on one named device in the current Hyprland session.
+set -euo pipefail
+repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+usage() {
+  cat <<'HELP'
+Usage: ./tests/run-takeover-trial.sh --device "<exact kernel device name>" [--seconds N]
+Launch as your regular user from a terminal inside your Hyprland session.
+Prompts for sudo before building. Routes only the named device through a
+temporary route broker for N seconds (default 60, 10..300) with no rules, so
+input should behave exactly as before. The broker takes the device over only
+after it has been neutral and idle for 100 ms, and exits by itself when the
+time is up, releasing the device; Ctrl-C ends it early.
+Temporarily installs Prek's udev metadata rule under /run/udev/rules.d and a
+root-owned trial configuration under /run/prek-trial; both are removed on exit.
+Device names: grep '^N: Name=' /proc/bus/input/devices
+Logs: target/takeover-trial/latest/{console.log,broker.log,session.log,status.json}
+HELP
+}
+device=""
+seconds=60
+while (($#)); do
+  case "$1" in
+    --device) device=${2:-}; shift 2 ;;
+    --seconds) seconds=${2:-}; shift 2 ;;
+    --help) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+  esac
+done
+if ((EUID == 0)) || [[ -z $device ]] || ! [[ $seconds =~ ^[0-9]+$ ]] || ((seconds < 10 || seconds > 300)); then
+  usage >&2
+  exit 2
+fi
+: "${HYPRLAND_INSTANCE_SIGNATURE:?Run from a terminal inside your Hyprland session}"
+if ! grep -Fxq "N: Name=\"$device\"" /proc/bus/input/devices; then
+  echo "No input device is named exactly \"$device\"." >&2
+  exit 2
+fi
+if [[ $device == *[\'\"\\]* ]]; then
+  echo "Device names with quotes or backslashes are not supported by this trial." >&2
+  exit 2
+fi
+mkdir -p "$repo/target/takeover-trial"
+run=$(mktemp -d "$repo/target/takeover-trial/run-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")
+ln -sfn -- "$run" "$repo/target/takeover-trial/latest"
+exec > >(tee -a "$run/console.log") 2>&1
+rule=/run/udev/rules.d/70-prek-trial.rules
+trial=/run/prek-trial
+broker=""
+session=""
+finish() {
+  result=$?
+  trap - EXIT
+  if [[ -n $session ]]; then kill "$session" 2>/dev/null || true; fi
+  if [[ -n $broker ]]; then kill -TERM "$broker" 2>/dev/null || true; wait "$broker" 2>/dev/null || true; fi
+  sudo -n rm -f "$rule" 2>/dev/null && sudo -n udevadm control --reload-rules 2>/dev/null || true
+  sudo -n rm -rf "$trial" 2>/dev/null || true
+  if [[ -n ${keepalive:-} ]]; then kill "$keepalive" 2>/dev/null || true; fi
+  status=failed
+  if ((result == 0)); then status=passed; fi
+  printf '{"status":"%s","exit_code":%d}\n' "$status" "$result" > "$run/status.json"
+  printf '\nResult: %s (exit %d). Logs: %s\n' "$status" "$result" "$run"
+  exit "$result"
+}
+trap finish EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+printf '{"status":"running"}\n' > "$run/status.json"
+printf 'Takeover trial for "%s", %d s. Started: %s\nLogs: %s\n' "$device" "$seconds" "$(date -u +%FT%TZ)" "$run"
+git -C "$repo" rev-parse HEAD
+git -C "$repo" status --short
+# Authenticates once, then keeps the sudo timestamp valid until exit.
+sudo -v
+while sleep 60; do sudo -n -v || exit; done </dev/null >/dev/null 2>&1 &
+keepalive=$!
+nix --option eval-cache false --extra-experimental-features 'nix-command flakes' \
+  --max-jobs 1 --cores 2 build --no-write-lock-file --out-link "$run/prek" "$repo#default"
+prek="$run/prek/bin/prek"
+cat > "$run/config.toml" <<CONFIG
+version = 1
+mode = "route"
+
+[policy]
+allowed_devices = ["trial"]
+allowed_seats = ["seat0"]
+
+[devices.trial]
+name = "$device"
+CONFIG
+"$prek" check --config "$run/config.toml" --json > "$run/check.json"
+pid=$(hyprctl -j instances | jq -er --arg instance "$HYPRLAND_INSTANCE_SIGNATURE" \
+  '.[] | select(.instance == $instance) | .pid')
+compositor=$(readlink -f "/proc/$pid/exe")
+logind=$(readlink -f /run/current-system/sw/lib/libsystemd.so.0)
+printf 'Compositor: %s (pid %s)\nlibsystemd: %s\n' "$compositor" "$pid" "$logind"
+sudo install -d -m 0755 -o root -g root "$trial"
+sudo install -m 0644 -o root -g root "$run/config.toml" "$trial/config.toml"
+sudo install -m 0644 -o root -g root "$run/prek/lib/udev/rules.d/70-prek.rules" "$rule"
+sudo udevadm control --reload-rules
+# shellcheck disable=SC2024
+sudo "$prek" broker --mode route --config "$trial/config.toml" --runtime-dir "$trial/runtime" \
+  --compositor-executable "$compositor" --logind-library "$logind" --json --duration "$seconds" \
+  > "$run/broker.log" 2>&1 &
+broker=$!
+for _ in $(seq 100); do
+  if sudo -n test -S "$trial/runtime/control.sock"; then break; fi
+  if ! kill -0 "$broker" 2>/dev/null; then wait "$broker"; fi
+  sleep 0.1
+done
+"$prek" session --socket "$trial/runtime/control.sock" --observations --context \
+  --duration "$((seconds - 2))" \
+  > "$run/session.log" 2>&1 &
+session=$!
+printf '\nType and use "%s" normally for %d seconds. If it stops responding,\n' "$device" "$seconds"
+printf 'wait for the timer or press Ctrl-C; the broker then releases it.\n\n'
+wait "$session" || echo "session agent exited with status $?"
+session=""
+wait "$broker"
+broker=""
+grep -E 'taken over|stays with its original consumer|keeps no consumer evidence|lost its device settings' \
+  "$run/broker.log" || echo "No takeover outcome was logged for \"$device\"."

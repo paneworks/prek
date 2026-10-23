@@ -480,10 +480,7 @@ impl Client {
             return Ok(None);
         };
         let original = match descriptor.physical_origin() {
-            Some(original) => {
-                let (group, name) = mirror::identity(descriptor.class, &original.name);
-                mirror::unique(&inventory, group, &name)?
-            }
+            Some(original) => mirror::original(descriptor.class, &inventory, &original.name)?,
             None => None,
         };
         let settings = verified_settings(entry, original, descriptor)?;

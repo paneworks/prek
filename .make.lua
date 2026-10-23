@@ -478,6 +478,8 @@ make.recipe{ name = "test-root-routing", desc = "unprivileged kernel-runner rece
                sh.python3("-m", "unittest", "discover", "-s", "tests/support", "-p", "test_root_routing.py", "-v")
                sh.bash("-n", "tests/run-root-routing.sh")
                sh.shellcheck("tests/run-root-routing.sh")
+               sh.bash("-n", "tests/run-takeover-trial.sh")
+               sh.shellcheck("tests/run-takeover-trial.sh")
              end }
 
 make.recipe{ name="build-root-routing",desc="build the user-launched kernel runner without running it",

@@ -187,3 +187,32 @@ fn a_reload_is_reported_once_even_when_its_line_arrives_in_pieces() {
     drop(compositor);
     assert!(events.reloaded().is_err());
 }
+
+#[test]
+fn same_named_originals_are_accepted_only_when_their_visible_settings_agree() {
+    let keyboard = |name: &str, layout: &str| {
+        serde_json::json!({"address":"0x1","name":name,"rules":"","model":"",
+            "layout":layout,"variant":"","options":""})
+    };
+    let inventory = |keyboards: Vec<Value>| serde_json::json!({"keyboards":keyboards,"mice":[],"touch":[],"switches":[],"tablets":[]});
+    let agreeing = inventory(vec![
+        keyboard("sipeed-nanokvm", "de"),
+        keyboard("sipeed-nanokvm-1", "de"),
+        keyboard("prek-virtual-0000000000000007-sipeed-nanokvm", "us"),
+    ]);
+    let found = original(Class::Keyboard, &agreeing, "sipeed NanoKVM")
+        .unwrap()
+        .unwrap();
+    assert_eq!(found["layout"], "de");
+    let differing = inventory(vec![
+        keyboard("sipeed-nanokvm", "de"),
+        keyboard("sipeed-nanokvm-1", "us"),
+    ]);
+    assert!(original(Class::Keyboard, &differing, "sipeed NanoKVM").is_err());
+    assert!(
+        original(Class::Keyboard, &inventory(vec![]), "sipeed NanoKVM")
+            .unwrap()
+            .is_none()
+    );
+    assert!(unique(&agreeing, "keyboards", "sipeed-nanokvm").is_err());
+}
