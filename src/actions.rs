@@ -497,10 +497,7 @@ impl Executor {
                 "compositor context belongs to another owner",
             ));
         }
-        let executable =
-            std::path::PathBuf::from(format!("/proc/{}/exe", context.binding.compositor_pid));
-        let client =
-            crate::hyprland::Client::open(runtime, instance, context.binding.uid, &executable)?;
+        let client = crate::hyprland::Client::open_bound(runtime, instance, &context.binding)?;
         Ok(Some(client))
     }
     pub fn grant(

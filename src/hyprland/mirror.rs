@@ -285,13 +285,12 @@ impl Client {
         let stream = connect(&path, Instant::now() + REQUEST_TIME)?;
         let stat = fs::symlink_metadata(&path)?;
         let peer = credentials(&stream)?;
-        let executable = fs::metadata(format!("/proc/{}/exe", self.pid))?;
         if !stat.file_type().is_socket()
             || stat.uid() != self.uid
             || peer.pid != self.pid as i32
             || peer.uid != self.uid
             || birth(self.pid)? != self.start
-            || (executable.dev(), executable.ino()) != self.executable
+            || executable_identity(self.pid)? != self.executable
         {
             return Err(denied("compositor event socket binding differs"));
         }

@@ -1482,7 +1482,10 @@ The host supplies a broker-approved binding/view and an already verified
 Hyprland client; these are not Lua authority setters. The public session agent
 uses `Executor::sync_power_context` to open the exact compositor from its fresh
 broker binding, verify process birth/executable/UID and private endpoint, and
-install the adapter. It refreshes this view without depending on a running Lua
+install the adapter. A compositor holding capabilities is not dumpable, so the
+kernel hides its executable from the agent; the agent then relies on the
+broker, which checked that executable as root, and still requires the exact
+PID, process birth, UID and endpoint on every request. It refreshes this view without depending on a running Lua
 VM. Fence changes retire the old adapter. This supplies no raw fd or authority
 setter to user Lua.
 

@@ -91,6 +91,16 @@ fn birth(pid: u32) -> io::Result<u64> {
         .ok_or_else(|| invalid("compositor process identity is missing"))
 }
 
+/// Executable device and inode, or none while the kernel hides a non-dumpable
+/// process's executable from this UID.
+fn executable_identity(pid: u32) -> io::Result<Option<(u64, u64)>> {
+    match fs::metadata(format!("/proc/{pid}/exe")) {
+        Ok(stat) => Ok(Some((stat.dev(), stat.ino()))),
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 fn wait(fd: i32, events: i16, until: Instant) -> io::Result<()> {
     loop {
         let remaining = until.saturating_duration_since(Instant::now());
@@ -205,7 +215,8 @@ pub(crate) fn connect(path: &Path, until: Instant) -> io::Result<UnixStream> {
 
 /// A policy-selected compositor executable and private instance directory.
 /// The caller supplies the UID/executable from trusted registration policy,
-/// rather than accepting either from an unverified client claim.
+/// or a binding the broker verified with them, rather than accepting either
+/// from an unverified client claim.
 #[derive(Debug)]
 pub struct Client {
     directory: File,
@@ -213,7 +224,7 @@ pub struct Client {
     uid: u32,
     pid: u32,
     start: u64,
-    executable: (u64, u64),
+    executable: Option<(u64, u64)>,
     instance: String,
     version: Version,
 }
@@ -234,6 +245,83 @@ impl Client {
         })
     }
     pub fn open(runtime: &Path, instance: &str, uid: u32, executable: &Path) -> io::Result<Self> {
+        let (directory, socket_inode, stream, pid) = Self::endpoint(runtime, instance, uid)?;
+        let expected = fs::metadata(executable)?;
+        let expected = Some((expected.dev(), expected.ino()));
+        if executable_identity(pid)? != expected {
+            return Err(denied(
+                "compositor executable differs from registration policy",
+            ));
+        }
+        let start = birth(pid)?;
+        drop(stream);
+        Self::bind(
+            directory,
+            socket_inode,
+            uid,
+            (pid, start),
+            expected,
+            instance,
+        )
+    }
+    /// Open the exact compositor process a broker-verified binding names. Its
+    /// executable is rechecked on every request only when this UID can see it.
+    pub fn open_bound(
+        runtime: &Path,
+        instance: &str,
+        binding: &crate::context::Binding,
+    ) -> io::Result<Self> {
+        let (directory, socket_inode, stream, pid) =
+            Self::endpoint(runtime, instance, binding.uid)?;
+        let start = birth(pid)?;
+        if pid != binding.compositor_pid || start != binding.compositor_start {
+            return Err(denied("compositor socket peer differs from its binding"));
+        }
+        let executable = executable_identity(pid)?;
+        drop(stream);
+        Self::bind(
+            directory,
+            socket_inode,
+            binding.uid,
+            (pid, start),
+            executable,
+            instance,
+        )
+    }
+    fn bind(
+        directory: File,
+        socket_inode: u64,
+        uid: u32,
+        (pid, start): (u32, u64),
+        executable: Option<(u64, u64)>,
+        instance: &str,
+    ) -> io::Result<Self> {
+        let mut client = Self {
+            directory,
+            socket_inode,
+            uid,
+            pid,
+            start,
+            executable,
+            instance: instance.into(),
+            version: Version {
+                major: 0,
+                minor: 0,
+                patch: 0,
+            },
+        };
+        // The initial connection carries no request. Every real request verifies
+        // the same peer, executable, birth and endpoint before and after I/O.
+        client.version = Version::parse(&client.query("version")?)?;
+        Ok(client)
+    }
+    /// Private instance directory, socket inode, connection and peer PID of a
+    /// compositor endpoint owned by `uid`.
+    fn endpoint(
+        runtime: &Path,
+        instance: &str,
+        uid: u32,
+    ) -> io::Result<(File, u64, UnixStream, u32)> {
         if !runtime.is_absolute()
             || instance.is_empty()
             || instance.len() > 160
@@ -275,33 +363,7 @@ impl Client {
                 "compositor socket peer does not match registered UID",
             ));
         }
-        let expected = fs::metadata(executable)?;
-        let actual = fs::metadata(format!("/proc/{}/exe", credentials.pid))?;
-        if (actual.dev(), actual.ino()) != (expected.dev(), expected.ino()) {
-            return Err(denied(
-                "compositor executable differs from registration policy",
-            ));
-        }
-        let pid = credentials.pid as u32;
-        let mut client = Self {
-            directory,
-            socket_inode: stat.ino(),
-            uid,
-            pid,
-            start: birth(pid)?,
-            executable: (expected.dev(), expected.ino()),
-            instance: instance.into(),
-            version: Version {
-                major: 0,
-                minor: 0,
-                patch: 0,
-            },
-        };
-        // The initial connection carries no request. Every real request verifies
-        // the same peer, executable, birth and endpoint before and after I/O.
-        drop(stream);
-        client.version = Version::parse(&client.query("version")?)?;
-        Ok(client)
+        Ok((directory, stat.ino(), stream, credentials.pid as u32))
     }
 
     fn socket_path(&self) -> PathBuf {
@@ -310,14 +372,13 @@ impl Client {
     fn verify(&self, stream: &UnixStream) -> io::Result<()> {
         let stat = fs::symlink_metadata(self.socket_path())?;
         let peer = credentials(stream)?;
-        let executable = fs::metadata(format!("/proc/{}/exe", self.pid))?;
         if !stat.file_type().is_socket()
             || stat.ino() != self.socket_inode
             || stat.uid() != self.uid
             || peer.pid != self.pid as i32
             || peer.uid != self.uid
             || birth(self.pid)? != self.start
-            || (executable.dev(), executable.ino()) != self.executable
+            || executable_identity(self.pid)? != self.executable
         {
             return Err(denied("compositor binding changed"));
         }
@@ -713,6 +774,47 @@ mod tests {
         let peer = credentials(&stream).unwrap();
         assert_eq!(peer.pid as u32, std::process::id());
         assert_eq!(peer.uid, unsafe { libc::geteuid() });
+    }
+    #[test]
+    fn non_dumpable_executables_are_hidden_rather_than_errors() {
+        let visible = executable_identity(std::process::id()).unwrap();
+        assert!(visible.is_some());
+        let mut ready = [0; 2];
+        // SAFETY: one fresh close-on-exec pipe pair.
+        assert_eq!(
+            unsafe { libc::pipe2(ready.as_mut_ptr(), libc::O_CLOEXEC) },
+            0
+        );
+        // SAFETY: the child makes only raw system calls until it is killed.
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0);
+        if child == 0 {
+            unsafe {
+                libc::prctl(libc::PR_SET_DUMPABLE, 0);
+                libc::write(ready[1], b"r".as_ptr().cast(), 1);
+                loop {
+                    libc::pause();
+                }
+            }
+        }
+        let mut byte = 0_u8;
+        // SAFETY: a one-byte read into a live local from the pipe read end.
+        let read = unsafe { libc::read(ready[0], (&raw mut byte).cast(), 1) };
+        let hidden = executable_identity(child as u32);
+        // SAFETY: kills and reaps this test's own child, then closes its pipe.
+        unsafe {
+            libc::kill(child, libc::SIGKILL);
+            libc::waitpid(child, std::ptr::null_mut(), 0);
+            libc::close(ready[0]);
+            libc::close(ready[1]);
+        }
+        assert_eq!(read, 1);
+        let expected = if unsafe { libc::geteuid() } == 0 {
+            visible
+        } else {
+            None
+        };
+        assert_eq!(hidden.unwrap(), expected);
     }
     #[test]
     fn versions_are_explicit_and_unknown_schemas_refuse() {

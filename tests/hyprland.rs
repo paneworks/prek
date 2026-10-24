@@ -202,6 +202,32 @@ fn registration_rejects_wrong_executable_and_nonprivate_directories() {
 }
 
 #[test]
+fn bound_clients_open_only_the_exact_compositor_process() {
+    let server = Server::new(EMPTY, Duration::ZERO);
+    let prek::transport::Consumer::Hyprland { pid, start, .. } = server.client().consumer() else {
+        panic!("Hyprland client has another consumer kind");
+    };
+    let binding = |compositor_pid, compositor_start| prek::context::Binding {
+        seat: "seat0".into(),
+        session: "1".into(),
+        uid: uid(),
+        compositor_pid,
+        compositor_start,
+        kind: prek::context::SessionKind::User,
+    };
+    let client = Client::open_bound(&server.directory, "test", &binding(pid, start)).unwrap();
+    assert!(client.inventory().is_ok());
+    for (other_pid, other_start) in [(pid, start + 1), (1, start)] {
+        assert_eq!(
+            Client::open_bound(&server.directory, "test", &binding(other_pid, other_start))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
+}
+
+#[test]
 fn stalled_or_malformed_compositor_replies_fail_within_the_budget() {
     let server = Server::new(EMPTY, Duration::from_millis(500));
     let client = server.client();
