@@ -115,7 +115,16 @@ fn discover() -> io::Result<Vec<Discovered>> {
     discover_in(Path::new("/dev/input"))
 }
 
+/// Descriptions of event nodes, reused while each node identity and udev
+/// record stay the same so a rescan need not reopen unchanged devices.
+#[derive(Default)]
+struct DiscoveryCache(BTreeMap<PathBuf, (Device, discovery::Publication)>);
+
 fn discover_in(directory: &Path) -> io::Result<Vec<Discovered>> {
+    discover_with(directory, &mut DiscoveryCache::default())
+}
+
+fn discover_with(directory: &Path, cache: &mut DiscoveryCache) -> io::Result<Vec<Discovered>> {
     let mut paths = Vec::new();
     match fs::read_dir(directory) {
         Ok(entries) => {
@@ -134,11 +143,21 @@ fn discover_in(directory: &Path) -> io::Result<Vec<Discovered>> {
         Err(error) => return Err(error),
     }
     paths.sort();
-    let entries: Vec<_> = paths
-        .into_iter()
-        .map(
-            |path| match open(&path).and_then(|raw| describe_snapshot(&path, &raw, 1)) {
-                Ok((device, publication)) => Discovered {
+    cache.0.retain(|path, _| paths.binary_search(path).is_ok());
+    let mut entries = Vec::with_capacity(paths.len());
+    for path in paths {
+        let described = match cache.0.get(&path) {
+            Some((device, publication)) if publication.unchanged(&path) => {
+                Ok((device.clone(), publication.clone()))
+            }
+            _ => open(&path).and_then(|raw| describe_snapshot(&path, &raw, 1)),
+        };
+        entries.push(match described {
+            Ok((device, publication)) => {
+                cache
+                    .0
+                    .insert(path.clone(), (device.clone(), publication.clone()));
+                Discovered {
                     entry: Entry {
                         path,
                         available: true,
@@ -146,8 +165,11 @@ fn discover_in(directory: &Path) -> io::Result<Vec<Discovered>> {
                         error: None,
                     },
                     publication: Some(publication),
-                },
-                Err(error) => Discovered {
+                }
+            }
+            Err(error) => {
+                cache.0.remove(&path);
+                Discovered {
                     entry: Entry {
                         path,
                         available: false,
@@ -155,10 +177,10 @@ fn discover_in(directory: &Path) -> io::Result<Vec<Discovered>> {
                         error: Some(error.to_string()),
                     },
                     publication: None,
-                },
-            },
-        )
-        .collect();
+                }
+            }
+        });
+    }
     Ok(entries)
 }
 
@@ -783,6 +805,7 @@ fn observe_loop(
         .map(|reader| (reader.device.source.device, 1))
         .collect();
     let mut scan_at = monotonic()?;
+    let mut discovered = DiscoveryCache::default();
     let mut policy_generation = 0;
     let mut input_at = Duration::ZERO;
     loop {
@@ -805,6 +828,7 @@ fn observe_loop(
             let config = config.clone();
             refresh_readers(
                 &config,
+                &mut discovered,
                 readers,
                 &mut generations,
                 &mut pending,
@@ -948,13 +972,14 @@ fn selected(config: &crate::config::Config, device: &Device) -> bool {
 
 fn refresh_readers(
     config: &crate::config::Config,
+    discovered: &mut DiscoveryCache,
     readers: &mut Vec<Reader>,
     generations: &mut BTreeMap<u64, u64>,
     pending: &mut Pending,
     sink: &mut impl InputSink,
     now: Duration,
 ) -> io::Result<()> {
-    let entries = discover()?;
+    let entries = discover_with(Path::new("/dev/input"), discovered)?;
     let mut identities = BTreeMap::new();
     let mut ambiguous = BTreeSet::new();
     for candidate in &entries {

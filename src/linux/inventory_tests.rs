@@ -196,6 +196,43 @@ fn structured_output_preserves_io_kinds_after_partial_json_or_text_writes() {
 }
 
 #[test]
+fn rescans_reuse_unchanged_descriptions_and_drop_replaced_or_vanished_nodes() {
+    let directory = Directory::new();
+    directory.failures();
+    let records = Directory::new();
+    let node = directory.0.join("event7");
+    fs::write(&node, b"stands in for a described device").unwrap();
+    let opened = fs::File::open(&node).unwrap();
+    let owner = opened.metadata().unwrap().uid();
+    let publication = DevicePublication::fixture(opened.as_fd(), &records.0, owner).unwrap();
+    let mut cache = DiscoveryCache::default();
+    let described = (crate::transport::tests::touch(), publication);
+    cache
+        .0
+        .insert(directory.0.join("event9"), described.clone());
+    cache.0.insert(node.clone(), described);
+    let entry = |scanned: &[Discovered]| {
+        scanned
+            .iter()
+            .find(|value| value.entry.path == node)
+            .map(|value| value.entry.available)
+    };
+    assert_eq!(
+        entry(&discover_with(&directory.0, &mut cache).unwrap()),
+        Some(true)
+    );
+    assert_eq!(cache.0.keys().collect::<Vec<_>>(), [&node]);
+    let replacement = directory.0.join("replacement");
+    fs::write(&replacement, b"a new device at the same path").unwrap();
+    fs::rename(&replacement, &node).unwrap();
+    assert_eq!(
+        entry(&discover_with(&directory.0, &mut cache).unwrap()),
+        Some(false)
+    );
+    assert!(cache.0.is_empty());
+}
+
+#[test]
 fn repeated_failed_scans_do_not_retain_descriptors_to_private_files() {
     let directory = Directory::new();
     directory.failures();

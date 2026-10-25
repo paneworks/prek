@@ -196,6 +196,26 @@ fn actual_atomic_publication_replacement_retires_even_identical_properties_and_d
 }
 
 #[test]
+fn unopened_rechecks_retire_republished_records_and_replaced_nodes() {
+    let fixture = Fixture::new();
+    fixture.publish("I:1\nE:ID_SEAT=seat0\n");
+    let first = fixture.read().unwrap();
+    let unchanged =
+        |value: &Publication| value.unchanged_at(&fixture.path, &fixture.data, fixture.owner);
+    assert!(unchanged(&first));
+    fixture.publish("I:1\nE:ID_SEAT=seat0\n");
+    assert!(!unchanged(&first));
+    let second = fixture.read().unwrap();
+    assert!(unchanged(&second));
+    let replacement = fixture.root.join("replacement");
+    fs::write(&replacement, b"another connection").unwrap();
+    fs::rename(replacement, &fixture.path).unwrap();
+    assert!(!unchanged(&second));
+    fs::remove_file(&fixture.path).unwrap();
+    assert!(!unchanged(&second));
+}
+
+#[test]
 fn actual_node_replacement_is_not_the_owned_descriptor_or_a_matching_publication() {
     let fixture = Fixture::new();
     fixture.publish("I:1\nE:ID_SEAT=seat0\n");

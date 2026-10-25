@@ -119,6 +119,14 @@ impl Publication {
         self.current_at(fd, Some(path), Path::new(DATABASE), 0)
             .unwrap_or(false)
     }
+    /// Whether `path` still names this node and its udev record is unchanged,
+    /// checked without opening the device.
+    pub(crate) fn unchanged(&self, path: &Path) -> bool {
+        self.unchanged_at(path, Path::new(DATABASE), 0)
+    }
+    fn unchanged_at(&self, path: &Path, root: &Path, owner: u32) -> bool {
+        self.node.at_path(path) && self.stamp_current(root, owner).unwrap_or(false)
+    }
     pub(super) fn admits(&self, expected: &Self, device: &Device, scanned: &Device) -> bool {
         self.initialized
             && expected.initialized
@@ -135,6 +143,9 @@ impl Publication {
         if Node::read(fd)? != self.node || path.is_some_and(|path| !self.node.at_path(path)) {
             return Ok(false);
         }
+        self.stamp_current(root, owner)
+    }
+    fn stamp_current(&self, root: &Path, owner: u32) -> io::Result<bool> {
         let stamp = match fs::symlink_metadata(self.node.database(root)) {
             Ok(stat) => Some(Stamp::protected(&stat, owner)?),
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
