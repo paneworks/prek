@@ -535,7 +535,7 @@ fn run(command: Command) -> io::Result<()> {
             })?;
             let config = prek::worker::bootstrap(&mut channel, &mut health)?;
             eprintln!(
-                "Routing worker: every source stays with its original consumer until native takeover is implemented."
+                "Routing worker: each allowed device moves to Prek only after it is neutral and idle."
             );
             let mut stream = prek::route_worker::Stream::new(config, channel)?;
             linux::observe_supervised(
@@ -935,6 +935,7 @@ fn run_broker(
         },
     )?;
     if route {
+        prek::kernel::Registry::prepare_system()?;
         broker.enable_routing(config.clone())?;
     }
     broker.install_lua_source(runtime_definition.as_ref())?;

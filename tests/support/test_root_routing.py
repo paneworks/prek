@@ -758,19 +758,20 @@ os._exit(0)
                 os.close(child_fd)
 
     def test_takeover_trial_runs_one_bounded_broker_and_session_then_removes_its_rule(self):
-        for opens_socket, instance, rules_exist in ((True, "test", False), (True, None, True),
+        for opens_socket, instance, provisioned in ((True, "test", False), (True, None, True),
                                                     (False, "test", False)):
-            with self.subTest(opens_socket=opens_socket, instance=instance, rules_exist=rules_exist):
-                self.takeover_trial(opens_socket, instance, rules_exist)
+            with self.subTest(opens_socket=opens_socket, instance=instance, provisioned=provisioned):
+                self.takeover_trial(opens_socket, instance, provisioned)
 
-    def takeover_trial(self, opens_socket, instance, rules_exist):
+    def takeover_trial(self, opens_socket, instance, provisioned):
         trial = Path(__file__).resolve().parents[1] / "run-takeover-trial.sh"
         with tempfile.TemporaryDirectory() as temporary:
             repo, mocks, run_root = Path(temporary), Path(temporary) / "bin", Path(temporary) / "run"
             (repo / "tests").mkdir()
             (run_root / "udev").mkdir(parents=True)
-            if rules_exist:
+            if provisioned:
                 (run_root / "udev/rules.d").mkdir()
+                (run_root / "prek/devices").mkdir(parents=True)
             mocks.mkdir()
             script = repo / "tests/run-takeover-trial.sh"
             shutil.copyfile(trial, script)
@@ -833,7 +834,7 @@ case "$1" in
   check) echo '{{"status":"valid","mode":"route","rules":0,"selectors":1,"version":1}}' ;;
   broker)
     while [ "$1" != --runtime-dir ]; do shift; done
-    mkdir -p "$2"
+    mkdir -p "$2" "$2/../../prek/devices"
     {bind}
     echo "routing worker: Prek test keyboard taken over at a neutral idle cut" >&2
     sleep 1 ;;
@@ -851,7 +852,9 @@ esac
                                     env=env, capture_output=True, text=True, timeout=60)
             run = (repo / "target/takeover-trial/latest").resolve(strict=True)
             self.assertFalse((run_root / "udev/rules.d/70-prek-trial.rules").exists())
-            self.assertEqual((run_root / "udev/rules.d").is_dir(), rules_exist)
+            self.assertEqual((run_root / "udev/rules.d").is_dir(), provisioned)
+            self.assertEqual((run_root / "prek/devices").is_dir(), provisioned)
+            self.assertEqual((run_root / "prek").is_dir(), provisioned)
             self.assertFalse((run_root / "prek-trial").exists())
             if not opens_socket:
                 self.assertEqual(result.returncode, 1)
@@ -870,8 +873,8 @@ esac
             self.assertEqual(sudo[0], "-v")
             self.assertIn(f"readlink -e /proc/{os.getpid()}/exe", sudo)
             created = f"install -d -m 0755 -o root -g root {run_root}/udev/rules.d"
-            self.assertEqual(created in sudo, not rules_exist)
-            self.assertEqual(f"-n rmdir {run_root}/udev/rules.d" in sudo, not rules_exist)
+            self.assertEqual(created in sudo, not provisioned)
+            self.assertEqual(f"-n rmdir {run_root}/udev/rules.d" in sudo, not provisioned)
             broker = next(line for line in sudo if " broker " in line)
             self.assertIn("--mode route", broker)
             self.assertIn("--duration 10", broker)

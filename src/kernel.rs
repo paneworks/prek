@@ -21,7 +21,7 @@ use std::{
     mem::{offset_of, size_of},
     os::{
         fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd},
-        unix::fs::{MetadataExt, OpenOptionsExt},
+        unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     },
     path::{Path, PathBuf},
     sync::{
@@ -30,6 +30,7 @@ use std::{
     },
 };
 
+const REGISTRY_PARENT: &str = "/run/prek";
 const REGISTRY: &str = "/run/prek/devices";
 const MAX_METADATA: u64 = 16 * 1024;
 const EVENT_SIZE: usize = size_of::<libc::input_event>();
@@ -304,6 +305,17 @@ impl Registry {
             directory: Arc::new(Directory::open(Path::new(REGISTRY), 0)?),
         })
     }
+    /// Create the root-owned registry and its parent when no service manager
+    /// has, before a route worker opens it.
+    pub fn prepare_system() -> io::Result<()> {
+        // SAFETY: geteuid has no pointer arguments or mutable side effects.
+        if unsafe { libc::geteuid() } != 0 {
+            return Err(denied(
+                "device metadata publication requires the root broker",
+            ));
+        }
+        prepare(Path::new(REGISTRY_PARENT), 0)
+    }
 
     fn publish(
         &self,
@@ -546,6 +558,24 @@ impl Registry {
         }
         Ok(removed)
     }
+}
+
+/// Create `parent` and its private `devices` registry when missing; each must
+/// be owned by `owner` without group/other writes.
+fn prepare(parent: &Path, owner: u32) -> io::Result<()> {
+    match fs::DirBuilder::new().mode(0o755).create(parent) {
+        Err(error) if error.kind() != io::ErrorKind::AlreadyExists => return Err(error),
+        _ => {}
+    }
+    let directory = Directory::open(parent, owner)?;
+    // SAFETY: a verified directory fd and a static NUL-terminated name.
+    if unsafe { libc::mkdirat(directory.file.as_raw_fd(), c"devices".as_ptr(), 0o700) } < 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::AlreadyExists {
+            return Err(error);
+        }
+    }
+    Directory::open(&parent.join("devices"), owner).map(drop)
 }
 
 fn registry_marker(name: &str) -> Option<String> {
@@ -1319,6 +1349,33 @@ mod tests {
             BTreeMap::new(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn registry_preparation_creates_private_directories_only_under_a_trusted_parent() {
+        use std::os::unix::fs::PermissionsExt;
+        let temporary = Temporary::new();
+        let owner = unsafe { libc::geteuid() };
+        let parent = temporary.path.join("prek");
+        prepare(&parent, owner).unwrap();
+        prepare(&parent, owner).unwrap();
+        let devices = fs::metadata(parent.join("devices")).unwrap();
+        assert!(devices.is_dir());
+        assert_eq!(devices.mode() & 0o077, 0);
+        assert!(Directory::open(&parent.join("devices"), owner).is_ok());
+        fs::remove_dir(parent.join("devices")).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o775)).unwrap();
+        assert_eq!(
+            prepare(&parent, owner).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert!(!parent.join("devices").exists());
+        assert_eq!(
+            prepare(&temporary.path.join("prek"), owner + 1)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
     }
 
     #[test]

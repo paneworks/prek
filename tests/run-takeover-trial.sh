@@ -13,7 +13,8 @@ input should behave exactly as before. The broker takes the device over only
 after it has been neutral and idle for 100 ms, and exits by itself when the
 time is up, releasing the device; Ctrl-C ends it early.
 Temporarily installs Prek's udev metadata rule under /run/udev/rules.d and a
-root-owned trial configuration under /run/prek-trial; both are removed on exit.
+root-owned trial configuration under /run/prek-trial; both are removed on exit,
+as is the broker's /run/prek device registry when the trial created it.
 Device names: grep '^N: Name=' /proc/bus/input/devices
 Logs: target/takeover-trial/latest/{console.log,broker.log,session.log,status.json}
 The checkout path may contain only letters, digits and _ . / -.
@@ -63,6 +64,7 @@ trial=$run_root/prek-trial
 broker=""
 prek=""
 made_rules=""
+made_registry=""
 finish() {
   result=$?
   trap - EXIT
@@ -75,6 +77,9 @@ finish() {
   if [[ -n $broker ]]; then kill -TERM "$broker" 2>/dev/null || true; wait "$broker" 2>/dev/null || true; fi
   sudo -n rm -f "$rule" 2>/dev/null && sudo -n udevadm control --reload-rules 2>/dev/null || true
   if [[ -n $made_rules ]]; then sudo -n rmdir "$rules" 2>/dev/null || true; fi
+  if [[ -n $made_registry ]]; then
+    sudo -n rmdir "$run_root/prek/devices" "$run_root/prek" 2>/dev/null || true
+  fi
   sudo -n rm -rf "$trial" 2>/dev/null || true
   if [[ -n ${keepalive:-} ]]; then kill "$keepalive" 2>/dev/null || true; fi
   status=failed
@@ -130,6 +135,8 @@ if [[ ! -d $rules ]]; then
 fi
 sudo install -m 0644 -o root -g root "$run/prek/lib/udev/rules.d/70-prek.rules" "$rule"
 sudo udevadm control --reload-rules
+# The broker creates its device registry under /run/prek when it is missing.
+if [[ ! -d $run_root/prek ]]; then made_registry=1; fi
 # shellcheck disable=SC2024
 sudo "$prek" broker --mode route --config "$trial/config.toml" --runtime-dir "$trial/runtime" \
   --compositor-executable "$compositor" --logind-library "$logind" --json --duration "$seconds" \
