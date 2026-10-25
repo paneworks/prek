@@ -403,9 +403,6 @@ fn root_sequence_scope_is_distinct_from_a_normally_completed_child() {
                 captured_at: ms(0),
                 state: State::Desktop,
                 outputs: vec![],
-                windows: vec![],
-                regions: vec![],
-                secure_overlay: false,
             },
             ms(0),
         )

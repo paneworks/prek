@@ -35,66 +35,6 @@ pub struct Subscription {
 pub struct ProvidedContext {
     pub binding: crate::context::Binding,
     pub snapshot: crate::context::Snapshot,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub layouts: Option<crate::hyprland::layouts::Snapshot>,
-}
-impl ProvidedContext {
-    /// Describe the native graph of an existing trusted window target.
-    pub fn reorder_scope(&self, window: &str) -> Option<crate::protocol::ReorderScope> {
-        self.native_scope(&crate::routing::native::Target::Window(window.into()))
-    }
-    /// Describe the native proof of scrolling `workspace` on `output`.
-    pub fn scroll_scope(
-        &self,
-        output: &str,
-        workspace: i64,
-    ) -> Option<crate::protocol::ReorderScope> {
-        self.native_scope(&crate::routing::native::Target::Workspace(
-            output.into(),
-            workspace,
-        ))
-    }
-    /// Describe the native proof of a reorder window or scrolled workspace.
-    pub(crate) fn native_scope(
-        &self,
-        target: &crate::routing::native::Target,
-    ) -> Option<crate::protocol::ReorderScope> {
-        self.validate_layouts().ok()?;
-        crate::hyprland::reorder::native_scope(&self.snapshot, self.layouts.as_ref()?, target)
-    }
-    pub(crate) fn hyprland_target_available(
-        &self,
-        action: &crate::config::Action,
-        scope: crate::config::Scope,
-        window: Option<&str>,
-        output: Option<&str>,
-        workspace: Option<i64>,
-    ) -> bool {
-        crate::hyprland::reorder::available(
-            &self.snapshot,
-            self.layouts.as_ref(),
-            action,
-            scope,
-            window,
-            output,
-            workspace,
-        )
-    }
-    pub(crate) fn validate_layouts(&self) -> io::Result<()> {
-        if let Some(layouts) = &self.layouts {
-            if self.binding.kind != crate::context::SessionKind::User
-                || self.binding.uid == 0
-                || self.binding.compositor_pid == 0
-                || self.binding.compositor_start == 0
-            {
-                return Err(protocol::invalid(
-                    "native layouts require a user desktop binding",
-                ));
-            }
-            layouts.validate_context(&self.snapshot)?;
-        }
-        Ok(())
-    }
 }
 impl Subscription {
     pub(crate) fn same_registration(&self, other: &Self) -> bool {
@@ -156,8 +96,6 @@ pub enum Report {
     Dispatch {
         subscription: Subscription,
         event: Box<Event>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reorder_scope: Option<crate::protocol::ReorderScope>,
     },
     SourceInvalidated {
         subscription: Subscription,
@@ -182,15 +120,6 @@ pub enum Message {
         fence: Fence,
         ticket: u64,
         error: Option<String>,
-    },
-    MorfReady {
-        activation: crate::morf::admission::Activation,
-    },
-    /// Private sole-worker acknowledgement after descriptor closure.
-    Released {
-        worker: crate::supervisor::WorkerIdentity,
-        fence: Fence,
-        source: crate::input::Source,
     },
     RulesChanged {
         seat: String,
@@ -498,7 +427,6 @@ impl Registry {
                 }
             }
             if let Some(context) = &subscription.context {
-                context.validate_layouts()?;
                 if context.binding.seat != subscription.seat
                     || context.snapshot.generation != subscription.fence.session
                 {
@@ -526,7 +454,7 @@ impl Registry {
                         .is_none_or(|old| old.snapshot.revision < context.snapshot.revision)
                 }) {
                     authority
-                        .update_native(context.snapshot.clone(), context.layouts.clone(), now)
+                        .update(context.snapshot.clone(), now)
                         .map_err(io::Error::other)?;
                 } else {
                     authority.tick(now);
@@ -1535,7 +1463,6 @@ mod tests {
     }
     fn with_context(mut subscription: Subscription, revision: u64, at: u64) -> Subscription {
         subscription.context = Some(Box::new(ProvidedContext {
-            layouts: None,
             binding: crate::context::Binding {
                 seat: subscription.seat.clone(),
                 session: "verified-session".into(),
@@ -1550,51 +1477,9 @@ mod tests {
                 captured_at: ms(at),
                 state: crate::context::State::Desktop,
                 outputs: vec![],
-                windows: vec![],
-                regions: vec![],
-                secure_overlay: false,
             },
         }));
         subscription
-    }
-
-    #[test]
-    fn native_layout_metadata_cannot_bypass_private_context_validation() {
-        let view = crate::context_transfer::tests::native_view(ms(0), 1);
-        let mut valid = subscription("seat0", 1);
-        valid.context = view.context;
-        let mut invalid = valid.clone();
-        invalid
-            .context
-            .as_mut()
-            .unwrap()
-            .layouts
-            .as_mut()
-            .unwrap()
-            .revision += 1;
-        let mut registry = Registry::new(config()).unwrap();
-        assert!(
-            registry
-                .update(
-                    Subscriptions {
-                        revision: 1,
-                        seats: vec![invalid]
-                    },
-                    ms(0)
-                )
-                .is_err()
-        );
-        assert!(registry.observers.is_empty());
-        registry
-            .update(
-                Subscriptions {
-                    revision: 1,
-                    seats: vec![valid],
-                },
-                ms(0),
-            )
-            .unwrap();
-        assert_eq!(registry.observers.len(), 1);
     }
     fn registry(config: Config) -> Registry {
         let mut registry = Registry::new(config).unwrap();
@@ -1766,9 +1651,6 @@ mod tests {
             copy.context.as_mut().unwrap().snapshot.state = state;
             assert!(!permits_input(&config, &copy, ms(100)));
         }
-        let mut copy = subscription.clone();
-        copy.context.as_mut().unwrap().snapshot.secure_overlay = true;
-        assert!(!permits_input(&config, &copy, ms(100)));
         assert!(!permits_input(&config, &subscription, ms(99)));
         assert!(!permits_input(&config, &subscription, ms(351)));
         config.policy.allowed_devices.clear();

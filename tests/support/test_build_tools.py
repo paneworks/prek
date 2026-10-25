@@ -237,7 +237,7 @@ esac
             (build / "SHA256SUMS").write_text(f"{digest}  prek\n")
             (root / "target/cross-aarch64/latest").symlink_to(build)
             (root / "Cargo.toml").write_text('[package]\nname = "prek"\nversion = "9.9.9"\n')
-            for config in ("touch_routing", "window_keys", "power"):
+            for config in ("touch_routing", "mode_transactions", "input_events"):
                 (root / "examples/lua").mkdir(parents=True, exist_ok=True)
                 (root / f"examples/lua/{config}.lua").write_text("")
             (root / "binfmt").write_text(binfmt)

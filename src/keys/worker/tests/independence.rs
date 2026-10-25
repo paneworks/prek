@@ -763,14 +763,8 @@ fn pending_touch_without_a_key_dependency_does_not_hold_keyboard_output() {
                 outputs: vec![crate::context::OutputState {
                     geometry: output.clone(),
                     geometry_generation: 2,
-                    active_workspace: Some(1),
                     screen: crate::config::Screen::On,
-                    keyboard_known: true,
-                    keyboard: None,
                 }],
-                windows: vec![],
-                regions: vec![],
-                secure_overlay: false,
             },
             ms(0),
         )

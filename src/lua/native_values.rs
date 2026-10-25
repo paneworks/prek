@@ -200,7 +200,7 @@ fn configuration_validation_is_not_a_runtime_reload_or_permission_grant() {
         r#"
 local p=require('prek')
 p.events.on('ready',function()
- assert(not pcall(p.config.validate,{version=1,policy={allow_power_actions=true}}))
+ assert(not pcall(p.config.validate,{version=1,policy={allow_runtime_rules=true}}))
  p.log.info('configuration-only')
 end)
 return {version=1}
@@ -212,7 +212,7 @@ return {version=1}
         .dispatch(EventKind::Ready, &serde_json::Value::Null)
         .unwrap();
     assert_eq!(logs[0].message, "configuration-only");
-    assert!(!runtime.config.policy.allow_power_actions);
+    assert!(!runtime.config.policy.allow_runtime_rules);
 }
 
 #[test]

@@ -177,15 +177,6 @@ pub enum Context {
 pub enum Scope {
     #[default]
     Everywhere,
-    AppContent,
-    Keyboard,
-    ContentBottom,
-    PhysicalBottom,
-    TopLeft,
-    TopRight,
-    SideLeft,
-    SideRight,
-    ClockBackground,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -255,78 +246,7 @@ pub struct Selector {
     pub keys: Vec<Key>,
     pub absolute_axes: Vec<u16>,
     pub properties: Vec<u16>,
-    /// Hyprland per-device options applied to this device's routed mirror.
-    #[serde(deserialize_with = "scalar_strings")]
-    pub hyprland: BTreeMap<String, String>,
 }
-/// A Hyprland per-device value that is safe in hyprlang and Lua requests.
-pub(crate) fn hyprland_value(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 256
-        && !value
-            .chars()
-            .any(|character| character.is_control() || "[]#;=$\"'\\{}".contains(character))
-}
-/// Reads string, integer, float or boolean values as their text.
-fn scalar_strings<'de, D>(deserializer: D) -> Result<BTreeMap<String, String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Scalar {
-        Text(String),
-        Integer(i64),
-        Float(f64),
-        Boolean(bool),
-    }
-    Ok(BTreeMap::<String, Scalar>::deserialize(deserializer)?
-        .into_iter()
-        .map(|(option, value)| {
-            let value = match value {
-                Scalar::Text(text) => text,
-                Scalar::Integer(number) => number.to_string(),
-                Scalar::Float(number) => number.to_string(),
-                Scalar::Boolean(flag) => flag.to_string(),
-            };
-            (option, value)
-        })
-        .collect())
-}
-/// Hyprland per-device options a selector may declare, in hyprlang spelling.
-pub const HYPRLAND_DEVICE_OPTIONS: &[&str] = &[
-    "kb_rules",
-    "kb_model",
-    "kb_layout",
-    "kb_variant",
-    "kb_options",
-    "repeat_rate",
-    "repeat_delay",
-    "numlock_by_default",
-    "resolve_binds_by_sym",
-    "sensitivity",
-    "accel_profile",
-    "scroll_points",
-    "natural_scroll",
-    "scroll_factor",
-    "left_handed",
-    "middle_button_emulation",
-    "tap-to-click",
-    "tap-and-drag",
-    "drag_lock",
-    "drag_3fg",
-    "disable_while_typing",
-    "clickfinger_behavior",
-    "tap_button_map",
-    "scroll_method",
-    "scroll_button",
-    "scroll_button_lock",
-    "rotation",
-    "flip_x",
-    "flip_y",
-    "output",
-    "transform",
-];
 impl Selector {
     pub fn matches(&self, device: &Device) -> bool {
         !device.virtual_device
@@ -367,10 +287,6 @@ pub struct Policy {
     pub allow_runtime_rules: bool,
     /// Root-approved, explicit opt-in to normalized desktop input observation.
     pub allow_input_events: bool,
-    /// Protected system permission for output-scoped user-session DPMS effects.
-    pub allow_power_actions: bool,
-    /// Protected system permission for targeted stock Hyprland window effects.
-    pub allow_hyprland_actions: bool,
 }
 impl Default for Policy {
     fn default() -> Self {
@@ -379,8 +295,6 @@ impl Default for Policy {
             allowed_seats: vec!["seat0".into()],
             allow_runtime_rules: false,
             allow_input_events: false,
-            allow_power_actions: false,
-            allow_hyprland_actions: false,
         }
     }
 }
@@ -775,15 +689,6 @@ pub enum Action {
         #[serde(deserialize_with = "bounded_argv")]
         argv: Vec<String>,
     },
-    Morf {
-        action: MorfAction,
-    },
-    Hyprland {
-        action: WindowAction,
-    },
-    Power {
-        action: PowerAction,
-    },
 }
 fn bounded_argv<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
     struct Argument(String);
@@ -839,103 +744,17 @@ pub enum EffectKind {
     Observations,
     Commands,
     SyntheticInput,
-    HyprlandActions,
-    MorfActions,
-    PowerActions,
 }
 impl Action {
-    pub fn requires_hyprland(&self) -> bool {
-        matches!(self, Self::Hyprland { .. })
-            || matches!(self, Self::Lua { requires, .. } if requires.contains(&EffectKind::HyprlandActions))
-    }
-    pub fn requires_power(&self) -> bool {
-        matches!(self, Self::Power { .. })
-            || matches!(self,Self::Lua {requires,..} if requires.contains(&EffectKind::PowerActions))
-    }
     pub fn effect_kind(&self) -> Option<EffectKind> {
         Some(match self {
             Self::Lua { .. } => return None,
             Self::Event { .. } => EffectKind::Observations,
             Self::Command { .. } => EffectKind::Commands,
             Self::Keys { .. } | Self::Remap { .. } => EffectKind::SyntheticInput,
-            Self::Hyprland { .. } => EffectKind::HyprlandActions,
-            Self::Morf { .. } => EffectKind::MorfActions,
-            Self::Power { .. } => EffectKind::PowerActions,
         })
     }
 }
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MorfAction {
-    Dashboard,
-    Notifications,
-    QuickSettings,
-    WorkspacePreview,
-    KeyboardShow,
-    KeyboardHide,
-    KeyboardToggleLayout,
-    Apps,
-    Web,
-    RevealClockForm,
-}
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WindowAction {
-    ReorderUp,
-    ReorderDown,
-    MoveLeftAndFollow,
-    MoveRightAndFollow,
-    Close,
-    ScrollStack,
-}
-impl WindowAction {
-    pub fn supported_session(self) -> bool {
-        matches!(
-            self,
-            Self::Close
-                | Self::MoveLeftAndFollow
-                | Self::MoveRightAndFollow
-                | Self::ReorderUp
-                | Self::ReorderDown
-                | Self::ScrollStack
-        )
-    }
-    pub fn workspace_destination(self, from: i64) -> Option<i64> {
-        let delta = match self {
-            Self::MoveLeftAndFollow => -1,
-            Self::MoveRightAndFollow => 1,
-            _ => return None,
-        };
-        from.checked_add(delta)
-            .filter(|id| (1..=i64::from(i32::MAX)).contains(id))
-    }
-}
-/// Exact bounded stock address plus lifetime identity; never a dispatcher selector.
-pub fn hyprland_window_address(id: &str) -> Option<&str> {
-    let (address, stable) = id.split_once(':')?;
-    let hex = |value: &str| {
-        !value.is_empty()
-            && value.len() <= 16
-            && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-            && u64::from_str_radix(value, 16).is_ok_and(|value| value != 0)
-    };
-    (address.starts_with("0x") && hex(&address[2..]) && hex(stable)).then_some(address)
-}
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PowerAction {
-    LockAndBlank,
-    Wake,
-    Blank,
-}
-pub fn valid_power_output(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 256
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
-}
-
 fn enabled() -> bool {
     true
 }
@@ -959,8 +778,6 @@ pub struct Rule {
     pub output: Option<String>,
     #[serde(default)]
     pub screen: Option<Screen>,
-    #[serde(default)]
-    pub keyboard_visible: Option<bool>,
     #[serde(default)]
     pub require_keys: Vec<Key>,
     #[serde(default)]
@@ -1143,34 +960,6 @@ impl Config {
         config.validate()?;
         Ok(config)
     }
-    /// Declared Hyprland options for a device, merged over its allowed
-    /// selectors; a conflicting value is an error.
-    pub fn hyprland_device_settings(
-        &self,
-        device: &Device,
-    ) -> Result<BTreeMap<String, String>, String> {
-        let mut settings = BTreeMap::new();
-        for id in &self.policy.allowed_devices {
-            let Some(selector) = self
-                .devices
-                .get(id)
-                .filter(|selector| selector.matches(device))
-            else {
-                continue;
-            };
-            for (option, value) in &selector.hyprland {
-                if settings
-                    .insert(option.clone(), value.clone())
-                    .is_some_and(|old| old != *value)
-                {
-                    return Err(format!(
-                        "devices.{id}.hyprland.{option} conflicts with another matching selector"
-                    ));
-                }
-            }
-        }
-        Ok(settings)
-    }
     pub fn validate(&self) -> Result<(), ConfigError> {
         let fail = |message: String| Err(ConfigError(message));
         if self.version != SCHEMA_VERSION {
@@ -1253,15 +1042,6 @@ impl Config {
             if id.is_empty() || !selector.constrained() {
                 return fail(format!(
                     "devices.{id}: selector requires identity, path or capability constraints"
-                ));
-            }
-            if selector.hyprland.len() > 64
-                || selector.hyprland.iter().any(|(option, value)| {
-                    !HYPRLAND_DEVICE_OPTIONS.contains(&option.as_str()) || !hyprland_value(value)
-                })
-            {
-                return fail(format!(
-                    "devices.{id}.hyprland: unsupported per-device option or value"
                 ));
             }
         }
@@ -1413,27 +1193,12 @@ impl Config {
                 return fail(format!("{prefix}.when_mode: unknown mode"));
             }
             if rule.delivery == Delivery::Reserve
-                && matches!(
-                    rule.scope,
-                    Scope::AppContent
-                        | Scope::Keyboard
-                        | Scope::ContentBottom
-                        | Scope::PhysicalBottom
-                        | Scope::TopLeft
-                        | Scope::TopRight
-                )
-            {
-                return fail(format!(
-                    "{prefix}.delivery: interactive shell/keyboard regions require buffer or observe"
-                ));
-            }
-            if rule.delivery == Delivery::Reserve
                 && rule.scope == Scope::Everywhere
                 && rule.trigger.contains_touch()
                 && rule.screen != Some(Screen::Off)
             {
                 return fail(format!(
-                    "{prefix}.delivery: touch reservation needs a noninteractive region or an explicitly off display"
+                    "{prefix}.delivery: touch reservation requires an explicitly off display"
                 ));
             }
             validate_trigger(&rule.trigger, &shapes, 0)
@@ -1548,7 +1313,6 @@ impl Config {
                     scope: Scope::Everywhere,
                     output: None,
                     screen: None,
-                    keyboard_visible: None,
                     require_keys: vec![],
                     keys_throughout: false,
                     layer: None,
@@ -1575,230 +1339,6 @@ impl Config {
                     },
                 );
                 config.policy.allowed_devices.push("touch".into());
-                let definitions = [
-                    (
-                        "G01",
-                        Scope::ContentBottom,
-                        1,
-                        Direction::Up,
-                        Action::Morf {
-                            action: MorfAction::Dashboard,
-                        },
-                    ),
-                    (
-                        "G02",
-                        Scope::TopLeft,
-                        1,
-                        Direction::Down,
-                        Action::Morf {
-                            action: MorfAction::Notifications,
-                        },
-                    ),
-                    (
-                        "G03",
-                        Scope::TopRight,
-                        1,
-                        Direction::Down,
-                        Action::Morf {
-                            action: MorfAction::QuickSettings,
-                        },
-                    ),
-                    (
-                        "G04",
-                        Scope::ContentBottom,
-                        1,
-                        Direction::Horizontal,
-                        Action::Morf {
-                            action: MorfAction::WorkspacePreview,
-                        },
-                    ),
-                    (
-                        "G05",
-                        Scope::PhysicalBottom,
-                        2,
-                        Direction::Up,
-                        Action::Morf {
-                            action: MorfAction::KeyboardShow,
-                        },
-                    ),
-                    (
-                        "G06",
-                        Scope::Keyboard,
-                        2,
-                        Direction::Down,
-                        Action::Morf {
-                            action: MorfAction::KeyboardHide,
-                        },
-                    ),
-                    (
-                        "G07",
-                        Scope::Keyboard,
-                        2,
-                        Direction::Up,
-                        Action::Morf {
-                            action: MorfAction::KeyboardToggleLayout,
-                        },
-                    ),
-                    (
-                        "G08_up",
-                        Scope::AppContent,
-                        2,
-                        Direction::Up,
-                        Action::Hyprland {
-                            action: WindowAction::ReorderUp,
-                        },
-                    ),
-                    (
-                        "G08_down",
-                        Scope::AppContent,
-                        2,
-                        Direction::Down,
-                        Action::Hyprland {
-                            action: WindowAction::ReorderDown,
-                        },
-                    ),
-                    (
-                        "G09_left",
-                        Scope::AppContent,
-                        2,
-                        Direction::Left,
-                        Action::Hyprland {
-                            action: WindowAction::MoveLeftAndFollow,
-                        },
-                    ),
-                    (
-                        "G09_right",
-                        Scope::AppContent,
-                        2,
-                        Direction::Right,
-                        Action::Hyprland {
-                            action: WindowAction::MoveRightAndFollow,
-                        },
-                    ),
-                    (
-                        "G10",
-                        Scope::AppContent,
-                        3,
-                        Direction::Vertical,
-                        Action::Hyprland {
-                            action: WindowAction::Close,
-                        },
-                    ),
-                    (
-                        "G11_left",
-                        Scope::SideLeft,
-                        1,
-                        Direction::Vertical,
-                        Action::Hyprland {
-                            action: WindowAction::ScrollStack,
-                        },
-                    ),
-                    (
-                        "G11_right",
-                        Scope::SideRight,
-                        1,
-                        Direction::Vertical,
-                        Action::Hyprland {
-                            action: WindowAction::ScrollStack,
-                        },
-                    ),
-                    (
-                        "G14_left",
-                        Scope::SideLeft,
-                        1,
-                        Direction::Right,
-                        Action::Morf {
-                            action: MorfAction::Apps,
-                        },
-                    ),
-                    (
-                        "G14_right",
-                        Scope::SideRight,
-                        1,
-                        Direction::Left,
-                        Action::Morf {
-                            action: MorfAction::Web,
-                        },
-                    ),
-                ];
-                for (index, (id, scope, fingers, direction, action)) in
-                    definitions.into_iter().enumerate()
-                {
-                    let continuous = matches!(
-                        action,
-                        Action::Morf {
-                            action: MorfAction::Dashboard
-                                | MorfAction::Notifications
-                                | MorfAction::QuickSettings
-                                | MorfAction::WorkspacePreview
-                        } | Action::Hyprland {
-                            action: WindowAction::ScrollStack
-                        }
-                    );
-                    config.rules.push(Rule {
-                        id: id.into(),
-                        enabled: true,
-                        priority: 100 + index as i32,
-                        devices: vec!["touch".into()],
-                        seats: vec![],
-                        contexts: vec![Context::Desktop],
-                        scope,
-                        output: None,
-                        screen: Some(Screen::On),
-                        keyboard_visible: if scope == Scope::Keyboard {
-                            Some(true)
-                        } else if id == "G05" {
-                            Some(false)
-                        } else {
-                            None
-                        },
-                        require_keys: vec![],
-                        keys_throughout: false,
-                        layer: None,
-                        when_mode: None,
-                        delivery: Delivery::Buffer,
-                        trigger: Trigger::Swipe {
-                            fingers,
-                            direction,
-                            travel: Distance::Millimetres(12.0),
-                            fallback_travel: Distance::Normalized(0.04),
-                            continuous,
-                        },
-                        action,
-                    });
-                }
-                for (id, scope, screen, action) in [
-                    ("G16", Scope::Everywhere, Screen::Off, PowerAction::Wake),
-                    (
-                        "G17",
-                        Scope::ClockBackground,
-                        Screen::On,
-                        PowerAction::Blank,
-                    ),
-                ] {
-                    config.rules.push(Rule {
-                        id: id.into(),
-                        enabled: true,
-                        priority: 1000,
-                        devices: vec!["touch".into()],
-                        seats: vec![],
-                        contexts: vec![Context::Locked, Context::Greeter],
-                        scope,
-                        output: None,
-                        screen: Some(screen),
-                        keyboard_visible: None,
-                        require_keys: vec![],
-                        keys_throughout: false,
-                        layer: None,
-                        when_mode: None,
-                        delivery: Delivery::Reserve,
-                        trigger: Trigger::TouchTaps {
-                            fingers: 1,
-                            count: 2,
-                        },
-                        action: Action::Power { action },
-                    });
-                }
             }
             _ => {
                 return Err(ConfigError(format!(
@@ -2000,24 +1540,7 @@ fn overlaps(a: &Rule, b: &Rule) -> bool {
     {
         return false;
     }
-    if a.screen.is_some() && b.screen.is_some() && a.screen != b.screen
-        || a.keyboard_visible.is_some()
-            && b.keyboard_visible.is_some()
-            && a.keyboard_visible != b.keyboard_visible
-    {
-        return false;
-    }
-    // Physical layers can be held together, and overrides can activate both.
-    // Different layer names cannot establish disjoint exclusive scopes.
-    if matches!(
-        (a.scope, b.scope),
-        (Scope::AppContent, Scope::Keyboard)
-            | (Scope::Keyboard, Scope::AppContent)
-            | (Scope::TopLeft, Scope::TopRight)
-            | (Scope::TopRight, Scope::TopLeft)
-            | (Scope::SideLeft, Scope::SideRight)
-            | (Scope::SideRight, Scope::SideLeft)
-    ) {
+    if a.screen.is_some() && b.screen.is_some() && a.screen != b.screen {
         return false;
     }
     if let (Some(a), Some(b)) = (a.trigger.fingers(), b.trigger.fingers())
@@ -2114,20 +1637,12 @@ mod tests {
         );
     }
     #[test]
-    fn output_names_and_power_policy_round_trip_without_user_policy_expansion() {
+    fn output_names_round_trip_and_reject_unbounded_names() {
         let mut system = Config::preset("desktop").unwrap();
-        system.policy.allow_power_actions = true;
-        system.policy.allow_hyprland_actions = true;
         system.rules[0].output = Some("panel".into());
         assert_eq!(
             Config::parse(&toml::to_string(&system).unwrap()).unwrap(),
             system
-        );
-        assert!(
-            toml::from_str::<Overlay>("version=1\n[policy]\nallow_power_actions=true").is_err()
-        );
-        assert!(
-            toml::from_str::<Overlay>("version=1\n[policy]\nallow_hyprland_actions=true").is_err()
         );
         for bad in ["".to_owned(), "bad\noutput".to_owned(), "x".repeat(257)] {
             let mut config = system.clone();
@@ -2148,60 +1663,40 @@ mod tests {
         assert!(config.validate().is_ok());
     }
     #[test]
-    fn phone_keyboard_gestures_leave_lock_and_greeter_to_their_shells() {
-        let config = Config::preset("phone").unwrap();
-        let contexts = |id: &str| {
-            config
-                .rules
-                .iter()
-                .find(|rule| rule.id == id)
-                .unwrap()
-                .contexts
-                .clone()
-        };
-        for id in ["G05", "G06", "G07"] {
-            assert_eq!(contexts(id), [Context::Desktop], "{id}");
-        }
-        for id in ["G16", "G17"] {
-            assert_eq!(contexts(id), [Context::Locked, Context::Greeter], "{id}");
-        }
-    }
-    #[test]
-    fn t51_tappable_keyboard_cannot_be_unconditionally_reserved() {
-        let mut config = Config::preset("phone").unwrap();
-        let rule = config
-            .rules
-            .iter_mut()
-            .find(|rule| rule.id == "G06")
-            .unwrap();
-        rule.delivery = Delivery::Reserve;
-        assert!(config.validate().is_err());
-    }
-    #[test]
     fn t51_touch_reservation_cannot_capture_an_entire_awake_display() {
         let mut config = Config::preset("phone").unwrap();
-        let rule = config
-            .rules
-            .iter_mut()
-            .find(|rule| rule.id == "G16")
-            .unwrap();
-        rule.screen = Some(Screen::On);
-        assert!(config.validate().is_err());
-        let rule = config
-            .rules
-            .iter_mut()
-            .find(|rule| rule.id == "G16")
-            .unwrap();
-        rule.screen = Some(Screen::Off);
+        config.rules.push(Rule {
+            id: "wake".into(),
+            enabled: true,
+            priority: 1000,
+            devices: vec!["touch".into()],
+            seats: vec![],
+            contexts: vec![Context::Locked, Context::Greeter],
+            scope: Scope::Everywhere,
+            output: None,
+            screen: Some(Screen::Off),
+            require_keys: vec![],
+            keys_throughout: false,
+            layer: None,
+            when_mode: None,
+            delivery: Delivery::Reserve,
+            trigger: Trigger::TouchTaps {
+                fingers: 1,
+                count: 2,
+            },
+            action: Action::Event {
+                name: "wake".into(),
+            },
+        });
         assert!(config.validate().is_ok());
-        let rule = config
-            .rules
-            .iter_mut()
-            .find(|rule| rule.id == "G16")
-            .unwrap();
-        rule.screen = None;
-        rule.trigger = Trigger::Sequence {
-            steps: vec![rule.trigger.clone(), rule.trigger.clone()],
+        config.rules[0].screen = Some(Screen::On);
+        assert!(config.validate().is_err());
+        config.rules[0].screen = None;
+        config.rules[0].trigger = Trigger::Sequence {
+            steps: vec![
+                config.rules[0].trigger.clone(),
+                config.rules[0].trigger.clone(),
+            ],
             timeout: Millis(5000),
         };
         assert!(config.validate().is_err());
@@ -2282,97 +1777,5 @@ mod tests {
         config.shape_capture.mouse_minimum_size_counts = f64::NAN;
         assert!(config.validate().is_err());
         assert!(Config::parse("version=1\n[shape_capture]\nunknown=1\n").is_err());
-    }
-    #[test]
-    fn selector_hyprland_options_read_scalars_and_refuse_unknown_or_unsafe_values() {
-        let selector: Selector = toml::from_str(
-            "keys=['KEY_A']\n[hyprland]\nrepeat_rate=35\nnatural_scroll=true\nsensitivity=-0.5\nkb_layout='de'\n",
-        )
-        .unwrap();
-        assert_eq!(
-            selector.hyprland,
-            BTreeMap::from([
-                ("kb_layout".into(), "de".into()),
-                ("natural_scroll".into(), "true".into()),
-                ("repeat_rate".into(), "35".into()),
-                ("sensitivity".into(), "-0.5".into()),
-            ])
-        );
-        let mut config = Config::preset("desktop").unwrap();
-        config.devices.insert("routed".into(), selector);
-        config.validate().unwrap();
-        let text = toml::to_string_pretty(&config).unwrap();
-        assert_eq!(Config::parse(&text).unwrap(), config);
-        for (option, value) in [
-            ("enabled", "0"),
-            ("keybinds", "0"),
-            ("kb_layout", "de;exec"),
-            ("kb_layout", "de]"),
-            ("kb_layout", ""),
-            ("output", "$monitor"),
-        ] {
-            let mut changed = config.clone();
-            changed
-                .devices
-                .get_mut("routed")
-                .unwrap()
-                .hyprland
-                .insert(option.into(), value.into());
-            assert!(changed.validate().is_err(), "{option}={value}");
-        }
-    }
-    #[test]
-    fn declared_hyprland_settings_merge_over_allowed_matching_selectors_only() {
-        let mut device = crate::transport::tests::touch();
-        device.name = "Routed keyboard".into();
-        let mut config = Config::preset("desktop").unwrap();
-        let selector = |options: &[(&str, &str)]| Selector {
-            name: Some("Routed keyboard".into()),
-            hyprland: options
-                .iter()
-                .map(|(option, value)| (option.to_string(), value.to_string()))
-                .collect(),
-            ..Selector::default()
-        };
-        config
-            .devices
-            .insert("first".into(), selector(&[("repeat_rate", "35")]));
-        config.devices.insert(
-            "second".into(),
-            selector(&[("repeat_rate", "35"), ("repeat_delay", "300")]),
-        );
-        config
-            .devices
-            .insert("unallowed".into(), selector(&[("kb_layout", "de")]));
-        config.policy.allowed_devices = vec!["first".into(), "second".into()];
-        assert_eq!(
-            config.hyprland_device_settings(&device).unwrap(),
-            BTreeMap::from([
-                ("repeat_delay".into(), "300".into()),
-                ("repeat_rate".into(), "35".into()),
-            ])
-        );
-        config
-            .devices
-            .insert("second".into(), selector(&[("repeat_rate", "40")]));
-        assert!(config.hyprland_device_settings(&device).is_err());
-        device.name = "Other keyboard".into();
-        assert!(config.hyprland_device_settings(&device).unwrap().is_empty());
-    }
-    #[test]
-    fn lua_selectors_declare_hyprland_options_with_native_scalars() {
-        let config = crate::lua::compile(
-            "local p=require('prek')\nreturn p.config.new{devices={routed={keys={'KEY_A'},hyprland={repeat_rate=35,natural_scroll=true,kb_layout='de'}}}}\n",
-            "hyprland-device.lua",
-        )
-        .unwrap();
-        assert_eq!(
-            config.devices["routed"].hyprland,
-            BTreeMap::from([
-                ("kb_layout".into(), "de".into()),
-                ("natural_scroll".into(), "true".into()),
-                ("repeat_rate".into(), "35".into()),
-            ])
-        );
     }
 }

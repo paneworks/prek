@@ -24,7 +24,6 @@ mod hooks;
 mod lifetimes;
 mod modules;
 #[cfg(target_os = "linux")]
-mod morf;
 #[cfg(test)]
 mod native_values;
 mod recognizers;
@@ -101,16 +100,6 @@ pub fn api() -> serde_json::Value {
             "Copy fresh broker-stamped mode, reported context state/revision, queued reply count and errors for this session fence; no desktop or effect authority is inferred.",
         ),
         (
-            "morf.providers",
-            "morf.providers() -> MorfProviderBinding[] | nil",
-            "Copy fresh broker-verified native shell connection bindings for the owning desktop/output; no rendered regions, lock proof, recognizer ownership or action grant is inferred.",
-        ),
-        (
-            "morf.regions",
-            "morf.regions() -> MorfRenderedContext[] | nil",
-            "Copy fresh native primary-frame named bounds in surface-local coordinates with output, endpoint/UI generation and fence; inspection only, without input-mask, keyboard-absence, authentication or compositor-presentation authority.",
-        ),
-        (
             "capabilities.current",
             "capabilities.current() -> CapabilityView | nil",
             "Copy fresh broker-negotiated flags and parent executor readiness for this session fence; neither grants effects.",
@@ -123,7 +112,7 @@ pub fn api() -> serde_json::Value {
         (
             "capabilities.ready",
             "capabilities.ready(name) -> boolean",
-            "Test current parent executor capacity for commands, lua_actions, power_actions or hyprland_actions; every effect still requires fresh context, target checks and a broker grant.",
+            "Test current parent executor capacity for commands or lua_actions; every effect still requires fresh context, target checks and a broker grant.",
         ),
         (
             "outputs.list",
@@ -134,21 +123,6 @@ pub fn api() -> serde_json::Value {
             "outputs.get",
             "outputs.get(name) -> OutputView | nil",
             "Query one output by exact name; no discovery outside the verified snapshot.",
-        ),
-        (
-            "regions.list",
-            "regions.list() -> RegionView[] | nil",
-            "Copy provider-reported rendered regions with their snapshot fence/revision; no guessed geometry.",
-        ),
-        (
-            "regions.get",
-            "regions.get(id) -> RegionView | nil",
-            "Query one rendered region by exact stable ID in the fresh snapshot.",
-        ),
-        (
-            "regions.at",
-            "regions.at(point) -> RegionView[] | nil",
-            "Return every rendered region containing a global logical point, with half-open bounds; does not arbitrate overlapping regions.",
         ),
         (
             "coordinates.convert",
@@ -272,17 +246,12 @@ pub fn api() -> serde_json::Value {
         (
             "snapshot",
             "Snapshot | nil",
-            "Return an owned copy of the complete fresh broker snapshot, including outputs, windows, regions and keyboard geometry; generations/revisions are decimal strings; nil when unavailable or expired.",
+            "Return an owned copy of the complete fresh broker snapshot, including output geometry and screen state; generations/revisions are decimal strings; nil when unavailable or expired.",
         ),
         (
             "binding",
             "Binding | nil",
             "Return an owned copy of the verified session/compositor binding for a fresh snapshot; compositor_start is a decimal string; conveys no authority.",
-        ),
-        (
-            "layouts",
-            "NativeLayouts | nil",
-            "Copy native layout/column metadata matched to the fresh owning desktop snapshot and fence; nil when unavailable, inhibited or expired; no camera bounds, rendered scope or action authority.",
         ),
         (
             "state",
@@ -352,43 +321,18 @@ pub fn api() -> serde_json::Value {
             "signature":format!("triggers.{kind}(named_fields) -> Trigger"),
             "description":"Construct a typed trigger with the documented schema fields."}));
     }
-    for kind in [
-        "event", "keys", "remap", "command", "morf", "hyprland", "power",
-    ] {
+    for kind in ["event", "keys", "remap", "command"] {
         symbols.push(serde_json::json!({"name":format!("actions.{kind}"),
             "signature":format!("actions.{kind}(named_fields) -> Action"),
             "description":"Declare an action; configuration evaluation does not execute it."}));
     }
-    let hyprland_adapter = serde_json::json!({
-        "public_session_negotiation": true, "production_routing_available": false,
-        "system_permission": "policy.allow_hyprland_actions", "agent_flags": ["hyprland"],
-        "named_handler_flags": ["lua","hyprland"], "broker_mode": "route",
-        "version": "0.54.3", "host_api": "actions::Executor::set_hyprland_adapter(HyprlandAdapter)",
-        "additional_versions": ["0.56.2"], "config_provider": "hyprlang or lua; frozen at installation and rechecked via j/status before each 0.56.2 mutation",
-        "lua_dispatch": "closed typed factories check frozen stable_id, workspace, window/output geometry or explicit power monitor name; no raw dispatch API, nil target or syntax fallback",
-        "capability": "hyprland_actions", "actions": ["close","move_left_and_follow","move_right_and_follow","reorder_up","reorder_down"],
-        "excluded": ["scroll_stack"],
-        "reorder": {"version":"0.56.2","provider":"lua","layout":"scrolling with unambiguous vertical native column order","context":"complete same-generation/revision/capture native graph before claim and frozen source/neighbor/workspace at offer","neighbor":"adjacent vertical column; unique closest horizontally overlapping member","refusals":["stack boundary","ambiguous alignment","horizontal or overlapping columns","hidden/floating/grouped/fullscreen app","missing or changed native graph"],"dispatch":"one explicit-source/explicit-neighbor native swap; whole-graph checks in native factory","completion":"observed exact pair permutation with unchanged workspace/column topology; camera repositioning is not a failure"},
-        "workspace_moves": "adjacent positive numeric workspace on a single-output desktop",
-        "workspace_id_min": 1, "workspace_id_max": 2147483647, "desktop_operations_per_plan": 1,
-        "direct_phases": ["discrete","begin"],
-        "target": "explicit frozen window address plus stableId, output, geometry generation and workspace; focus never selects a target",
-        "race": "legacy address selectors retain a read/dispatch race; Lua factories recheck native target fields; no atomic lock/overlay or rendered-visibility claim",
-        "deadline": "remaining broker grant and 200ms total IPC budget",
-        "completion": "accepted dispatch plus observed target disappearance or exact workspace/output/focus",
-        "uncertain": "any failure after mutation bytes were written; never retry",
-        "cage_flags": ["layers","input","power","windows"]
-    });
     let action_requires = serde_json::json!({
         "agent_flags":["lua","commands"],"capabilities":["context","observations","lua_events","lua_actions","commands"],
-        "implemented_effects":["commands","observations","power_actions","hyprland_actions"],
-        "power_alternative":{"agent_flags":["lua","power"],"system_permission":"policy.allow_power_actions","broker_mode":"route","target":"explicit frozen output"},
-        "hyprland_alternative":{"agent_flags":["lua","hyprland"],"system_permission":"policy.allow_hyprland_actions","broker_mode":"route","target":"frozen window/output/workspace"},
+        "implemented_effects":["commands","observations"],
         "grant_time_ms":250
     });
-    let morf_adapter = serde_json::json!({"agent_flags":["morf"],"named_handler_flags":["lua","morf"],"public_session_negotiation":false,"production_gate":"native rendered context and physical cutover","transport":"broker offer ID/ordinal and typed action only; no caller target, motion or deadline","completion":"native controller acceptance; no rendered animation/presentation proof","pending_agent":8,"pending_broker":64,"morf_effects_per_ordinal":1,"result_wait_after_grant_ms":2000,"native_receipt_poll_ms":5,"ownership_refresh_ms":100,"cancellation":"known owning gesture only; no uncertain retry"});
-    let custom_recognizers = serde_json::json!({"constructor":"recognizers.define","agent_flags":["lua","recognizers"],"capability":"custom_recognizers","system_permission":"policy.allow_input_events","production_broker":"observation_or_route_mode","context":"fresh owning desktop without secure overlay","inputs":["key","relative","wheel","absolute","switch","touch"],"declaration_registry":"Config.recognizers; canonical source-approved definitions persist without rules; runtime additions need no template and cannot add or alter definitions","maximum_declarations":64,"maximum_candidates_and_cleanup":64,"maximum_pending_tickets":64,"ticket_bytes":65536,"pending_bytes":1048576,"reply_ms":[1,250],"timeout_ms":[1,10000],"wake_ms":[5,250],"callback_ms":20,"callback_instructions":100000,"data_bytes":4096,"data_depth":8,"identities":"canonical decimal strings","result":"nil for pending or a strict phase/data table; cancellation returns nil","source":"private canonical declaration, exact rule binding and complete approved snapshot parity","claims":false,"raw_frames":false,"routing":"negotiable; stock Hyprland takeover only","custom_sequences":"source-bound nested plans; native coordinator required","device_catalog":"independent declaration-scoped metadata without held state or ordinary input callbacks; ordinary resets when --input is also enabled","root_acceptance":"pending user-launched live tests"});
-    let capability_queries = serde_json::json!({"source":"broker-negotiated registration flags and parent executor readiness; never inferred from Lua source","freshness_ms":250,"refresh_ms":100,"queued_snapshots":1,"in_flight_snapshots":1,"ready_families":["commands","lua_actions","power_actions","hyprland_actions","morf_actions"],"hyprland":"protected policy.allow_hyprland_actions and session --hyprland on a routing broker; production takeover remains unavailable","unavailable":"current returns nil; has and ready return false","unknown_names":"false; names must be strings of 1 to 128 bytes","grants":false,"lifetime":"negotiated flags immutable within the owning fence; stop clears metadata"});
+    let custom_recognizers = serde_json::json!({"constructor":"recognizers.define","agent_flags":["lua","recognizers"],"capability":"custom_recognizers","system_permission":"policy.allow_input_events","production_broker":"observation_or_route_mode","context":"fresh owning desktop","inputs":["key","relative","wheel","absolute","switch","touch"],"declaration_registry":"Config.recognizers; canonical source-approved definitions persist without rules; runtime additions need no template and cannot add or alter definitions","maximum_declarations":64,"maximum_candidates_and_cleanup":64,"maximum_pending_tickets":64,"ticket_bytes":65536,"pending_bytes":1048576,"reply_ms":[1,250],"timeout_ms":[1,10000],"wake_ms":[5,250],"callback_ms":20,"callback_instructions":100000,"data_bytes":4096,"data_depth":8,"identities":"canonical decimal strings","result":"nil for pending or a strict phase/data table; cancellation returns nil","source":"private canonical declaration, exact rule binding and complete approved snapshot parity","claims":false,"raw_frames":false,"routing":"negotiable; bound Wayland compositor takeover only","custom_sequences":"source-bound nested plans; native coordinator required","device_catalog":"independent declaration-scoped metadata without held state or ordinary input callbacks; ordinary resets when --input is also enabled","root_acceptance":"pending user-launched live tests"});
+    let capability_queries = serde_json::json!({"source":"broker-negotiated registration flags and parent executor readiness; never inferred from Lua source","freshness_ms":250,"refresh_ms":100,"queued_snapshots":1,"in_flight_snapshots":1,"ready_families":["commands","lua_actions"],"unavailable":"current returns nil; has and ready return false","unknown_names":"false; names must be strings of 1 to 128 bytes","grants":false,"lifetime":"negotiated flags immutable within the owning fence; stop clears metadata"});
     let native_value_limits = serde_json::json!({
         "accounting":"expanded keys and values; aliases counted for every expansion; conservative bytes are not measured RSS",
         "configuration":{"depth":64,"values":values::CONFIG_VALUES,"conservative_bytes":values::CONFIG_EXPANDED_BYTES},
@@ -407,19 +351,16 @@ pub fn api() -> serde_json::Value {
         "modules":{"root":"entry_parent/modules","path":"<identifier>/.../<identifier>.lua","count":modules::MAX_MODULES,"import_depth":modules::MAX_IMPORT_DEPTH,"source_set_bytes":MAX_CONFIG_BYTES,"owner":"entry_file_uid","group_other_writes":false,"symlinks":false,"runtime":"approved sources only; no filesystem reads"},
         "event_kinds":["input","matched","begin","update","end","cancel","skipped","ready","reload","stop","recovery","session_changed","context_changed","rules_changed"],
         "runtime_identities":{"type":"decimal_string","range":"0..18446744073709551615","fields":["fence.broker[]","fence.configuration","fence.session","event.id","event.ordinal","event.source.device","event.source.generation","event.config_generation","event.session_generation","Snapshot.generation","Snapshot.revision","OutputState.geometry_generation","Binding.compositor_start","context_changed.revision","rules.revision","input.source.device","input.source.generation","input.sequence","input.contacts[].id.generation","input.contacts_started[].generation","input.contacts_ended[].generation","input.ended_contacts[].id.generation"],"comparison":"exact string equality; no numeric conversion","bounded_handles":"subscription/timer/task IDs remain Lua integers","protocol":"Rust transport retains u64 values"},
-        "rule_transactions":{"builders":64,"operations":64,"transaction_bytes":32768,"pending_proposals":1,"receipt_time_ms":250,"revision_type":"decimal_string","transport":"explicit authorized host opt-in","production_broker":"observation_or_route_mode","system_permission":"policy.allow_runtime_rules","agent_flags":["lua","rule-mutations"],"capability":"runtime_rules","context":"fresh owning desktop","routing":"negotiable; stock Hyprland takeover only"},
+        "rule_transactions":{"builders":64,"operations":64,"transaction_bytes":32768,"pending_proposals":1,"receipt_time_ms":250,"revision_type":"decimal_string","transport":"explicit authorized host opt-in","production_broker":"observation_or_route_mode","system_permission":"policy.allow_runtime_rules","agent_flags":["lua","rule-mutations"],"capability":"runtime_rules","context":"fresh owning desktop","routing":"negotiable; bound Wayland compositor takeover only"},
         "runtime_layers":{"declared_layers":64,"activation_values":["physical","active","inactive"],"default":"physical","queries":"acknowledged definitions and activation overrides; no physical-key state","transaction":"shared RuleTransaction revision/receipt/permissions","definitions":"immutable at runtime","activation":"fresh input only; existing candidates retired","physical_toggles":"preserved across runtime edits; reconciled on source reload","seat":"owning broker registration"},
         "runtime_modes":{"declared_modes":64,"selected_modes":1,"default":"no selection","rule_condition":"when_mode","queries":"owned acknowledged definitions and active selection","transaction":"shared RuleTransaction revision/receipt/permissions","definitions":"immutable at runtime","activation":"fresh input only; pending and active candidates retired","authority":"does not alter Observe/Route, policy or capability grants","lifetime":"owning seat registration; source reload restores declared initial selection"},
         "rule_hooks":{"registration":"configuration only; rule ID must exist in the validated initial configuration","phases":["discrete","begin","update","end","cancel"],"inline_fields":["on_discrete","on_begin","on_update","on_end","on_cancel"],"budget":"shared event subscription, fuel, time and log limits","delivery":"rule ID and phase filtered in the owning VM; registration order; updates may coalesce","effects":"observational; no returned effects, input claims or synthetic ownership","lifetime":"approved source generation; follows stable rule ID across acknowledged edits; removed rules emit no fresh matches; reload disposes the old VM","export":"callbacks require original Lua source"},
-        "input_events":{"event":"input","configuration_mode":"observe","agent_flags":["lua","input"],"capability":"input_events","system_permission":"policy.allow_input_events","production_broker":"observation_mode","sources":"explicit policy.allowed_devices selectors on the owning seat; virtual devices excluded","context":"fresh desktop without secure overlay","freshness_ms":250,"payload":"InputPayload","raw_frames":false,"input_claims":false,"delivery":"ordered, no coalescing; overflow retires the affected stream or Lua component","resets":["attached","reconciled","mapping_changed","removed","lost"],"coordinates":"device axis counts","maximum_changes":4096,"maximum_contacts":256,"identity_fields":["source.device","source.generation","sequence","contacts[].id.generation","contacts_started[].generation","contacts_ended[].generation","ended_contacts[].id.generation"],"identity_type":"decimal_string"},
+        "input_events":{"event":"input","configuration_mode":"observe","agent_flags":["lua","input"],"capability":"input_events","system_permission":"policy.allow_input_events","production_broker":"observation_mode","sources":"explicit policy.allowed_devices selectors on the owning seat; virtual devices excluded","context":"fresh desktop","freshness_ms":250,"payload":"InputPayload","raw_frames":false,"input_claims":false,"delivery":"ordered, no coalescing; overflow retires the affected stream or Lua component","resets":["attached","reconciled","mapping_changed","removed","lost"],"coordinates":"device axis counts","maximum_changes":4096,"maximum_contacts":256,"identity_fields":["source.device","source.generation","sequence","contacts[].id.generation","contacts_started[].generation","contacts_ended[].generation","ended_contacts[].id.generation"],"identity_type":"decimal_string"},
         "context_limits":{"snapshot_bytes":4194304,"chunk_bytes":32768,"transfer_time_ms":1000,"freshness_ms":250,"refresh_ms":100,"queued_snapshots":2,"read_only":true},
-        "morf_provider_queries":{"role":"shell","capability":"context","freshness_ms":250,"maximum_outputs":64,"discovery_ms":1000,"ipc_budget_ms":200,"phases":{"pending":1,"configured":2},"identity":"native Wayland socket credentials, exact executable/process, logind registration and bound compositor; connection epoch is independent of Lua configuration reload","integers":"compositor_start and fence identities are canonical decimal strings","unavailable":"nil without a fresh owning desktop; empty array when no native provider is currently verified","authority":"read-only connection/configure metadata; no presentation, rendered regions, authentication, recognizer ownership or action grant"},
         "capability_queries":capability_queries,
-        "geometry_queries":{"context":"fresh owning desktop without secure overlay","lookup":"exact output name or rendered region ID","references":"canonical decimal-string fence, snapshot revision and output geometry generation; copies confer no authority","spaces":["normalized","local","global"],"normalized":"post-transform output axes, not raw device axes","local":"post-transform logical units; rotation and scale applied through output logical size","region_bounds":"global logical, half-open","overlaps":"all matches in provider order, no target selection","unavailable":"nil for absent/stale/inhibited context, missing name or retired reference; known empty arrays remain empty","conversion":"finite numeric points, no clamping; arithmetic overflow raises an error","effects":false},
+        "geometry_queries":{"context":"fresh owning desktop","lookup":"exact output name","references":"canonical decimal-string fence, snapshot revision and output geometry generation; copies confer no authority","spaces":["normalized","local","global"],"normalized":"post-transform output axes, not raw device axes","local":"post-transform logical units; rotation and scale applied through output logical size","unavailable":"nil for absent, stale or locked context, missing name or retired reference; known empty arrays remain empty","conversion":"finite numeric points, no clamping; arithmetic overflow raises an error","effects":false},
         "runtime_requires":{"uid":"unprivileged active session","capabilities":["context","observations","lua_events"],"thread":"owning Luna arena","generation":"current broker/configuration/session fence"},
         "action_requires":action_requires,
-        "experimental_adapters":{"power":{"public_session_negotiation":true,"broker_mode":"route","production_routing_available":false,"system_permission":"policy.allow_power_actions","agent_flags":["power"],"named_handler_flags":["lua","power"],"rule_output":"explicit name or validated input mapping; no focus fallback","host_api":"actions::Executor::set_power_adapter(PowerAdapter)","actions":["blank","wake"],"excluded":["lock_and_blank","toggle","suspend"],"target":"explicit frozen owning output, exact geometry generation and binding","deadline":"remaining broker grant and 200ms total IPC budget","completion":"accepted dispatch and observed compositor-reported DPMS state; no hardware power claim","uncertain":"any failure after a mutating request may have been written; never retry","cage_flags":["layers","input","power"]}},
-        "hyprland_adapter":hyprland_adapter,
         "editor":{"format":"LuaCATS","module":"prek","cli":["prek","api","--lua"],"path":"share/prek/lua/prek.lua","scope":"implemented_configuration_and_runtime"},
         "device_queries":{"catalog":"permitted metadata received through input resets or declaration-scoped custom recognizer metadata; no host inventory scan","delivery":"ordinary --input resets, or independent --recognizers metadata without held state or ordinary input callbacks; current owning context and capabilities required","maximum_sources":256,"maximum_bytes":4194304,"lookup":"exact Source device/generation/seat with canonical decimal strings","nil":"no received metadata, unknown source, missing mapping or unavailable/stale desktop context","empty_list":"all known sources removed while context remains usable","revision":"decimal string; metadata changes/removals only","map_keys":"numeric evdev type/axis keys in Lua","position":"validated device counts to normalized/mm/output-local/global coordinates; no action authority","seat":"current fresh desktop binding/fence only; no other-seat enumeration"},
         "runtime_api":"partial"});
@@ -433,7 +374,6 @@ pub fn api() -> serde_json::Value {
         "exclusive_progress":"begin/update after the declared held domains finish is rejected",
         "helper_reentry":"already-held declared domains must become neutral before a new candidate"
     });
-    manifest["morf_adapter"] = morf_adapter;
     manifest["service_inspection"] = serde_json::json!({
         "configuration":"acknowledged Rust model and canonical decimal-string rule revision; closures require original source",
         "policy":"protected permissions in that model; not negotiated execution grants",
@@ -462,77 +402,6 @@ pub fn api() -> serde_json::Value {
         "maximum_outcome_bytes":replay::MAX_BYTES,"maximum_sources":16,"maximum_outcomes":4096,
         "maximum_configuration_values":replay::MAX_CONFIG_VALUES,
         "failure":"malformed records, engine errors and resource/expectation failures retire that replay; ordinary uncaught callback errors retire the VM"
-    });
-    manifest["morf_rendered_queries"] = serde_json::json!({
-        "capability":"context","freshness_ms":250,"ipc_budget_ms":200,
-        "maximum_regions":256,"maximum_reply_bytes":131072,
-        "coverage":"primary_surface_named_bounds","coordinates":"surface-local logical bounding boxes",
-        "identity":"verified native output/endpoint epoch, UI generation and broker fence",
-        "integers":"node identity, UI generation, revision and sampled_ns are canonical decimal strings",
-        "unavailable":"nil without a fresh owning desktop; empty array when no fresh native frame is available",
-        "authority":"inspection only in the report; no keyboard-absence, authentication, stacking or presentation proof",
-        "scopes":false,
-        "routing_refinement":{
-            "requires":"fresh settled_stock_layer projection with a described input region naming the exact coarse layer:<output>:<address> region",
-            "replaces":"the coarse interactive layer region with morf:<epoch>:input:<i> interactive regions",
-            "adds":"local_control as interactive unscoped regions; clock_background, content_bottom, physical_bottom, top_left, top_right, side_left and side_right as scoped regions",
-            "keyboard":"registered hidden/visible state sets keyboard_known, with visible geometry, only on an exclusive output whose keyboard was unknown",
-            "secure_overlay":"any visible secure_overlay node, settled or not"
-        },
-        "input_region":{
-            "capability":"input_region","maximum_rectangles":512,
-            "coordinates":"integer Morf layout units in the frame; outward-rounded global logical boxes in the projection",
-            "unknown":"absent for a configured mask or too many rectangles; never empty by omission"
-        },
-        "layout_projection":{
-            "basis":["stock_layer_layout","settled_stock_layer"],
-            "coordinates":"global logical layout boxes; the layer's current position only for settled_stock_layer, never presentation, stacking or input masks",
-            "settlement":"surface mapped_ns plus the stock layersIn bound agreed by both bracketing samples plus 100 ms, at or before started_ns",
-            "map_in":"zero while animations:enabled or the layersIn node is off; otherwise speed tenths of a second for a listed cubic bezier; none for springs or unknown curves",
-            "integers":"started_ns, sampled_ns, map_in_ns and rendered_from_ns are canonical decimal strings",
-            "identity":"unique stable native producer PID, process birth, output, layer namespace/address/level/box and geometry generation",
-            "missing_bounds":"viewport-clipped rows retain their native identities with null bounds",
-            "exclusive":"no other process's bottom, top or overlay layer on the output in either bracketing sample",
-            "optional":true
-        },
-        "keyboard_registry":{
-            "capability":"keyboard_registry","scope":"registered_morf_primary",
-            "states":["unknown","hidden","visible"],
-            "known":"one declared keyboard under the primary root, with node and layout",
-            "absence":"hidden applies only to the registered Morf node; sets snapshot keyboard_known only through the routing refinement on an exclusive output"
-        },
-        "surface_space":{
-            "capability":"layer_space","fields":["namespace","width","height","local_scale","mapped_ns"],
-            "local_scale":"compositor logical units per native Morf layout unit",
-            "mapped_ns":"optional decimal CLOCK_MONOTONIC receipt of the first frame callback; an upper bound of compositor map time"
-        }
-    });
-    manifest["morf_rendered_queries"]["semantic"] = serde_json::json!({
-        "capability":"semantic_regions","property":"input_context","fields":["role","layout"],
-        "roles":["keyboard","secure_overlay","clock_background","content_bottom","physical_bottom","top_left","top_right","side_left","side_right","local_control"],
-        "layout":"required for keyboard only; 1 to 128 bytes without control characters",
-        "coordinates":"native frame bounds only; caller coordinates rejected",
-        "absence":"does not establish hidden keyboard or complete coverage",
-        "ownership":false
-    });
-    manifest["keyboard_context"] = serde_json::json!({
-        "knowledge":"OutputState.keyboard_known; false means unknown even without geometry",
-        "visible":"known with keyboard geometry","hidden":"known without keyboard geometry",
-        "unknown":"KeyboardUnavailable for visibility conditions and awake spatial scopes",
-        "independent":"explicit global rules and explicit screen-off scopes need not infer keyboard state",
-        "loss":"invalidates the frozen output target","stock_compositor":"unknown",
-        "native_annotations":"inspection only until complete verified mapping and coverage"
-    });
-    manifest["native_layout_queries"] = serde_json::json!({
-        "capability":"context","backend":"Hyprland 0.56.2 Lua","freshness_ms":250,
-        "combined_ipc_budget_ms":200,"optional_ipc_budget_ms":50,"maximum_workspaces":64,"maximum_mapped_windows":512,
-        "identity":"same owning desktop sample, generation, revision and conservative timestamp; current broker fence",
-        "integers":"generation/revision/fence identities are canonical decimal strings; window lifetime identities are address:stable hexadecimal strings",
-        "columns":"zero-based native indices/rows; one-based Lua arrays; width is a native primary-axis fraction",
-        "coordinates":"integer native animation-goal rectangles [x,y,width,height], not rendered hit tests",
-        "unavailable":"nil for unsupported, unavailable, inconsistent, non-desktop, stale or inhibited context; a verified empty inventory is an empty workspace array",
-        "authority":"inspection only; no camera/work-area/effective-rule bounds or input ownership/grants",
-        "effects":false
     });
     manifest["task_dependencies"] = serde_json::json!({
         "operation":"Task.join","states":["pending","running","sleeping","waiting","completed","cancelled"],
@@ -712,7 +581,7 @@ function api.triggers.pan(value)
     value.continuous = true
     return api.triggers.swipe(value)
 end
-for _, kind in ipairs({"event", "keys", "remap", "command", "morf", "hyprland", "power"}) do
+for _, kind in ipairs({"event", "keys", "remap", "command"}) do
     api.actions[kind] = constructor(kind)
 end
 function api.units.duration(value)
@@ -872,9 +741,7 @@ fn instantiate(
                 "devices",
                 "seats",
                 "outputs",
-                "regions",
                 "coordinates",
-                "morf",
                 "replay",
                 "status",
                 "policy",
@@ -987,12 +854,8 @@ fn instantiate(
                     capabilities.set(ctx, field, self::capabilities::getter(&ctx, host.clone(), field))?;
                 }
                 geometry::register(&ctx, module, host.clone())?;
-                let morf: Table = module.get(ctx, "morf")?;
-                for field in ["providers", "regions"] {
-                    morf.set(ctx, field, self::morf::getter(&ctx, host.clone(), field))?;
-                }
                 let context: Table = module.get(ctx, "context")?;
-                for field in ["snapshot", "binding", "state", "fence", "error", "layouts"] {
+                for field in ["snapshot", "binding", "state", "fence", "error"] {
                     context.set(ctx, field, self::context::getter(&ctx, host.clone(), field))?;
                 }
                 let devices: Table = module.get(ctx, "devices")?;

@@ -88,10 +88,7 @@ pub(crate) fn touch_context(at: u64, revision: u64) -> Record {
     snapshot.outputs.push(OutputState {
         geometry: output(),
         geometry_generation: 2,
-        active_workspace: Some(1),
         screen: Screen::On,
-        keyboard_known: true,
-        keyboard: None,
     });
     Record::Context {
         at,
@@ -199,9 +196,7 @@ fn held_touch_nested_steps_run_real_timer_callbacks_without_a_second_frame() {
                 },
             ],
         },
-        window: None,
         output: Some("replay-output".into()),
-        workspace: Some(1),
     };
     assert_eq!(replay.events(), std::slice::from_ref(&expected));
     replay

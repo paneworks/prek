@@ -496,7 +496,6 @@ return p.config.new{{mode='route',
             },
             None,
             &BTreeMap::new(),
-            BTreeMap::new(),
         )
         .unwrap();
         let consumer = Consumer::IsolatedReceiver { pid: 1, start: 1 };
@@ -510,7 +509,6 @@ return p.config.new{{mode='route',
                     name: descriptor.name,
                     class: descriptor.class,
                     seat: "seat0".into(),
-                    settings: BTreeMap::new(),
                     at,
                 },
                 at,

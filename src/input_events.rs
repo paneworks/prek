@@ -236,7 +236,6 @@ pub(crate) fn permitted_context(
         && context.binding.kind == crate::context::SessionKind::User
         && context.snapshot.generation == session
         && context.snapshot.state == crate::context::State::Desktop
-        && !context.snapshot.secure_overlay
         && now >= context.snapshot.captured_at
         && now - context.snapshot.captured_at <= crate::context::SNAPSHOT_MAX_AGE
 }

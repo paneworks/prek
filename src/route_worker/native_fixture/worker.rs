@@ -201,18 +201,11 @@ fn serve(held: &mut Option<Owned>) -> io::Result<()> {
     )?;
     for (device, output) in devices.iter().zip(physical) {
         let now = monotonic()?;
-        stream
-            .releases
-            .insert(device.source.clone(), (fence, health.worker_identity()));
+        stream.releases.insert(device.source.clone());
         stream.outputs.insert(
             device.source.clone(),
             Output {
                 fence,
-                admission: crate::morf::admission::Gate::new(
-                    health.worker_identity(),
-                    fence,
-                    device.source.clone(),
-                ),
                 virtual_device: output,
                 state_probe: None,
                 feedback: None,
@@ -253,9 +246,6 @@ fn serve(held: &mut Option<Owned>) -> io::Result<()> {
             .consumer
             .as_ref()
             .ok_or_else(|| invalid("managed physical receiver has no evidence"))?;
-        if !output.admission.allowed(now) {
-            return Err(invalid("managed physical fixture admission is not ready"));
-        }
         let mut gate = Readiness::new(
             output.virtual_device.descriptor().clone(),
             consumer.clone(),

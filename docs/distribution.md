@@ -5,7 +5,7 @@ Prek's release artifact is `prek-VERSION-SYSTEM-nix.tar.gz`, for
 in Nix's file binary-cache format, not a source `.crate` or a portable ELF.
 It requires Linux, Nix with the `nix-command` feature, and Python 3.11 or newer.
 The ELF interpreter and runtime libraries retain their `/nix/store` paths.
-The bundle does not provide Cage, Hyprland, Morf or a working login session.
+The bundle does not provide a compositor or a working login session.
 Broker use still requires the explicitly configured host libsystemd,
 compositor, device permissions and session policy documented in
 [nixos.md](nixos.md). These are not implied by a successful CLI smoke check.
@@ -92,7 +92,7 @@ the current `HEAD`, rechecks the retained hash before and after, and executes a
 copy whose interpreter and runtime path point at the pinned cross musl loader
 and `libgcc_s.so.1`; the retained artifact is never modified. It requires
 `prek --version` to match `Cargo.toml` and `prek check --json` to report the
-shipped `touch_routing`, `window_keys` and `power` Lua examples valid, which
+shipped `touch_routing`, `mode_transactions` and `input_events` Lua examples valid, which
 exercises Luna and the isolated compile worker. Evidence lands in
 `target/cross-aarch64/executed`; its receipt says `execution=emulated-binfmt`
 and `hardware=false`. Emulation is not ARM64 hardware, phone, native-bundle or
@@ -146,7 +146,7 @@ hosting/signing and successful published/download-only acceptance remain
 separate evidence gates.
 
 Local CLI/configuration checks do not prove physical routing, kernel tests,
-rendered Cage behavior, native phone execution or device/session integration.
+compositor behavior, native phone execution or device/session integration.
 The dynamic ARM musl phone shell is a separate target, not the GNU/Nix bundle.
 
 Nix documents closure copying and relocated-store limitations in its

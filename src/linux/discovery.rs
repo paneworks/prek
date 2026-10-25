@@ -155,6 +155,72 @@ impl Publication {
     }
 }
 
+/// Event nodes whose processed udev record publishes `marker`, matched by
+/// device number without opening any device.
+pub(crate) fn published(marker: &str) -> io::Result<Vec<PathBuf>> {
+    published_at(Path::new("/dev/input"), Path::new(DATABASE), 0, marker)
+}
+fn published_at(
+    directory: &Path,
+    root: &Path,
+    owner: u32,
+    marker: &str,
+) -> io::Result<Vec<PathBuf>> {
+    let mut nodes = Vec::new();
+    for entry in fs::read_dir(directory)? {
+        let name = entry?.file_name();
+        if !name.to_str().is_some_and(|name| {
+            name.strip_prefix("event")
+                .is_some_and(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
+        }) {
+            continue;
+        }
+        let path = directory.join(name);
+        let stat = match fs::symlink_metadata(&path) {
+            Ok(stat) if stat.mode() & libc::S_IFMT == libc::S_IFCHR => stat,
+            Ok(_) => continue,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        let database = root.join(format!(
+            "c{}:{}",
+            libc::major(stat.rdev()),
+            libc::minor(stat.rdev())
+        ));
+        let file = match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+            .open(database)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        let before = Stamp::protected(&file.metadata()?, owner)?;
+        let mut bytes = Vec::new();
+        (&file).take(MAX_DATABASE + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_DATABASE
+            || before != Stamp::protected(&file.metadata()?, owner)?
+        {
+            continue;
+        }
+        let Some((true, properties)) = std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(|text| parse(text).ok())
+        else {
+            continue;
+        };
+        if properties
+            .get("PREK_PUBLICATION")
+            .is_some_and(|value| value == marker)
+        {
+            nodes.push(path);
+        }
+    }
+    nodes.sort();
+    Ok(nodes)
+}
+
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }

@@ -21,6 +21,23 @@ const SYSTEM_BUS: &CStr = c"unix:path=/run/dbus/system_bus_socket";
 pub(crate) fn connection_pid(library: &crate::session::Library, name: &CStr) -> io::Result<u32> {
     Connection::open(Api::load(library)?, SYSTEM_BUS)?.pid(name)
 }
+/// One retained system-bus connection for logind lock-hint queries.
+pub(crate) struct LockHints {
+    bus: Connection,
+}
+impl LockHints {
+    pub(crate) fn open(library: &crate::session::Library) -> io::Result<Self> {
+        Ok(Self {
+            bus: Connection::open(Api::load(library)?, SYSTEM_BUS)?,
+        })
+    }
+    pub(crate) fn session_path(&self, session: &CStr) -> io::Result<CString> {
+        self.bus.session_path(session)
+    }
+    pub(crate) fn locked(&self, path: &CStr) -> io::Result<bool> {
+        self.bus.locked_hint(path)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Snapshot {

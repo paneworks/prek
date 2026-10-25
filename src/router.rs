@@ -1057,7 +1057,6 @@ mod tests {
             },
             None,
             &BTreeMap::new(),
-            BTreeMap::new(),
         )
         .unwrap();
         let consumer = Consumer::IsolatedReceiver { pid: 1, start: 1 };
@@ -1071,7 +1070,6 @@ mod tests {
                 name: descriptor.name.clone(),
                 class: descriptor.class,
                 seat: "seat0".into(),
-                settings: BTreeMap::new(),
                 at: Duration::ZERO,
             },
             Duration::ZERO,

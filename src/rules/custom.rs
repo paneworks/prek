@@ -308,9 +308,10 @@ fn frame_at(
         if !starts
             || context.custom.live.len() + context.custom.gate.retiring()
                 >= recognition::MAX_PENDING
-            || !context.authority.fresh(at).is_ok_and(|snapshot| {
-                snapshot.state == crate::context::State::Desktop && !snapshot.secure_overlay
-            })
+            || !context
+                .authority
+                .fresh(at)
+                .is_ok_and(|snapshot| snapshot.state == crate::context::State::Desktop)
             || context.authority.generation() != context.custom.fence.session
         {
             return;
@@ -514,9 +515,10 @@ pub(super) fn continue_touch(
         || context.authority.generation() != context.custom.fence.session
         || previous.session_generation != context.custom.fence.session
         || !conditions(&worker.rule, context.keys, &previous.source.seat)
-        || !context.authority.fresh(at).is_ok_and(|snapshot| {
-            snapshot.state == crate::context::State::Desktop && !snapshot.secure_overlay
-        })
+        || !context
+            .authority
+            .fresh(at)
+            .is_ok_and(|snapshot| snapshot.state == crate::context::State::Desktop)
     {
         return Err("touch continuation is no longer eligible");
     }
@@ -744,9 +746,10 @@ impl Engine {
             && selected(&self.config, &worker.rule, &state.device)
             && (!worker.rule.keys_throughout
                 || conditions(&worker.rule, &self.conditions, &candidate.source.seat))
-            && self.authority.fresh(at).is_ok_and(|snapshot| {
-                snapshot.state == crate::context::State::Desktop && !snapshot.secure_overlay
-            })
+            && self
+                .authority
+                .fresh(at)
+                .is_ok_and(|snapshot| snapshot.state == crate::context::State::Desktop)
             && self.validate_route(&intent, at).is_ok())
         .then_some(intent)
     }

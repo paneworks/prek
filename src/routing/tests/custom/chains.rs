@@ -362,7 +362,7 @@ fn expired_suffix_replies_fall_back_at_the_first_buffer_epoch_without_overtaking
 }
 
 #[test]
-fn prefix_transport_helper_or_secure_context_loss_invalidates_a_cross_source_reply() {
+fn prefix_transport_helper_or_session_lock_invalidates_a_cross_source_reply() {
     for loss in [0, 1, 2] {
         let (mut routing, first, second) = custom_pair(Delivery::Reserve);
         prefix(&mut routing, &first);
@@ -371,13 +371,7 @@ fn prefix_transport_helper_or_secure_context_loss_invalidates_a_cross_source_rep
         match loss {
             0 => routing.recover(&first.source),
             1 => routing.recognition_ready(false, ms(201)).unwrap(),
-            _ => {
-                let mut snapshot = routing.authority_mut().fresh(ms(200)).unwrap().clone();
-                snapshot.revision += 1;
-                snapshot.captured_at = ms(201);
-                snapshot.secure_overlay = true;
-                routing.authority_mut().update(snapshot, ms(201)).unwrap();
-            }
+            _ => routing.authority_mut().lock_requested(),
         }
         assert!(
             routing

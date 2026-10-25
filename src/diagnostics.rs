@@ -1,7 +1,7 @@
 //! Read-only capability preflight. Missing hardware and unfinished consumers
 //! are explicit findings, never silently accepted as operational routing.
 use crate::{
-    config::{Action, Config, Mode, Trigger},
+    config::{Config, Mode, Trigger},
     input::Device,
 };
 use serde::{Deserialize, Serialize};
@@ -148,26 +148,9 @@ impl Report {
                     }
                 }
             }
-            if matches!(rule.action, Action::Morf { .. }) {
-                add(
-                    "morf_adapter_unavailable",
-                    None,
-                    Some(&rule.id),
-                    "Morf context/action negotiation is not implemented yet".into(),
-                );
-            }
-            if matches!(rule.action, Action::Hyprland { .. }) {
-                add(
-                    "hyprland_adapter_unavailable",
-                    None,
-                    Some(&rule.id),
-                    "Hyprland window context/actions are not connected to the session agent yet"
-                        .into(),
-                );
-            }
         }
         if config.mode == Mode::Route {
-            add("routing_pending", None, None, "Routing runs only under `prek broker --mode route`, takes over stock-Hyprland devices at a neutral idle cut and is not yet accepted on real hardware".into());
+            add("routing_pending", None, None, "Routing runs only under `prek broker --mode route`, takes over devices held by the bound Wayland compositor at a neutral idle cut and is not yet accepted on real hardware".into());
         }
         Self {
             version: 1,
@@ -190,6 +173,37 @@ fn maximum_fingers(trigger: &Trigger) -> Option<u16> {
 mod tests {
     use super::*;
     use crate::{config::Selector, input::*};
+    fn phone() -> Config {
+        let mut config = Config::preset("phone").unwrap();
+        config.rules.push(crate::config::Rule {
+            id: "three".into(),
+            enabled: true,
+            priority: 0,
+            devices: vec!["touch".into()],
+            seats: vec![],
+            contexts: vec![crate::config::Context::Desktop],
+            scope: crate::config::Scope::Everywhere,
+            output: None,
+            screen: None,
+            require_keys: vec![],
+            keys_throughout: false,
+            layer: None,
+            when_mode: None,
+            delivery: crate::config::Delivery::Buffer,
+            trigger: Trigger::Swipe {
+                fingers: 3,
+                direction: crate::config::Direction::Vertical,
+                travel: crate::config::Distance::Millimetres(12.0),
+                fallback_travel: crate::config::Distance::Normalized(0.04),
+                continuous: false,
+            },
+            action: crate::config::Action::Event {
+                name: "three".into(),
+            },
+        });
+        config.validate().unwrap();
+        config
+    }
     fn touch(capacity: usize, virtual_device: bool) -> Entry {
         let axis = |maximum| Axis {
             minimum: 0,
@@ -237,7 +251,7 @@ mod tests {
     }
     #[test]
     fn t04_virtual_devices_are_excluded_and_unknown_capacity_is_reported() {
-        let config = Config::preset("phone").unwrap();
+        let config = phone();
         let report = Report::inspect(&config, &[touch(10, true)]);
         assert!(report.matches["touch"].is_empty());
         let mut entry = touch(10, false);
@@ -251,14 +265,14 @@ mod tests {
     }
     #[test]
     fn t04_finger_capacity_and_unfinished_routing_are_honest() {
-        let config = Config::preset("phone").unwrap();
+        let config = phone();
         let report = Report::inspect(&config, &[touch(2, false)]);
         assert!(
             report
                 .findings
                 .iter()
                 .any(|finding| finding.code == "finger_capacity"
-                    && finding.rule.as_deref() == Some("G10"))
+                    && finding.rule.as_deref() == Some("three"))
         );
         assert!(
             report

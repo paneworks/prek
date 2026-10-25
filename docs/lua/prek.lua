@@ -11,21 +11,18 @@
 ---@alias prek.Delivery 'observe'|'buffer'|'reserve'
 ---@alias prek.State 'console'|'desktop'|'locking'|'locked'|'greeter'|'inactive'|'unknown'
 ---@alias prek.Context 'console'|'desktop'|'locking'|'locked'|'greeter'
----@alias prek.Scope 'everywhere'|'app_content'|'keyboard'|'content_bottom'|'physical_bottom'|'top_left'|'top_right'|'side_left'|'side_right'|'clock_background'
+---@alias prek.Scope 'everywhere'
 ---@alias prek.Direction 'up'|'down'|'left'|'right'|'horizontal'|'vertical'|'any'
 ---@alias prek.Screen 'on'|'off'
 ---@alias prek.LayerActivation 'physical'|'active'|'inactive'
 ---@alias prek.Stage 'discrete'|'begin'|'update'|'end'|'cancel'
 ---@alias prek.TaskState 'pending'|'running'|'sleeping'|'waiting'|'completed'|'cancelled'
 ---@alias prek.TaskTerminal 'completed'|'cancelled'
----@alias prek.EffectKind 'observations'|'commands'|'synthetic_input'|'hyprland_actions'|'morf_actions'|'power_actions'
----@alias prek.Capability 'context'|'observations'|'lua_events'|'input_events'|'custom_recognizers'|'lua_actions'|'runtime_rules'|'hyprland_actions'|'morf_actions'|'power_actions'|'commands'|'synthetic_input'
+---@alias prek.EffectKind 'observations'|'commands'|'synthetic_input'
+---@alias prek.Capability 'context'|'observations'|'lua_events'|'input_events'|'custom_recognizers'|'lua_actions'|'runtime_rules'|'commands'|'synthetic_input'
 ---@alias prek.EventKind 'input'|'matched'|'begin'|'update'|'end'|'cancel'|'skipped'|'ready'|'reload'|'stop'|'recovery'|'session_changed'|'context_changed'|'rules_changed'
 ---@alias prek.RecognizerInput 'key'|'relative'|'wheel'|'absolute'|'switch'|'touch'
 ---@alias prek.RecognizerPhase 'pending'|'discrete'|'begin'|'update'|'end'|'cancel'
----@alias prek.MorfAction 'dashboard'|'notifications'|'quick_settings'|'workspace_preview'|'keyboard_show'|'keyboard_hide'|'keyboard_toggle_layout'|'apps'|'web'|'reveal_clock_form'
----@alias prek.WindowAction 'reorder_up'|'reorder_down'|'move_left_and_follow'|'move_right_and_follow'|'close'|'scroll_stack'
----@alias prek.PowerAction 'lock_and_blank'|'wake'|'blank'
 
 ---@class (exact) prek.Timings
 ---@field tap_max? prek.Duration Default 250ms.
@@ -48,15 +45,12 @@
 ---@field keys? prek.Key[] Required capabilities, not held-key conditions.
 ---@field absolute_axes? integer[]
 ---@field properties? integer[]
----@field hyprland? table<string, string> Hyprland per-device options (hyprlang names) applied to this device's routed virtual copy.
 
 ---@class (exact) prek.Policy
 ---@field allowed_devices? string[]
 ---@field allowed_seats? string[]
 ---@field allow_runtime_rules? boolean Default false; only protected system policy grants permission.
 ---@field allow_input_events? boolean Default false; protected opt-in for --lua --input or --lua --recognizers with fresh desktop context.
----@field allow_power_actions? boolean Default false; protected permission for --power on a routing broker.
----@field allow_hyprland_actions? boolean Default false; protected permission for --hyprland on a routing broker.
 
 ---@class (exact) prek.ShapeCapture
 ---@field max_samples? integer Default 2048.
@@ -201,15 +195,6 @@
 ---@class (exact) prek.CommandFields
 ---@field kind? 'command' Matching explicit kind is accepted; constructors supply it if absent.
 ---@field argv string[] Exact argv, no implicit shell; at most 256 arguments, 4096 bytes each.
----@class (exact) prek.MorfFields
----@field kind? 'morf' Matching explicit kind is accepted; constructors supply it if absent.
----@field action prek.MorfAction
----@class (exact) prek.HyprlandFields
----@field kind? 'hyprland' Matching explicit kind is accepted; constructors supply it if absent.
----@field action prek.WindowAction
----@class (exact) prek.PowerFields
----@field kind? 'power' Matching explicit kind is accepted; constructors supply it if absent.
----@field action prek.PowerAction
 ---@class (exact) prek.HandlerOptions
 ---@field requires prek.EffectKind[] Nonempty declared effect capabilities.
 ---@class (exact) prek.EventAction: prek.EventFields
@@ -220,16 +205,10 @@
 ---@field kind 'remap'
 ---@class (exact) prek.CommandAction: prek.CommandFields
 ---@field kind 'command'
----@class (exact) prek.MorfActionDeclaration: prek.MorfFields
----@field kind 'morf'
----@class (exact) prek.HyprlandAction: prek.HyprlandFields
----@field kind 'hyprland'
----@class (exact) prek.PowerActionDeclaration: prek.PowerFields
----@field kind 'power'
 ---@class (exact) prek.LuaAction: prek.HandlerOptions
 ---@field kind 'lua'
 ---@field handler string Approved named handler in this exact source generation.
----@alias prek.Action prek.EventAction|prek.KeysAction|prek.RemapAction|prek.CommandAction|prek.MorfActionDeclaration|prek.HyprlandAction|prek.PowerActionDeclaration|prek.LuaAction
+---@alias prek.Action prek.EventAction|prek.KeysAction|prek.RemapAction|prek.CommandAction|prek.LuaAction
 ---@alias prek.ActionResult prek.EventAction|prek.CommandAction Only these named-handler effects are currently executable.
 
 ---@class (exact) prek.Rule
@@ -242,7 +221,6 @@
 ---@field scope? prek.Scope Default everywhere.
 ---@field output? string Explicit output name for keyboard/non-spatial rules; mapping must agree when present.
 ---@field screen? prek.Screen
----@field keyboard_visible? boolean
 ---@field require_keys? prek.Key[]
 ---@field keys_throughout? boolean Default false.
 ---@field layer? string Declared layer ID.
@@ -305,26 +283,10 @@
 ---@field scale number
 ---@field origin prek.Point
 ---@field transform 'normal'|'rotate90'|'rotate180'|'rotate270'|'flipped'|'flipped90'|'flipped180'|'flipped270'
----@class (exact) prek.Keyboard
----@field rect prek.Rect
----@field layout string
 ---@class (exact) prek.OutputState
 ---@field geometry prek.Output
 ---@field geometry_generation prek.Identity
----@field active_workspace? integer
 ---@field screen prek.Screen
----@field keyboard? prek.Keyboard
----@field keyboard_known boolean Whether visibility was explicitly established by a bound provider; false means unknown, not hidden.
----@class (exact) prek.Window
----@field id string
----@field output string
----@field workspace integer
----@field rect prek.Rect
----@field content prek.Rect
----@field mapped boolean
----@field visible boolean
----@field focused boolean
----@field z_order? integer
 ---@alias prek.CoordinateSpace 'normalized'|'local'|'global'
 ---@class (exact) prek.OutputReference
 ---@field fence prek.Fence
@@ -334,25 +296,12 @@
 ---@class (exact) prek.OutputView
 ---@field reference prek.OutputReference
 ---@field state prek.OutputState Owned metadata; edits never change conversions or host geometry.
----@class (exact) prek.Region
----@field id string
----@field scope? prek.Scope
----@field output string
----@field rect prek.Rect
----@field interactive boolean
----@class (exact) prek.RegionView
----@field fence prek.Fence
----@field revision prek.Identity
----@field region prek.Region
 ---@class (exact) prek.Snapshot
 ---@field generation prek.Identity
 ---@field revision prek.Identity
 ---@field captured_at prek.MonotonicTime
 ---@field state prek.State
 ---@field outputs prek.OutputState[]
----@field windows prek.Window[]
----@field regions prek.Region[]
----@field secure_overlay boolean
 ---@class (exact) prek.Binding
 ---@field seat string
 ---@field session string
@@ -360,49 +309,6 @@
 ---@field compositor_pid integer
 ---@field compositor_start prek.Identity
 ---@field kind 'user'|'greeter'
-
----@class (exact) prek.NativeLayoutPosition
----@field index integer Zero-based native column index.
----@field row integer Zero-based member index in that column.
----@class (exact) prek.NativeLayoutWindow
----@field id string Exact hexadecimal address:stable lifetime.
----@field rect number[] Native animation-goal x,y,width,height; not rendered bounds.
----@field hidden boolean
----@field floating boolean
----@field grouped boolean
----@field fullscreen integer
----@field column? prek.NativeLayoutPosition
----@class (exact) prek.NativeLayoutColumn
----@field index integer Zero-based native column index.
----@field width number Native primary-axis fraction, not pixels.
----@field members string[] Ordered exact window lifetimes.
----@class (exact) prek.NativeLayoutWorkspace
----@field id integer
----@field output? string
----@field monitor? integer
----@field active boolean
----@field special boolean
----@field layout string
----@field windows prek.NativeLayoutWindow[]
----@field columns prek.NativeLayoutColumn[]
----@class (exact) prek.NativeReservedArea
----@field output string
----@field area number[] Reserved `{left, top, right, bottom}` in logical pixels.
----@class (exact) prek.NativeScrollProfile
----@field direction string Global `scrolling:direction`.
----@field gaps_in integer[] `general:gaps_in` as `{top, right, bottom, left}`.
----@field gaps_out integer[] `general:gaps_out` as `{top, right, bottom, left}`.
----@field border integer `general:border_size`.
----@field focus_fit integer `scrolling:focus_fit_method`: 0 centres, 1 fits.
----@field workspace_rules integer Number of workspace rules.
----@field reserved prek.NativeReservedArea[]
----@class (exact) prek.NativeLayouts
----@field fence prek.Fence
----@field generation prek.Identity
----@field revision prek.Identity
----@field captured_at prek.MonotonicTime
----@field workspaces prek.NativeLayoutWorkspace[]
----@field profile? prek.NativeScrollProfile Present only beside an active scrolling workspace.
 
 ---@alias prek.Space 'normalized'|'logical'|'millimetres'|'relative'
 ---@alias prek.CancelReason 'event_loss'|'backward_time'|'invalid_frame'|'source_changed'|'disconnected'|'mapping_changed'
@@ -489,9 +395,7 @@
 ---@field stage prek.Stage
 ---@field action prek.Action
 ---@field evidence prek.Evidence Narrow on evidence.kind before accessing variant fields.
----@field window? string
 ---@field output? string
----@field workspace? integer
 ---@class (exact) prek.SkippedEvent
 ---@field outcome 'skipped'
 ---@field version integer
@@ -732,87 +636,11 @@ local SchedulerAPI = {}
 ---@class (exact) prek.CapabilityView
 ---@field fence prek.Fence
 ---@field negotiated prek.Capability[] Registration flags; policy and per-effect authorization still apply.
----@field ready prek.Capability[] Current executor capacity for commands, lua_actions, power_actions and hyprland_actions.
+---@field ready prek.Capability[] Current executor capacity for commands and lua_actions.
 ---@field sampled_at prek.MonotonicTime Original parent sampling time; expires after 250ms.
 
 ---@class prek.CapabilitiesAPI
 local CapabilitiesAPI = {}
----@class (exact) prek.MorfProviderBinding
----@field version integer Native wire version, currently 1.
----@field role 'shell'
----@field epoch string Exact native connection epoch; no action authority.
----@field revision integer Native phase revision, 1 or 2.
----@field phase 'pending'|'configured' Configured is a native configure witness, not rendered-region evidence.
----@field output string Actual named output of this native connection.
----@field compositor_pid integer
----@field compositor_uid integer
----@field compositor_start prek.Identity Exact compositor process birth.
----@field fence prek.Fence Owning broker/configuration/session fence.
----@class prek.MorfAPI
-local MorfAPI = {}
----Read-only native bindings in the fresh owning desktop. Known absence is an empty array.
----Nil for stale, missing or inhibited context. No geometry, handoff, lock proof or effect grant.
----@return prek.MorfProviderBinding[]|nil
-function MorfAPI.providers() error("Prek editor definition") end
----@class (exact) prek.MorfNamedBounds
----@field semantic? prek.MorfSemanticRegion Declared meaning of this native node; no screen mapping or input authority.
----@field node prek.Identity Opaque generational node identity, scoped by the native endpoint epoch and UI generation.
----@field id string Scene node name; repeated names are preserved as separate native nodes.
----@field bounds {x:number,y:number,width:number,height:number} Surface-local logical bounding box, clipped to ancestor and surface bounds.
----@field interactive boolean Whether this node is an enabled native input target; does not describe its exact hit shape or surface input mask.
----@class (exact) prek.MorfSemanticRegion
----@field role 'keyboard'|'secure_overlay'|'clock_background'|'content_bottom'|'physical_bottom'|'top_left'|'top_right'|'side_left'|'side_right'|'local_control'
----@field layout? string Required only for the keyboard role; the existing full/dev/phone/pattern layout name.
----@class (exact) prek.MorfPrimaryFrame
----@field width integer Surface-local logical width.
----@field height integer Surface-local logical height.
----@field scale_120 integer Actual surface scale in units of 1/120.
----@field regions prek.MorfNamedBounds[] At most 256 named scene bounds from a submitted GPU frame.
----@field surface? {namespace:string,width:integer,height:integer,local_scale:number,mapped_ns?:prek.Identity} Immutable native layer namespace, viewport, compositor logical units per Morf layout unit and first frame callback receipt.
----@field keyboard? prek.MorfKeyboardRegistry Scoped declaration coverage; no global keyboard absence proof.
----@field input? {x:integer,y:integer,width:integer,height:integer}[] Input region committed with this frame in Morf layout units; absent when unknown.
----@class (exact) prek.MorfKeyboardRegistry
----@field scope 'registered_morf_primary'
----@field registered integer Number of declared keyboards across native scene roots.
----@field state 'unknown'|'hidden'|'visible'
----@field node? prek.Identity Present only for a known state.
----@field layout? string Present only for a known state.
----@class (exact) prek.MorfProjectedRegion
----@field node prek.Identity
----@field id string
----@field bounds? {origin:{x:number,y:number},size:{x:number,y:number}} Global logical layout box; nil when fully clipped by the native viewport.
----@field interactive boolean
----@field semantic? prek.MorfSemanticRegion
----@class (exact) prek.MorfLayoutProjection
----@field basis 'stock_layer_layout'|'settled_stock_layer' Settled boxes are the layer's current position, never its presentation.
----@field producer_pid integer
----@field producer_start prek.Identity
----@field output prek.Output
----@field geometry_generation prek.Identity
----@field started_ns prek.Identity Before the first bracketing layer sample.
----@field sampled_ns prek.Identity
----@field map_in_ns? prek.Identity Stock layersIn bound agreed by both samples.
----@field rendered_from_ns? prek.Identity Map bound plus map-in bound plus 100ms.
----@field input? {origin:{x:number,y:number},size:{x:number,y:number}}[] Committed input region as global logical boxes, rounded outward and clipped to the layer.
----@field exclusive boolean No other process's bottom, top or overlay layer on this output in either sample.
----@field surface {output:string,address:string,namespace:string,pid:integer,level:integer,rect:{origin:{x:number,y:number},size:{x:number,y:number}}}
----@field regions prek.MorfProjectedRegion[]
----@class (exact) prek.MorfFrameContext
----@field version integer Currently 1.
----@field epoch string Native connection identity.
----@field ui_generation prek.Identity Lua VM generation.
----@field revision prek.Identity Named frame geometry revision.
----@field sampled_ns prek.Identity CLOCK_MONOTONIC observation, expires after 250ms.
----@field coverage 'primary_surface_named_bounds'
----@field frame prek.MorfPrimaryFrame
----@class (exact) prek.MorfRenderedContext
----@field output string Verified native output binding.
----@field context prek.MorfFrameContext
----@field fence prek.Fence
----@field layout? prek.MorfLayoutProjection Stable compositor layout mapping, never gesture authority.
----Fresh submitted-frame inspection only. Bounds do not grant input scopes, prove keyboard absence, authenticate a surface, or acknowledge compositor presentation.
----@return prek.MorfRenderedContext[]|nil
-function MorfAPI.regions() error("Prek editor definition") end
 ---@class prek.ContextAPI
 local ContextAPI = {}
 ---@class prek.DevicesAPI
@@ -821,8 +649,6 @@ local DevicesAPI = {}
 local SeatsAPI = {}
 ---@class prek.OutputsAPI
 local OutputsAPI = {}
----@class prek.RegionsAPI
-local RegionsAPI = {}
 ---@class prek.CoordinatesAPI
 local CoordinatesAPI = {}
 ---@class prek.ReplayAPI
@@ -849,11 +675,9 @@ local PolicyAPI = {}
 ---@field scheduler prek.SchedulerAPI
 ---@field context prek.ContextAPI
 ---@field capabilities prek.CapabilitiesAPI
----@field morf prek.MorfAPI
 ---@field devices prek.DevicesAPI
 ---@field seats prek.SeatsAPI
 ---@field outputs prek.OutputsAPI
----@field regions prek.RegionsAPI
 ---@field coordinates prek.CoordinatesAPI
 ---@field replay prek.ReplayAPI
 ---@field status prek.StatusAPI
@@ -863,9 +687,8 @@ local prek = {
     config = ConfigAPI, rules = RulesAPI, layers = LayersAPI, modes = ModesAPI, triggers = TriggersAPI, recognizers = RecognizersAPI, actions = ActionsAPI,
     units = UnitsAPI, events = EventsAPI, log = LogAPI, scheduler = SchedulerAPI, context = ContextAPI,
     capabilities = CapabilitiesAPI,
-    morf = MorfAPI,
     devices = DevicesAPI, seats = SeatsAPI,
-    outputs = OutputsAPI, regions = RegionsAPI, coordinates = CoordinatesAPI,
+    outputs = OutputsAPI, coordinates = CoordinatesAPI,
     replay = ReplayAPI,
     status = StatusAPI, policy = PolicyAPI,
 }
@@ -891,7 +714,7 @@ function ConfigAPI.current() error("Prek editor definition") end
 ---Runtime callback/task only. These permissions cannot grant live effects.
 ---@return prek.PolicyView|nil
 function PolicyAPI.current() error("Prek editor definition") end
----Fresh broker status for this fence, including unknown/inhibited states. No desktop context is required.
+---Fresh broker status for this fence, including unknown and locked states. No desktop context is required.
 ---@return prek.StatusView|nil
 function StatusAPI.current() error("Prek editor definition") end
 
@@ -1051,9 +874,6 @@ function SchedulerAPI.sleep(duration) error("Prek editor definition") end
 function ContextAPI.snapshot() error("Prek editor definition") end
 ---@return prek.Binding?
 function ContextAPI.binding() error("Prek editor definition") end
----Fresh copy-only native metadata matched to this desktop sample. No scope or execution authority.
----@return prek.NativeLayouts?
-function ContextAPI.layouts() error("Prek editor definition") end
 ---Unknown after the current view expires.
 ---@return prek.State
 function ContextAPI.state() error("Prek editor definition") end
@@ -1070,7 +890,7 @@ function CapabilitiesAPI.current() error("Prek editor definition") end
 ---@return boolean
 function CapabilitiesAPI.has(name) error("Prek editor definition") end
 ---Executor capacity only; effects still require context, target checks and broker grants.
----@param name string commands, lua_actions, power_actions or hyprland_actions.
+---@param name string commands or lua_actions.
 ---@return boolean
 function CapabilitiesAPI.ready(name) error("Prek editor definition") end
 
@@ -1102,16 +922,6 @@ function OutputsAPI.list() error("Prek editor definition") end
 ---@param name string Exact output name, 1–256 bytes.
 ---@return prek.OutputView?
 function OutputsAPI.get(name) error("Prek editor definition") end
----Provider-reported rendered geometry; missing regions are never inferred.
----@return prek.RegionView[]?
-function RegionsAPI.list() error("Prek editor definition") end
----@param id string Exact rendered region ID, 1–256 bytes.
----@return prek.RegionView?
-function RegionsAPI.get(id) error("Prek editor definition") end
----All regions containing the global logical point; half-open bounds, provider order, no overlap arbitration.
----@param point prek.Point Finite numeric coordinates.
----@return prek.RegionView[]?
-function RegionsAPI.at(point) error("Prek editor definition") end
 ---Uses host geometry, not edited Lua metadata. Any changed fence/revision/generation returns nil.
 ---Normalized axes follow the transformed output; local/global use logical units. No clamping.
 ---@param reference prek.OutputReference
@@ -1191,17 +1001,5 @@ function ActionsAPI.remap(fields) error("Prek editor definition") end
 ---@param fields prek.CommandFields
 ---@return prek.CommandAction
 function ActionsAPI.command(fields) error("Prek editor definition") end
----Declaration only; live adapter execution remains pending.
----@param fields prek.MorfFields
----@return prek.MorfActionDeclaration
-function ActionsAPI.morf(fields) error("Prek editor definition") end
----Typed close/adjacent moves require protected policy, --hyprland and per-effect grants; production routing remains gated.
----@param fields prek.HyprlandFields
----@return prek.HyprlandAction
-function ActionsAPI.hyprland(fields) error("Prek editor definition") end
----Declaration only; live adapter execution remains pending.
----@param fields prek.PowerFields
----@return prek.PowerActionDeclaration
-function ActionsAPI.power(fields) error("Prek editor definition") end
 
 return prek

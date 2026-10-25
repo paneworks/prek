@@ -1,7 +1,7 @@
 //! Owned compositor geometry views and conversions fenced to one snapshot.
 use super::*;
 use crate::{
-    context::{OutputState, Region, Snapshot},
+    context::{OutputState, Snapshot},
     gestures::Point,
     protocol::Fence,
 };
@@ -77,22 +77,6 @@ fn output_view<'gc>(
     table.set(ctx, "state", state)?;
     Ok(Value::Table(table))
 }
-fn region_view<'gc>(
-    ctx: luna::Context<'gc>,
-    fence: &Fence,
-    revision: u64,
-    region: &Region,
-) -> Result<Value<'gc>, luna::Error<'gc>> {
-    let table = Table::new(&ctx);
-    table.set(ctx, "fence", values::context_fence(ctx, fence)?)?;
-    table.set(ctx, "revision", revision.to_string())?;
-    table.set(
-        ctx,
-        "region",
-        luna_util::serde::to_value(ctx, region).map_err(io::Error::other)?,
-    )?;
-    Ok(Value::Table(table))
-}
 struct Reference {
     fence: Fence,
     revision: u64,
@@ -160,7 +144,6 @@ pub(super) fn register<'gc>(
 ) -> Result<(), luna::Error<'gc>> {
     for (namespace, fields) in [
         ("outputs", &["list", "get"][..]),
-        ("regions", &["list", "get", "at"][..]),
         ("coordinates", &["convert"][..]),
     ] {
         let table: Table = module.get(*ctx, namespace)?;
@@ -179,11 +162,6 @@ pub(super) fn register<'gc>(
                     }
                     let requested = if field == "get" {
                         Some(name(stack.from_front(ctx)?)?)
-                    } else {
-                        None
-                    };
-                    let location = if field == "at" {
-                        Some(point(ctx, stack.from_front(ctx)?)?)
                     } else {
                         None
                     };
@@ -217,29 +195,6 @@ pub(super) fn register<'gc>(
                                     ctx,
                                     index + 1,
                                     output_view(ctx, &view.fence, snapshot.revision, output)?,
-                                )?;
-                            }
-                            Value::Table(list)
-                        }
-                        ("regions", "get") => snapshot
-                            .regions
-                            .iter()
-                            .find(|region| Some(&region.id) == requested.as_ref())
-                            .map(|region| region_view(ctx, &view.fence, snapshot.revision, region))
-                            .transpose()?
-                            .unwrap_or(Value::Nil),
-                        ("regions", "list" | "at") => {
-                            let list = Table::new(&ctx);
-                            for (index, region) in snapshot
-                                .regions
-                                .iter()
-                                .filter(|region| location.is_none_or(|p| region.rect.contains(p)))
-                                .enumerate()
-                            {
-                                list.set(
-                                    ctx,
-                                    index + 1,
-                                    region_view(ctx, &view.fence, snapshot.revision, region)?,
                                 )?;
                             }
                             Value::Table(list)
@@ -295,9 +250,6 @@ mod tests {
         for call in [
             "outputs.list()",
             "outputs.get('x')",
-            "regions.list()",
-            "regions.get('x')",
-            "regions.at({x=0,y=0})",
             "coordinates.convert({}, {x=0,y=0}, 'local', 'global')",
         ] {
             assert!(
@@ -313,19 +265,15 @@ mod tests {
         let mut runtime = runtime(
             r#"
 if event.empty then
-  assert(#p.outputs.list()==0 and #p.regions.list()==0 and #p.regions.at({x=0,y=0})==0)
+  assert(#p.outputs.list()==0)
 else
   assert(p.outputs.list()==nil and p.outputs.get('missing')==nil)
-  assert(p.regions.list()==nil and p.regions.get('missing')==nil and p.regions.at({x=0,y=0})==nil)
 end
 "#,
         );
         dispatch(&mut runtime, serde_json::json!({}));
         let mut view = view(Duration::ZERO);
-        let snapshot = &mut view.context.as_mut().unwrap().snapshot;
-        snapshot.outputs.clear();
-        snapshot.windows.clear();
-        snapshot.regions.clear();
+        view.context.as_mut().unwrap().snapshot.outputs.clear();
         runtime.set_context(view, Duration::ZERO).unwrap();
         dispatch(&mut runtime, serde_json::json!({"empty":true}));
         runtime
@@ -338,7 +286,7 @@ end
         let mut runtime = runtime(
             r#"
 local output=p.outputs.get('fixture-output'); assert(output and #p.outputs.list()==1)
-assert(p.outputs.get('absent')==nil and p.regions.get('absent')==nil)
+assert(p.outputs.get('absent')==nil)
 assert(output.reference.revision=='18446744073709551615')
 assert(output.reference.geometry_generation=='9223372036854775808')
 assert(output.reference.fence.broker[1]=='18446744073709551615')
@@ -352,9 +300,6 @@ local normalized=p.coordinates.convert(output.reference,local_point,'local','nor
 assert(normalized.x==0.25 and normalized.y==0.5)
 local outside=p.coordinates.convert(output.reference,{x=-1,y=2},'normalized','local')
 assert(outside.x==-400 and outside.y==1000)
-local region=p.regions.get('widget-1'); region.region.id='forged'
-assert(p.regions.list()[1].region.id=='widget-1')
-assert(region.revision==output.reference.revision and region.fence.session==output.reference.fence.session)
 "#,
         );
         let mut view = view(Duration::ZERO);
@@ -366,31 +311,6 @@ assert(region.revision==output.reference.revision and region.fence.session==outp
         output.geometry.origin = Point { x: -100.0, y: 50.0 };
         output.geometry.scale = 2.0;
         output.geometry.transform = Transform::Rotate90;
-        // Keep provider-reported regions/keyboard inside the transformed output.
-        output.keyboard = None;
-        snapshot.regions[0].rect.origin.y = 50.0;
-        runtime.set_context(view, Duration::ZERO).unwrap();
-        dispatch(&mut runtime, serde_json::json!({}));
-    }
-    #[test]
-    fn region_hits_are_half_open_preserve_overlaps_and_never_infer_geometry() {
-        let mut runtime = runtime(
-            r#"
-local hits=p.regions.at({x=1,y=20}); assert(#hits==2)
-assert(hits[1].region.id=='widget-1' and hits[2].region.id=='overlap')
-assert(hits[1].region.interactive and not hits[2].region.interactive)
-assert(#p.regions.at({x=0.1,y=10})==2)
-assert(#p.regions.at({x=100.1,y=20})==0)
-assert(#p.regions.at({x=1,y=130})==0)
-assert(#p.regions.at({x=-1,y=20})==0)
-"#,
-        );
-        let mut view = view(Duration::ZERO);
-        let snapshot = &mut view.context.as_mut().unwrap().snapshot;
-        let mut overlap = snapshot.regions[0].clone();
-        overlap.id = "overlap".into();
-        overlap.interactive = false;
-        snapshot.regions.push(overlap);
         runtime.set_context(view, Duration::ZERO).unwrap();
         dispatch(&mut runtime, serde_json::json!({}));
     }
@@ -413,10 +333,7 @@ else assert(p.coordinates.convert(saved,{x=1,y=1},'local','global')==nil) end
                     view.context.as_mut().unwrap().snapshot.outputs[0].geometry_generation += 1
                 }
                 "removed" => {
-                    let snapshot = &mut view.context.as_mut().unwrap().snapshot;
-                    snapshot.outputs.clear();
-                    snapshot.windows.clear();
-                    snapshot.regions.clear();
+                    view.context.as_mut().unwrap().snapshot.outputs.clear();
                 }
                 _ => unreachable!(),
             }
@@ -426,12 +343,12 @@ else assert(p.coordinates.convert(saved,{x=1,y=1},'local','global')==nil) end
     }
     #[test]
     fn inhibited_and_expired_context_cannot_supply_geometry_or_conversions() {
-        for change in ["locked", "secure", "binding", "expired", "missing"] {
+        for change in ["locked", "binding", "expired", "missing"] {
             let mut runtime = runtime(
                 r#"
 if event.save then saved=p.outputs.list()[1].reference
 else
-  assert(p.outputs.list()==nil and p.regions.list()==nil)
+  assert(p.outputs.list()==nil)
   assert(p.coordinates.convert(saved,{x=1,y=1},'local','global')==nil)
 end
 "#,
@@ -444,7 +361,6 @@ end
                     view.state = crate::context::State::Locked;
                     view.context.as_mut().unwrap().snapshot.state = view.state;
                 }
-                "secure" => view.context.as_mut().unwrap().snapshot.secure_overlay = true,
                 "binding" => {
                     view.context.as_mut().unwrap().binding.kind =
                         crate::context::SessionKind::Greeter
@@ -467,9 +383,7 @@ end
         let mut runtime = runtime(
             r#"
 local output=p.outputs.list()[1]; local ref=output.reference
-assert(not pcall(p.outputs.get,'')); assert(not pcall(p.regions.get,12))
-assert(not pcall(p.regions.at,{x=0/0,y=0}))
-assert(not pcall(p.regions.at,{x='1',y=0}))
+assert(not pcall(p.outputs.get,'')); assert(not pcall(p.outputs.get,12))
 assert(not pcall(p.coordinates.convert,ref,{x=false,y=0},'local','global'))
 assert(not pcall(p.coordinates.convert,ref,{x=math.huge,y=0},'local','global'))
 assert(not pcall(p.coordinates.convert,ref,{x=1e308,y=0},'normalized','local'))

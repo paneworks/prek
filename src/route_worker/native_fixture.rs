@@ -172,7 +172,6 @@ fn configuration(devices: &[Device]) -> io::Result<Config> {
     rule.scope = Scope::Everywhere;
     rule.output = None;
     rule.screen = None;
-    rule.keyboard_visible = None;
     rule.require_keys.clear();
     rule.keys_throughout = false;
     rule.layer = None;
@@ -218,7 +217,6 @@ fn subscription(
         consumer: Some(consumer.clone()),
         capabilities,
         context: Some(Box::new(ProvidedContext {
-            layouts: None,
             binding: Binding {
                 seat: "seat0".into(),
                 session: "isolated-managed".into(),
@@ -233,9 +231,6 @@ fn subscription(
                 captured_at: monotonic()?,
                 state: State::Desktop,
                 outputs: vec![],
-                windows: vec![],
-                regions: vec![],
-                secure_overlay: false,
             },
         })),
     })

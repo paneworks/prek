@@ -83,10 +83,7 @@ pub(super) fn hybrid_budget(inputs: &[InputKind], continuous: bool, limit: usize
     snapshot.outputs = vec![crate::context::OutputState {
         geometry,
         geometry_generation: mapping.generation,
-        active_workspace: Some(1),
         screen: crate::config::Screen::On,
-        keyboard_known: true,
-        keyboard: None,
     }];
     engine.authority.update(snapshot, ms(0)).unwrap();
     let source = device.source.clone();

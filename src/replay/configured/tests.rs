@@ -41,9 +41,6 @@ pub(crate) fn context(seat: &str, generation: u64, revision: u64, at: u64, state
             captured_at: ms(at),
             state,
             outputs: vec![],
-            windows: vec![],
-            regions: vec![],
-            secure_overlay: false,
         }),
     }
 }

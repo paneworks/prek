@@ -8,15 +8,15 @@ local tx
 p.events.on('ready',function()
  local v=p.config.current();local policy=p.policy.current()
  assert(v.revision=='1' and policy.revision=='1')
- assert(v.config.rules[1].enabled and not policy.policy.allow_power_actions)
- v.config.rules[1].enabled=false;policy.policy.allow_power_actions=true
- assert(p.config.current().config.rules[1].enabled and not p.policy.current().policy.allow_power_actions)
+ assert(v.config.rules[1].enabled and not policy.policy.allow_input_events)
+ v.config.rules[1].enabled=false;policy.policy.allow_input_events=true
+ assert(p.config.current().config.rules[1].enabled and not p.policy.current().policy.allow_input_events)
  tx=p.rules.transaction();tx:disable('sample_double_tap');tx:commit()
  assert(p.config.current().revision=='1' and p.config.current().config.rules[1].enabled)
 end)
 p.events.on('rules_changed',function()
  local v=p.config.current();assert(v.revision=='2' and not v.config.rules[1].enabled)
- assert(p.policy.current().revision=='2' and not p.policy.current().policy.allow_power_actions)
+ assert(p.policy.current().revision=='2' and not p.policy.current().policy.allow_input_events)
  p.log.info('acknowledged')
 end)
 local c=p.config.preset('desktop');c.rules[1].enabled=true

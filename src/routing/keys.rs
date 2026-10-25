@@ -14,9 +14,11 @@ pub struct KeyWork {
 
 impl ScopedDispatch {
     pub fn into_key_work(mut self) -> Result<KeyWork, Box<Self>> {
-        if !self.key_work.as_ref().is_some_and(|work| {
-            work.event() == &self.event && work.dispatch.reorder_scope == self.reorder_scope
-        }) {
+        if !self
+            .key_work
+            .as_ref()
+            .is_some_and(|work| work.event() == &self.event)
+        {
             return Err(Box::new(self));
         }
         Ok(*self.key_work.take().unwrap())

@@ -10,8 +10,8 @@
 //! before accepting context or dispatching an action.
 
 use crate::{
+    compositor::Compositor,
     context::{Binding, SessionKind},
-    hyprland::Client,
     transport::Consumer,
 };
 use nix::libc;
@@ -268,6 +268,7 @@ pub struct Logind {
     session_remote: SessionBool,
     seat_active: SeatActive,
     library: Library,
+    lock_hints: std::cell::RefCell<Option<crate::sleep_watch::LockHints>>,
 }
 impl Logind {
     pub fn open(library: &Path) -> io::Result<Self> {
@@ -295,6 +296,7 @@ impl Logind {
             session_remote: symbol!("sd_session_is_remote", SessionBool),
             seat_active: symbol!("sd_seat_get_active", SeatActive),
             library,
+            lock_hints: std::cell::RefCell::new(None),
         })
     }
     fn process_session(&self, process: &Process) -> io::Result<String> {
@@ -377,12 +379,31 @@ impl Logind {
         compositor.check()?;
         Ok(facts)
     }
-    pub fn register(&self, peer: Peer, client: &Client) -> io::Result<Registration> {
+    /// Lock hint of `session` through one retained bus connection; any failure
+    /// drops the connection and the cached object path.
+    fn locked(&self, session: &str, path: &mut Option<CString>) -> io::Result<bool> {
+        let mut hints = self.lock_hints.borrow_mut();
+        let result = (|| {
+            if hints.is_none() {
+                *hints = Some(crate::sleep_watch::LockHints::open(&self.library)?);
+            }
+            let bus = hints.as_ref().unwrap();
+            if path.is_none() {
+                let id = CString::new(session).map_err(|_| invalid("invalid session ID"))?;
+                *path = Some(bus.session_path(&id)?);
+            }
+            bus.locked(path.as_ref().unwrap())
+        })();
+        if result.is_err() {
+            *hints = None;
+            *path = None;
+        }
+        result
+    }
+    pub fn register(&self, peer: Peer, client: &Compositor) -> io::Result<Registration> {
         let checked_at = Instant::now();
         client.check_binding()?;
-        let Consumer::Hyprland { pid, start, .. } = client.consumer() else {
-            unreachable!()
-        };
+        let (pid, start) = (client.pid(), client.start());
         let compositor = Process::open(pid, client.uid())?;
         if compositor.start != start {
             return Err(denied("compositor process was replaced"));
@@ -422,6 +443,7 @@ impl Logind {
             binding,
             consumer: client.consumer(),
             checked_at,
+            session_path: None,
             revoked: false,
         };
         registration.binding()?;
@@ -555,9 +577,14 @@ pub struct Registration {
     binding: Binding,
     consumer: Consumer,
     checked_at: Instant,
+    session_path: Option<CString>,
     revoked: bool,
 }
 impl Registration {
+    /// Logind's lock hint for the bound session.
+    pub fn locked(&mut self, logind: &Logind) -> io::Result<bool> {
+        logind.locked(&self.facts.session, &mut self.session_path)
+    }
     pub fn binding(&self) -> io::Result<&Binding> {
         if self.revoked {
             Err(denied("session registration has been revoked"))
@@ -567,7 +594,7 @@ impl Registration {
             Ok(&self.binding)
         }
     }
-    pub fn check(&mut self, logind: &Logind, client: &Client) -> io::Result<()> {
+    pub fn check(&mut self, logind: &Logind, client: &Compositor) -> io::Result<()> {
         if self.revoked {
             return Err(denied("session registration has been revoked"));
         }
@@ -658,7 +685,7 @@ mod tests {
     }
     #[test]
     fn a_sessionless_compositor_needs_its_user_manager_and_exactly_one_controller() {
-        let unit = "/user.slice/user-1000.slice/user@1000.service/session.slice/wayland-wm@hyprland.desktop.service";
+        let unit = "/user.slice/user-1000.slice/user@1000.service/session.slice/wayland-wm@compositor.desktop.service";
         assert!(user_manager_cgroup(unit, 1000));
         for cgroup in [
             "/user.slice/user-1000.slice/user@1000.service/",

@@ -115,9 +115,6 @@ pub struct Descriptor {
     pub compositor_repeat: bool,
     /// Pre-add registry data. Never import arbitrary original udev properties.
     pub udev: BTreeMap<String, String>,
-    /// Required consumer settings, keyed by the virtual identity. Supplied by
-    /// trusted device policy; copying capability bits does not preserve these.
-    pub consumer_settings: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -159,14 +156,6 @@ pub(crate) fn permitted_property(key: &str) -> bool {
 impl Descriptor {
     #[cfg(feature = "native-test-harness")]
     pub(crate) fn fixture_source(&self) -> Option<&Device> {
-        match &self.origin {
-            Origin::Physical(original) => Some(original),
-            Origin::GeneratedKeyboard => None,
-        }
-    }
-
-    /// The physical device this descriptor mirrors.
-    pub(crate) fn physical_origin(&self) -> Option<&Device> {
         match &self.origin {
             Origin::Physical(original) => Some(original),
             Origin::GeneratedKeyboard => None,
@@ -237,12 +226,9 @@ impl Descriptor {
                 self.identity,
                 self.repeat,
                 &self.udev,
-                self.consumer_settings.clone(),
                 self.compositor_repeat,
             )?,
-            Origin::GeneratedKeyboard => {
-                Self::generated_keyboard(self.source.clone(), self.consumer_settings.clone())?
-            }
+            Origin::GeneratedKeyboard => Self::generated_keyboard(self.source.clone())?,
         };
         if self.isolated {
             expected.mark_isolated()?;
@@ -268,23 +254,13 @@ impl Descriptor {
     }
 
     /// Prepare a separate per-seat keyboard without a physical source counterpart.
-    pub fn generated_keyboard(
-        source: Source,
-        consumer_settings: BTreeMap<String, String>,
-    ) -> Result<Self, &'static str> {
+    pub fn generated_keyboard(source: Source) -> Result<Self, &'static str> {
         if source.generation == 0
             || source.seat.is_empty()
             || source.seat.len() > 128
             || source.seat.chars().any(char::is_control)
         {
             return Err("generated keyboard requires a bounded seat and nonzero incarnation");
-        }
-        if consumer_settings.len() > 64
-            || consumer_settings
-                .iter()
-                .any(|(key, value)| !bounded(key) || !bounded(value))
-        {
-            return Err("invalid consumer settings");
         }
         let keys = (1..=0xff)
             .chain(0x160..=0x21f)
@@ -323,7 +299,6 @@ impl Descriptor {
                 ("PREK_VIRTUAL".into(), "1".into()),
                 ("PREK_GENERATED_KEYBOARD".into(), "1".into()),
             ]),
-            consumer_settings,
             source,
         })
     }
@@ -333,9 +308,8 @@ impl Descriptor {
         identity: KernelIdentity,
         repeat: Option<Repeat>,
         udev: &BTreeMap<String, String>,
-        consumer_settings: BTreeMap<String, String>,
     ) -> Result<Self, &'static str> {
-        Self::mirrored(original, identity, repeat, udev, consumer_settings, false)
+        Self::mirrored(original, identity, repeat, udev, false)
     }
 
     /// Mirrors a kernel-repeating keyboard for a consumer that generates its
@@ -344,9 +318,8 @@ impl Descriptor {
         original: &Device,
         identity: KernelIdentity,
         udev: &BTreeMap<String, String>,
-        consumer_settings: BTreeMap<String, String>,
     ) -> Result<Self, &'static str> {
-        Self::mirrored(original, identity, None, udev, consumer_settings, true)
+        Self::mirrored(original, identity, None, udev, true)
     }
 
     fn mirrored(
@@ -354,7 +327,6 @@ impl Descriptor {
         identity: KernelIdentity,
         repeat: Option<Repeat>,
         udev: &BTreeMap<String, String>,
-        consumer_settings: BTreeMap<String, String>,
         compositor_repeat: bool,
     ) -> Result<Self, &'static str> {
         if original.virtual_device
@@ -472,13 +444,6 @@ impl Descriptor {
         if compositor_repeat {
             capabilities.remove(&20);
         }
-        if consumer_settings.len() > 64
-            || consumer_settings
-                .iter()
-                .any(|(key, value)| !bounded(key) || !bounded(value))
-        {
-            return Err("invalid consumer settings");
-        }
         let marker = format!(
             "prek/{:016x}/{:016x}",
             original.source.device, original.source.generation
@@ -522,7 +487,6 @@ impl Descriptor {
             repeat,
             compositor_repeat,
             udev: properties,
-            consumer_settings,
         })
     }
 
@@ -534,10 +498,11 @@ impl Descriptor {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Consumer {
-    Hyprland {
+    /// The compositor process serving the session's Wayland display.
+    Compositor {
         pid: u32,
         start: u64,
-        instance: String,
+        display: String,
     },
     ConsoleKeyboard {
         handler: String,
@@ -558,7 +523,6 @@ pub struct ConsumerEvidence {
     pub name: String,
     pub class: Class,
     pub seat: String,
-    pub settings: BTreeMap<String, String>,
     pub at: Duration,
 }
 impl ConsumerEvidence {
@@ -575,7 +539,6 @@ impl ConsumerEvidence {
             && self.name == descriptor.name
             && self.class == descriptor.class
             && self.seat == descriptor.source.seat
-            && self.settings == descriptor.consumer_settings
     }
     pub(crate) fn deadline(&self) -> Duration {
         self.at
@@ -631,11 +594,11 @@ impl Readiness {
     ) -> Result<Self, &'static str> {
         descriptor.validate()?;
         let valid = match &consumer {
-            Consumer::Hyprland {
+            Consumer::Compositor {
                 pid,
                 start,
-                instance,
-            } => *pid > 0 && *start > 0 && bounded(instance),
+                display,
+            } => *pid > 0 && *start > 0 && bounded(display),
             Consumer::ConsoleKeyboard { handler } => {
                 descriptor.class == Class::Keyboard
                     && bounded(handler)
@@ -805,19 +768,15 @@ pub(crate) mod tests {
                 ("RUN".into(), "untrusted".into()),
                 ("WL_OUTPUT".into(), "DSI-1".into()),
             ]),
-            BTreeMap::from([
-                ("output".into(), "DSI-1".into()),
-                ("rotation".into(), "90".into()),
-            ]),
         )
         .unwrap()
     }
 
     fn consumer() -> Consumer {
-        Consumer::Hyprland {
+        Consumer::Compositor {
             pid: 10,
             start: 20,
-            instance: "verified-instance".into(),
+            display: "wayland-1".into(),
         }
     }
     fn evidence(spec: &Descriptor) -> ConsumerEvidence {
@@ -827,7 +786,6 @@ pub(crate) mod tests {
             name: spec.name.clone(),
             class: spec.class,
             seat: "seat0".into(),
-            settings: spec.consumer_settings.clone(),
             at: Duration::ZERO,
         }
     }
@@ -862,7 +820,6 @@ pub(crate) mod tests {
 
         let expected = evidence(&spec);
         let command = crate::configuration::Command::Transport {
-            admission: None,
             fence,
             source: spec.source.clone(),
             marker: spec.marker.clone(),
@@ -912,14 +869,13 @@ pub(crate) mod tests {
         let mut device = touch();
         let id = descriptor().identity;
         device.capabilities.insert(21, vec![0x50]);
-        assert!(Descriptor::mirror(&device, id, None, &BTreeMap::new(), BTreeMap::new()).is_err());
+        assert!(Descriptor::mirror(&device, id, None, &BTreeMap::new()).is_err());
         device.capabilities.remove(&21);
         device.capabilities.get_mut(&EV_KEY).unwrap().push(0x14b);
-        assert!(Descriptor::mirror(&device, id, None, &BTreeMap::new(), BTreeMap::new()).is_err());
+        assert!(Descriptor::mirror(&device, id, None, &BTreeMap::new()).is_err());
         device.capabilities.insert(EV_KEY, vec![30]);
         device.capabilities.insert(17, vec![0]);
-        let spec =
-            Descriptor::mirror(&device, id, None, &BTreeMap::new(), BTreeMap::new()).unwrap();
+        let spec = Descriptor::mirror(&device, id, None, &BTreeMap::new()).unwrap();
         assert!(spec.feedback_required());
         let mut gate = Readiness::new(spec.clone(), consumer(), Duration::ZERO).unwrap();
         gate.metadata(&spec, Duration::ZERO).unwrap();
@@ -933,26 +889,12 @@ pub(crate) mod tests {
         let mut device = touch();
         device.physical = "prek/already-virtual".into();
         assert!(
-            Descriptor::mirror(
-                &device,
-                descriptor().identity,
-                None,
-                &BTreeMap::new(),
-                BTreeMap::new()
-            )
-            .is_err()
+            Descriptor::mirror(&device, descriptor().identity, None, &BTreeMap::new(),).is_err()
         );
         device.physical.clear();
         device.axes.remove(&ABS_MT_POSITION_X);
         assert!(
-            Descriptor::mirror(
-                &device,
-                descriptor().identity,
-                None,
-                &BTreeMap::new(),
-                BTreeMap::new()
-            )
-            .is_err()
+            Descriptor::mirror(&device, descriptor().identity, None, &BTreeMap::new(),).is_err()
         );
     }
 
@@ -965,22 +907,18 @@ pub(crate) mod tests {
         assert!(gate.finish(Duration::ZERO).is_err());
         let mut gate = Readiness::new(spec.clone(), consumer(), Duration::ZERO).unwrap();
         let mut ack = evidence(&spec);
-        ack.consumer = Consumer::Hyprland {
+        ack.consumer = Consumer::Compositor {
             pid: 10,
             start: 21,
-            instance: "verified-instance".into(),
+            display: "wayland-1".into(),
         };
         assert!(gate.consumer(&ack, Duration::ZERO).is_err());
         assert!(gate.metadata(&spec, Duration::ZERO).is_err());
     }
 
     #[test]
-    fn output_mapping_and_created_axes_must_match_exactly() {
+    fn created_axes_must_match_exactly() {
         let spec = descriptor();
-        let mut gate = Readiness::new(spec.clone(), consumer(), Duration::ZERO).unwrap();
-        let mut ack = evidence(&spec);
-        ack.settings.insert("output".into(), "other-output".into());
-        assert!(gate.consumer(&ack, Duration::ZERO).is_err());
         let mut gate = Readiness::new(spec.clone(), consumer(), Duration::ZERO).unwrap();
         let mut observed = spec.clone();
         observed
@@ -1018,14 +956,8 @@ pub(crate) mod tests {
         device
             .capabilities
             .insert(EV_KEY, vec![0x145, 0x148, 0x14a, 0x14d, 0x14e, 0x14f]);
-        let spec = Descriptor::mirror(
-            &device,
-            descriptor().identity,
-            None,
-            &BTreeMap::new(),
-            BTreeMap::new(),
-        )
-        .unwrap();
+        let spec =
+            Descriptor::mirror(&device, descriptor().identity, None, &BTreeMap::new()).unwrap();
         assert_eq!(spec.class, Class::Touchpad);
         assert_eq!(spec.capabilities[&EV_KEY], device.capabilities[&EV_KEY]);
         assert!(spec.name.len() <= 79);
@@ -1041,21 +973,13 @@ pub(crate) mod tests {
             period_ms: 30,
         };
         assert!(
-            Descriptor::mirror(
-                &device,
-                descriptor().identity,
-                None,
-                &BTreeMap::new(),
-                BTreeMap::new()
-            )
-            .is_err()
+            Descriptor::mirror(&device, descriptor().identity, None, &BTreeMap::new(),).is_err()
         );
         let spec = Descriptor::mirror(
             &device,
             descriptor().identity,
             Some(repeat),
             &BTreeMap::new(),
-            BTreeMap::new(),
         )
         .unwrap();
         let mut gate = Readiness::new(spec.clone(), consumer(), Duration::ZERO).unwrap();
@@ -1091,7 +1015,6 @@ pub(crate) mod tests {
                         descriptor().identity,
                         Some(repeat),
                         &BTreeMap::new(),
-                        BTreeMap::new()
                     )
                     .is_err()
                 );
@@ -1115,7 +1038,6 @@ pub(crate) mod tests {
                         period_ms
                     }),
                     &BTreeMap::new(),
-                    BTreeMap::new()
                 )
                 .is_ok(),
                 allowed
@@ -1131,16 +1053,9 @@ pub(crate) mod tests {
         device.capabilities =
             BTreeMap::from([(0, vec![0]), (1, vec![30]), (17, vec![0]), (20, vec![0, 1])]);
         let identity = descriptor().identity;
-        assert!(
-            Descriptor::mirror(&device, identity, None, &BTreeMap::new(), BTreeMap::new()).is_err()
-        );
-        let mirror = Descriptor::mirror_with_compositor_repeat(
-            &device,
-            identity,
-            &BTreeMap::new(),
-            BTreeMap::new(),
-        )
-        .unwrap();
+        assert!(Descriptor::mirror(&device, identity, None, &BTreeMap::new()).is_err());
+        let mirror =
+            Descriptor::mirror_with_compositor_repeat(&device, identity, &BTreeMap::new()).unwrap();
         assert!(mirror.compositor_repeat && mirror.repeat.is_none());
         assert!(!mirror.capabilities.contains_key(&20));
         assert!(!mirror.feedback_required() || mirror.capabilities.contains_key(&17));
@@ -1153,16 +1068,10 @@ pub(crate) mod tests {
         assert!(forged.validate().is_err());
         device.capabilities.remove(&20);
         assert!(
-            Descriptor::mirror_with_compositor_repeat(
-                &device,
-                identity,
-                &BTreeMap::new(),
-                BTreeMap::new()
-            )
-            .is_err()
+            Descriptor::mirror_with_compositor_repeat(&device, identity, &BTreeMap::new(),)
+                .is_err()
         );
-        let plain =
-            Descriptor::mirror(&device, identity, None, &BTreeMap::new(), BTreeMap::new()).unwrap();
+        let plain = Descriptor::mirror(&device, identity, None, &BTreeMap::new()).unwrap();
         assert!(
             serde_json::to_value(&plain)
                 .unwrap()

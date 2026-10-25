@@ -28,10 +28,6 @@ pub(super) fn child() {
 }
 
 fn subscription(now: Duration) -> worker::Subscription {
-    let rect = context::Rect {
-        origin: gestures::Point { x: 0.0, y: 0.0 },
-        size: gestures::Point { x: 100.0, y: 100.0 },
-    };
     worker::Subscription {
         seat: "seat0".into(),
         fence: protocol::Fence {
@@ -50,42 +46,28 @@ fn subscription(now: Duration) -> worker::Subscription {
                 compositor_start: 123,
                 kind: context::SessionKind::User,
             },
-            layouts: None,
             snapshot: context::Snapshot {
                 generation: 1,
                 revision: 1,
                 captured_at: now,
                 state: context::State::Desktop,
-                secure_overlay: false,
-                outputs: vec![context::OutputState {
-                    geometry: gestures::Output {
-                        name: "fixture-output".into(),
-                        pixel_width: 1000.0,
-                        pixel_height: 800.0,
-                        scale: 1.0,
-                        origin: rect.origin,
-                        transform: gestures::Transform::Normal,
-                    },
-                    geometry_generation: 1,
-                    active_workspace: Some(1),
-                    screen: prek::config::Screen::On,
-                    keyboard_known: true,
-                    keyboard: None,
-                }],
-                windows: (0..512)
-                    .map(|index| context::Window {
-                        id: format!("window-{index}"),
-                        output: "fixture-output".into(),
-                        workspace: 1,
-                        rect,
-                        content: rect,
-                        mapped: true,
-                        visible: false,
-                        focused: false,
-                        z_order: None,
+                outputs: (0..256)
+                    .map(|index| context::OutputState {
+                        geometry: gestures::Output {
+                            name: format!("{}-{index}", "o".repeat(200)),
+                            pixel_width: 1000.0,
+                            pixel_height: 800.0,
+                            scale: 1.0,
+                            origin: gestures::Point {
+                                x: f64::from(index) * 1000.0,
+                                y: 0.0,
+                            },
+                            transform: gestures::Transform::Normal,
+                        },
+                        geometry_generation: 1,
+                        screen: prek::config::Screen::On,
                     })
                     .collect(),
-                regions: vec![],
             },
         })),
     }

@@ -28,24 +28,30 @@ fn drain(session: &mut Session) -> Result<Vec<LogRecord>, std::io::Error> {
         std::thread::sleep(Duration::from_millis(1));
     }
 }
-fn context_view(at: Duration, windows: usize) -> prek::context_transfer::View {
+fn context_view(at: Duration, extra: usize) -> prek::context_transfer::View {
     // SAFETY: read-only current process credential query.
     let uid = unsafe { nix::libc::geteuid() };
-    let rect = serde_json::json!({"origin":{"x":0.1,"y":10.0},"size":{"x":100.0,"y":120.0}});
-    let windows: Vec<_> = (0..windows).map(|i| serde_json::json!({
-        "id":format!("window-{i}"),"output":"fixture-output","workspace":3,
-        "rect":rect,"content":rect,"mapped":true,"visible":true,"focused":i==0,"z_order":null
-    })).collect();
+    let output = |name: String, x: f64| {
+        serde_json::json!({
+            "geometry":{"name":name,"pixel_width":1000.0,"pixel_height":800.0,
+                "scale":1.0,"origin":{"x":x,"y":0.0},"transform":"normal"},
+            "geometry_generation":2,"screen":"on"
+        })
+    };
+    let outputs: Vec<_> = std::iter::once(output("fixture-output".into(), 0.0))
+        .chain((0..extra).map(|i| {
+            output(
+                format!("{}-{i}", "o".repeat(200)),
+                (i as f64 + 1.0) * 1000.0,
+            )
+        }))
+        .collect();
     serde_json::from_value(serde_json::json!({
         "fence":fence(1),"sampled_at":at,"state":"desktop","error":null,
         "context":{"binding":{"seat":"seat0","session":"fixture","uid":uid,
             "compositor_pid":123,"compositor_start":456,"kind":"user"},
             "snapshot":{"generation":1,"revision":7,"captured_at":at,"state":"desktop",
-                "secure_overlay":false,"regions":[],"windows":windows,"outputs":[{
-                    "geometry":{"name":"fixture-output","pixel_width":1000.0,"pixel_height":800.0,
-                        "scale":1.0,"origin":{"x":0.0,"y":0.0},"transform":"normal"},
-                    "geometry_generation":2,"active_workspace":3,"screen":"on","keyboard":null
-                }]}}
+                "outputs":outputs}}
     }))
     .unwrap()
 }
@@ -1311,9 +1317,9 @@ p.events.on('ready',function()
  assert(status.fence.configuration=='1' and status.state=='unknown')
  assert(status.context_error=='provider unavailable' and not p.capabilities.has('commands'))
  local config=p.config.current();local policy=p.policy.current()
- assert(config.revision=='1' and policy.revision=='1' and not policy.policy.allow_power_actions)
- config.config.policy.allow_power_actions=true
- assert(not p.policy.current().policy.allow_power_actions)
+ assert(config.revision=='1' and policy.revision=='1' and not policy.policy.allow_runtime_rules)
+ config.config.policy.allow_runtime_rules=true
+ assert(not p.policy.current().policy.allow_runtime_rules)
  p.log.info('status')
 end)
 p.events.on('matched',function()
@@ -1425,7 +1431,7 @@ p.events.on('ready',function()
  assert(v.fence.configuration=='1' and v.fence.session=='1')
  assert(p.capabilities.has('commands') and p.capabilities.has('context'))
  assert(p.capabilities.ready('commands') and not p.capabilities.ready('context'))
- v.ready[1]='power_actions';assert(not p.capabilities.ready('power_actions'))
+ v.ready[1]='lua_actions';assert(not p.capabilities.ready('lua_actions'))
  p.log.info('negotiated')
 end)
 p.events.on('matched',function(event)
@@ -1487,7 +1493,7 @@ fn real_helper_coalesces_unsent_readiness_without_changing_negotiated_flags() {
         r#"
 local p=require('prek')
 p.events.on('ready',function()
- assert(p.capabilities.has('commands') and not p.capabilities.has('power_actions'))
+ assert(p.capabilities.has('commands') and not p.capabilities.has('lua_actions'))
  assert(not p.capabilities.ready('commands'));p.log.info('latest')
 end)
 return {version=1}
@@ -1513,7 +1519,7 @@ return {version=1}
     }
     assert!(
         session
-            .update_capabilities(BTreeSet::from([Capability::PowerActions]), BTreeSet::new())
+            .update_capabilities(BTreeSet::from([Capability::LuaActions]), BTreeSet::new())
             .is_err()
     );
     assert!(
@@ -1531,10 +1537,10 @@ fn real_helper_never_infers_capabilities_from_configuration_permissions() {
 local p=require('prek')
 p.events.on('ready',function()
  assert(p.capabilities.current()==nil)
- assert(not p.capabilities.has('power_actions') and not p.capabilities.ready('commands'))
+ assert(not p.capabilities.has('runtime_rules') and not p.capabilities.ready('commands'))
  p.log.info('unavailable')
 end)
-return {version=1,policy={allow_power_actions=true}}
+return {version=1,policy={allow_runtime_rules=true}}
 "#,
         "capability-none.lua",
     )
@@ -1630,7 +1636,7 @@ return p.config.new{rules={p.rules.define{id='exact',trigger=p.triggers.key{key=
         messages,
         vec!["exact-ready", "exact-resume", "exact-task", "exact-timer"]
     );
-    let mut view = context_view(monotonic().unwrap(), 1);
+    let mut view = context_view(monotonic().unwrap(), 0);
     view.fence = fence;
     let context = view.context.as_mut().unwrap();
     context.snapshot.generation = fence.session;
@@ -1659,9 +1665,7 @@ return p.config.new{rules={p.rules.define{id='exact',trigger=p.triggers.key{key=
         stage: Stage::Discrete,
         action,
         evidence: Evidence::Taps { count: 3 },
-        window: None,
         output: None,
-        workspace: None,
     });
     session
         .notify(
@@ -1696,9 +1700,9 @@ local saved
 p.events.on('context_changed',function(event)
   if event.available then
     local snapshot=p.context.snapshot(); local binding=p.context.binding()
-    assert(snapshot.windows[1].rect.origin.x==0.1 and snapshot.outputs[1].active_workspace==3)
+    assert(snapshot.outputs[1].geometry.name=='fixture-output' and snapshot.outputs[1].screen=='on')
     local output=p.outputs.get('fixture-output')
-    assert(#p.outputs.list()==1 and #p.regions.list()==0 and #p.regions.at({x=0,y=0})==0)
+    assert(#p.outputs.list()==1 and p.regions==nil)
     assert(output and output.reference.revision==snapshot.revision)
     if saved then assert(p.coordinates.convert(saved,{x=0,y=0},'local','global')==nil) end
     saved=output.reference
@@ -1706,12 +1710,12 @@ p.events.on('context_changed',function(event)
     assert(position and position.x==500 and position.y==400)
     output.state.geometry.origin.x=123
     assert(p.coordinates.convert(output.reference,{x=0,y=0},'local','global').x==0)
-    snapshot.windows[1].id='forged'; binding.uid=0
-    assert(p.context.snapshot().windows[1].id=='window-0' and p.context.binding().uid~=0)
+    snapshot.outputs[1].geometry.name='forged'; binding.uid=0
+    assert(p.context.snapshot().outputs[1].geometry.name=='fixture-output' and p.context.binding().uid~=0)
     p.log.info('context',{state=p.context.state(),revision=event.revision})
   else
     assert(p.context.snapshot()==nil and p.context.state()=='unknown')
-    assert(p.outputs.list()==nil and p.regions.list()==nil)
+    assert(p.outputs.list()==nil)
     assert(p.coordinates.convert(saved,{x=0,y=0},'local','global')==nil)
     p.log.info('expired-context')
   end
@@ -1729,7 +1733,7 @@ return {version=1}
     )
     .unwrap();
     drain(&mut session).unwrap();
-    let mut view = context_view(monotonic().unwrap(), 1);
+    let mut view = context_view(monotonic().unwrap(), 0);
     let mut wrong = view.clone();
     wrong.fence.configuration = 2;
     assert!(session.update_context(wrong).is_err());
@@ -1764,88 +1768,6 @@ return {version=1}
 }
 
 #[test]
-fn real_helper_receives_native_morf_bindings_and_retires_them_with_context() {
-    let definition = Definition::compile(
-        r#"
-local p=require('prek')
-p.events.on('context_changed',function()
-  local providers=p.morf.providers()
-  if providers==nil then p.log.info('unavailable');return end
-  if #providers==0 then p.log.info('empty');return end
-  local provider=providers[1]
-  assert(provider.phase=='configured' and provider.output=='fixture-output')
-  assert(provider.compositor_start=='18446744073709551615')
-  assert(provider.fence.session==p.context.fence().session)
-  local reports=p.morf.regions()
-  assert(#reports==1 and reports[1].output==provider.output)
-  assert(reports[1].context.frame.regions[1].id=='drawer-keyboard')
-  assert(reports[1].context.ui_generation=='2')
-  p.log.info('native-binding',{epoch=provider.epoch,birth=provider.compositor_start})
-end)
-return {version=1}
-"#,
-        "native-morf.lua",
-    )
-    .unwrap();
-    let mut session = Session::spawn(
-        Path::new(env!("CARGO_BIN_EXE_prek")),
-        fence(1),
-        "seat0",
-        definition,
-    )
-    .unwrap();
-    drain(&mut session).unwrap();
-    let mut view = context_view(monotonic().unwrap(), 0);
-    let binding = &mut view.context.as_mut().unwrap().binding;
-    binding.compositor_start = u64::MAX;
-    view.morf.push(prek::morf::ShellState {
-        version: 1,
-        role: "shell".into(),
-        epoch: "a".repeat(32),
-        revision: 2,
-        phase: prek::morf::ShellPhase::Configured,
-        compositor_pid: binding.compositor_pid,
-        compositor_start: binding.compositor_start,
-        compositor_uid: binding.uid,
-        output: "fixture-output".into(),
-    });
-    // This helper test transfers an explicit native-context model; actual
-    // native GPU observations are exercised separately in the owned Cage run.
-    view.morf_rendered
-        .push(prek::morf::rendered::OutputContext {
-            layout: None,
-            output: "fixture-output".into(),
-            context: serde_json::from_value(serde_json::json!({
-                "version":1,"epoch":"a".repeat(32),"ui_generation":"2","revision":"7",
-                "sampled_ns":view.sampled_at.as_nanos().to_string(),
-                "coverage":"primary_surface_named_bounds",
-                "frame":{"width":1000,"height":800,"scale_120":120,"regions":[{
-                "node":"18446744073709551615","id":"drawer-keyboard","interactive":false,
-                    "bounds":{"x":10.0,"y":600.0,"width":980.0,"height":200.0}
-                }]}
-            }))
-            .unwrap(),
-        });
-    session.update_context(view.clone()).unwrap();
-    assert_eq!(
-        drain(&mut session).unwrap()[0].fields,
-        serde_json::json!({"epoch":"a".repeat(32),"birth":u64::MAX.to_string()})
-    );
-    view.morf.clear();
-    view.morf_rendered.clear();
-    view.sampled_at = monotonic().unwrap();
-    view.context.as_mut().unwrap().snapshot.captured_at = view.sampled_at;
-    session.update_context(view.clone()).unwrap();
-    assert_eq!(drain(&mut session).unwrap()[0].message, "empty");
-    view.sampled_at = Duration::ZERO;
-    view.context.as_mut().unwrap().snapshot.captured_at = Duration::ZERO;
-    session.update_context(view).unwrap();
-    assert_eq!(drain(&mut session).unwrap()[0].message, "unavailable");
-    session.stop().unwrap();
-    drain(&mut session).unwrap();
-}
-
-#[test]
 fn real_helper_assembles_multiple_context_chunks_and_replaces_unsent_updates() {
     let definition = Definition::compile(
         r#"
@@ -1866,7 +1788,7 @@ return {version=1}
     )
     .unwrap();
     drain(&mut session).unwrap();
-    let mut view = context_view(monotonic().unwrap(), 512);
+    let mut view = context_view(monotonic().unwrap(), 255);
     assert!(view.encode().unwrap().len() > prek::context_transfer::CHUNK_BYTES);
     session.update_context(view.clone()).unwrap();
     session.step(monotonic().unwrap()).unwrap(); // First chunk freezes this upload.
@@ -2012,9 +1934,7 @@ return p.config.new{rules={p.rules.define{id='touch-rule',trigger=p.triggers.key
         stage: Stage::Discrete,
         action,
         evidence: Evidence::Key { down: true },
-        window: None,
         output: Some(path.to_str().unwrap().into()),
-        workspace: None,
     });
     executor
         .offer(fence(1), event.clone(), monotonic().unwrap())

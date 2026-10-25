@@ -16,7 +16,7 @@ is used, and input timestamps are not rewritten.
 
 The Linux reader, supervisor and IPC clock entry points share this guard. The
 reader checks it before servicing callbacks or opening input. IPC send/receive
-and Hyprland/Morf native request/receipt boundaries refuse work in a retired
+and Wayland request/receipt boundaries refuse work in a retired
 epoch. An unchanged numerical deadline or previously queued packet therefore
 cannot bypass a confirmed epoch loss. Already dispatched effects remain
 uncertain and non-retryable; epoch loss cannot undo a command already handed to
@@ -94,7 +94,7 @@ API/descriptor-lifetime probe, not a suspend or consumer-release acceptance test
 `oslo make test-suspend-epoch` checks interval intersection, delayed and ambiguous
 samples, signed offsets, equal/extreme timestamps, permanent retirement, query
 failure and concurrent real clock reads. An isolated native child test confirms
-that retired epochs fence old IPC and verified Hyprland sockets, refuse new
+that retired epochs fence old IPC and verified compositor sockets, refuse new
 supervised work and still reap an existing owned child. Clock injection exists
 only in the library test executable; production has no reset or test-clock flag.
 These tests do not suspend the host or access input devices.

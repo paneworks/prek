@@ -26,7 +26,7 @@ mod discovery;
 mod inventory_tests;
 #[cfg(test)]
 mod owned_service_tests;
-pub(crate) use discovery::Publication as DevicePublication;
+pub(crate) use discovery::{Publication as DevicePublication, published};
 pub mod feedback;
 pub mod handoff;
 mod ingress;

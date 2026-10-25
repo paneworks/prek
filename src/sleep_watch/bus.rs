@@ -121,6 +121,51 @@ impl Connection {
         }
         Ok(text.to_owned())
     }
+    /// Logind's object path for one session id.
+    pub fn session_path(&self, session: &CStr) -> io::Result<CString> {
+        let mut reply = std::ptr::null_mut();
+        let result = unsafe {
+            (self.api.call)(
+                self.ptr.as_ptr(),
+                c"org.freedesktop.login1".as_ptr(),
+                c"/org/freedesktop/login1".as_ptr(),
+                c"org.freedesktop.login1.Manager".as_ptr(),
+                c"GetSession".as_ptr(),
+                std::ptr::null_mut(),
+                &mut reply,
+                c"s".as_ptr(),
+                session.as_ptr(),
+            )
+        };
+        let reply = Reply::result(result, reply, self.api)?;
+        let mut path: *const libc::c_char = std::ptr::null();
+        reply.basic(c"o", b'o', (&mut path as *mut *const libc::c_char).cast())?;
+        if path.is_null() {
+            return Err(invalid("missing session object path"));
+        }
+        let path = unsafe { CStr::from_ptr(path) };
+        if path.to_bytes().len() > 255 {
+            return Err(invalid("session object path exceeds bounds"));
+        }
+        Ok(path.to_owned())
+    }
+    /// Logind's `LockedHint` for one session object path.
+    pub fn locked_hint(&self, path: &CStr) -> io::Result<bool> {
+        let mut value: i32 = 0;
+        checked(unsafe {
+            (self.api.property)(
+                self.ptr.as_ptr(),
+                c"org.freedesktop.login1".as_ptr(),
+                path.as_ptr(),
+                c"org.freedesktop.login1.Session".as_ptr(),
+                c"LockedHint".as_ptr(),
+                std::ptr::null_mut(),
+                b'b' as libc::c_char,
+                (&mut value as *mut i32).cast(),
+            )
+        })?;
+        Ok(value != 0)
+    }
     pub fn uid(&self, name: &CStr) -> io::Result<u32> {
         self.number(c"GetConnectionUnixUser", name)
     }

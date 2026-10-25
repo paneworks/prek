@@ -3,7 +3,7 @@ use crate::input::EV_KEY;
 use std::time::Duration;
 
 fn generated() -> Descriptor {
-    Descriptor::generated_keyboard(descriptor().source, BTreeMap::new()).unwrap()
+    Descriptor::generated_keyboard(descriptor().source).unwrap()
 }
 
 #[test]
@@ -128,14 +128,8 @@ fn generated_key_sink_refuses_every_physical_adapter_operation_without_a_device(
     original.axes.clear();
     original.properties.clear();
     original.capabilities = BTreeMap::from([(EV_SYN, vec![SYN_REPORT]), (EV_KEY, vec![30, 42])]);
-    let descriptor = Descriptor::mirror(
-        &original,
-        descriptor().identity,
-        None,
-        &BTreeMap::new(),
-        BTreeMap::new(),
-    )
-    .unwrap();
+    let descriptor =
+        Descriptor::mirror(&original, descriptor().identity, None, &BTreeMap::new()).unwrap();
     assert_eq!(descriptor.class, crate::transport::Class::Keyboard);
     let publication = registry.prepare_isolated(descriptor).unwrap();
     let path = temporary.path.join("ordinary-file");

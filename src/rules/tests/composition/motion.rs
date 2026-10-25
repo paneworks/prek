@@ -221,33 +221,6 @@ fn shape_handoff_discards_the_eager_path_and_seeds_only_current_centroid() {
 }
 
 #[test]
-fn native_motion_handoff_preserves_the_first_target_after_focus_and_position_move() {
-    let mut engine = native(swipe(true));
-    let action = Action::Hyprland {
-        action: crate::config::WindowAction::Close,
-    };
-    engine.sequences[0].rule.action = action.clone();
-    engine.sequences[0].rule.output = Some("phone".into());
-    for child in &mut engine.sequences[0].steps {
-        child.workers[0].rule.action = action.clone();
-        child.workers[0].rule.output = Some("phone".into());
-    }
-    let ticket = start(&mut engine);
-    points(&mut engine, 20, 2, (600, 500), (700, 500), false);
-    let mut changed = snapshot(1, 2, 25);
-    changed.windows[0].focused = false;
-    changed.windows[1].focused = true;
-    engine.authority.update(changed, ms(25)).unwrap();
-    complete(&mut engine, &ticket, 30);
-    let candidate = &engine.sequences[0].steps[1].workers[0].candidates[&device(1).source];
-    assert_eq!(candidate.permit.as_ref().unwrap().window().unwrap().id, "a");
-    points(&mut engine, 40, 3, (800, 500), (900, 500), false);
-    assert!(
-        matches!(&matches(&engine.events)[..],[Event::Matched{window:Some(window),..}] if window=="a")
-    );
-}
-
-#[test]
 fn native_motion_and_shape_continuations_cancel_on_source_context_and_helper_loss() {
     for shape in [false, true] {
         for reset in 0..7 {

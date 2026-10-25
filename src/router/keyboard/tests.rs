@@ -46,7 +46,6 @@ fn prepared(limits: Limits, device: Device) -> Router {
         },
         None,
         &BTreeMap::new(),
-        BTreeMap::new(),
     )
     .unwrap();
     let consumer = Consumer::IsolatedReceiver { pid: 1, start: 1 };
@@ -59,7 +58,6 @@ fn prepared(limits: Limits, device: Device) -> Router {
             name: descriptor.name,
             class: descriptor.class,
             seat: "seat0".into(),
-            settings: BTreeMap::new(),
             at: ms(0),
         },
         ms(0),

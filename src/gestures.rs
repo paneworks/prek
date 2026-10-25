@@ -80,7 +80,7 @@ impl Transform {
             Self::Flipped270 => Point { x: p.y, y: p.x },
         }
     }
-    fn swapped(self) -> bool {
+    pub(crate) fn swapped(self) -> bool {
         matches!(
             self,
             Self::Rotate90 | Self::Rotate270 | Self::Flipped90 | Self::Flipped270

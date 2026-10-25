@@ -19,7 +19,6 @@ struct Parent {
     step: u64,
     last_inputs: Vec<Frame>,
     neutral_drains: BTreeMap<Source, crate::keys::drain::Request>,
-    released: BTreeSet<Source>,
     finishing: bool,
     closed: bool,
     reaped: bool,
@@ -171,10 +170,8 @@ impl Parent {
                     name: descriptor.name.clone(),
                     class: descriptor.class,
                     seat: descriptor.source.seat.clone(),
-                    settings: descriptor.consumer_settings.clone(),
                     at: monotonic()?,
                 },
-                admission: None,
             },
         )
     }
@@ -214,24 +211,6 @@ impl Parent {
                         self.transport(&endpoint)?;
                     } else if !self.endpoints.is_empty() {
                         return Err(invalid("managed transport offer has an unknown source"));
-                    }
-                }
-                Message::Released {
-                    worker,
-                    fence,
-                    source,
-                } => {
-                    if !self.finishing {
-                        return Err(invalid(format!(
-                            "managed worker released device {} before the fixture finished",
-                            source.device
-                        )));
-                    }
-                    if worker != self.supervisor.worker_identity()
-                        || fence != self.fence
-                        || !self.released.insert(source)
-                    {
-                        return Err(invalid("managed release is stale or duplicated"));
                     }
                 }
                 Message::Outcome {
@@ -525,7 +504,6 @@ pub(super) fn run() -> io::Result<()> {
         step: 0,
         last_inputs: vec![],
         neutral_drains: BTreeMap::new(),
-        released: BTreeSet::new(),
         finishing: false,
         closed: false,
         reaped: false,
@@ -714,7 +692,7 @@ pub(super) fn run() -> io::Result<()> {
     }
     let recovered = registry.recover_worker(&report)?;
     parent.reaped = true;
-    if recovered != 0 || parent.released != sources.iter().cloned().collect() {
+    if recovered != 0 {
         return Err(invalid(
             "managed worker did not retire every output before source release",
         ));

@@ -87,17 +87,18 @@ and [input core](https://github.com/torvalds/linux/blob/v6.18/drivers/input/inpu
 
 The input-core handler grab and evdev-client grab are different boundaries. This
 witness does **not** establish console keyboard-handler delivery. It also does
-not prove a stock compositor drained earlier events, an initially held sequence
+not prove a compositor drained earlier events, an initially held sequence
 can transfer between devices, a rollback preserved all ordinary input, or a
 neutral snapshot is atomic. Those are remaining live handoff gates, not reasons
 to enable CLI routing after a model pass.
 
-### Neutral idle takeover from stock Hyprland
+### Neutral idle takeover
 
-For the stock Hyprland consumer the routing worker accepts an inferred
-consumer-neutral boundary instead of a consumer acknowledgement, since stock
-Hyprland exposes no per-device held state or processed-event cursor. After the
-mirror's metadata, live consumer evidence, LED feedback and Morf admission pass,
+For a Wayland compositor consumer the routing worker accepts an inferred
+consumer-neutral boundary instead of a consumer acknowledgement, since the
+compositor exposes no per-device held state or processed-event cursor. After the
+mirror's metadata, live consumer evidence (the bound compositor process holds
+the mirror's event node in `/proc/<pid>/fd`) and LED feedback pass,
 the worker arms only when the source probe is neutral and no original input has
 been read for 100 ms. One attempt then prepares the witness (pending events are
 observed and the attempt waits again), grabs, and classifies. The readiness gate
@@ -105,28 +106,13 @@ is finished at the instant before the grab, which precedes every retained event.
 
 A prefix that leaves a key, switch or contact active releases the grab before
 commit and returns the whole prefix and tail through the observation loop;
-committing would leave Hyprland holding that key with nothing to release it.
+committing would leave the compositor holding that key with nothing to release it.
 With an empty tail the release is lossless. A tail read in the same few
-microseconds is not delivered to Hyprland after release; re-injecting it cannot
+microseconds is not delivered to the compositor after release; re-injecting it cannot
 help, because the kernel already applied those transitions and drops events
 that do not toggle its state. A failed grab, classification or readiness check
 refuses that source until it is removed. A committed cut attaches the route when
 the reader loop announces the delivered prefix.
-
-Before offering consumer evidence for a mirror, the broker writes its Hyprland
-per-device settings once, under the mirror's own device name: the original's
-visible name-specific settings (XKB fields that differ from the global
-`input:kb_*` values, an explicit mouse `scroll_factor`) plus the selector's
-declared `hyprland` options, as one `keyword device[...]` batch for hyprlang or one
-`r/eval hl.device{...}` for Lua, both applied before the reply. Evidence then
-requires the declared settings stock IPC shows, and every other visible setting
-to equal the original's. Declared settings stock IPC cannot show are trusted from
-the write receipt. A failed write or check leaves the mirror without evidence,
-so the worker refuses that source at its readiness deadline. A compositor
-configuration reload discards runtime device entries. The broker reads the
-compositor's verified event socket and re-applies the settings of each session's
-64 most recent mirrors after `configreloaded`, or after losing that stream; until
-then a reverted visible setting fails the next evidence check.
 
 Input-core grab acquisition does not itself wait for an RCU grace period.
 Release does, and the console keyboard handler's `start` callback refreshes
@@ -171,39 +157,7 @@ neutral contacts and a zero-fuzz control. It uses only owned isolated nodes;
 compilation and model results do not prove that native case executed. The
 production nonzero-fuzz refusal remains in place.
 
-## Per-device disable is not a neutral handoff
-
-Hyprland v0.56.2 assigns the keyboard's `enabled` flag and ignores key/modifier
-events while disabled. It does not thereby release the application's held
-keys. Its pointer/libinput disable path is different. See its
-[input manager](https://github.com/hyprwm/Hyprland/blob/v0.56.2/src/managers/input/InputManager.cpp).
-
-`oslo make test-keyboard-quiesce` exercises this failure with one owned
-Wayland-protocol keyboard and a real rendered application, using both legacy
-and Lua Hyprland configuration. It selects the explicitly **test-only Aquamarine
-Wayland startup fix**, not an unmodified-stock acceptance fixture. Host input,
-evdev/uinput, console and production broker routing are not tested or altered.
-
-The application receives a held C. After behaviorally qualifying disable, the
-source releases C but the application stays held. After qualifying re-enable,
-a fresh C press is also suppressed; only its later release restores neutrality.
-Diagnostic Z batches confirm actual device behavior rather than trusting a
-configuration reply or sleeping for an assumed refresh interval.
-
-In this optional fixture mode, the receiver issues at most one `wl_display.sync`
-at a time on a coalesced 20 ms timer. Only a request timestamp **after** the
-keyboard producer's completed roundtrip fences a snapshot. An old request with
-a late callback cannot qualify. This orders this controlled Wayland protocol
-test; it is not an evdev/libinput drain acknowledgement for arbitrary apps.
-Idle sync observations do not request redraws.
-
-Every phase requires the actual application state and a rendered watermark.
-Real captures must contain both the receiver's identity pixel and the matching
-red-held/green-neutral pixel. Capture retries do not repeat input or configuration
-effects; first unmatched images are retained. Five phase captures, full command/
-synthetic-event trace and `keyboard-quiesce-result.json` remain under the attempt's
-`target/cage-host/run-*`. A passing **negative** characterization explicitly
-retains `production_route_tested=false` and `kernel_input_tested=false`.
+## Handoff boundary tests
 
 `oslo make test-handoff-boundary` exercises the protocol with scripted ports,
 including an in-flight pre-grab fanout and faults. These are models, not kernel
@@ -256,7 +210,7 @@ The private routing `Stream` does not yet opt into this interface, and its live
 admission/neutral/rollback/consumer/console obligations remain open. Its former
 grab-and-blind-discard path has been removed: complete metadata/model snapshots
 still return `Unsupported` before grabbing, draining, ungrabbing, attaching live
-routing, asking Morf to activate, or emitting native `Ready`. Source-neutral queries are not promoted to
+routing or emitting native `Ready`. Source-neutral queries are not promoted to
 consumer-neutral acknowledgements. This is a safety refusal, not a completed
 takeover protocol. A user-run
 synthetic loop case checks prefix/callback/tail ordering, one downstream output
@@ -349,5 +303,5 @@ and triggers no existing device.
 recreation, late import requests, strict receipts, replacement/legacy records,
 consumer-evidence fencing and existing transport/discovery models. Actual
 kernel cases remain in the user-launched runner. Neither layer establishes
-stock-compositor/console drain, neutral handoff, physical source incarnation or
+compositor/console drain, neutral handoff, physical source incarnation or
 complete rollback. Production routing remains disabled.

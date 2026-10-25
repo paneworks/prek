@@ -123,7 +123,7 @@ fn authorize(runtime: &mut Runtime, at: Duration) {
     let view = serde_json::from_value(serde_json::json!({
         "fence":fence(),"sampled_at":at,"state":"desktop","error":null,
         "context":{"binding":{"seat":"seat0","session":"model","uid":1000,"compositor_pid":123,"compositor_start":456,"kind":"user"},
-        "snapshot":{"generation":1,"revision":1,"captured_at":at,"state":"desktop","secure_overlay":false,"regions":[],"windows":[],"outputs":[]}}
+        "snapshot":{"generation":1,"revision":1,"captured_at":at,"state":"desktop","outputs":[]}}
     })).unwrap();
     runtime.set_context(view, at).unwrap();
     runtime

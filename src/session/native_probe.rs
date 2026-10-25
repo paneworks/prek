@@ -38,7 +38,7 @@ fn library_preflight() {
         "PREK_NATIVE_LIBRARY_PREFLIGHT={}",
         serde_json::json!({
             "version": 1, "library": fs::canonicalize(path).unwrap(), "loaded": true,
-            "root_owned": true, "session_checked": false, "handoff_tested": false,
+            "root_owned": true, "session_checked": false,
         })
     );
 }
@@ -57,9 +57,9 @@ fn session_preflight() {
     let process = Process::open(std::process::id(), uid).unwrap();
     let facts = library.facts(&peer, &process).unwrap_or_else(|error| {
         panic!(
-            "native handoff requires an active local Wayland or TTY login on a seat; \
-            SSH/headless Cage alone is insufficient. Run from your logged-in local terminal. \
-            No sudo or handoff was attempted. logind: {error}"
+            "session preflight requires an active local Wayland or TTY login on a seat; \
+            an SSH or headless login is insufficient. Run from your logged-in local terminal. \
+            No sudo was attempted. logind: {error}"
         )
     });
     println!(
@@ -67,7 +67,7 @@ fn session_preflight() {
         serde_json::json!({
             "version": 1, "library": fs::canonicalize(path).unwrap(), "uid": facts.uid,
             "session": facts.session, "seat": facts.seat, "type": facts.session_type,
-            "active_local": true, "handoff_tested": false,
+            "active_local": true,
         })
     );
 }

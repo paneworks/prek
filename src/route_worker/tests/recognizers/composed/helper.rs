@@ -87,8 +87,6 @@ return p.config.new{mode='route',policy={allow_input_events=true,allow_runtime_r
                 sampled_at: monotonic().unwrap(),
                 state: State::Desktop,
                 context: fixture.owner.context.clone(),
-                morf: vec![],
-                morf_rendered: vec![],
                 error: None,
             })
             .unwrap();

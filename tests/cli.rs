@@ -1,6 +1,6 @@
 use prek::{
     Button, Gesture,
-    config::{Action, Config, WindowAction},
+    config::{Action, Config},
     input::{
         Change, Device, EV_KEY, EV_SYN, Frame, KeyState, NormalizedFrame, RawEvent, SYN_REPORT,
         Source,
@@ -59,7 +59,6 @@ fn routed_replay_cli_checks_downstream_frames_without_opening_recorded_devices()
         },
         None,
         &BTreeMap::new(),
-        BTreeMap::new(),
     )
     .unwrap();
     let consumer = ConsumerEvidence {
@@ -68,7 +67,6 @@ fn routed_replay_cli_checks_downstream_frames_without_opening_recorded_devices()
         name: descriptor.name.clone(),
         class: descriptor.class,
         seat: "seat0".into(),
-        settings: BTreeMap::new(),
         at: Duration::ZERO,
     };
     let input = |input, now| RoutedRecord::Input {
@@ -94,9 +92,6 @@ fn routed_replay_cli_checks_downstream_frames_without_opening_recorded_devices()
                     captured_at: Duration::ZERO,
                     state: State::Desktop,
                     outputs: vec![],
-                    windows: vec![],
-                    regions: vec![],
-                    secure_overlay: false,
                 }),
             },
             0,
@@ -282,9 +277,7 @@ fn composed_source_cli_replay_checks_the_public_example_and_stays_unfenced_in_ru
                 })
                 .collect(),
         },
-        window: None,
         output: None,
-        workspace: None,
     };
     let Record::Device { mut device, .. } = serde_json::from_str::<Record>(
         String::from_utf8(recording())
@@ -315,9 +308,6 @@ fn composed_source_cli_replay_checks_the_public_example_and_stays_unfenced_in_ru
                 captured_at: Duration::ZERO,
                 state: State::Desktop,
                 outputs: vec![],
-                windows: vec![],
-                regions: vec![],
-                secure_overlay: false,
             }),
         },
         Record::Device {
@@ -424,9 +414,7 @@ return p.config.new{{policy={{allow_input_events=true,allowed_devices={{'keys'}}
             recognizer: "offline".into(),
             data: serde_json::json!({"calls":2}),
         },
-        window: None,
         output: None,
-        workspace: None,
     };
     let mut records = vec![
         Record::Header { version: 1 },
@@ -446,9 +434,6 @@ return p.config.new{{policy={{allow_input_events=true,allowed_devices={{'keys'}}
                 captured_at: Duration::ZERO,
                 state: State::Desktop,
                 outputs: vec![],
-                windows: vec![],
-                regions: vec![],
-                secure_overlay: false,
             }),
         },
     ];
@@ -546,8 +531,7 @@ fn session_help_documents_explicit_desktop_opt_ins_without_enabling_routing() {
     let output = run(&["session", "--help"]);
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
-    assert!(help.contains("--power") && help.contains("protected-policy DPMS"));
-    assert!(help.contains("--hyprland") && help.contains("protected-policy targeted Hyprland"));
+    assert!(help.contains("--display"));
     assert!(help.contains("--recognizers") && help.contains("native validated"));
     assert!(help.contains("--reconnect") && !help.contains("--reconnect-child"));
     assert!(help.contains("--logind-library"));
@@ -574,8 +558,8 @@ fn reconnecting_cli_reexecutes_only_against_its_missing_owned_endpoint_and_stops
         .args([
             "session",
             "--reconnect",
-            "--instance",
-            "owned-missing-instance",
+            "--display",
+            "owned-missing-display",
             "--socket",
         ])
         .arg(directory.0.join("missing socket"))
@@ -650,7 +634,7 @@ fn broker_route_mode_requires_administrator_policy_before_runtime_or_device_acce
         "--config",
         "/missing/config.toml",
         "--compositor-executable",
-        "/missing/Hyprland",
+        "/missing/compositor",
         "--logind-library",
         "/missing/libsystemd.so.0",
         "--runtime-dir",
@@ -724,9 +708,7 @@ fn t33_configured_mouse_shape_cli_replay_checks_a_hand_written_outcome() {
                 margin: 1.0,
             },
         },
-        window: None,
         output: None,
-        workspace: None,
     };
     let config_path = directory.0.join("shape.toml");
     fs::write(&config_path, toml::to_string_pretty(&config).unwrap()).unwrap();
@@ -947,9 +929,7 @@ fn t42_configured_sequence_cli_replay_matches_a_hand_written_outcome() {
                 Evidence::Hold { repeat: false },
             ],
         },
-        window: None,
         output: None,
-        workspace: None,
     };
     let mut bytes = Vec::new();
     write_record(&mut bytes, &Record::Header { version: 1 }).unwrap();
@@ -1245,7 +1225,7 @@ fn lua_example_entries() -> Vec<std::path::PathBuf> {
         }
     }
     entries.sort();
-    assert!(entries.len() >= 25, "{entries:?}");
+    assert!(entries.len() >= 21, "{entries:?}");
     entries
 }
 
@@ -1524,7 +1504,6 @@ fn run(args: &[&str]) -> Output {
         .args(args)
         .env_remove("DISPLAY")
         .env_remove("WAYLAND_DISPLAY")
-        .env_remove("HYPRLAND_INSTANCE_SIGNATURE")
         .output()
         .unwrap()
 }
@@ -1614,9 +1593,7 @@ fn t05_configured_cli_replay_checks_rules_without_device_access() {
                     name: "volume_double_tap".into(),
                 },
                 evidence: Evidence::Taps { count: 2 },
-                window: None,
                 output: None,
-                workspace: None,
             }],
         },
     )
@@ -1730,12 +1707,7 @@ fn t03_presets_check_and_preserve_existing_files() {
     let result: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
     assert_eq!(result["status"], "valid");
     let config = Config::parse(std::str::from_utf8(&original).unwrap()).unwrap();
-    assert!(config.rules.iter().any(|rule| matches!(
-        rule.action,
-        Action::Hyprland {
-            action: WindowAction::MoveLeftAndFollow
-        }
-    )));
+    assert_eq!(config.mode, prek::config::Mode::Route);
     assert!(
         run(&["init", "--preset", "minimal", "--output", name, "--force"])
             .status
@@ -1976,7 +1948,6 @@ fn t04_already_closed_stdout_is_a_clean_exit_for_json_commands() {
             .stderr(Stdio::piped())
             .env_remove("DISPLAY")
             .env_remove("WAYLAND_DISPLAY")
-            .env_remove("HYPRLAND_INSTANCE_SIGNATURE")
             .output()
             .unwrap()
     }

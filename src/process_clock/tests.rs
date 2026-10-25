@@ -4,90 +4,6 @@ use std::{
     process::{Command, Stdio},
 };
 
-struct NativeSocket {
-    root: std::path::PathBuf,
-    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    thread: Option<std::thread::JoinHandle<()>>,
-}
-impl NativeSocket {
-    fn new() -> Self {
-        use std::{
-            fs,
-            io::{Read, Write},
-            os::unix::{fs::PermissionsExt, net::UnixListener},
-            sync::{
-                Arc,
-                atomic::{AtomicBool, AtomicUsize, Ordering},
-            },
-        };
-        let root = std::env::temp_dir().join(format!("prek-clock-socket-{}", std::process::id()));
-        fs::create_dir(&root).unwrap();
-        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
-        fs::create_dir_all(root.join("hypr/clock")).unwrap();
-        for directory in [root.join("hypr"), root.join("hypr/clock")] {
-            fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
-        }
-        let listener = UnixListener::bind(root.join("hypr/clock/.socket.sock")).unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let stop = Arc::new(AtomicBool::new(false));
-        let stopping = stop.clone();
-        let requests = Arc::new(AtomicUsize::new(0));
-        let seen = requests.clone();
-        let thread = std::thread::spawn(move || {
-            while !stopping.load(Ordering::Relaxed) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        stream
-                            .set_read_timeout(Some(Duration::from_secs(1)))
-                            .unwrap();
-                        let mut bytes = [0; 1024];
-                        let count = stream.read(&mut bytes).unwrap_or(0);
-                        if count == 0 {
-                            continue;
-                        }
-                        seen.fetch_add(1, Ordering::Relaxed);
-                        let reply = if &bytes[..count] == b"j/version" {
-                            "{\"version\":\"0.56.2\"}"
-                        } else {
-                            "{\"keyboards\":[],\"mice\":[],\"touch\":[],\"switches\":[],\"tablets\":[]}"
-                        };
-                        let _ = stream.write_all(reply.as_bytes());
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(1))
-                    }
-                    Err(error) => panic!("native test listener: {error}"),
-                }
-            }
-        });
-        Self {
-            root,
-            stop,
-            requests,
-            thread: Some(thread),
-        }
-    }
-    fn client(&self) -> crate::hyprland::Client {
-        // Read-only effective process UID.
-        let uid = unsafe { nix::libc::geteuid() };
-        crate::hyprland::Client::open(
-            &self.root,
-            "clock",
-            uid,
-            &std::path::PathBuf::from(format!("/proc/{}/exe", std::process::id())),
-        )
-        .unwrap()
-    }
-}
-impl Drop for NativeSocket {
-    fn drop(&mut self) {
-        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        self.thread.take().unwrap().join().unwrap();
-        std::fs::remove_dir_all(&self.root).unwrap();
-    }
-}
-
 fn ns(value: u64) -> Duration {
     Duration::from_nanos(value)
 }
@@ -265,8 +181,6 @@ fn isolated_process_epoch_invalidation_fences_io_and_reaps_owned_children() {
     let worker = crate::supervisor::Supervisor::spawn(worker_command).unwrap();
     let identity = worker.worker_identity();
     assert!(!identity.confirmed_dead().unwrap());
-    let native = NativeSocket::new();
-    let client = native.client();
     let (mut sender, mut receiver) = crate::ipc::Channel::pair().unwrap();
     let now = crate::ipc::monotonic().unwrap();
     assert!(sender.send(&true, now).unwrap());
@@ -302,11 +216,6 @@ fn isolated_process_epoch_invalidation_fences_io_and_reaps_owned_children() {
     assert_eq!(sink.0, 0);
     assert!(sender.send(&true, now).is_err());
     assert!(receiver.receive::<bool>().is_err());
-    assert!(client.inventory().is_err());
-    assert_eq!(
-        native.requests.load(std::sync::atomic::Ordering::Relaxed),
-        1
-    );
     assert!(worker.deadline().is_err());
     assert!(crate::supervisor::Supervisor::spawn(child("worker")).is_err());
     drop(worker);

@@ -238,7 +238,6 @@ fn previous_publication_consumer_evidence_cannot_complete_the_new_gate() {
                 name: old.name,
                 class: old.class,
                 seat: old.source.seat,
-                settings: old.consumer_settings,
                 at: now,
             },
             now

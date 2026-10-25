@@ -3,7 +3,7 @@ set -euo pipefail
 
 rustc --version
 cargo fmt --all -- --check
-for model in root_session root_routing cage_startup nix_dist build_tools; do
+for model in root_routing nix_dist build_tools; do
     python3 -m unittest discover -s tests/support -p "test_${model}.py" -v
 done
 cargo check --locked --all-targets --all-features

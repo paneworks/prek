@@ -54,9 +54,10 @@ pub(super) fn motion(
 ) -> Result<(), &'static str> {
     let at = context.admitted_at;
     if !conditions(&worker.rule, context.keys, &state.device.source.seat)
-        || !context.authority.fresh(at).is_ok_and(|snapshot| {
-            snapshot.state == crate::context::State::Desktop && !snapshot.secure_overlay
-        })
+        || !context
+            .authority
+            .fresh(at)
+            .is_ok_and(|snapshot| snapshot.state == crate::context::State::Desktop)
     {
         return Err("touch continuation is no longer eligible");
     }

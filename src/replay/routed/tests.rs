@@ -36,7 +36,6 @@ fn attach() -> Record {
         },
         None,
         &BTreeMap::new(),
-        BTreeMap::new(),
     )
     .unwrap();
     let consumer = ConsumerEvidence {
@@ -45,7 +44,6 @@ fn attach() -> Record {
         name: descriptor.name.clone(),
         class: descriptor.class,
         seat: "seat0".into(),
-        settings: BTreeMap::new(),
         at: ms(0),
     };
     Record::Attach {
@@ -445,9 +443,7 @@ fn actual_source_bound_composed_callbacks_consume_all_raw_groups_before_one_disp
                 })
                 .collect(),
         },
-        window: None,
         output: None,
-        workspace: None,
     };
     assert_eq!(
         replay.outcomes(),
@@ -687,7 +683,6 @@ fn held_touch_nested_callbacks_consume_the_whole_stream_on_a_recorded_timer() {
         },
         None,
         &BTreeMap::new(),
-        BTreeMap::new(),
     )
     .unwrap();
     let consumer = ConsumerEvidence {
@@ -696,7 +691,6 @@ fn held_touch_nested_callbacks_consume_the_whole_stream_on_a_recorded_timer() {
         name: descriptor.name.clone(),
         class: descriptor.class,
         seat: "seat0".into(),
-        settings: BTreeMap::new(),
         at: ms(0),
     };
     let mut mapping = Mapping::from_device(&device).unwrap();
@@ -807,9 +801,7 @@ fn held_touch_nested_callbacks_consume_the_whole_stream_on_a_recorded_timer() {
                 },
             ],
         },
-        window: None,
         output: Some("replay-output".into()),
-        workspace: Some(1),
     };
     replay
         .push(Record::Expected {

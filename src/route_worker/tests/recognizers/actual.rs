@@ -67,8 +67,6 @@ return p.config.new{mode='route',
             sampled_at: monotonic().unwrap(),
             state: State::Desktop,
             context: fixture.owner.context.clone(),
-            morf: Vec::new(),
-            morf_rendered: Vec::new(),
             error: None,
         })
         .unwrap();

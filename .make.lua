@@ -457,13 +457,6 @@ make.recipe{
   end,
 }
 
-make.recipe{ name = "test-root-session", desc = "unprivileged remote-handoff transport and cleanup models",
-             run = function()
-               sh.python3("-m", "unittest", "discover", "-s", "tests/support", "-p", "test_root_session.py", "-v")
-               sh.bash("-n", "tests/run-root-handoff.sh")
-               sh.shellcheck("tests/run-root-handoff.sh")
-             end }
-
 make.recipe{
   name = "test-feedback",
   desc = "bounded LED relay and independent source-writer models; no device access",
@@ -486,35 +479,6 @@ make.recipe{ name="build-root-routing",desc="build the user-launched kernel runn
              run=function()
                sh.mkdir("-p","target/root-routing")
                assert(oslo.run{"nix","--option","eval-cache","false","--extra-experimental-features","nix-command flakes","--max-jobs","1","--cores","2","build","--no-write-lock-file","--out-link",project_root().."/target/root-routing/probe",".#root-routing-test"}.ok,"root routing probe build failed")
-             end }
-
-local function cage_test(fixture, flags)
-  local command = { "nix", "--option", "eval-cache", "false", "--extra-experimental-features",
-    "nix-command flakes", "--max-jobs", "1", "--cores", "2", "run", "--no-write-lock-file",
-    ".#" .. fixture, "--", "--hardware-rendering" }
-  for _, flag in ipairs(flags) do command[#command + 1] = flag end
-  assert(oslo.run(command).ok, "local Cage fixture failed")
-end
-
-make.recipe{ name = "test-cage", desc = "local GPU Cage/Hyprland keyboard, Lua and window receipts",
-             run = function() cage_test("cage-test", { "--layers", "--input", "--power", "--windows" }) end }
-
-make.recipe{ name = "test-cage-stock", desc = "modern pinned stock Cage/Hyprland without a dependency override",
-             run = function() cage_test("cage-test-stock", { "--layers", "--input", "--power", "--windows" }) end }
-
-make.recipe{ name = "test-cage-lua-stock", desc = "modern stock Cage/Hyprland with an actual Lua config",
-             run = function() cage_test("cage-test-stock", { "--hyprland-config", "lua", "--modes", "--input", "--power", "--windows" }) end }
-
-make.recipe{ name="test-keyboard-quiesce",desc="real held-key disable characterization with explicit test-only Wayland backend fix",
-             run=function()
-               cage_test("cage-test-wayland-fix",{"--keyboard-quiesce"})
-               cage_test("cage-test-wayland-fix",{"--keyboard-quiesce","--hyprland-config","lua"})
-             end }
-
-make.recipe{ name="test-keyboard-ownership",desc="independent keyboard modifier ownership in the owned local fixture",
-             run=function()
-               cage_test("cage-test-wayland-fix",{"--keyboard-ownership","--hyprland-config","lua"})
-               cage_test("cage-test-wayland-fix",{"--keyboard-ownership"})
              end }
 
 make.recipe{ name="test-key-output",desc="transactional remap and chord ownership, backpressure and retirement; no devices",
@@ -691,159 +655,6 @@ cargo test --locked --features native-test-harness --test native_managed --no-ru
                assert(listed.ok and (listed.out==expected or listed.out==expected.."\n"),"managed fixture inventory differs: "..string.format("%q",listed.out or ""))
              end }
 
-make.recipe{ name="test-key-output-cage",desc="actual key output driver and app rendering on owned protocol keyboards",
-             run=function()
-               cage_test("cage-test-wayland-fix",{"--key-output","--hyprland-config","lua"})
-               cage_test("cage-test-wayland-fix",{"--key-output"})
-             end }
-
-make.recipe{ name="test-key-worker-cage",desc="scoped scheduler and raw/generated ordering on owned protocol keyboards",
-             run=function()
-               cage_test("cage-test-wayland-fix",{"--key-output","--key-worker","--hyprland-config","lua"})
-               cage_test("cage-test-wayland-fix",{"--key-output","--key-worker"})
-             end }
-
-make.recipe{ name="test-key-worker-cage-dev",desc="current Cargo scheduler fixture with an explicit immutable compositor runner",
-             params={{"--runner",desc="absolute Nix store prek-cage-host-test executable"}},
-             run=function(a)
-               assert(type(a.runner)=="string" and a.runner:match("^/nix/store/[^/]+/bin/prek%-cage%-host%-test$"),
-                      "supply the immutable --runner executable explicitly")
-               pin_test_store(a.runner, "key-worker-runner")
-               local script=oslo.fs.read(a.runner)
-               assert(script and not script:find("--morf-root-probe",1,true),"supply a non-root Cage runner")
-               sh.mkdir("-p","target/hybrid-key-journal")
-               for _,tool in ipairs{"keyboard","receiver"} do
-                 assert(oslo.run{"nix","--option","eval-cache","false","--extra-experimental-features","nix-command flakes",
-                   "--max-jobs","1","--cores","2","build","--no-write-lock-file","--out-link",
-                   project_root().."/target/hybrid-key-journal/"..tool,".#cage-test-"..tool}.ok,"current protocol helper failed to build")
-               end
-               local built=oslo.run{"bash","-c",[[set -euo pipefail
-cargo test --locked --features native-test-harness --test key_output_cage --no-run --message-format=json | jq -ers '
-  [.[] | select(.reason=="compiler-artifact" and .executable!=null)] as $artifacts |
-  [$artifacts[] | select(.target.name=="key_output_cage" and .profile.test) | .executable] | unique as $fixture |
-  [$artifacts[] | select(.target.name=="prek" and (.target.kind|index("bin")) and (.profile.test|not)) | .executable] | unique as $app |
-  if ($fixture|length)==1 and ($app|length)==1 then $fixture[0],$app[0] else error("expected current scheduler and helper executables") end'
-]],capture=true}
-               if not built.ok then io.stderr:write(built.err or "") end
-               assert(built.ok,"scheduler test failed to build")
-               local fixture,app=(built.out or ""):match("^%s*([^\r\n]+)[\r\n]+([^\r\n]+)%s*$")
-               assert(fixture and app and fixture:sub(1,1)=="/" and app:sub(1,1)=="/","missing current Cargo executables")
-               print("DEV: current Cargo fixture; explicitly pinned compositor runner: "..a.runner)
-               assert(oslo.run{"sha256sum",fixture}.ok,"could not identify scheduler fixture")
-               assert(oslo.run{"sha256sum",app}.ok,"could not identify Lua helper")
-               local helper=project_root().."/tests/support/keyboard_quiesce.py"
-               assert(oslo.run{"sha256sum",helper}.ok,"could not identify scheduler helper")
-               for _,routing in ipairs{"key","scoped"} do
-                 for _,provider in ipairs{"lua","hyprlang"} do
-                   assert(oslo.run{"env","PREK_KEY_WORKER_ROUTING="..routing,a.runner,"--hardware-rendering","--key-output","--key-worker",
-                     "--key-output-fixture",fixture,"--prek-app",app,"--keyboard-quiesce-check",helper,
-                     "--keyboard",project_root().."/target/hybrid-key-journal/keyboard/bin/prek-wayland-keyboard",
-                     "--receiver",project_root().."/target/hybrid-key-journal/receiver/bin/prek-wayland-receiver",
-                     "--hyprland-config",provider}.ok,"local debug scheduler fixture failed: "..routing.." "..provider)
-                 end
-               end
-             end }
-
-make.recipe{ name = "test-cage-wayland-fix", desc = "explicit test-only patched nested compositor receipts",
-             run = function()
-               cage_test("cage-test-wayland-fix", { "--modes", "--input", "--power", "--windows" })
-               cage_test("cage-test-wayland-fix", { "--layers", "--input", "--power", "--windows" })
-             end }
-
-make.recipe{ name = "test-cage-touch", desc = "local GPU Cage two-contact delivery and neutral releases",
-             run = function() cage_test("cage-touch-test", {}) end }
-
-make.recipe{ name = "test-touch-runtime", desc = "touch packet bridge and source-bound Lua configuration models",
-             run = function() sh.cargo("test", "--locked", "--test", "cage_touch_runtime") end }
-
-make.recipe{ name = "test-cage-touch-dev", desc = "current debug touch controller with explicitly supplied fixture tools",
-             params = {{"--cage",desc="test-only Cage touch source executable"},
-                       {"--receiver",desc="Wayland receiver executable"},
-                       {"--grim",desc="grim executable"},
-                       {"--dbus",desc="dbus-run-session executable"}},
-             run = function(a)
-               for _, name in ipairs{"cage","receiver","grim","dbus"} do
-                 assert(type(a[name])=="string" and a[name]:sub(1,1)=="/", "supply an absolute --"..name.." path")
-                 pin_test_store(a[name], "touch-"..name)
-               end
-               local built = oslo.run{"bash","-c",[[set -euo pipefail
-app=$(cargo build --locked --bin prek --message-format=json | jq -ers '
-  [.[] | select(.reason=="compiler-artifact" and .target.name=="prek" and (.profile.test|not) and .executable!=null) | .executable] | unique |
-  if length==1 then .[0] else error("expected exactly one current application executable") end')
-fixture=$(cargo test --locked --test cage_touch_runtime --no-run --message-format=json | jq -ers '
-  [.[] | select(.reason=="compiler-artifact" and .target.name=="cage_touch_runtime" and .profile.test and .executable!=null) | .executable] | unique |
-  if length==1 then .[0] else error("expected exactly one current touch test executable") end')
-printf '%s\n%s\n' "$app" "$fixture"]],capture=true}
-               if not built.ok then io.stderr:write(built.err or "") end
-               assert(built.ok,"touch application/controller failed to build")
-               local app,fixture=(built.out or ""):match("^%s*([^\r\n]+)\r?\n([^\r\n]+)%s*$")
-               assert(app and fixture,"missing current Cargo application/test executable")
-               for _, routing in ipairs{"coarse","scoped"} do
-                 assert(oslo.run{a.dbus,"--config-file="..project_root().."/tests/support/dbus-session.conf","--",
-                   "bash","-c",'export PREK_TEST_SESSION_BUS="$DBUS_SESSION_BUS_ADDRESS"; exec "$@"',"--",
-                   "env","PREK_CAGE_TOUCH_ROUTING="..routing,
-                   "python3","tests/cage-touch.py","--hardware-rendering","--cage",a.cage,"--receiver",a.receiver,
-                   "--screencopy",a.grim,"--fixture",fixture,"--app",app}.ok,"local debug touch fixture failed: "..routing)
-               end
-             end }
-
-make.recipe{ name = "test-cage-lua-wayland-fix", desc = "typed window/power effects in an owned Lua-config compositor",
-             run = function()
-               cage_test("cage-test-wayland-fix", { "--hyprland-config", "lua", "--modes", "--input", "--power", "--windows" })
-               cage_test("cage-test-wayland-fix", { "--hyprland-config", "lua", "--layers", "--input", "--power", "--windows" })
-             end }
-
-make.recipe{ name="build-cage-receiver",desc="immutable instrumented receiver without rebuilding Rust",
-             run=function()
-               assert(oslo.run{"nix","--option","eval-cache","false","--extra-experimental-features","nix-command flakes","--max-jobs","1","--cores","2","build","--no-write-lock-file","--out-link",project_root().."/target/reorder-rendering/receiver",".#cage-test-receiver"}.ok,"receiver build failed")
-             end }
-
-make.recipe{ name="build-cage-touch-tools",desc="retain current Cage/receiver/grim/dbus tools without a release Rust build",
-             run=function()
-               sh.mkdir("-p", "target/test-fixtures")
-               for _,name in ipairs{"cage","receiver","grim","dbus"} do
-                 assert(oslo.run{"nix","--option","eval-cache","false","--extra-experimental-features","nix-command flakes",
-                   "--max-jobs","1","--cores","2","build","--no-write-lock-file","--out-link",
-                   project_root().."/target/test-fixtures/touch-"..name,".#cage-touch-test."..name}.ok,"touch test tool failed: "..name)
-               end
-             end }
-make.recipe{ name="test-cage-runtime-dev",desc="current Cargo controller with an explicit immutable owned test runner",
-             params={{"--runner",desc="absolute pinned test-only Cage runner"},{"--receiver",desc="absolute current instrumented receiver"}},
-             run=function(a)
-               for _,name in ipairs{"runner","receiver"} do assert(type(a[name])=="string" and a[name]:sub(1,1)=="/","supply absolute --"..name) end
-               local built=oslo.run{"bash","-c",[[set -euo pipefail
-app=$(cargo build --locked --bin prek --message-format=json | jq -ers '[.[]|select(.reason=="compiler-artifact" and .target.name=="prek" and (.profile.test|not) and .executable!=null)|.executable]|unique|if length==1 then .[0] else error("expected one application") end')
-fixture=$(cargo test --locked --test cage_runtime --no-run --message-format=json | jq -ers '[.[]|select(.reason=="compiler-artifact" and .target.name=="cage_runtime" and .profile.test and .executable!=null)|.executable]|unique|if length==1 then .[0] else error("expected one controller") end')
-printf '%s\n%s\n' "$app" "$fixture"]],capture=true}
-               if not built.ok then io.stderr:write(built.err or "") end
-               assert(built.ok,"current application/controller build failed")
-               local app,fixture=(built.out or ""):match("^%s*([^\r\n]+)\r?\n([^\r\n]+)%s*$")
-               assert(app and fixture,"missing Cargo artifacts")
-               assert(oslo.run{a.runner,"--hyprland-config","lua","--modes","--input","--power","--windows","--receiver",a.receiver,"--prek-fixture",fixture,"--prek-app",app}.ok,"owned current-source Cage fixture failed")
-             end }
-
-make.recipe{ name = "test-cage-startup", desc = "unprivileged nested output and library-provenance checks",
-             run = function()
-               sh.python3("-m", "unittest", "discover", "-s", "tests/support", "-p", "test_cage_startup.py", "-v")
-             end }
-
-make.recipe{ name="test-cage-rendering",desc="bounded real capture pixel decoder and marker checks",
-             run=function() sh.cargo("test","--locked","--test","cage_runtime","rendering::tests") end }
-
-make.recipe{ name = "test-hyprland", desc = "bound Hyprland queries, window and power adapter models",
-             run = function()
-               sh.cargo("test", "--locked", "--lib", "hyprland::dispatch::tests")
-               sh.cargo("test", "--locked", "--lib", "hyprland::scrolling::")
-               sh.cargo("test", "--locked", "--lib", "hyprland::layouts::tests")
-               sh.cargo("test", "--locked", "--lib", "hyprland::animations::")
-               sh.cargo("test", "--locked", "--lib", "hyprland::layers::")
-               sh.cargo("test", "--locked", "--lib", "hyprland::reorder::tests")
-               sh.cargo("test", "--locked", "--lib", "routing::tests::native_claims::")
-               sh.cargo("test", "--locked", "--lib", "service::tests::native_reorder::")
-               sh.cargo("test", "--locked", "--lib", "route_worker::tests::recognizers::native_reorder::")
-               sh.cargo("test", "--locked", "--test", "hyprland")
-             end }
-
 make.recipe{ name = "check", desc = "type-check every target",
              run = function() sh.cargo("check", "--locked", "--all-targets") end }
 
@@ -859,20 +670,10 @@ cargo run --locked -- api --json | jq . > "$tmp"
 mv "$tmp" docs/lua-api.json]])
              end }
 
-make.recipe{ name = "test-context-layouts", desc = "bound native context transfer, Lua copies and sampling",
-             run = function()
-               sh.cargo("test", "--locked", "--lib", "context_transfer::tests::native_layout")
-               sh.cargo("test", "--locked", "--lib", "lua::context::tests::native_layout")
-               sh.cargo("test", "--locked", "--lib", "service::tests::native_layout")
-               sh.cargo("test", "--locked", "--lib", "worker::tests::native_layout")
-               sh.cargo("test", "--locked", "--test", "hyprland", "layouts::")
-             end }
-
 make.recipe{ name = "test-subscription-transfer", desc = "bounded private worker updates and revocation barriers",
              run = function()
                sh.cargo("test", "--locked", "--lib", "subscription_transfer::tests::")
                sh.cargo("test", "--locked", "--lib", "private_subscription_")
-               sh.cargo("test", "--locked", "--lib", "service::tests::native_layout")
              end }
 
 make.recipe{
@@ -975,6 +776,6 @@ make.alias("c", "compile")
 make.recipe{
   name = "verify",
   desc = "the whole local gate",
-  deps = { "fmt-check", "check-all", "test-all", "test-lua-native-values", "test-lua-api", "test-lua-lifetimes", "test-lua-tasks", "test-key-provenance", "test-key-admission", "test-key-participants", "test-key-journal", "test-tail-provenance", "test-domain-journal", "test-mixed-arbitration", "test-scoped-touch", "test-custom-key-arbitration", "test-software-worker", "test-routing-helper", "test-composition-helper", "test-chain-helper", "test-composed-worker-helper", "test-root-session", "test-root-routing", "test-native-managed-model", "test-cage-startup", "test-distribution", "clippy", "rustdoc" },
+  deps = { "fmt-check", "check-all", "test-all", "test-lua-native-values", "test-lua-api", "test-lua-lifetimes", "test-lua-tasks", "test-key-provenance", "test-key-admission", "test-key-participants", "test-key-journal", "test-tail-provenance", "test-domain-journal", "test-mixed-arbitration", "test-scoped-touch", "test-custom-key-arbitration", "test-software-worker", "test-routing-helper", "test-composition-helper", "test-chain-helper", "test-composed-worker-helper", "test-root-routing", "test-native-managed-model", "test-distribution", "clippy", "rustdoc" },
 }
 make.alias("v", "verify")

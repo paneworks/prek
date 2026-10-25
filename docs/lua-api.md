@@ -5,7 +5,7 @@ Prek embeds [onix-os/luna](https://github.com/onix-os/luna), pinned to version
 also accepted. Configuration evaluation declares actions and does not execute
 them. Live production routing remains disabled.
 
-This reference covers configuration, rule queries and host transaction bindings, read-only session context/native Morf connections, event subscriptions, timers, tasks and named
+This reference covers configuration, rule queries and host transaction bindings, read-only session context, event subscriptions, timers, tasks and named
 action handlers producing command/event plans. Custom recognizers,
 live adapter bindings and the remaining operational APIs remain required
 work in `PLAN.md`. Discovery labels the runtime API partial.
@@ -19,144 +19,6 @@ runs `prek check --json` on every shipped `examples/lua` entry point (top-level
 files and each directory's `config.lua`) and dispatches each one's `ready`
 event with a session-shaped `{fence, seat}` payload; other Lua files must live
 under a `modules/` tree. This exercises callbacks without live adapter effects.
-
-## Native Morf connections
-
-`morf.providers() -> MorfProviderBinding[] | nil` copies the native shell
-connection bindings currently verified by the broker for this desktop. Call it
-in a runtime callback. Configuration-time calls raise an error. It returns
-`nil` for missing, stale or inhibited desktop context; an empty array means no
-native shell provider is currently verified. This uses the existing context
-capability and the protected broker `morfExecutable` policy. User Lua cannot
-register providers or populate this view.
-
-Each binding contains `version=1`, `role="shell"`, `output`, a 32-character
-native `epoch`, `revision`, `phase`, `compositor_pid`, `compositor_uid`,
-`compositor_start` and the owning `fence`. Process birth is an exact unsigned
-decimal string. Fence identities are also decimal strings. Compare them as
-strings. Returned tables are independent copies and confer no authority.
-
-`pending`/revision 1 means the native shell connection exists for that output.
-`configured`/revision 2 means the native host witnessed its primary surface
-configure. The epoch changes when the backend connection is replaced. A Lua
-configuration reload on the same connection does not by itself change this
-connection epoch. These fields prove neither compositor presentation nor
-rendered widget regions, keyboard state, authentication, recognizer ownership
-or an action grant. The other Morf runtime operations remain pending.
-
-The broker verifies the private endpoint, exact Morf executable and process
-lifetime, active logind membership and the actual bound compositor. It samples
-existing connections with a shared 200 ms IPC deadline and discovers providers
-at most once per second. The context expires after 250 ms and is limited to 64
-unique output bindings. Loss, malformed state, retargeting or ambiguity clears
-the view; it cannot establish unlock. Missing Morf does not inhibit unrelated
-generic rules. Authentication input and inactive/unrelated sessions cannot use
-this query. See [morf_providers.lua](../examples/lua/morf_providers.lua) for a
-runnable observation recipe.
-
-`morf.regions() -> MorfRenderedContext[] | nil` copies fresh native named bounds
-from the shell's primary GPU frame. Each item contains `output`, `fence` and
-`context={version,epoch,ui_generation,revision,sampled_ns,coverage,frame}`.
-Generation, revision and monotonic nanoseconds are exact decimal strings.
-`coverage` is `primary_surface_named_bounds`; `frame` contains logical surface
-`width`, `height`, `scale_120` and up to 256 `regions`. Each region supplies its
-scene name `id`, an opaque decimal-string `node` identity, a surface-local
-`bounds={x,y,width,height}` and `interactive`. Names can repeat, such as a label
-in each launcher row; the native node identities keep every result distinct.
-Node identities are meaningful only within the endpoint epoch and UI generation.
-An optional `semantic={role,layout?}` annotates the actual node: `keyboard`,
-`secure_overlay`, `clock_background`, `content_bottom`, `physical_bottom`,
-`top_left`, `top_right`, `side_left`, `side_right` or `local_control`. A keyboard
-role requires its existing layout name; other roles cannot set a layout.
-Annotations accept no coordinates or authentication/ownership fields.
-Bounds include ancestor transforms and clipping and exclude hidden, transparent,
-masked and exiting subtrees. They are bounding boxes, including for curved or
-rotated items. `interactive` describes an enabled native input target itself;
-it does not describe the exact hit shape or the compositor input mask.
-
-With native `layer_space` support, `frame.surface={namespace,width,height,local_scale,mapped_ns?}`
-identifies the immutable Wayland layer namespace and native logical viewport;
-multiply Morf local coordinates by `local_scale` to obtain compositor logical
-units. `mapped_ns`, once present, is the decimal CLOCK_MONOTONIC time at which
-Morf received the surface's first frame callback, an upper bound of its
-compositor map time. An optional report-level `layout` contains `basis`,
-`producer_pid`, exact decimal-string `producer_start`, `geometry_generation`,
-`started_ns` and `sampled_ns`, optional `map_in_ns` and `rendered_from_ns`,
-owning output geometry, matched `surface` and projected `regions`. Each
-projected row preserves its native identity and metadata;
-`bounds={origin={x,y},size={x,y}}` is global logical layout geometry, or `nil`
-when the native viewport clips it completely. This mapping requires one stable
-compositor layer with the same native producer, namespace, output and viewport.
-
-`basis="stock_layer_layout"` describes the layout goal, which an animating
-layer has not reached. `basis="settled_stock_layer"` means the layer's map-in
-animation was provably over before `started_ns`, the time before the first of
-the two bracketing layer samples. `map_in_ns` is the stock `layersIn` bound and
-is present only when both samples agree. It is zero while `animations:enabled`
-is off or the node is disabled, because the stock tick then warps every
-animated value. Otherwise it is `speed` tenths of a second for a listed cubic
-bezier; springs and unknown curves give no bound.
-`rendered_from_ns = mapped_ns + map_in_ns + 100ms` must not exceed
-`started_ns`. Stock layers move without animation once mapped, so a settled box
-is the layer's current position. It is still not presentation, stacking or the
-surface's input mask, and a spring defined with a listed bezier's name cannot
-be distinguished through stock IPC.
-
-With `keyboard_registry` support, `frame.keyboard` contains
-`{scope="registered_morf_primary",registered,state,node?,layout?}`. `state` is
-`unknown`, `hidden` or `visible`. Known states identify exactly one declared
-keyboard on the primary scene. A hidden registered keyboard says nothing about
-other programs' keyboards. In the report itself these fields are inspection
-data; see below for how a settled report updates the routing snapshot.
-
-With `input_region` support, `frame.input` lists the rectangles of the input
-region committed with that frame, `{x,y,width,height}` in Morf layout units; it
-is absent when Morf did not describe it (a configured mask or more than 512
-rectangles), which means unknown, not empty. `layout.input` holds the same
-rectangles as global logical boxes, scaled by `local_scale`, rounded outward
-and clipped to the layer. `layout.exclusive` is true when neither bracketing
-stock sample showed another process's bottom, top or overlay layer on that
-output.
-
-The native host records a successful GPU submission, then refreshes unchanged
-geometry only while the current scene, surface size/scale and Lua generation
-still match it. A query cannot refresh itself. Busy, skipped, layout-only, stale
-or replaced frames supply no regions. Invalid or excessive named regions make
-the report unavailable rather than truncating it. Duplicate native node identities
-are rejected. The broker verifies the
-native binding around each read within the shared 200 ms deadline. Lua gets
-independent tables, `nil` without fresh desktop context and an empty array when
-no fresh report is available. Unavailable reports are never proof of absence.
-
-The broker refines its desktop snapshot from a fresh report only when its
-`layout` is `settled_stock_layer` and describes `input`, and the stock snapshot
-holds that exact layer as `layer:<output>:<address>`. That coarse interactive
-region is then replaced by one interactive region per input rectangle
-(`morf:<epoch>:input:<i>`) and one region per visible semantic node
-(`morf:<epoch>:node:<node>`): `local_control` is an interactive unscoped region,
-and `clock_background`, `content_bottom`, `physical_bottom`, `top_left`,
-`top_right`, `side_left` and `side_right` become regions of that scope. On an
-exclusive output whose keyboard is still unknown, a `hidden` registry sets
-`keyboard_known=true` without geometry, and a `visible` one also sets
-`keyboard={rect,layout}` from the registered node. Any visible `secure_overlay`
-node sets `secure_overlay=true`, settled or not. An inconsistent view changes
-nothing else. The result must still pass snapshot validation.
-
-This does not prove compositor presentation, authentication, surface stacking
-or the contents of auxiliary layers, and other programs' xdg windows are not
-keyboards for this purpose. Production ownership/cutover remains required
-before Morf action negotiation.
-
-Output snapshots explicitly distinguish keyboard knowledge. `keyboard_known=false`
-means unknown, even when `keyboard=nil`. Keyboard visibility conditions and
-spatial eligibility on an awake output then fail with `KeyboardUnavailable`.
-A known state with no keyboard geometry establishes hidden; a known state with
-geometry establishes visible. Knowledge loss invalidates frozen output targets.
-Explicit global rules can remain independent of keyboard context, and an explicit
-screen-off rule can use its supplied region without inferring a visible keyboard.
-Stock compositor metadata reports unknown. Only the settled, exclusive Morf
-refinement above supplies knowledge; missing keyboard annotations cannot
-establish hidden.
 
 ## Editor definitions
 
@@ -275,7 +137,7 @@ activation, correlates the private worker receipt, and verifies identity, lock,
 freshness and receipt time again before publishing acceptance. Source/session
 changes discard unsent requests and reset registration-scoped rule state.
 A route broker negotiates the same transactions. Its worker routes only
-stock-Hyprland devices taken over at a neutral idle cut. An accepted
+devices held by the bound Wayland compositor and taken over at a neutral idle cut. An accepted
 routing-mode transaction retires every route on the seat, which releases those
 devices until each is neutral and idle again. Broker policy/protocol checks and helper/worker model IPC are tested;
 real login, kernel routing and phone acceptance remain required.
@@ -362,7 +224,7 @@ Physical press/toggle state survives runtime edits, so reset restores that
 state without inventing presses. A source reload follows ordinary held-state
 reconciliation. Routing embeddings must also complete transport recovery and
 establish fresh neutral readiness. A route broker permits the same mutation for
-the stock-Hyprland devices its worker routes.
+the devices its worker routes.
 
 `examples/lua/layer_transactions.lua` activates a layer after permission is
 granted, then restores physical control after its configured key rule ends.
@@ -408,9 +270,7 @@ must complete neutral transport recovery before accepting new input. Production
 routing remains unavailable.
 
 `examples/lua/mode_transactions.lua` uses F9 to switch between normal/navigation
-and shares A between the two declared modes. The local `cage-test -- --modes`
-fixture switches modes while the original rule and its layer stay enabled,
-then checks actual application delivery through the owned compositor.
+and shares A between the two declared modes.
 
 Lua modules live in `modules/` beside the entry configuration. For example,
 `require("phone.bindings")` loads `modules/phone/bindings.lua`. Names use ASCII
@@ -532,18 +392,23 @@ Supported kinds are `matched` (all matching phases), `begin`, `update`, `end`,
 Rule callbacks receive `{fence, event}`; `event` is the existing typed rule
 outcome, including its source, monotonic time and applicable gesture identity,
 ordinal, stage, action declaration and frozen target. No raw input is supplied.
+Pan evidence (`TouchPan`) reports cumulative `total`, the per-update `delta`,
+`velocity` (that delta divided by the time since the previous update, per
+second, in the same units) and the current contact `centroid`. Touch and shape
+evidence name their coordinate `space`: `normalized`, `logical` (mapped output
+coordinates), `millimetres` or `relative` (raw relative counts).
 Host identities are lossless decimal strings, including both words in
 `fence.broker`, `fence.configuration`, `fence.session`, rule `event.id` and
 `event.ordinal`, `event.source.device`/`generation`, and rule
 `config_generation`/`session_generation`. This representation is consistent for
 small and large values, up to `"18446744073709551615"`. Compare identities with
 string equality; `tonumber` can lose precision. Timer/task/subscription handle
-IDs remain bounded Lua integers. Coordinates, counts, UID/PID, workspaces and
+IDs remain bounded Lua integers. Coordinates, counts, UID/PID and
 timestamps retain their documented numeric types. The Rust control protocol
 continues to carry exact unsigned integers.
 The fence contains broker, configuration and session generations. `ready`
 receives `{fence, seat}`; reload/stop receive `{fence}` and session/recovery
-receive `{fence, state}`. Recovery here describes session inhibition, not all
+receive `{fence, state}`. Recovery here describes session lock or context loss, not all
 future device/routing recovery hooks. Stop delivery has a 250 ms grace; stalled
 or still-initializing VMs are terminated after it.
 
@@ -609,8 +474,8 @@ the capability while production takeover remains pending. The protected source
 must also use `mode="observe"` (the configuration default), so negotiation and
 worker delivery enforce the same mode requirement.
 
-The worker and broker require fresh desktop context from the verified session,
-with no secure overlay. Greeter, console, locked, locking, unknown, stale/future
+The worker and broker require fresh desktop context from the verified session.
+Greeter, console, locked, locking, unknown, stale/future
 context, another seat, virtual devices and sources outside the protected
 allowlist do not produce input callbacks. Pending frames from before subscription
 or late opt-in are reconciled internally without exposing historical typing as
@@ -619,12 +484,10 @@ The broker rechecks lock state and registration and checks the input permit agai
 at actual send time. A queued observation older than 250 ms invalidates the
 stream instead of being delivered under a refreshed context.
 
-The owned [Cage touch test](../tests/cage.md#lua-touch-routing) exercises
-[`touch_observations.lua`](../examples/lua/touch_observations.lua) in a real
+[`touch_observations.lua`](../examples/lua/touch_observations.lua) runs in an
 observation helper, independently of
 [`touch_routing.lua`](../examples/lua/touch_routing.lua)'s phase/rule helper.
-This separation preserves the mode and capability boundary; the rendered test
-uses modeled source/readiness and does not enable production routing.
+This separation preserves the mode and capability boundary.
 
 Callbacks receive `{fence, input}`. `input.kind` is `frame` or `reset`. Every
 payload includes `source`, monotonic `at={secs,nanos}` and `selectors`, the matched
@@ -668,28 +531,21 @@ subscription supplies observations only: returning a value cannot claim,
 consume, remap or dispatch an action. Custom recognizer proposals under Rust
 ownership/deadline arbitration remain required work. Model permission tests and
 actual worker/helper IPC are separate from root/logind and physical acceptance.
-`nix run .#cage-test -- --layers --input` checks ordered model source frames and
-resets through worker/helper IPC alongside actual compositor context and app
-delivery. The fixture supplies synthetic device/seat authority. Add `--visible`
-for the owned visible nested-Hyprland path; it opens no host evdev devices.
 
-## Output, region and coordinate queries
+## Output and coordinate queries
 
-`outputs`, `regions` and `coordinates` are runtime-only, read-only APIs over the
-verified owning desktop snapshot. They require fresh context (250 ms), a user
-session and no secure overlay. They perform no compositor calls or host scans
+`outputs` and `coordinates` are runtime-only, read-only APIs over the
+verified owning desktop snapshot. They require fresh context (250 ms) and a user
+session. They perform no compositor calls or host scans
 inside a Lua callback. Queries check freshness again after constructing results.
-Missing, expired or inhibited context returns nil; an available snapshot with
-no reported outputs/regions returns an empty list. Output and region names are
+Missing, expired or locked context returns nil; an available snapshot with
+no reported outputs returns an empty list. Output names are
 exact strings of 1–256 UTF-8 bytes. Invalid argument types or values raise errors.
 
 | Function | Result |
 | --- | --- |
 | `outputs.list()` | `OutputView[]`, or nil while context is unavailable. |
 | `outputs.get(name)` | `OutputView`, or nil for an absent output/unavailable context. |
-| `regions.list()` | `RegionView[]`, or nil while context is unavailable. |
-| `regions.get(id)` | `RegionView`, or nil for an absent region/unavailable context. |
-| `regions.at(point)` | Every region containing a global logical point, or nil while unavailable. |
 | `coordinates.convert(reference, point, from, to)` | Converted `Point`, or nil for an unavailable/retired output reference. |
 
 `OutputView = {reference, state}` contains an owned `OutputState` and
@@ -701,14 +557,6 @@ even if output geometry is unchanged; obtain another view explicitly. Fence
 changes, geometry-generation changes and output removal also return nil. These
 references are comparisons against host state, not authority tokens. Editing
 `state.geometry` never changes conversion geometry or an external target.
-
-`RegionView = {fence, revision, region}` contains a rendered provider-reported
-`Region`, with its ID, optional scope, output, global logical rectangle and
-interactive flag. Missing rendered regions remain absent; keyboard/output
-rectangles are not invented as shell regions. `regions.at` uses half-open bounds
-and returns all matches in provider order, including overlapping interactive
-and noninteractive regions. It does not select a target, consume input or grant
-permission to a rule.
 
 Coordinate spaces are `"normalized"`, `"local"` and `"global"`. Normalized axes
 follow the transformed output, with (0,0) at its local origin and (1,1) at its far
@@ -732,12 +580,11 @@ end)
 return p.config.new {}
 ```
 
-The installed [geometry example](../examples/lua/geometry.lua) also inspects
-rendered regions. Unit tests cover reference retirement, full-width identities,
-copy isolation, rotation/scale/origin, region overlap and argument failures.
-Helper-process and local compositor tests exercise these queries through the
-same context transport used by callbacks. They do not prove physical touch
-routing, shell controller effects or authentication ownership.
+The installed [geometry example](../examples/lua/geometry.lua) logs each output
+centre. Unit tests cover reference retirement, full-width identities, copy
+isolation, rotation/scale/origin and argument failures. Helper-process tests
+exercise these queries through the same context transport used by callbacks.
+They do not prove physical touch routing or authentication ownership.
 
 ## Permitted device and seat queries
 
@@ -765,7 +612,7 @@ values, leading zeros and overflow are rejected. Lookup never redirects an old
 connection generation to its replacement. The catalog holds at most 256 entries
 and 4 MiB of encoded metadata. Metadata changes, replacement and removal advance
 its revision; ordinary input frames do not. A malformed, regressing or excessive
-metadata update retires the Lua component. Context inhibition or a new fence
+metadata update retires the Lua component. Context loss or a new fence
 retires the cached view.
 
 Before the first metadata arrives, `devices.list()` returns nil. After all known
@@ -811,7 +658,6 @@ not change broker state, a later query, or an action grant.
 | --- | --- |
 | `context.snapshot()` | Complete fresh `Snapshot`, or `nil` when absent/expired. |
 | `context.binding()` | Verified `Binding` for that snapshot, or `nil`. |
-| `context.layouts()` | Matching native layout graph on a fresh owning desktop, or `nil`; inspection only. |
 | `context.state()` | Fresh broker state, or `"unknown"` when the view expires. |
 | `context.fence()` | Fresh `{broker, configuration, session}` fence, or `nil`. |
 | `context.error()` | Fresh broker diagnostic of at most 512 bytes, or `nil`. |
@@ -825,67 +671,12 @@ its lifetime. All times use the system monotonic clock and appear as
 `{secs, nanos}`. Lua-held copies are historical data after this freshness
 window; use a new query before making a decision.
 
-### Native layout inspection
-
-`context.layouts()` is runtime-only and requires the owning registration's
-`context` capability, not permission to execute window actions. It copies
-broker-collected Hyprland 0.56.2 Lua metadata matched against that same complete
-desktop snapshot. Unsupported backends, absent/inconsistent metadata, greeters,
-secure overlays, stale context and inhibition return `nil`. Ordinary geometry
-remains available when only optional layout collection fails. An observed lock
-invalidates the whole desktop context and remains latched until the verified
-unlock transition.
-
-The returned `NativeLayouts` contains:
-
-- `fence`, `generation`, `revision`, `captured_at`: the owning broker fence and
-  exact desktop sample identity. Generation/revision/fence identities are
-  canonical decimal strings; `captured_at` is `{secs, nanos}` and is conservatively
-  the original geometry capture time, not completion of later metadata reads.
-- `workspaces`: at most 64 records with `id`, optional `output`/`monitor`, native
-  `active`/`special` flags, tiled algorithm `layout`, `windows` and `columns`.
-- `windows`: at most 512 globally. Each has exact hexadecimal `id`
-  (`address:stable`), goal `rect = {x, y, width, height}`, `hidden`, `floating`,
-  `grouped`, native `fullscreen` mode, and optional `column = {index, row}`.
-- `columns`: ordered scrolling records with native `index`, normalized primary
-  `width` fraction and ordered `members` containing exact window lifetime IDs.
-  Native column indices/member rows start at **zero**; Lua arrays start at one.
-- `profile`: present only when an active, non-special workspace uses the
-  scrolling layout and one more locked batch succeeded within the same budget.
-  It copies the stock settings of the
-  [validated phone profile](hyprland-scrolling.md#validated-phone-profile):
-  `direction`, `gaps_in`/`gaps_out` as `{top, right, bottom, left}`, `border`,
-  `focus_fit` (`scrolling:focus_fit_method`, 1 = fit),
-  the `workspace_rules` count and each output's `reserved = {output, area}` with
-  `area = {left, top, right, bottom}`. It is read after the graph, so it does not
-  share its capture time.
-
-Copies can be changed locally; subsequent queries still return the original
-host data. Receiving, copying or retaining a view never renews its 250 ms lease.
-Native collection gets at most 50 ms inside the existing combined 200 ms context
-budget. Mapped windows, goals, outputs, workspaces, graph membership and sample
-identities must match; incomplete or mismatched graphs are not published.
-Large views use the existing bounded chunked context transfer without truncating
-window/member lists. The graph is kept out of private recognition packets,
-which keep their existing core context and size budget. The private worker
-receives it through its own chunked subscription, where it is preclaim evidence
-only for the native G08 reorder and G11 scroll proofs.
-
-These are **animation goals, not rendered hit tests**. No effective camera
-offset/work area, arbitrary workspace-rule resolution, empty-strip scope, input
-ownership or execution grant is implied. G11 uses the attached `profile`
-through its own preclaim, proof and executor, not through this view. See
-[continuous viewport motion](hyprland-scrolling.md).
-
 | Type | Fields |
 | --- | --- |
-| `Snapshot` | `generation`, `revision`, `captured_at`, `state`, `outputs`, `windows`, `regions`, `secure_overlay`. `generation` matches the session fence. |
+| `Snapshot` | `generation`, `revision`, `captured_at`, `state`, `outputs`. `generation` matches the session fence. |
 | `Binding` | `seat`, `session`, `uid`, `compositor_pid`, `compositor_start`, `kind` (`user` or `greeter`). Identity comes from broker process/logind verification. |
-| `OutputState` | `geometry`, `geometry_generation`, `active_workspace` (integer or `nil`), `screen` (`on` or `off`), `keyboard_known` (boolean), `keyboard` (`Keyboard` or `nil`). `keyboard_known=false` means unknown; only a known state with `keyboard=nil` establishes hidden. |
+| `OutputState` | `geometry`, `geometry_generation`, `screen` (`on` or `off`). Geometry comes from `wl_output` and `xdg_output` on the session's Wayland socket; screen state comes from the DRM connector in sysfs. |
 | `Output` | `name`, `pixel_width`, `pixel_height`, `scale`, `origin`, `transform`. Pixel dimensions and scale define logical dimensions; origins use logical desktop coordinates. |
-| `Window` | `id`, `output`, `workspace`, `rect`, `content`, `mapped`, `visible`, `focused`, `z_order` (integer or `nil`). Mapped and visible are distinct; absent stacking order conveys no order. |
-| `Region` | `id`, `scope` (or `nil` for a local widget/overlay), `output`, `rect`, `interactive`. |
-| `Keyboard` | `rect`, `layout`. |
 | `Rect` | `origin={x,y}`, `size={x,y}` in logical desktop coordinates. |
 
 `Snapshot.generation`, `Snapshot.revision`, `OutputState.geometry_generation`
@@ -895,9 +686,8 @@ no snapshot is available. Fences have identical field types in lifecycle/rule
 callbacks, named action handlers, timer/task contexts and `context.fence()`.
 
 Arrays have ordinary one-based Lua indices. Optional fields are `nil`; getters
-do not invent workspaces, regions, keyboard bounds, visibility or stacking order
-when a provider cannot supply them. Snapshots are transferred whole, with up to
-256 outputs, 4096 windows and 4096 regions. The serialized view is limited to
+do not invent geometry the compositor does not report. Snapshots are
+transferred whole, with up to 256 outputs. The serialized view is limited to
 4 MiB; oversized or invalid transfers fail rather than truncate geometry.
 Queries and notifications share the callback memory, fuel, elapsed-time and
 logging budgets. Copying a large snapshot can exhaust those budgets.
@@ -917,7 +707,6 @@ p.events.on("context_changed", function(event)
         p.log.info("desktop geometry", {
             revision = snapshot.revision,
             outputs = #snapshot.outputs,
-            windows = #snapshot.windows,
         })
     end
 end)
@@ -950,29 +739,16 @@ exact decimal strings; sampling time uses `{secs, nanos}` on the system
 monotonic clock. Editing a returned table does not change the host view.
 
 Names are `context`, `observations`, `lua_events`, `input_events`, `custom_recognizers`, `lua_actions`,
-`runtime_rules`, `hyprland_actions`, `morf_actions`, `power_actions`, `commands`
-and `synthetic_input`. Unknown names return `false` for forward feature
+`runtime_rules`, `commands` and `synthetic_input`. Unknown names return `false` for forward feature
 detection. Nonstring, empty or greater-than-128-byte names raise an error.
 Configuration-time queries raise an error.
 
 The session supplies the actual broker-negotiated flags after checking the
 registration reply. Lua declarations and system policy alone do not populate
 this view. Negotiated flags remain fixed within the session fence; readiness
-can change. `commands`, `lua_actions`, `power_actions`, `hyprland_actions` and
-the Morf submission transport's `morf_actions`
-can be ready. Window effects require protected `policy.allow_hyprland_actions`
-and `session --hyprland` on a routing broker; declarations alone grant nothing.
+can change. `commands` and `lua_actions` can be ready.
 Observation sessions report an empty readiness list. Source loading, executor
 capacity and adapter/context expiry can withdraw readiness.
-
-Morf readiness describes the submission transport's fresh metadata and capacity,
-not native ownership or rendered geometry. `session --morf` is an explicit
-opt-in; the current broker rejects public negotiation until native rendered
-context and physical ownership gates pass. A Lua declaration cannot enable it.
-Once negotiated, one Morf effect per offered ordinal may join a named plan's
-other permitted effects. Its completion means controller acceptance, not a
-finished animation. Cancellation, missing outcomes and partial plans cannot
-manufacture successful completion. See [Morf integration](morf.md).
 
 These queries grant no effects. A negotiated flag is registration metadata;
 current policy, fresh owning context, exact targets and a separate broker grant
@@ -1065,7 +841,7 @@ Source-time timers become active with runtime readiness. Timers registered by
 callbacks use that callback's monotonic runtime clock. Payloads contain
 `{context = {fence}, timer = {id, periodic}, at}`, where `at` is the service's
 monotonic duration (`secs`/`nanos`). Handles and closure state belong to one VM
-generation; replacement, logout/inhibition and shutdown retire the old timers
+generation; replacement, logout/lock and shutdown retire the old timers
 with that VM. Current timer callbacks have the same observational permissions
 as event subscriptions.
 
@@ -1166,7 +942,7 @@ The returned configuration accepts `version`, `mode`, `timing`, `shape_capture`,
 authoritative, including unknown fields, references, priorities, resource bounds,
 activation keys, permitted seats and source selectors. A rule accepts `id`,
 `enabled`, `priority`, `devices`, `seats`, `contexts`, `scope`, `output`, `screen`,
-`keyboard_visible`, `require_keys`, `keys_throughout`, `layer`, `delivery`,
+`require_keys`, `keys_throughout`, `layer`, `delivery`,
 `trigger` and `action`. Existing defaults and exact units remain in effect.
 
 ### Timing, policy, selector and shape fields
@@ -1191,23 +967,14 @@ routing additionally requires `join_window < decision_window`.
 
 `policy` is protected system policy. `allowed_devices` names the selector IDs a
 broker may open and `allowed_seats` the seats it may serve (default
-`{"seat0"}`). `allow_runtime_rules`, `allow_input_events`,
-`allow_power_actions` and `allow_hyprland_actions` default to false and must be
-booleans.
+`{"seat0"}`). `allow_runtime_rules` and `allow_input_events` default to false
+and must be booleans.
 
 A `devices` selector matches a non-virtual device whose `identity`, `path`,
 `name`, `physical`, `unique` and `seat` equal every given value, which reports
 every listed `keys` code and every listed `absolute_axes` code (numeric
 `EV_ABS` codes, for example `53`/`54` for multi-touch X/Y), and which has every
 listed input `properties` code.
-
-A selector's `hyprland` table declares Hyprland per-device options, in hyprlang
-spelling (`repeat_rate`, `natural_scroll`, `tap-to-click`, `kb_layout`, ...), that
-Prek applies to the routed virtual copy of every matching allowed device. Stock
-Hyprland cannot report most per-device settings, so only the copy's keyboard
-`kb_*` fields and `scroll_factor` are verified; undeclared options fall back to
-Hyprland's global values. Values are at most 256 characters without control
-characters or `[]#;=$"'\{}`, and matching selectors must not disagree.
 
 A `shapes` template has a `name`, 2–2048 `points`, a `threshold`
 (minimum similarity in `(0, 1]`) and a `margin` (minimum lead over the runner-up
@@ -1259,8 +1026,8 @@ a named handler during configuration evaluation and returns a `lua` action
 declaration for a rule. Names contain 1–128 ASCII letters/digits, `_`, `-`, `.`
 or `:`. Names are unique; a generation may register at most 256 handlers. The
 only option is `requires`, a nonempty capability array. Accepted names are
-`commands`, `observations`, `synthetic_input`, `hyprland_actions`, `morf_actions`
-and `power_actions`. Handler names, capabilities, exact source and model travel
+`commands`, `observations` and `synthetic_input`. Handler names, capabilities,
+exact source and model travel
 in the broker-approved snapshot and must agree on runtime reconstruction.
 
 Named handlers run in the supervised unprivileged Lua process after an offered
@@ -1271,7 +1038,7 @@ Production routing remains disabled while its separate handoff gates are pending
 
 The callback receives `{fence, event}`. `event` is the approved match: `id`,
 `ordinal`, `rule`, `source`, `at`, `stage`, configuration/session generations,
-evidence and nullable frozen `window`, `output`, `workspace`. It returns nil/no
+evidence and nullable frozen `output`. It returns nil/no
 values, one action constructor result, or a dense array of at most 32 actions.
 Returning another named action, undeclared effects, malformed values, yielding,
 errors or budget exhaustion discards the entire result/log batch and retires
@@ -1320,210 +1087,12 @@ return p.config.new {
 | `actions.keys` | `keys` |
 | `actions.remap` | `key` |
 | `actions.command` | `argv` containing exact arguments |
-| `actions.morf` | `action` containing a supported Morf action name |
-| `actions.hyprland` | `action` containing a supported window action name |
-| `actions.power` | `action` containing a supported power action name |
 
 Declaring an action does not establish availability, authorize a target or run
 it. Observation and replay execute no live effect. Actions require the applicable
 session capability, context and ownership checks in routing mode. Functions in
 the configuration result are rejected. Named callbacks use their private
 approved registry; callable pointers are never serialized into configuration.
-
-## Experimental targeted Hyprland window adapter
-
-`prek session --hyprland` opts into protected-policy `close`,
-`move_left_and_follow` and `move_right_and_follow` actions on a routing broker.
-The native 0.56.2 Lua provider additionally supports experimental `reorder_up`
-and `reorder_down` with a complete frozen vertical scrolling-layout graph;
-see [the selection and execution contract](hyprland-reorder.md). A rule whose
-action is `scroll_stack` on a `side_left`/`side_right` strip moves the
-validated phone workspace continuously; see
-[continuous viewport motion](hyprland-scrolling.md). Handlers resolving to
-`scroll_stack` stay unavailable because they carry no workspace proof.
-Use `--lua --hyprland` for approved named handlers returning
-`actions.hyprland {action=...}`. `--commands` and `--power` are independent
-permissions and are required only for their effect families. The protected
-system configuration must set `policy.allow_hyprland_actions=true` (default
-false) and declare an enabled supported window action or approved handler
-requiring `hyprland_actions`. User overlays cannot grant this permission;
-observe brokers and inspector registrations refuse it. **Production takeover
-remains disabled; the flag does not bypass the routing gate.**
-
-The session opens only the compositor matching its broker-provided
-PID/start/executable/UID/seat binding and refreshes the adapter from that context.
-The Rust host equivalents remain `HyprlandAdapter::new(client, view)`,
-`Executor::set_hyprland_adapter(adapter)`,
-`Executor::update_hyprland_context(view)` and
-`Executor::sync_hyprland_context(runtime, instance, view)`. These are not Lua
-authority setters. [The example](../examples/lua/window_actions.lua) declares
-protected touchscreen actions; offline compilation executes no effect.
-
-The adapter supports **Hyprland 0.54.3** and exact **0.56.2**. For 0.56.2,
-`j/status.configProvider` must be `hyprlang` or `lua`. The adapter freezes the
-selected dialect at installation and rechecks it immediately before mutation
-within the existing IPC deadline. Changed, missing, malformed and unknown
-providers refuse without mutation; there is no syntax fallback or mutation retry.
-This does not change Prek's own Luna API. The Lua dialect uses closed, typed
-dispatcher factories with an explicit window or monitor. Its window factory
-checks the frozen `stable_id`, mapped state, workspace, output name, window goal
-box, and output position/pixel size/scale/transform/DPMS/active workspace before
-constructing an effect. An active special workspace refuses window effects.
-These checks run inside the same native Lua factory, closing the gap after
-the final context sample for those fields; a focus change does not select a
-different target. Output names are bounded byte-escaped Lua literals, not code.
-The expected native scale is reconstructed as binary32, matching Hyprland's
-stored float and its Lua getter; this is exact identity, not an epsilon test.
-Its power factory checks the monitor exists and
-has the frozen name before constructing an effect, never passing a nil monitor
-that could select every output. No user-supplied code or raw dispatch API is added.
-The provider-sensitive
-dispatch behavior is defined by the pinned
-[Hyprland source](https://github.com/hyprwm/Hyprland/blob/v0.56.2/src/debug/HyprCtl.cpp).
-The factories follow the pinned
-[Lua dispatcher bindings](https://github.com/hyprwm/Hyprland/blob/v0.56.2/src/config/lua/bindings/LuaBindingsDispatchers.cpp).
-The exact
-window address **and stableId**, output/geometry generation, positive numeric
-workspace and geometry are frozen at offer time. Missing or malformed targets,
-another binding/seat/fence, secure overlays, lock inhibition, expired context,
-retired geometry and changed window lifetimes refuse execution. A focus change
-never retargets an offer. Move/follow computes the adjacent absolute workspace
-from the starting window, rather than from later focus. Moves currently require
-a single-output desktop; cross-output workspace-rule topology remains pending.
-Numeric destinations must fit stock Hyprland's positive 32-bit workspace parser
-(`1..2147483647`); moving left from 1 or right from 2147483647 is unavailable.
-Continuous scrolling-layout actions remain unavailable. Legacy Hyprlang address
-dispatchers cannot enforce the same atomic window guards: they retain a
-read/dispatch race despite the pre-dispatch checks. Goal boxes do not establish
-rendered visibility, and these guards do not prove atomic lock/overlay state or
-monitor lifetime across removal/replacement. Production routing remains gated.
-
-Routing checks protected policy, current negotiated availability and a valid
-frozen target before claiming input. Missing/unsafe targets, a different active
-workspace, screen-off/locked/secure-overlay state, unsupported direct operations,
-invalid adjacent destinations and multiple outputs for direct moves preserve
-ordinary input. Broker dispatch repeats target/policy checks. A handler's
-declared family must have an eligible frozen target; its returned plan is
-validated after the grant and may still be refused.
-
-`scope="everywhere"` keyboard rules can set an explicit output and freeze its
-mapped focused window at the initial key event. They do not perform spatial
-hit testing or infer rendered geometry; a later focus change does not retarget
-them. App-content and other spatial scopes still require provider-proven
-rendered visibility and correct starting geometry. Stock IPC animation goals
-alone do not authorize app-content touch consumption. The stock sampler marks a
-window `visible` only when the same locked context batch shows that no window or
-workspace movement can animate. That means `animations:enabled` is off, or each
-of `windows`, `windowsIn`, `windowsOut`, `windowsMove`, `workspaces`,
-`workspacesIn`, `workspacesOut`, `specialWorkspace`, `specialWorkspaceIn` and
-`specialWorkspaceOut` appears once and uses a disabled configuration. A node
-that was never configured inherits its nearest overridden ancestor, so
-disabling `windows` and `workspaces` is enough. In that case the stock tick
-warps every value to its goal at the next frame. The window must also be
-unhidden, report its fullscreen state, sit on its monitor's active workspace
-with no special workspace shown, and not be covered by another fullscreen
-window there. With movement animations enabled, stock windows stay not visible.
-See [the keyboard recipe](../examples/lua/window_keys.lua) for exact-output
-global key rules; the touchscreen example uses app-content targeting.
-
-Each effect requires a separate current broker grant. Direct declarations act
-only on discrete/begin; named handlers choose their phases explicitly. The
-executor preflights the complete plan and allows at most one Hyprland or power
-operation per plan. Exact argv commands and observation effects can accompany
-it, retaining partial-effect uncertainty. Source/candidate cancellation and
-generation retirement use the existing action lifetime rules.
-
-The remaining grant, capped at 200 ms, covers independent stock context/lock
-preflight, one exact address-targeted mutation and state verification. Close
-uses `closewindow address:...`; move/follow uses
-`movetoworkspace N,address:...`. No implicit active-window selector or shell is
-used. Applied completion means the compositor accepted the request and the
-original window disappeared, or that same window moved to the exact workspace,
-remained on the output and became focused there. It does not prove rendered
-animation completion. Missing confirmation or any error after request bytes
-were written reports uncertainty and is never retried.
-
-**Stock IPC race:** Hyprland dispatch selectors accept an address, not an
-atomic address-plus-stableId guard. Preflight rejects already replaced
-windows, but a replacement between the final query and dispatch can still be
-affected. The adapter cannot guarantee lifetime identity across that interval;
-postchecks do not remove the race. Lock/topology can also change after
-preflight. This limitation is separate from broker authority and must be
-resolved or explicitly accepted before production window routing is enabled.
-
-Run the owned local fixture with `nix run .#cage-test -- --layers --input
---power --windows` (add `--visible` for a visible nested window). It uses actual
-Lua/helper/stock IPC and test receiver close receipts with explicit model
-seat/grant metadata; it does not establish physical root/logind takeover.
-
-## Experimental output-scoped DPMS adapter
-
-`prek session --power` opts into protected-policy DPMS actions on a routing
-broker. Use `--lua --power` for named Lua handlers; `--commands` is independent
-and is required only for command effects. The protected system configuration
-must set `policy.allow_power_actions=true` (default false) and declare an enabled
-blank/wake rule or an approved handler requiring `power_actions`. A user overlay
-cannot grant this policy. Observe brokers and inspector registrations refuse
-power negotiation. **Production routing remains disabled pending takeover
-acceptance; this flag does not bypass that gate.**
-
-A rule can set `output="eDP-1"` to freeze an exact verified output for keyboard
-or other non-spatial input. When a device mapping exists it must name the same
-output; a missing/mismatched output is unavailable. No name is inferred from
-focus or from a single-monitor layout. The complete output state and generation
-are validated throughout the gesture. Normal input passes through when policy,
-target or current power availability is missing. Unsupported lock-and-blank
-also remains unavailable before claiming input.
-
-The Rust session executor additionally supports explicit host installation:
-`actions::PowerAdapter::new(client, view)`,
-`Executor::set_power_adapter(adapter)` and `Executor::update_power_context(view)`.
-The host supplies a broker-approved binding/view and an already verified
-Hyprland client; these are not Lua authority setters. The public session agent
-uses `Executor::sync_power_context` to open the exact compositor from its fresh
-broker binding, verify process birth/executable/UID and private endpoint, and
-install the adapter. A compositor holding capabilities is not dumpable, so the
-kernel hides its executable from the agent; the agent then relies on the
-broker, which checked that executable as root, and still requires the exact
-PID, process birth, UID and endpoint on every request. It refreshes this view without depending on a running Lua
-VM. Fence changes retire the old adapter. This supplies no raw fd or authority
-setter to user Lua.
-
-When a host authorizes it, existing `actions.power {action="blank"}` and
-`actions.power {action="wake"}` plans execute against the offered match's
-explicit frozen output. A named handler must declare `power_actions`; the
-executor also requires a route-mode offer, negotiated capability, its exact
-seat/fence/gesture/ordinal and a fresh execution grant. It captures output state
-at offer time, rejects missing/unsafe names, retired geometry generations and
-unusable context, and rechecks actual compositor identity/lock/geometry before
-the effect. No focused-output fallback or global DPMS command is used.
-
-The deadline is the grant's remaining time, capped at 200 ms for all adapter
-IPC. The unprivileged parent executor performs this bounded work outside the
-Lua VM and physical forwarding loop. A plan may contain at most one power
-operation. Direct power declarations run only in discrete/begin phases;
-named handlers can explicitly return an operation in their authorized phase.
-Lock-and-blank, toggles, suspend and hardware-key policy changes are unavailable.
-A witnessed lock latches adapter inhibition; a new approved generation needs
-its own adapter. Expired/unusable adapters withdraw power availability.
-
-An applied completion requires dispatch acceptance followed by a snapshot
-reporting the requested DPMS state for the same output geometry. This proves
-the compositor's DPMS state, not physical panel power or suspend wake. A failure
-before mutation is unavailable/cancelled; any failure after bytes of the
-mutation may have been written is uncertain. Effects are never retried after
-uncertainty. Existing duplicate suppression, cancellation and generation
-retirement apply. Partial composed plans retain uncertain completion semantics.
-
-`nix run .#cage-test -- --layers --input --power` executes named Lua plans through
-the actual helper and executor, with explicit model broker grants, and checks
-DPMS off/on through stock IPC on the owned nested output. Add `--visible` for
-the owned visible path. These fixtures open no host evdev devices and do not
-change host-display DPMS. Authenticated broker/logind and production-routing
-acceptance, lock-provider integration and physical phone/power trials
-remain required. The installed `power.lua` declaration shows exact
-output selection, separate screen-on/off rules and a named handler that performs
-an effect only in the begin phase. Offline checking performs no effect.
 
 ## Service inspection
 
@@ -1619,7 +1188,7 @@ VM's fuel, wall-time and memory limits; split longer offline work across task
 wakes. The CLI remains the external file reader for larger recordings. A record,
 resource or expectation error retires that replay; an uncaught callback error
 also follows normal VM retirement. Finish, close, errors and VM replacement
-release owned replay state. No commands, Morf controls or power actions contained
+release owned replay state. No commands or other actions contained
 in replay outcomes are executed.
 
 Up to four custom callback VMs are shared across all replay handles in one

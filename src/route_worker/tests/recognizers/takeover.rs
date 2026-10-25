@@ -73,7 +73,6 @@ fn prepared(fixture: &mut Fixture) {
         },
         None,
         &BTreeMap::new(),
-        BTreeMap::new(),
     )
     .unwrap();
     let publication = fixture
@@ -101,23 +100,15 @@ fn prepared(fixture: &mut Fixture) {
                 name: descriptor.name.clone(),
                 class: descriptor.class,
                 seat: "seat0".into(),
-                settings: BTreeMap::new(),
                 at: now,
             },
             now,
         )
         .unwrap();
-    let worker =
-        serde_json::from_value(serde_json::json!({"pid":std::process::id(),"birth":1,"epoch":1}))
-            .unwrap();
-    let mut admission =
-        crate::morf::admission::Gate::new(worker, fixture.owner.fence, device().source);
-    admission.update(None, now).unwrap();
     fixture.stream.outputs.insert(
         device().source,
         Output {
             fence: fixture.owner.fence,
-            admission,
             virtual_device,
             state_probe: None,
             feedback: None,

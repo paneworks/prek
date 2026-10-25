@@ -11,109 +11,35 @@ fn hold(key: u16) -> Trigger {
     }
 }
 fn setup(first: Trigger) -> (Routing, Device, Device) {
-    setup_with_target(first, false)
+    setup_profile(vec![first, hold(48)], Delivery::Reserve)
 }
-fn snapshot(at: u64, second: bool) -> Snapshot {
-    let geometry = output();
-    let rect = crate::context::Rect {
-        origin: geometry.origin,
-        size: geometry.logical_size(),
-    };
-    Snapshot {
-        generation: 1,
-        revision: at + 2,
-        captured_at: ms(at),
-        state: State::Desktop,
-        secure_overlay: false,
-        outputs: vec![OutputState {
-            geometry,
-            geometry_generation: 2,
-            active_workspace: Some(1),
-            screen: Screen::On,
-            keyboard_known: true,
-            keyboard: None,
-        }],
-        windows: ["0x1234:abc", "0x2345:abc"]
-            .into_iter()
-            .enumerate()
-            .map(|(index, id)| crate::context::Window {
-                id: id.into(),
-                output: "test".into(),
-                workspace: 1,
-                rect,
-                content: rect,
-                mapped: true,
-                visible: true,
-                focused: (index == 1) == second,
-                z_order: Some(index as i64),
-            })
-            .collect(),
-        regions: vec![],
-    }
+fn setup_profile(steps: Vec<Trigger>, delivery: Delivery) -> (Routing, Device, Device) {
+    setup_mode(steps, delivery, false)
 }
-fn setup_with_target(first: Trigger, targeted: bool) -> (Routing, Device, Device) {
-    setup_profile(vec![first, hold(48)], targeted, Delivery::Reserve)
-}
-fn setup_profile(
-    steps: Vec<Trigger>,
-    targeted: bool,
-    delivery: Delivery,
-) -> (Routing, Device, Device) {
-    setup_mode(steps, targeted, delivery, false)
-}
-fn setup_mode(
-    steps: Vec<Trigger>,
-    targeted: bool,
-    delivery: Delivery,
-    scoped: bool,
-) -> (Routing, Device, Device) {
+fn setup_mode(steps: Vec<Trigger>, delivery: Delivery, scoped: bool) -> (Routing, Device, Device) {
     let mut config = config();
     config.timing.tap_gap = Millis(20);
     let selector = config.devices.get_mut("touch").unwrap();
     selector.identity = None;
     selector.keys = vec![Key(30), Key(48)];
-    config.policy.allow_hyprland_actions = targeted;
     let rule = &mut config.rules[0];
-    rule.contexts = vec![if targeted {
-        Context::Desktop
-    } else {
-        Context::Console
-    }];
+    rule.contexts = vec![Context::Console];
     rule.scope = Scope::Everywhere;
     rule.delivery = delivery;
     rule.trigger = Trigger::Sequence {
         timeout: Millis(1000),
         steps,
     };
-    if targeted {
-        rule.output = Some("test".into());
-        rule.action = Action::Hyprland {
-            action: crate::config::WindowAction::Close,
-        };
-    }
     let mut routing = if scoped {
         Routing::with_input_projection(config, crate::keys::worker::tests::fence()).unwrap()
     } else {
         Routing::new(config).unwrap()
     };
-    if targeted {
-        context(&mut routing, 0);
-        routing
-            .authority_mut()
-            .update(snapshot(0, false), ms(0))
-            .unwrap();
-        routing.actions_available(
-            1,
-            BTreeSet::from([Capability::HyprlandActions, Capability::Observations]),
-            ms(0),
-        );
-    } else {
-        routing
-            .authority_mut()
-            .enter_console("seat0".into())
-            .unwrap();
-        routing.actions_available(1, BTreeSet::from([Capability::Observations]), ms(0));
-    }
+    routing
+        .authority_mut()
+        .enter_console("seat0".into())
+        .unwrap();
+    routing.actions_available(1, BTreeSet::from([Capability::Observations]), ms(0));
     let mut first = device();
     first.axes.clear();
     first.properties.clear();
@@ -208,31 +134,6 @@ fn a_future_step_cannot_reserve_or_reuse_input_started_before_activation() {
 }
 
 #[test]
-fn a_later_source_with_another_frozen_target_is_rejected_before_reservation() {
-    let (mut routing, first, second) = setup_with_target(Trigger::Key { key: Key(30) }, true);
-    key(&mut routing, &first, 1, 0, 30, 1);
-    key(&mut routing, &first, 2, 10, 30, 0);
-    assert!(received(&mut routing, &first, 10).is_empty());
-    routing
-        .authority_mut()
-        .update(snapshot(20, true), ms(20))
-        .unwrap();
-    key(&mut routing, &second, 1, 21, 48, 1);
-    assert_eq!(received(&mut routing, &second, 21).len(), 1);
-    assert!(
-        routing
-            .take_events()
-            .iter()
-            .any(|event| matches!(event, Event::Cancelled { at, reason, .. }
-        if *at == ms(21) && reason == "sequence target changed"))
-    );
-    key(&mut routing, &second, 2, 22, 48, 0);
-    assert_eq!(received(&mut routing, &second, 22).len(), 1);
-    routing.push(Record::Tick { at: ms(130) }).unwrap();
-    assert!(routing.take_dispatches(ms(130)).is_empty());
-}
-
-#[test]
 fn losing_an_admitted_later_source_cancels_the_parent_before_completion() {
     let (mut routing, first, second) = setup(Trigger::Key { key: Key(30) });
     key(&mut routing, &first, 1, 0, 30, 1);
@@ -275,7 +176,7 @@ fn pump(routing: &mut Routing, devices: [&Device; 2], from: u64, to: u64) -> Vec
 fn a_future_step_press_is_delivered_but_never_reused_in_either_routing_mode() {
     for scoped in [false, true] {
         let (mut routing, first, second) =
-            setup_mode(vec![hold(30), hold(48)], false, Delivery::Reserve, scoped);
+            setup_mode(vec![hold(30), hold(48)], Delivery::Reserve, scoped);
         let devices = [&first, &second];
         key(&mut routing, &first, 1, 0, 30, 1);
         key(&mut routing, &second, 1, 10, 48, 1);

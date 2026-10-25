@@ -143,7 +143,6 @@ pub fn descriptor(device: &Device) -> Descriptor {
         },
         None,
         &BTreeMap::new(),
-        BTreeMap::new(),
     )
     .unwrap()
 }
@@ -454,7 +453,6 @@ pub fn readiness(device: &Device, output: &Virtual) -> Ready {
             name: spec.name.clone(),
             class: spec.class,
             seat: device.source.seat.clone(),
-            settings: BTreeMap::new(),
             at: time,
         },
         time,

@@ -43,27 +43,12 @@ let
     ${lib.getExe cfg.package} check --config "$out/config.lua" --json > "$out/validation.json"
     jq -e --arg mode ${lib.escapeShellArg cfg.mode} '.status == "valid" and .mode == $mode' "$out/validation.json" > /dev/null
   '');
-  compositor = pkgs.runCommand "prek-compositor-identity" {
-    nativeBuildInputs = [ pkgs.binutils ];
-  } ''
-    mkdir "$out"
-    candidate=${lib.escapeShellArg "${cfg.compositorPackage}/bin/Hyprland"}
-    if test -e ${lib.escapeShellArg "${cfg.compositorPackage}/bin/.Hyprland-wrapped"}; then
-      candidate=${lib.escapeShellArg "${cfg.compositorPackage}/bin/.Hyprland-wrapped"}
-    fi
-    readelf -h "$candidate" > /dev/null
-    ln -s "$candidate" "$out/Hyprland"
-  '';
-  compositorExecutable = if cfg.compositorExecutable != null
-    then cfg.compositorExecutable else "${compositor}/Hyprland";
   brokerArgs = [
     (lib.getExe cfg.package) "broker" "--mode" cfg.mode
     "--config" "${configuration}/config.lua"
     "--runtime-dir" "/run/${cfg.runtimeDirectory}"
-    "--compositor-executable" (toString compositorExecutable)
+    "--compositor-executable" (toString cfg.compositorExecutable)
     "--logind-library" (toString cfg.logindLibrary) "--json"
-  ] ++ lib.optionals (cfg.morfExecutable != null) [
-    "--morf-executable" (toString cfg.morfExecutable)
   ];
   sessionArgs = [ (lib.getExe cfg.package) "session" "--socket" "/run/${cfg.runtimeDirectory}/control.sock" ]
     ++ lib.optional cfg.session.reconnect "--reconnect"
@@ -87,7 +72,7 @@ in {
     mode = mkOption {
       type = types.enum [ "observe" "route" ];
       default = "observe";
-      description = "Broker mode; must match the configuration's mode. Route takes over the configuration's allowed devices consumed by stock Hyprland at a neutral idle cut and requires allowPhysicalTakeover.";
+      description = "Broker mode; must match the configuration's mode. Route takes over the configuration's allowed devices held by the session's Wayland compositor at a neutral idle cut and requires allowPhysicalTakeover.";
     };
     allowPhysicalTakeover = mkOption {
       type = types.bool;
@@ -114,21 +99,9 @@ in {
       readOnly = true;
       description = "Immutable configuration tree, checked by the selected Prek package before service activation.";
     };
-    compositorPackage = mkOption {
-      type = types.package;
-      default = config.programs.hyprland.package;
-      defaultText = lib.literalExpression "config.programs.hyprland.package";
-      description = "Exact installed Hyprland package. Its actual ELF is selected and checked, including the Nix wrapper case.";
-    };
     compositorExecutable = mkOption {
-      type = types.nullOr types.path;
-      default = null;
-      description = "Override the trusted actual Hyprland ELF for a nonstandard package layout.";
-    };
-    morfExecutable = mkOption {
-      type = types.nullOr types.path;
-      default = null;
-      description = "Optional trusted Morf ELF for native lock-provider verification.";
+      type = types.path;
+      description = "Trusted actual Wayland compositor ELF, not a wrapper script. The process serving the session's WAYLAND_DISPLAY socket must run this exact file.";
     };
     logindLibrary = mkOption {
       type = types.path;

@@ -105,7 +105,7 @@ impl Preparation for ModelPreparation {
 fn model() -> (Slot<ModelPreparation>, Rc<RefCell<State>>) {
     let mut source = source(0);
     source.generation = 17;
-    let descriptor = Descriptor::generated_keyboard(source.clone(), BTreeMap::new())
+    let descriptor = Descriptor::generated_keyboard(source.clone())
         .unwrap()
         .for_isolated()
         .unwrap()
@@ -141,7 +141,6 @@ fn evidence(slot: &Slot<ModelPreparation>, at: u64) -> ConsumerEvidence {
         name: slot.descriptor.name.clone(),
         class: slot.descriptor.class,
         seat: slot.source().seat.clone(),
-        settings: slot.descriptor.consumer_settings.clone(),
         at: ms(at),
     }
 }
@@ -249,7 +248,7 @@ fn wrong_fence_source_or_publication_cannot_update_the_slot() {
 
 #[test]
 fn every_consumer_identity_field_and_sample_time_is_revalidated_after_activation() {
-    for field in 0..8 {
+    for field in 0..7 {
         let (mut slot, state) = model();
         activate(&mut slot, &state, 0);
         let mut wrong = evidence(&slot, 10);
@@ -259,15 +258,12 @@ fn every_consumer_identity_field_and_sample_time_is_revalidated_after_activation
             2 => wrong.name.push('x'),
             3 => wrong.class = crate::transport::Class::Touchscreen,
             4 => wrong.seat = "seat1".into(),
-            5 => {
-                wrong.settings.insert("layout".into(), "other".into());
-            }
-            6 => wrong.at = ms(11),
+            5 => wrong.at = ms(11),
             _ => wrong.at = ms(0),
         }
         let source = slot.source().clone();
         let marker = slot.descriptor.marker.clone();
-        let at = if field == 7 { ms(251) } else { ms(10) };
+        let at = if field == 6 { ms(251) } else { ms(10) };
         assert!(
             slot.observe(fence(), &source, &marker, &wrong, at).is_err(),
             "field{field}"
@@ -288,17 +284,16 @@ fn a_slot_requires_its_published_generated_role_and_matching_consumer_isolation(
         let mut consumer = slot.consumer.clone();
         match field {
             0 => {
-                prepared.descriptor =
-                    Descriptor::generated_keyboard(slot.source().clone(), BTreeMap::new())
-                        .unwrap()
-                        .for_isolated()
-                        .unwrap()
+                prepared.descriptor = Descriptor::generated_keyboard(slot.source().clone())
+                    .unwrap()
+                    .for_isolated()
+                    .unwrap()
             }
             1 => {
-                consumer = Consumer::Hyprland {
+                consumer = Consumer::Compositor {
                     pid: 2,
                     start: 1,
-                    instance: "model".into(),
+                    display: "wayland-model".into(),
                 }
             }
             _ => {
@@ -312,7 +307,6 @@ fn a_slot_requires_its_published_generated_role_and_matching_consumer_isolation(
                     },
                     None,
                     &BTreeMap::new(),
-                    BTreeMap::new(),
                 )
                 .unwrap()
             }

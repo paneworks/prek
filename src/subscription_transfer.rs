@@ -20,7 +20,6 @@ pub struct ContextScope {
     binding: Binding,
     generation: u64,
     state: State,
-    secure_overlay: bool,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -42,7 +41,6 @@ impl Scope {
                 binding: context.binding.clone(),
                 generation: context.snapshot.generation,
                 state: context.snapshot.state,
-                secure_overlay: context.snapshot.secure_overlay,
             }),
         }
     }

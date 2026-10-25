@@ -448,8 +448,7 @@ impl Routed {
         seat.snapshot = snapshot;
         seat.engine.push_at(Input::Tick { at: self.at }, self.now)?;
         seat.engine.recognition_ready(
-            seat.engine.authority().state(self.now) == State::Desktop
-                && !seat.snapshot.secure_overlay,
+            seat.engine.authority().state(self.now) == State::Desktop,
             self.now,
         )?;
         Ok(())
@@ -477,8 +476,7 @@ impl Routed {
             ));
         }
         let seat = self.seats.get_mut(&source.seat).unwrap();
-        if seat.engine.authority().state(self.now) != State::Desktop || seat.snapshot.secure_overlay
-        {
+        if seat.engine.authority().state(self.now) != State::Desktop {
             return Err(invalid(
                 "routing attachment requires current recorded desktop context",
             ));
@@ -512,10 +510,9 @@ impl Routed {
             .attached
             .iter()
             .filter(|source| {
-                self.seats.get(&source.seat).is_some_and(|seat| {
-                    seat.engine.authority().state(self.now) != State::Desktop
-                        || seat.snapshot.secure_overlay
-                })
+                self.seats
+                    .get(&source.seat)
+                    .is_some_and(|seat| seat.engine.authority().state(self.now) != State::Desktop)
             })
             .cloned()
             .collect();

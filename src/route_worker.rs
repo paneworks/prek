@@ -1,7 +1,7 @@
 //! Configured routing in the sole descriptor-owning supervised worker.
 //!
 //! `prek broker --mode route` runs it as `route-worker`. Physical takeover is
-//! admitted only from stock Hyprland, at a neutral idle cut; every other source
+//! admitted only from the bound Wayland compositor, at a neutral idle cut; every other source
 //! is refused before any virtual mirror exists.
 use crate::{
     config::{Config, Mode},
@@ -49,7 +49,6 @@ struct Seat {
 }
 struct Output {
     fence: Fence,
-    admission: crate::morf::admission::Gate,
     virtual_device: Virtual,
     state_probe: Option<linux::StateProbe>,
     feedback: Option<linux::feedback::LedFeedback>,
@@ -100,11 +99,11 @@ fn consumer_boundary(
     gate.feedback(feedback, now).map_err(invalid)?;
     native_boundary(&evidence.consumer)
 }
-/// Admits physical takeover only from stock Hyprland, through the neutral idle
+/// Admits physical takeover only from the bound Wayland compositor, through the neutral idle
 /// cut in `takeover`; other consumers have no prefix/drain/neutral/rollback boundary.
 fn native_boundary(consumer: &crate::transport::Consumer) -> io::Result<()> {
     let kind = match consumer {
-        crate::transport::Consumer::Hyprland { .. } => return Ok(()),
+        crate::transport::Consumer::Compositor { .. } => return Ok(()),
         crate::transport::Consumer::ConsoleKeyboard { .. } => "console keyboard",
         crate::transport::Consumer::IsolatedReceiver { .. } => "isolated receiver",
     };
@@ -125,7 +124,7 @@ pub struct Stream {
     seats: BTreeMap<String, Seat>,
     outputs: BTreeMap<Source, Output>,
     grabbed: BTreeSet<Source>,
-    releases: BTreeMap<Source, (Fence, crate::supervisor::WorkerIdentity)>,
+    releases: BTreeSet<Source>,
     assembly: Assembly,
     subscriptions: crate::subscription_transfer::Assembly,
     messages: Outbox,
@@ -233,7 +232,6 @@ impl Outbox {
             let discard = match message {
                 Message::Outcome { report } => report.subscription().seat == seat,
                 Message::Transport { subscription, .. } => subscription.seat == seat,
-                Message::MorfReady { activation } => activation.source.seat == seat,
                 Message::Configuration { .. } => false,
                 Message::RulesChanged {
                     seat: changed_seat, ..
@@ -241,7 +239,6 @@ impl Outbox {
                 | Message::RecognitionResult {
                     seat: changed_seat, ..
                 } => changed_seat == seat,
-                Message::Released { .. } => false,
                 Message::KeyDrain { .. } => false,
                 Message::SoftwareResult { .. } => false,
             };
@@ -293,24 +290,6 @@ impl Stream {
             descriptor,
         })
     }
-    fn expire_admissions(&mut self, now: Duration) -> io::Result<()> {
-        let expired = self
-            .outputs
-            .iter()
-            .filter(|(source, output)| {
-                self.grabbed.contains(*source) && !output.admission.allowed(now)
-            })
-            .map(|(source, _)| source.clone())
-            .collect::<Vec<_>>();
-        for source in expired {
-            if let Some(seat) = self.seats.get_mut(&source.seat) {
-                seat.routing.recover(&source);
-            }
-            self.collect(&source.seat, now, None)?;
-            self.outputs.remove(&source);
-        }
-        Ok(())
-    }
 
     pub fn new(config: Config, channel: Channel) -> io::Result<Self> {
         Self::with_registry(config, channel, Registry::system()?)
@@ -341,7 +320,7 @@ impl Stream {
             seats: BTreeMap::new(),
             outputs: BTreeMap::new(),
             grabbed: BTreeSet::new(),
-            releases: BTreeMap::new(),
+            releases: BTreeSet::new(),
             assembly: Assembly::default(),
             subscriptions: crate::subscription_transfer::Assembly::default(),
             messages,
@@ -575,7 +554,6 @@ impl Stream {
                 .context
                 .as_ref()
                 .ok_or_else(|| invalid("routing needs positive live context"))?;
-            context.validate_layouts()?;
             if context.binding.seat != subscription.seat
                 || context.snapshot.generation != subscription.fence.session
                 || subscription.consumer.is_none()
@@ -601,7 +579,7 @@ impl Stream {
                     .is_none_or(|old| old.snapshot.revision < context.snapshot.revision)
                 {
                     authority
-                        .update_native(context.snapshot.clone(), context.layouts.clone(), now)
+                        .update(context.snapshot.clone(), now)
                         .map_err(io::Error::other)?;
                 } else {
                     authority.tick(now);
@@ -616,7 +594,7 @@ impl Stream {
                     .adopt(context.binding.clone(), subscription.fence.session)
                     .map_err(io::Error::other)?;
                 authority
-                    .update_native(context.snapshot.clone(), context.layouts.clone(), now)
+                    .update(context.snapshot.clone(), now)
                     .map_err(io::Error::other)?;
                 prepared.insert(subscription.seat.clone(), authority);
             }
@@ -700,18 +678,11 @@ impl Stream {
             product: id.product(),
             version: id.version(),
         };
-        let hyprland = matches!(consumer, crate::transport::Consumer::Hyprland { .. });
-        let settings = if hyprland {
-            self.config
-                .hyprland_device_settings(device)
-                .map_err(io::Error::other)?
+        let compositor = matches!(consumer, crate::transport::Consumer::Compositor { .. });
+        let descriptor = if compositor && device.capabilities.contains_key(&20) {
+            Descriptor::mirror_with_compositor_repeat(device, identity, &BTreeMap::new())
         } else {
-            BTreeMap::new()
-        };
-        let descriptor = if hyprland && device.capabilities.contains_key(&20) {
-            Descriptor::mirror_with_compositor_repeat(device, identity, &BTreeMap::new(), settings)
-        } else {
-            Descriptor::mirror(device, identity, None, &BTreeMap::new(), settings)
+            Descriptor::mirror(device, identity, None, &BTreeMap::new())
         }
         .map_err(invalid)?;
         let publication = self.registry.prepare_for_worker(descriptor, health)?;
@@ -727,19 +698,11 @@ impl Stream {
         if self.releases.len() >= 4096 {
             return Err(invalid("too many pending reader releases"));
         }
-        self.releases.insert(
-            device.source.clone(),
-            (subscription.fence, health.worker_identity()),
-        );
+        self.releases.insert(device.source.clone());
         self.outputs.insert(
             device.source.clone(),
             Output {
                 fence: subscription.fence,
-                admission: crate::morf::admission::Gate::new(
-                    health.worker_identity(),
-                    subscription.fence,
-                    device.source.clone(),
-                ),
                 virtual_device: output,
                 state_probe: Some(state_probe),
                 feedback,
@@ -860,7 +823,6 @@ impl Stream {
                 report: Report::Dispatch {
                     subscription: subscription.clone(),
                     event: Box::new(dispatch.event),
-                    reorder_scope: dispatch.reorder_scope,
                 },
             })?;
         }
@@ -882,15 +844,8 @@ impl InputSink for Stream {
         if self.outputs.contains_key(source) || self.key_drain_pending(&source.seat) {
             return Err(invalid("original closed before virtual retirement"));
         }
-        let Some((fence, worker)) = self.releases.remove(source) else {
-            return Ok(());
-        };
-        self.queue(Message::Released {
-            worker,
-            fence,
-            source: source.clone(),
-        })?;
-        self.messages.flush(&mut self.channel)
+        self.releases.remove(source);
+        Ok(())
     }
     fn reader(
         &mut self,
@@ -903,7 +858,7 @@ impl InputSink for Stream {
         if self.key_drain_pending(&device.source.seat) {
             return Ok(ReaderDisposition::Keep);
         }
-        if (self.grabbed.contains(&device.source) || self.releases.contains_key(&device.source))
+        if (self.grabbed.contains(&device.source) || self.releases.contains(&device.source))
             && !self.outputs.contains_key(&device.source)
         {
             // The old routing engine retires this source on Remove before a
@@ -927,12 +882,8 @@ impl InputSink for Stream {
             return Ok(ReaderDisposition::Keep);
         }
         if self.grabbed.contains(&device.source) {
-            self.expire_admissions(now)?;
             if !self.outputs.contains_key(&device.source) {
                 return Ok(ReaderDisposition::Reopen);
-            }
-            if self.outputs[&device.source].admission.watched() {
-                self.offer_transport(&device.source, now)?;
             }
             return Ok(ReaderDisposition::Keep);
         }
@@ -957,11 +908,9 @@ impl InputSink for Stream {
             return Ok(ReaderDisposition::Keep);
         };
         if now < evidence.at || now - evidence.at > Duration::from_millis(250) {
-            output.admission.cancel_pending();
             return Ok(ReaderDisposition::Keep);
         }
         if !output.virtual_device.processed_metadata()? {
-            output.admission.cancel_pending();
             return Ok(ReaderDisposition::Keep);
         }
         if output
@@ -969,16 +918,13 @@ impl InputSink for Stream {
             .as_ref()
             .is_some_and(|feedback| !feedback.ready(now))
         {
-            output.admission.cancel_pending();
             return Ok(ReaderDisposition::Keep);
         }
         // Pending complete and partial frames remain on the observation path.
         if !buffer.is_drained() {
-            output.admission.cancel_pending();
             return Ok(ReaderDisposition::Keep);
         }
         if !output.state_probe.as_ref().unwrap().is_neutral(device)? {
-            output.admission.cancel_pending();
             return Ok(ReaderDisposition::Keep);
         }
         if let Err(error) = consumer_boundary(
@@ -989,12 +935,6 @@ impl InputSink for Stream {
             now,
         ) {
             self.refuse_output(device, &error);
-            return Ok(ReaderDisposition::Keep);
-        }
-        if !output.admission.allowed(monotonic()?) {
-            if let Some(activation) = output.admission.request(now).map_err(invalid)? {
-                self.queue(Message::MorfReady { activation })?;
-            }
             return Ok(ReaderDisposition::Keep);
         }
         let quiet_since = self
@@ -1017,7 +957,6 @@ impl InputSink for Stream {
     }
     fn push(&mut self, record: Record) -> io::Result<()> {
         let now = monotonic()?;
-        self.expire_admissions(now)?;
         if matches!(record, Record::Header { .. }) {
             return Ok(());
         }
@@ -1045,7 +984,6 @@ impl InputSink for Stream {
     fn service(&mut self) -> io::Result<()> {
         let now = monotonic()?;
         self.expire_subscriptions(now)?;
-        self.expire_admissions(now)?;
         if self
             .assembly
             .deadline()
@@ -1134,7 +1072,6 @@ impl InputSink for Stream {
                     source,
                     marker,
                     evidence,
-                    admission,
                 } => {
                     if let Some(keys) = self
                         .seats
@@ -1142,11 +1079,6 @@ impl InputSink for Stream {
                         .and_then(|seat| seat.keys.as_mut())
                         && keys.matches(fence, &source, &marker)
                     {
-                        if admission.is_some() {
-                            return Err(invalid(
-                                "generated keyboard received physical Morf admission",
-                            ));
-                        }
                         keys.observe(fence, &source, &marker, &evidence, monotonic()?)?;
                         continue;
                     }
@@ -1154,18 +1086,7 @@ impl InputSink for Stream {
                         && output.fence == fence
                         && output.virtual_device.descriptor().marker == marker
                     {
-                        output
-                            .admission
-                            .update(admission, monotonic()?)
-                            .map_err(invalid)?;
                         output.consumer = Some(evidence);
-                    }
-                }
-                Command::MorfActivated { grant } => {
-                    if let Some(output) = self.outputs.get_mut(&grant.activation.source)
-                        && output.fence == grant.activation.fence
-                    {
-                        output.admission.grant(&grant, monotonic()?);
                     }
                 }
                 Command::KeyDrained { request, at } => {
@@ -1210,7 +1131,6 @@ impl InputSink for Stream {
         let now = monotonic()?;
         self.refresh_keys(now)?;
         self.expire_subscriptions(now)?;
-        self.expire_admissions(now)?;
         self.prune_reports(now)?;
         for (source, output) in &mut self.outputs {
             if let Some(feedback) = &mut output.feedback {
@@ -1316,13 +1236,8 @@ impl InputSink for Stream {
             .chain(
                 self.outputs
                     .values()
-                    .filter(|output| output.readiness.is_some() || output.admission.watched())
+                    .filter(|output| output.readiness.is_some())
                     .map(|output| output.offered + Duration::from_millis(100)),
-            )
-            .chain(
-                self.outputs
-                    .values()
-                    .filter_map(|output| output.admission.deadline()),
             )
             .chain(
                 self.outputs.values().filter_map(|output| {
@@ -1463,42 +1378,5 @@ mod tests {
         queue.discard_seat("seat1");
         assert_eq!(queue.messages.len(), 1);
         assert_eq!(queue.bytes, queue.messages[0].1);
-    }
-
-    #[test]
-    fn seat_replacement_preserves_original_descriptor_release_acknowledgements() {
-        let mut queue = Outbox::default();
-        let worker = serde_json::from_value(serde_json::json!({
-            "pid":std::process::id(),"birth":1,"epoch":1
-        }))
-        .unwrap();
-        let fence = Fence {
-            broker: protocol::Epoch([1, 2]),
-            configuration: 1,
-            session: 1,
-        };
-        let source = Source {
-            device: 7,
-            generation: 2,
-            seat: "seat0".into(),
-        };
-        queue.push(ended("seat0", 1)).unwrap();
-        queue
-            .push(Message::Released {
-                worker,
-                fence,
-                source: source.clone(),
-            })
-            .unwrap();
-        queue.discard_seat("seat0");
-        assert_eq!(queue.messages.len(), 1);
-        assert_eq!(queue.bytes, queue.messages[0].1);
-        let (mut sender, mut receiver) = Channel::pair().unwrap();
-        queue.flush(&mut sender).unwrap();
-        assert_eq!(queue.bytes, 0);
-        let message = receiver.receive::<Message>().unwrap().unwrap().message;
-        assert!(
-            matches!(message,Message::Released {worker:w,fence:f,source:s} if w==worker && f==fence && s==source)
-        );
     }
 }

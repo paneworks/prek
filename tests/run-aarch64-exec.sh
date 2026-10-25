@@ -51,7 +51,7 @@ install -m 755 "$build/prek" "$run/prek"
 patchelf --set-interpreter "$loader" --set-rpath "$musl:$gcc" "$run/prek"
 version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)
 [[ $("$run/prek" --version) == "prek $version" ]]
-for config in touch_routing window_keys power; do
+for config in touch_routing mode_transactions input_events; do
   "$run/prek" check --config "examples/lua/$config.lua" --json > "$run/check-$config.json"
   grep -q '"status":"valid"' "$run/check-$config.json"
 done
@@ -63,6 +63,6 @@ done
   printf 'build_toolchain=%s\n' "$(sed -n 's/^toolchain=//p' "$build/receipt.txt")"
   printf 'artifact_sha256=%s\n' "$(cut -d' ' -f1 "$build/SHA256SUMS")"
   printf 'host_machine=%s\n' "$(uname -m)"
-  printf 'execution=emulated-binfmt\nhardware=false\nchecked=version,lua-check:touch_routing,window_keys,power\n'
+  printf 'execution=emulated-binfmt\nhardware=false\nchecked=version,lua-check:touch_routing,mode_transactions,input_events\n'
 } > "$run/receipt.txt"
 cat "$run/receipt.txt"

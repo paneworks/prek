@@ -166,13 +166,10 @@ impl<E: Coordinator> Seat<E> {
             state,
             context: (state == self.snapshot.state).then(|| {
                 Box::new(ProvidedContext {
-                    layouts: None,
                     binding: self.binding.clone(),
                     snapshot: self.snapshot.clone(),
                 })
             }),
-            morf: vec![],
-            morf_rendered: vec![],
             error: None,
         }
     }
@@ -285,7 +282,7 @@ impl<E: Coordinator> Seat<E> {
         inputs: Vec<crate::input_events::Event>,
         at: Duration,
     ) -> io::Result<()> {
-        if self.engine.authority().state(at) != State::Desktop || self.snapshot.secure_overlay {
+        if self.engine.authority().state(at) != State::Desktop {
             return Ok(());
         }
         let Some(callbacks) = &mut self.callbacks else {
@@ -536,10 +533,8 @@ impl Configured {
         seat.binding = binding;
         seat.snapshot = snapshot;
         seat.clock(at)?;
-        seat.engine.recognition_ready(
-            seat.engine.authority().state(at) == State::Desktop && !seat.snapshot.secure_overlay,
-            at,
-        )?;
+        seat.engine
+            .recognition_ready(seat.engine.authority().state(at) == State::Desktop, at)?;
         seat.engine.push(Record::Tick { at })?;
         seat.settle(&self.config, self.definition.as_deref(), &self.budget, at)?;
         self.baseline.as_mut().unwrap().push(Record::Tick { at })?;

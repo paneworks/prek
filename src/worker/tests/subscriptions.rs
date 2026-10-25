@@ -1,8 +1,8 @@
 use super::*;
 use crate::subscription_transfer::{Scope, Sender, tests::commands};
 
-fn native(count: usize, now: Duration) -> Subscription {
-    let view = crate::context_transfer::tests::native_view(now, count);
+fn wide(count: usize, now: Duration) -> Subscription {
+    let view = crate::context_transfer::tests::wide_view(now, count);
     Subscription {
         seat: "seat0".into(),
         fence: view.fence,
@@ -21,12 +21,12 @@ fn send(stream: &mut Stream, parent: &mut Channel, command: Command) {
 }
 
 #[test]
-fn private_subscription_large_graph_activates_only_after_commit_and_services_input() {
+fn private_subscription_large_snapshot_activates_only_after_commit_and_services_input() {
     let now = crate::ipc::monotonic().unwrap();
     let (mut parent, child) = Channel::pair().unwrap();
     let mut stream = Stream::new(config(), child).unwrap();
     stream.push(Record::Header { version: 1 }).unwrap();
-    let subscription = native(512, now);
+    let subscription = wide(256, now);
     let mut sender = Sender::default();
     sender
         .replace(
@@ -165,7 +165,7 @@ fn private_subscription_security_changes_remove_old_observer_but_binding_needs_f
             .unwrap();
         let mut next = initial.clone();
         match case {
-            0 => next.context.as_mut().unwrap().snapshot.secure_overlay = true,
+            0 => next.context.as_mut().unwrap().snapshot.state = crate::context::State::Locked,
             1 => next.context.as_mut().unwrap().snapshot.state = crate::context::State::Locking,
             2 => {
                 next.consumer =
@@ -200,7 +200,7 @@ fn private_subscription_transfer_timeout_is_nonfatal_and_drops_partial_state() {
     let (mut parent, child) = Channel::pair().unwrap();
     let mut stream = Stream::new(config(), child).unwrap();
     stream.push(Record::Header { version: 1 }).unwrap();
-    let owner = native(1, now);
+    let owner = wide(1, now);
     for command in commands(Subscriptions {
         revision: 1,
         seats: vec![owner.clone()],
@@ -234,7 +234,7 @@ fn private_subscription_stale_committed_capture_cannot_gain_receipt_freshness() 
     let mut stream = Stream::new(config(), child).unwrap();
     for command in commands(Subscriptions {
         revision: 1,
-        seats: vec![native(1, now - Duration::from_secs(2))],
+        seats: vec![wide(1, now - Duration::from_secs(2))],
     }) {
         send(&mut stream, &mut parent, command);
     }
@@ -257,7 +257,7 @@ fn private_subscription_config_install_discards_old_body_and_ignores_retired_chu
     parent.receive::<Message>().unwrap().unwrap();
     let mut old = commands(Subscriptions {
         revision: 1,
-        seats: vec![native(1, now)],
+        seats: vec![wide(1, now)],
     })
     .into_iter();
     send(&mut stream, &mut parent, old.next().unwrap());
@@ -277,12 +277,12 @@ fn private_subscription_config_install_discards_old_body_and_ignores_retired_chu
     }
     for command in commands(Subscriptions {
         revision: 2,
-        seats: vec![native(1, now)],
+        seats: vec![wide(1, now)],
     }) {
         send(&mut stream, &mut parent, command);
     }
     assert!(stream.registry.observers.is_empty());
-    let mut fresh = native(1, crate::ipc::monotonic().unwrap());
+    let mut fresh = wide(1, crate::ipc::monotonic().unwrap());
     fresh.fence.configuration = 2;
     for command in commands(Subscriptions {
         revision: 3,

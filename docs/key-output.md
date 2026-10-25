@@ -9,7 +9,7 @@ gate**. Configured `keys`/`remap` actions have private broker/worker binding,
 but live execution remains unaccepted. `SyntheticInput` remains ungrantable and
 native takeover remains closed. The native `kernel::Virtual` sink adapter is compiled; device-free tests
 exercise the driver and native byte-prefix accounting. Its kernel execution is
-not verified. The real Cage tests use owned protocol keyboards, not kernel devices.
+not verified.
 
 ## Native preparation
 
@@ -283,8 +283,7 @@ Live native key arbitration uses this journal for immediate and delayed decision
 The direct `push_key_frame` ledger retains its original contract and cannot be
 mixed with journal staging. The old private immediate adapter remains a test
 oracle, not a second live arbitrator. The standalone journal protocol fixture
-still supplies explicit modeled decisions; the separate native-key Cage phases
-use actual recognizer outcomes instead. Neither grants broker authorization.
+still supplies explicit modeled decisions and grants no broker authorization.
 
 `Routing::with_key_projection` retains original positions across attached
 sources. Eligible sources with native key/tap/hold/chord/key-only-sequence
@@ -356,12 +355,7 @@ unrelated touch. Other custom input definitions retain their own group semantics
 offer versus delivery time, event-local activation, atomic queue bounds,
 continuous cancellation, timer isolation and actual
 supervised Luna callbacks feeding the acknowledged device-free output actor.
-That gate is not rendered custom-input or kernel acceptance. The separate custom
-Cage phases use real supervised Luna callbacks, original ticket/reply clocks and
-owned protocol keyboards. Its strict receiver must see unrelated typing before
-the generated action, with no consumed control leakage. This proves the exercised
-root and composed key-only custom paths, not non-key/hybrid/mixed or
-physical/kernel consumption.
+That gate is not rendered custom-input or kernel acceptance.
 
 Pending input fences later raw keys in the same keyboard domain. A common bounded
 epoch offset preserves cross-source cadence without rescheduling exposed output.
@@ -382,7 +376,7 @@ triggering keyboard. Local backpressure retains barriers through full report
 acknowledgement. Closing generated slots fence raw forwarding until their owned
 cleanup finishes. A blocked or in-flight raw report wakes at its existing
 write-budget failure boundary, not continuously at an expired due timestamp.
-These are local coordinator/write guarantees. They do not prove stock-compositor
+These are local coordinator/write guarantees. They do not prove compositor
 cross-fd delivery, consumer-neutral acknowledgement or native takeover.
 
 The key-ordering domain includes physical sources with any generated-keyboard
@@ -404,7 +398,7 @@ backpressure. Neutral cancellation/closing cleanup remains a seat-wide barrier.
 Independent delivery lanes do not promise a single raw delivery order across
 unrelated sources; recognition retains the common input timeline. Ordinary
 model/private-file evidence does not establish combined native or graphical
-key/touch latency, stock consumer interpretation, or full resource-policy acceptance.
+key/touch latency, consumer interpretation, or full resource-policy acceptance.
 
 Before polling, the owning loop must forward Routing's cancellation events to
 `cancel` and its source-recovery transitions to `retire_source`. A retained
@@ -466,52 +460,7 @@ complete-report cut, original-position, capacity and recovery models.
 global actor barriers, legacy buffered positions, merged repeats and actual
 sole-worker ABI writes on owned private regular files (no devices).
 `oslo make test-key-worker` runs device-free scope, ordering, ownership,
-cancellation, timeout and bounds regressions. `oslo make test-key-worker-cage`
-drives the actual scheduler through owned protocol keyboards and a rendered app
-with both Hyprland configuration dialects. Its authority/readiness fixtures are
-explicitly modeled. Forty-two phases include consumed immediate per-key
-projection, ordinary typing, cross-source modifiers, tap-tail lifecycle,
-multiple same-report sequences, delayed tap/key completions, rejection of reversed
-steps and fresh reentry, plus explicitly decided journal fallback cadence, using
-fifteen owned protocol keyboards and two owned pointers. Six native arbitration phases additionally prove
-selective buffered tap/hold/sequence consumption, deferred action order and unmatched fallback. The strict
-receiver checks every delivered edge, the absence of consumed control keys and
-the original unmatched down/up interval within existing scheduler slack. Earlier
-sequence phases remain observational. A separate actual Luna root key-only custom
-phase preserves a later unseen ordinary key before its generated action. A second
-actual Luna phase requires a modifier pressed and released within the same report,
-excludes earlier input from the callback and preserves both earlier and unseen
-ordinary typing before its generated action. These
-two root phases are joined by native-to-custom and custom-to-native cases. Their
-receipts include the actual configured trigger, original reports, reply dispatch
-count and distinct reply/work admission clocks. The latter case forwards an early
-native-looking press normally and waits for a fresh post-reply press to complete.
-Three hybrid phases establish a real pointer baseline, exercise a consumed key
-with ordinary same-report typing and a coherent relative-motion commit, then
-exercise unmatched whole-report fallback with original motion/key cadence.
-The validator compares original inputs, scheduled reports, decoded sink traces,
-actual app key/pointer/frame ordering and displacement. Pointer initialization
-waits for an actual app motion receipt. Both owned keyboard and pointer devices
-must retire. These decoded protocol interfaces do not prove the native single-node
-hybrid counterpart topology or MT rendering. These
-are owned protocol paths, not general mixed ownership, native takeover or
-physical/kernel selective consumption. Repeat interleaving has direct worker/file
-evidence; these rendered phases do not simulate kernel repeat.
-
-For fixture development, `test-key-worker-cage-dev --runner=/nix/store/.../bin/prek-cage-host-test`
-requires an explicitly supplied, already built immutable compositor runner. It
-builds and selects the current Cargo test/helper and Nix protocol producer/receiver,
-prints the Cargo and validator SHA-256 hashes and explicitly supplies those paths.
-It runs both configuration dialects without rebuilding the release
-application. This is development-binary evidence, not packaged-release evidence.
-
-The development recipe retains the supplied Nix runner closure under
-`target/test-fixtures` before building Cargo helpers and rejects root-probe
-runners. To restore an unavailable saved derivation, use
-`oslo make pin-test-fixture --derivation=/nix/store/...drv --name=cage-host`.
-`oslo make build-cage-touch-tools` retains the current Cage, receiver, grim and
-DBus tools independently of the release Rust application. These project-local
-roots keep fixture closures available across long verification runs.
+cancellation, timeout and bounds regressions.
 
 ### Coherent non-key ownership journal
 
@@ -632,11 +581,6 @@ prepared source rather than reinterpreting old scopes.
 
 `oslo make test-domain-journal` checks selective fates, shared barriers, bounded
 continuation, metadata limits, fallback timing and domain-private state repair.
-The owned Cage worker also exercises real protocol-sink delivery: XY47/31 is
-consumed while ordinary Left-key edges pass, then a fresh ordinary XY5/3 report
-moves the receiver pointer. This is trusted Router transport/rendering evidence,
-not configured mixed-recognizer arbitration, native hybrid/MT topology, switch
-ownership, kernel input or physical/production authorization.
 
 ## Private native worker binding
 
@@ -649,11 +593,10 @@ Availability changes never extend the original capability lease.
 
 Private transport replies carry the exact publication marker, source and fence.
 Numeric source values do not distinguish physical and generated roles. Generated
-offers do not enroll physical original-release evidence, close its enrollment
-window, or receive Morf recognizer admission. The broker still checks the actual
+offers never start a physical takeover. The broker still checks the actual
 agent registration before and after obtaining its device evidence.
 
-Consumer identity, marker, name, class, seat, settings and timestamp remain
+Consumer identity, marker, name, class, seat and timestamp remain
 checked after activation. A fresh sample cannot revive an expired active lease.
 Consumer loss seals the output, cancels unwritten tails and requires worker
 recovery, not an inventory-only resume. Cancellation and source-recovery reports
@@ -672,7 +615,7 @@ duplicate receipts cannot close another slot. Shutdown pumps private receipts
 within that bound, destroys outputs on failure, and reports neutrality unproven
 before releasing original readers. A retired slot never resumes in place.
 
-This binding does not complete native acceptance. The stock consumer boundary
+This binding does not complete native acceptance. The consumer boundary
 still refuses takeover, public `SyntheticInput` negotiation stays disabled, and
 the complete native consumer prefix/drain/neutral boundary remains unproven.
 Mixed press/release/repeat reports use canonical merged admission, which rejects
@@ -754,9 +697,8 @@ These are emission/ownership primitives, not authentication. The nonce alone
 grants nothing. Private managed-worker admission is described below; authenticated
 software-keyboard registration and Lua held-key handles still require their full
 broker/consumer contract. Public `SyntheticInput` remains disabled. Model tests cover explicit
-repeat and byte-prefix cancellation; the owned Cage fixture renders provider
-isolation and physical-modifier overlap, but does not render repeat or establish
-software authorization or native consumer delivery.
+repeat and byte-prefix cancellation; they do not establish software authorization
+or native consumer delivery.
 
 ## Private managed software producers
 
@@ -800,14 +742,9 @@ and consumer fields are correlation data, not authenticated UI credentials.
 
 `oslo make test-software-worker` checks actor ordering/leases, exact slot scopes,
 strict packet schemas and actual private-channel/native-ABI writes on protected
-ordinary files, without kernel devices. The nondefault test harness also drives
-eighteen owned Cage actor phases, including lease expiry without new input,
-timed starts with correctly ordered begin-only modifiers, and throughout chord
-revocation/reentry. The five conditional-action phases use observational rules;
-they do not establish consuming timed/chord raw projection.
-Its authority/readiness remain modeled and it does not test private software IPC,
-public authorization or repeat rendering. Default application packages expose no
-fixture admission method.
+ordinary files, without kernel devices. Its authority/readiness remain modeled
+and it does not test public authorization or repeat rendering. Default
+application packages expose no fixture admission method.
 
 ## Configured selective input scopes
 
@@ -829,11 +766,7 @@ consume later unseen motion. Live contact cohorts keep their physical root.
 
 `oslo make test-mixed-arbitration` covers configured mixed claims, independent
 wheel/relative competition, exact deferred tickets, cross-source dependencies,
-expiry, cancellation cadence and refusal of unknown switch ownership. The Cage
-domain exercise crosses the actual supervised Luna callback, native coordinator,
-protocol sink and receiving app, with correlated tickets/proposals/dispatches.
-It consumes nonzero XY47/31 while ordinary Left-key edges pass, then requires
-ordinary XY5/3 as a positive control.
+expiry, cancellation cadence and refusal of unknown switch ownership.
 
 Scoped touch keeps the existing lifecycle. A native pan claim or a complete
 multi-finger tap contact count claims coherent motion before completion and
@@ -868,13 +801,12 @@ overhead, not the configured decision windows, kernel I/O or compositor
 delivery.
 
 The managed route worker builds every seat with `Routing::with_input_projection`.
-Its supervised helper gates, the touch Cage and the 42-phase key Cage run in both
-the previous and the scoped mode (`PREK_CAGE_TOUCH_ROUTING`,
-`PREK_KEY_WORKER_ROUTING`). Scoped rendering differs only where a callback reply
-arrives after later unseen input: its action is written at the offered cutpoint,
-before that input, instead of at the reply. Switch ownership stays refused
-without a known baseline. Kernel input, physical takeover, broker authorization
-and public synthetic input remain unproven by this owned protocol evidence.
+Its supervised helper gates run in both the previous and the scoped mode.
+Scoped delivery differs only where a callback reply arrives after later unseen
+input: its action is written at the offered cutpoint, before that input, instead
+of at the reply. Switch ownership stays refused without a known baseline. Kernel
+input, physical takeover, broker authorization and public synthetic input remain
+unproven.
 
 ## Bounds and verification
 
@@ -889,8 +821,3 @@ reports that state. After capacity exhaustion, new holds/chords are denied.
 
 - `oslo make test-key-output`: device-free ownership, prefix, backpressure,
   cancellation, fencing, bounds and native-byte-prefix tests.
-- `oslo make test-key-output-cage`: the actual driver, two independently owned
-  protocol keyboards, causal app receipts and fifteen rendered phases in each
-  config dialect, including same-source task isolation, context cancellation/
-  reentry and delayed old-press rejection. The explicit test-only Aquamarine
-  startup override remains separate from unmodified-stock/native/physical acceptance.

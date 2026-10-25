@@ -2,8 +2,8 @@
 
 Low-level Linux input tools, named after Albanian **preke** — “touch it”.
 
-Prek reads evdev input below Wayland. Its recognition core is independent of Morf
-and the compositor. The current CLI supports read-only observation, private
+Prek reads evdev input below Wayland. Its recognition core is independent of the
+compositor. The current CLI supports read-only observation, private
 recordings, deterministic offline replay, declarative configuration validation,
 configured rule observation, and authenticated broker/session status.
 
@@ -24,11 +24,11 @@ recovery. The Linux backend now publishes pre-add metadata, creates per-source
 uinput devices and writes bounded complete frames. The private worker has a
 [bounded, descriptor-bound LED feedback bridge](docs/feedback.md), with independent
 queries and source writes; its synthetic kernel challenge still needs a user-run
-receipt. Supervised takeover from stock Hyprland at a neutral idle cut is
-implemented but not yet accepted on real hardware. Devices with nonzero axis fuzz,
-and repeat-capable devices whose consumer is not Hyprland, are refused until
-transparent forwarding is verified for those capabilities; a Hyprland-consumed
-keyboard is mirrored without kernel repeat.
+receipt. Supervised takeover from the session's Wayland compositor at a neutral
+idle cut is implemented but not yet accepted on real hardware. Devices with
+nonzero axis fuzz are refused until transparent forwarding is verified for that
+capability; a compositor-consumed keyboard is mirrored without kernel repeat,
+since the compositor generates key repeat itself.
 Production routing remains disabled.
 
 The configured routing core connects rule candidates to reserve/buffer/observe
@@ -56,12 +56,13 @@ and routing-library tests cover configured consumption with model context.
 Local application delivery, live broker bridges, pre-grab handoff and remaining
 application behaviors are required before the CLI can enable routing.
 
-The Hyprland client verifies the IPC socket's owner, compositor process identity
-and executable before querying bounded device inventories. It supports the
-verified 0.54/0.55 and exact 0.56.2 device schemas and checks virtual-device
-acceptance and reported keyboard settings. The kernel backend also verifies processed udev metadata
-and the resulting evdev capabilities. Settings absent from stock IPC and
-complete readiness handoff remain pending.
+The compositor binding is built from kernel facts only: the owner and inode of
+the `WAYLAND_DISPLAY` socket in the user's private runtime directory, the
+`SO_PEERCRED` of a fresh connection, the process start time and the executable
+inode. A virtual device counts as consumed once that exact compositor process
+holds a descriptor on the event node udev published for it, read from
+`/proc/<pid>/fd`. The kernel backend also verifies processed udev metadata and
+the resulting evdev capabilities. Complete readiness handoff remains pending.
 
 The session library obtains agent credentials from an established local socket
 and verifies that agent and compositor belong to the same active local logind
@@ -114,9 +115,9 @@ configuration/session generations and the proposed action. Repeats share a gestu
 ID and have distinct ordinals. Observation evaluates each rule; it makes no claim
 about exclusive arbitration or input consumption. `run --mode route` refuses before
 device takeover; `broker --mode route` supervises the routing worker, which takes
-over an allowed device consumed by stock Hyprland only at a neutral idle cut and
-leaves every other device with its original consumer. See the
-[neutral idle takeover](docs/evdev-boundary.md#neutral-idle-takeover-from-stock-hyprland).
+over an allowed device consumed by the session's Wayland compositor only at a
+neutral idle cut and leaves every other device with its original consumer. See
+the [neutral idle takeover](docs/evdev-boundary.md#neutral-idle-takeover).
 
 Configured observation runs in a supervised worker. Only that worker opens input
 devices; the parent watches a private health channel. The input loop reports
@@ -133,21 +134,21 @@ removal and production broker handoff still require downstream-consumer gates.
 
 `broker` runs the same supervised observation worker alongside a privileged
 control service. It requires a protected root-owned system configuration and
-parent directories, the actual Hyprland ELF path and an absolute system
-libsystemd path:
+parent directories, the actual compositor ELF path (not a wrapper script) and
+an absolute system libsystemd path:
 
 ```sh
 sudo prek broker --config /etc/prek/prek.toml \
-  --compositor-executable /YOUR/SYSTEM/Hyprland-ELF \
+  --compositor-executable /YOUR/SYSTEM/COMPOSITOR-ELF \
   --logind-library /YOUR/SYSTEM/libsystemd.so.0
 ```
 
 Start `session` from the compositor's own login session. It uses
-`HYPRLAND_INSTANCE_SIGNATURE`, or an explicit `--instance`, and maintains a
+`WAYLAND_DISPLAY`, or an explicit `--display`, and maintains a
 250 ms acknowledged heartbeat. A second agent for the same seat is refused;
 `status` uses a separate authenticated inspection role. A shared user-manager
 process without session membership is refused, except beside a compositor that
-its user manager runs outside any session (as uwsm does): there the agent must
+its user manager runs outside any session: there the agent must
 share the compositor's systemd unit, and logind must record that exact
 compositor as the controller of the user's display session. Both commands accept `--socket`
 for a different broker endpoint. Status reports the active agent's current
@@ -159,38 +160,25 @@ The worker acknowledges readiness with `subscribed: true` in JSON output after
 reconciling held keys and contacts. Already-held or unread input older than that
 activation cannot become a new gesture. Outcomes carry the current broker,
 configuration and session fences. Inspection clients receive status only. Session
-membership permits context-free observations after a fresh compositor lock check.
+membership permits context-free observations after a fresh logind lock check.
 Add `--context` to enable rules scoped to the verified desktop or greeter. The
-broker samples output geometry, workspaces, DPMS, focus and layers directly from
-the bound compositor, rechecks logind, and publishes context on its private worker
-channel. Caller-supplied context snapshots remain refused.
+broker reads output geometry from `wl_output` and `xdg_output` on the session's
+Wayland socket and screen state from the DRM connector in sysfs, rechecks
+logind, and publishes context on its private worker channel. Caller-supplied
+context snapshots remain refused.
 
-Context refreshes run at 100 ms intervals with a shared 200 ms IPC deadline and
+Context refreshes run at 100 ms intervals with an 80 ms Wayland deadline and
 250 ms snapshot freshness. Context loss, restoration or a witnessed lock advances
 the session fence, discards queued outcomes and reconciles held input before
 recognition resumes. Workers expire context independently while idle; delayed
 context cannot stop their input reader. Oversized snapshots disable publication
 and report an error instead of truncating targets or crashing the broker.
 
-Every observation is checked against the compositor lock before delivery, including
-agents without `--context`. A witnessed lock inhibits all observation subscriptions
-and remains latched across agent reconnection. A bare compositor unlock cannot
-resume observations: the bound lock provider's completed transition is required.
-With an adapter-enabled Morf build, pass its actual ELF as `broker --morf-executable`
-and enable `PREK_LOCK_PROVIDER=1` for the lock process. The broker verifies the
-native endpoint's exact process/executable, active logind session and actual
-Wayland compositor identity. It accepts unlock only for the bound native lock
-epoch after Morf observed its compositor acknowledgement, flushed unlock, and
-the compositor independently reports unlocked. Morf briefly retains its native
-endpoint until the broker acknowledges completion; timeout or provider loss keeps
-inhibition in place. Caller-supplied Lua lock state and socket disappearance cannot
-authorize unlock. Locked/greeter region actions and authentication remain the
-provider's responsibility. Stock window coordinates describe animation
-goals, so application-content targets remain ineligible until rendered geometry is
-proven by a provider. Layer bounds reserve interactive space conservatively;
-Morf-specific regions and device-to-output mapping are still required. The native
-adapter gate is [tests/morf.nix](tests/morf.nix), which takes a separately built
-upstream Morf package; generic Prek builds retain no Morf dependency.
+Every observation is checked against logind's `LockedHint` for the bound session
+before delivery, including agents without `--context`. A locked session
+suspends all observation subscriptions until logind reports it unlocked; an
+unreadable hint is treated as unknown context. Caller-supplied Lua lock state
+cannot authorize unlock, and authentication remains outside Prek.
 
 The private worker channel carries subscriptions and semantic outcomes, with no
 raw frames or device descriptors. Its health channel remains separate. Progress
@@ -226,8 +214,8 @@ are fenced. A private kernel lease permits one broker per runtime directory.
 Bad, disconnected or stalled clients lose their queued replies and seat ownership;
 the device worker continues independently. Startup, control traffic and device
 supervision have native process tests; privileged kernel acceptance remains a separate gate. Route mode refuses
-physical takeover from any consumer other than stock Hyprland before creating a
-virtual mirror.
+physical takeover from any consumer other than the bound Wayland compositor
+before creating a virtual mirror.
 
 Supervised virtual devices carry their worker's process birth and supervision
 epoch in the private runtime registry. Complete metadata is published atomically.
@@ -245,12 +233,6 @@ commands keep their selected-source lifetime. Suspend/resume recovery remains
 pending. Offline replay supports reconciliation and mapping-generation changes.
 
 ## Configuration
-
-The broker's native Morf lock-provider integration and its owned local test are
-described in [Morf integration](docs/morf.md). This supplies lock evidence and
-read-only native shell bindings through `prek.morf.providers()`;
-Morf's rendered regions, typed shell actions and recognizer handoff remain work
-in progress.
 
 NixOS users can import `nixosModules.default` from this flake. It provides the
 supervised observation broker, build-checked Lua/modules and a `prek-session`
@@ -293,22 +275,12 @@ These observations do not grant input consumption or action authority.
 `devices.list/get/revision/position` expose the received permitted metadata and
 validated coordinate mapping; `seats.current` returns the fresh current session
 binding. See [device queries](docs/lua-api.md#permitted-device-and-seat-queries).
-`outputs` and `regions` query verified compositor geometry;
+`outputs` queries verified compositor output geometry;
 `coordinates.convert` uses an exact snapshot reference for output coordinates.
-See [geometry queries](docs/lua-api.md#output-region-and-coordinate-queries).
+See [geometry queries](docs/lua-api.md#output-and-coordinate-queries).
 Rule declarations support observational `on_begin`, `on_update`, `on_end` and
 `on_cancel` hooks; `rules.on` returns a disposable per-rule subscription.
 See [rule callbacks](docs/lua-api.md#rule-phase-callbacks).
-`session --power` negotiates protected-policy DPMS blank/wake on explicit frozen
-outputs with a routing broker; `--lua --power` also enables approved Lua plans.
-Production takeover remains gated. `nix run .#cage-test -- --layers --input --power`
-verifies the owned nested output; see
-[adapter scope and requirements](docs/lua-api.md#experimental-output-scoped-dpms-adapter).
-`session --hyprland` negotiates protected `allow_hyprland_actions` permission for
-targeted close and adjacent workspace move/follow; add `--lua` for named plans.
-The agent installs only the broker-bound compositor, and routing checks target
-eligibility before claiming input. See
-[window adapter requirements](docs/lua-api.md#experimental-targeted-hyprland-window-adapter).
 Production routing remains disabled; named-effect execution currently has model
 grant and helper-process coverage, without authenticated production routing proof.
 Pending effects are canceled by generation, gesture cancellation and source
@@ -331,7 +303,7 @@ reusing identities. Generation replacement retires their coroutine state.
 
 Runtime callbacks and tasks can query `context.snapshot()`, `binding()`,
 `state()`, `fence()` and `error()` for broker-verified session identity and full
-output/window/region/keyboard geometry. Results are owned copies, expire from
+output geometry and screen state. Results are owned copies, expire from
 their original monotonic timestamps, and cannot set authority. The agent
 refreshes snapshots every 100 ms; `context_changed` notifies the owning Lua VM.
 See [the context reference](docs/lua-api.md#runtime-context) and
@@ -405,12 +377,8 @@ preserved. `--json` reports units, sample count, duration and destination.
 named source without opening input. Copy the resulting template into the desired
 configuration and choose a binding explicitly.
 
-The phone preset describes the intended Morf/Hyprland gesture bindings and
-ownership policies. It does not enable a service or install those bindings yet.
-Its Morf keyboard gestures (G05–G07) apply on the desktop only. On the lock
-screen and greeter, touches pass through to the Morf shell's own keyboard
-gestures, because those shells take no Prek controls. Only the screen-off wake
-and clock-background blank (G16, G17) are claimed there.
+The phone preset selects the touchscreen in route mode and declares no rules;
+add your own bindings. It does not enable a service.
 The desktop example is disabled until you enable its rule. Desktop shape templates
 include V, circle and zigzag without active action
 bindings. `check` validates syntax, units, references, bounded nesting, system
@@ -436,22 +404,20 @@ trigger and action. `require_keys` combines devices on the same permitted seat;
 timing overrides apply to that rule, including arbitrary hold durations and repeats.
 Ordinary OS repeat is separate from configured repeat-while-held.
 
-An unbound event rule can be observed without a desktop if its scope is everywhere
-and it has no context, screen or keyboard condition. Other rules require a verified
-session provider. `session --context --observations` supplies verified compositor
-context for observation. Rules requiring app targets, keyboard geometry or
-Morf regions remain skipped until their providers are integrated.
+An unbound event rule can be observed without a desktop if it has no context or
+screen condition. Other rules require a verified session provider.
+`session --context --observations` supplies verified compositor context for
+observation.
 
-The library's context model freezes the first target and validates later fingers
-against it. A focus change cannot redirect a swipe. Session/lock changes, stale
-snapshots, target removal, relevant geometry changes and overlays cancel it.
-Compositor visibility is distinct from a mapped window on another workspace.
-The model requires 250 ms snapshot freshness and a one-second provider lease.
-The Linux session library supplies verified socket/process/logind membership
-for agents launched inside the compositor's session, or inside the systemd unit
-of a uwsm-style compositor that logind records as the display session's
-controller. Action integration, delegation for other shared user services and
-real lock-provider registration remain pending. The lockscreen/greeter UI and authentication remain Morf's responsibility.
+The library's context model freezes the first output target and validates later
+fingers against it. Session/lock changes, stale snapshots, output removal and
+relevant geometry changes cancel it. The model requires 250 ms snapshot
+freshness and a one-second provider lease. The Linux session library supplies
+verified socket/process/logind membership for agents launched inside the
+compositor's session, or inside the systemd unit of a compositor that logind
+records as the display session's controller. Action integration and delegation
+for other shared user services remain pending. Lock screens, greeters and
+authentication are outside Prek.
 
 ## Recording and replay
 
@@ -494,12 +460,13 @@ commands. Raw recordings are an explicit diagnostic operation, not service logs.
 - `gestures` maps coordinates and groups touch interactions.
 - `paths` bounds armed trajectories and compares resampled shape templates.
 - `config` owns the strict schema, presets, policy and generation model.
-- `context` checks session authority, regions and frozen application targets.
+- `context` checks session authority, output targets and frozen permits.
 - `rules` connects configured recognizers, conditions and context checks.
 - `transport` validates virtual-device descriptors and readiness evidence.
 - `router` owns sequences and schedules bounded, ordered raw-frame delivery.
 - `kernel` owns Linux virtual-device creation, metadata and nonblocking writes.
-- `hyprland` verifies compositor IPC identity and virtual-device inventory evidence.
+- `compositor` binds the Wayland compositor process behind the session's display socket.
+- `display` reads output geometry over the Wayland protocol and screen state from DRM sysfs.
 - `session` verifies agent/compositor membership in logind's active seat/session.
 - `protocol` and `ipc` bound control messages, generations and kernel sender credentials.
 - `service` owns authenticated broker registrations and their bounded leases.
@@ -517,111 +484,12 @@ by that harness; it never opens or grabs a production event node.
 `tests/supervisor.rs` runs fourteen process gates for healthy/stalled workers,
 termination escalation, health-channel failure, worker identity and parent death.
 It uses a separate executable so fixtures run on their process's original thread.
-`oslo make test-cage-touch` adds [rendered Lua touch routing](tests/cage.md#lua-touch-routing),
-including buffered fallback cadence, claimed-pan suppression and acknowledged
-rule edits. Its source/readiness authority is modeled; it is not kernel takeover.
 `tests/recovery.rs` and the other privileged kernel fixtures remain manual gates
 for a prepared isolated Linux environment. They are excluded from ordinary
 Cargo and local compositor runs; they must not inject into the host session.
 
-The desktop test setup follows Mold's `tools/sandbox/nested.sh`:
-
-```sh
-nix run .#cage-test                     # headless Cage -> nested Hyprland -> receiver
-nix run .#cage-test -- --visible        # watch the owned session as a window
-nix run .#cage-test -- --layers         # Lua layer change with its rule still enabled
-nix run .#cage-test -- --modes          # Lua mode switch with its rule and layer still enabled
-nix run .#cage-test -- --layers --input # Normalized source frames and resets reach Lua
-nix run .#cage-test -- --layers --input --power --windows # Lua DPMS and targeted window actions
-nix run .#cage-touch-test               # direct headless Cage touch receipts
-```
-
-On NixOS, use `oslo make test-cage-touch` and the explicitly patched
-`oslo make test-cage-wayland-fix` for hardware-rendered checks without nixGL.
-`oslo make test-cage` preserves the separate stock dependency gate. See
-[local NixOS development](docs/nixos.md#local-development-and-cage-tests) for
-the development shell, known stock startup failure, resource limits and
-user-launched privileged gates.
-
-The runner uses private Wayland sockets, a scratch home/XDG directories and a
-private session bus with service activation disabled. The system bus and seatd
-socket point to nonexistent paths. It injects B and Shift+A into the nested
-compositor only, checks six ordered events, text and neutral modifier cleanup,
-then stops its Cage, Hyprland, proxy and receiver processes. Logs and receipts
-remain under `target/cage-host/run-*`. No host evdev devices are opened.
-`RENDER_NODE` selects the rendering device, defaulting to `/dev/dri/renderD128`.
-The compatibility proxy is adapted from Mold's sandbox at commit `36261df7`.
-
-On Ubuntu, an explicitly patched newer-compositor fixture is available as
-`cage-test-wayland-fix`; the default remains unchanged. See
-[the dependency distinction and owned-output screenshots](docs/ubuntu-compositors.md#explicit-nested-wayland-test-variant)
-before using its results as acceptance evidence.
-
-The same run now queries that owned Hyprland through Prek's verified IPC client,
-transfers complete geometry to its real supervised Luna helper, and routes
-synthetic A/B frames through the Lua-configured routing library. The app must
-receive only B from that phase; A must produce its semantic callback without
-appearing in the receiver. These source/readiness/session authorities are model
-fixtures. They do not establish production kernel takeover or logind registration.
-
-The app receipt for that phase now precedes a Lua disable transaction. The
-coordinator retires its transports and queued matches, the fixture establishes a
-fresh neutral model source incarnation, and Lua receives revision 2 while the
-file/session fences stay at 1. A second phase must deliver A and B to the same
-real receiver, with neutral keys/modifiers and increasing gesture IDs. Nine
-actual compositor snapshots and the correlated Lua receipt are checked.
-
-`--layers` runs the same app-receipt sequence by deactivating A's declared layer
-while keeping A's rule enabled. The receiver must then get A and B. This tests
-acknowledged Lua layer control through the routing model and actual nested app;
-source ownership/readiness remain model fixtures.
-
-`--modes` runs that sequence by switching A out of its named mode while its rule
-and layer remain enabled. The accepted selection and shared revision must agree
-with Lua queries before the receiver gets A and B. It can be combined with the
-input, power and window checks; `--modes` takes precedence over `--layers` for
-the mutation exercised in that run.
-
-`--windows` creates two additional owned receivers. Granted Lua plans move the
-starting receiver to the adjacent numeric workspace and back, following it,
-then close it after focus switches to the guard receiver. Stock IPC must confirm
-the exact window/workspace/focus, the target must acknowledge close, and the
-guard must remain alive. The adapter supports Hyprland 0.54.3 and exact 0.56.2
-with a verified, frozen hyprlang or Lua config provider. Lua effects use typed
-factories with explicit targets and final lifetime, workspace, native goal-box
-and output-geometry guards, not arbitrary dispatch strings. These guards run
-inside the native factory; legacy address dispatch retains a read/dispatch race.
-Unknown or changed providers refuse without syntax fallback.
-Workspace moves require a single output and protected `session --hyprland` opt-in.
-Production takeover and continuous scrolling-layout effects remain pending.
-[Native app reordering](docs/hyprland-reorder.md) requires a complete frozen
-vertical scrolling-layout graph on the exact 0.56.2 Lua provider; it does not
-grant rendered app-content or physical input ownership.
-[Continuous viewport motion](docs/hyprland-scrolling.md) documents G11
-`scroll_stack`: a validated phone scrolling profile, a frozen workspace proof
-and guarded numeric 0.56.2 Lua moves. Touch routing and physical acceptance
-remain pending.
-`oslo make test-cage-lua-wayland-fix` runs the same mode/layer, input, power and
-window checks with an actual Lua-config compositor. Like the legacy variant,
-it explicitly uses the test-only Aquamarine startup patch, not stock acceptance.
-[The reference](docs/lua-api.md#experimental-targeted-hyprland-window-adapter)
-documents the stock address-selector race between lifetime preflight and dispatch.
-
-The separate touch runner uses a test-only Cage build with a private inherited
-socketpair and a wlroots touch device. Its events use Cage's ordinary touch
-handlers and must reach the actual receiver as two identified contacts, precise
-coordinates, motion, four ordered touch frames and neutral releases. The driver
-refuses non-headless backends before startup and terminates on malformed input.
-No public input protocol or kernel input device is created. An initial frame
-callback establishes the mapped target; each touch frame then requires its own
-submitted-state watermark. Keyboard batches also wait for their watermark before
-the owned compositor is captured. Frame callbacks are pacing, not physical
-presentation evidence.
-
-These local checks prove keyboard/touch delivery and modeled keyboard consumption.
-Touch routing/consumption, cancellation, remapping/repeats, broker/lock integration and handoff races retain their own
-required acceptance gates. The old NixOS/QEMU test drivers are retired; ARM
-builds and execution follow the native-CI and phone cross-build paths below.
+The old NixOS/QEMU test drivers are retired; ARM builds and execution follow
+the native-CI and phone cross-build paths below.
 
 `tests/protocol.rs` covers schema/size/order/time bounds, nonblocking backpressure,
 descriptor rejection/cleanup, endpoint lifetimes and inherited-socket misuse.
@@ -675,8 +543,7 @@ cargo build --release --target aarch64-unknown-linux-musl --bin prek
 
 The shell supplies the ARM standard library and cross linker. It uses dynamic
 musl linking with `/lib/ld-musl-aarch64.so.1`, allowing runtime system libraries
-to load on the phone. Run device acceptance on the actual ARM phone; desktop
-Cage checks run locally without a machine emulator.
+to load on the phone. Run device acceptance on the actual ARM phone.
 
 For Nix builds of a Git checkout, add new source files to Git's index so they are
 included. The package source excludes recordings, sockets and local build output.

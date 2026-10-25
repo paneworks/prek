@@ -211,12 +211,12 @@ assert(v.fence.configuration=='18446744073709551614' and v.fence.session=='18446
 assert(#v.negotiated==3 and #v.ready==1 and v.ready[1]=='commands')
 assert(v.sampled_at.secs==0 and v.sampled_at.nanos==0)
 assert(p.capabilities.has('context') and p.capabilities.has('commands'))
-assert(not p.capabilities.ready('context') and not p.capabilities.has('power_actions'))
+assert(not p.capabilities.ready('context') and not p.capabilities.has('lua_actions'))
 assert(p.capabilities.ready('commands') and not p.capabilities.ready('unknown'))
-v.fence.session='forged';v.negotiated[1]='power_actions';v.ready[1]='power_actions'
+v.fence.session='forged';v.negotiated[1]='lua_actions';v.ready[1]='lua_actions'
 assert(p.capabilities.current().fence.session=='18446744073709551615')
-assert(p.capabilities.has('context') and not p.capabilities.has('power_actions'))
-assert(p.capabilities.ready('commands') and not p.capabilities.ready('power_actions'))
+assert(p.capabilities.has('context') and not p.capabilities.has('lua_actions'))
+assert(p.capabilities.ready('commands') and not p.capabilities.ready('lua_actions'))
 "#,
         );
         runtime
@@ -269,10 +269,10 @@ assert(p.capabilities.ready('commands') and not p.capabilities.ready('power_acti
         dispatch(&mut runtime);
         let mut invalid = Vec::new();
         let mut changed = unavailable.clone();
-        changed.negotiated.insert(Capability::PowerActions);
+        changed.negotiated.insert(Capability::LuaActions);
         invalid.push(changed);
         let mut changed = unavailable.clone();
-        changed.ready.insert(Capability::PowerActions);
+        changed.ready.insert(Capability::LuaActions);
         invalid.push(changed);
         let mut changed = unavailable.clone();
         changed.ready.insert(Capability::Context);

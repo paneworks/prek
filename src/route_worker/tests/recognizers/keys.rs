@@ -7,16 +7,10 @@ mod producers;
 #[test]
 fn generated_incarnations_have_distinct_consumer_names() {
     let mut fixture = Fixture::new(profile(), super::owner());
-    let one = Descriptor::generated_keyboard(
-        fixture.stream.next_key_source("seat0").unwrap(),
-        BTreeMap::new(),
-    )
-    .unwrap();
-    let two = Descriptor::generated_keyboard(
-        fixture.stream.next_key_source("seat1").unwrap(),
-        BTreeMap::new(),
-    )
-    .unwrap();
+    let one =
+        Descriptor::generated_keyboard(fixture.stream.next_key_source("seat0").unwrap()).unwrap();
+    let two =
+        Descriptor::generated_keyboard(fixture.stream.next_key_source("seat1").unwrap()).unwrap();
     assert_ne!(one.name, two.name);
     fixture.stream.key_generation = u64::MAX;
     assert!(fixture.stream.next_key_source("seat0").is_err());
@@ -44,14 +38,11 @@ fn a_fatal_generated_cleanup_error_stays_latched() {
 #[test]
 fn the_native_adapter_fixture_rejects_a_socket_instead_of_a_regular_file() {
     let fixture = Fixture::new(profile(), super::owner());
-    let descriptor = Descriptor::generated_keyboard(
-        Source {
-            device: 0,
-            generation: 1,
-            seat: "seat0".into(),
-        },
-        BTreeMap::new(),
-    )
+    let descriptor = Descriptor::generated_keyboard(Source {
+        device: 0,
+        generation: 1,
+        seat: "seat0".into(),
+    })
     .unwrap();
     let publication = fixture
         .stream
@@ -82,14 +73,11 @@ fn owner() -> Subscription {
     owner
 }
 fn slot(fixture: &Fixture) -> (crate::route_worker::keys::Slot, Descriptor, PathBuf) {
-    let descriptor = Descriptor::generated_keyboard(
-        Source {
-            device: 0,
-            generation: 1,
-            seat: "seat0".into(),
-        },
-        BTreeMap::new(),
-    )
+    let descriptor = Descriptor::generated_keyboard(Source {
+        device: 0,
+        generation: 1,
+        seat: "seat0".into(),
+    })
     .unwrap();
     let publication = fixture
         .stream
@@ -168,7 +156,6 @@ fn physical_file(fixture: &mut Fixture, original: &Device, name: &str) -> PathBu
         },
         None,
         &BTreeMap::new(),
-        BTreeMap::new(),
     )
     .unwrap();
     let publication = fixture
@@ -185,18 +172,11 @@ fn physical_file(fixture: &mut Fixture, original: &Device, name: &str) -> PathBu
         .open(&path)
         .unwrap();
     let virtual_device = Virtual::ordinary_file_fixture(publication, file).unwrap();
-    let worker =
-        serde_json::from_value(serde_json::json!({"pid":std::process::id(),"birth":1,"epoch":1}))
-            .unwrap();
     let now = monotonic().unwrap();
-    let mut admission =
-        crate::morf::admission::Gate::new(worker, fixture.owner.fence, original.source.clone());
-    admission.update(None, now).unwrap();
     fixture.stream.outputs.insert(
         original.source.clone(),
         Output {
             fence: fixture.owner.fence,
-            admission,
             virtual_device,
             state_probe: None,
             feedback: None,
@@ -484,7 +464,6 @@ fn private_publication_reply_is_demultiplexed_without_physical_source_aliases() 
         name: descriptor.name.clone(),
         class: descriptor.class,
         seat: "seat0".into(),
-        settings: BTreeMap::new(),
         at: monotonic().unwrap(),
     };
     let source = descriptor.source.clone();
@@ -496,11 +475,7 @@ fn private_publication_reply_is_demultiplexed_without_physical_source_aliases() 
                     fence: fixture.owner.fence,
                     source: source.clone(),
                     marker: "old-publication".into(),
-                    evidence: evidence.clone(),
-                    admission: Some(crate::morf::admission::Admission {
-                        owners: vec![],
-                        expires: None
-                    })
+                    evidence,
                 },
                 monotonic().unwrap()
             )
@@ -514,25 +489,6 @@ fn private_publication_reply_is_demultiplexed_without_physical_source_aliases() 
             .unwrap()
             .available(monotonic().unwrap())
     );
-    assert!(
-        fixture
-            .parent
-            .send(
-                &Command::Transport {
-                    fence: fixture.owner.fence,
-                    source,
-                    marker: descriptor.marker,
-                    evidence,
-                    admission: Some(crate::morf::admission::Admission {
-                        owners: vec![],
-                        expires: None
-                    })
-                },
-                monotonic().unwrap()
-            )
-            .unwrap()
-    );
-    assert!(fixture.stream.service().is_err());
 }
 
 #[test]
@@ -558,7 +514,6 @@ fn a_late_generated_reply_cannot_mutate_a_physical_output_with_equal_source_numb
         },
         None,
         &BTreeMap::new(),
-        BTreeMap::new(),
     )
     .unwrap();
     let publication = fixture
@@ -576,19 +531,11 @@ fn a_late_generated_reply_cannot_mutate_a_physical_output_with_equal_source_numb
     let virtual_device = Virtual::ordinary_file_fixture(publication, file).unwrap();
     let physical = virtual_device.descriptor().clone();
     let source = physical.source.clone();
-    let worker =
-        serde_json::from_value(serde_json::json!({"pid":std::process::id(),"birth":1,"epoch":1}))
-            .unwrap();
     let now = monotonic().unwrap();
     fixture.stream.outputs.insert(
         source.clone(),
         Output {
             fence: fixture.owner.fence,
-            admission: crate::morf::admission::Gate::new(
-                worker,
-                fixture.owner.fence,
-                source.clone(),
-            ),
             virtual_device,
             state_probe: None,
             feedback: None,
@@ -600,7 +547,7 @@ fn a_late_generated_reply_cannot_mutate_a_physical_output_with_equal_source_numb
             sequence: 0,
         },
     );
-    let generated = Descriptor::generated_keyboard(source.clone(), BTreeMap::new())
+    let generated = Descriptor::generated_keyboard(source.clone())
         .unwrap()
         .for_isolated()
         .unwrap()
@@ -613,7 +560,6 @@ fn a_late_generated_reply_cannot_mutate_a_physical_output_with_equal_source_numb
             name: descriptor.name.clone(),
             class: descriptor.class,
             seat: "seat0".into(),
-            settings: BTreeMap::new(),
             at: monotonic().unwrap(),
         };
         assert!(
@@ -625,7 +571,6 @@ fn a_late_generated_reply_cannot_mutate_a_physical_output_with_equal_source_numb
                         source: source.clone(),
                         marker: descriptor.marker.clone(),
                         evidence,
-                        admission: None
                     },
                     monotonic().unwrap()
                 )

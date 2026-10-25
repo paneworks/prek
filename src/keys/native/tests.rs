@@ -14,17 +14,13 @@ fn source() -> Source {
     }
 }
 fn descriptor() -> Descriptor {
-    Descriptor::generated_keyboard(
-        source(),
-        BTreeMap::from([("kb_layout".into(), "us".into())]),
-    )
-    .unwrap()
+    Descriptor::generated_keyboard(source()).unwrap()
 }
 fn consumer() -> Consumer {
-    Consumer::Hyprland {
+    Consumer::Compositor {
         pid: 123,
         start: 456,
-        instance: "owned-model".into(),
+        display: "wayland-1".into(),
     }
 }
 fn evidence(descriptor: &Descriptor, at: Duration) -> ConsumerEvidence {
@@ -34,7 +30,6 @@ fn evidence(descriptor: &Descriptor, at: Duration) -> ConsumerEvidence {
         name: descriptor.name.clone(),
         class: descriptor.class,
         seat: descriptor.source.seat.clone(),
-        settings: descriptor.consumer_settings.clone(),
         at,
     }
 }
@@ -113,10 +108,6 @@ fn generated_descriptor_revalidation_rejects_changed_native_shape_or_role() {
         |d| {
             d.udev.insert("ID_INPUT_MOUSE".into(), "1".into());
         },
-        |d| {
-            d.consumer_settings
-                .insert("kb_layout".into(), "us\n".into());
-        },
     ];
     for edit in mutations {
         let mut changed = descriptor();
@@ -127,9 +118,7 @@ fn generated_descriptor_revalidation_rejects_changed_native_shape_or_role() {
         );
     }
     for seat in ["".into(), "s".repeat(129), "seat\n".into()] {
-        assert!(
-            Descriptor::generated_keyboard(Source { seat, ..source() }, BTreeMap::new()).is_err()
-        );
+        assert!(Descriptor::generated_keyboard(Source { seat, ..source() }).is_err());
     }
     let mut value = serde_json::to_value(descriptor()).unwrap();
     value["original"] = serde_json::Value::Null;
@@ -187,13 +176,12 @@ fn generated_readiness_rejects_wrong_or_future_consumer_evidence() {
         |e| e.name.push('x'),
         |e| e.seat = "seat1".into(),
         |e| e.class = Class::Mouse,
-        |e| e.settings.clear(),
         |e| e.at = Duration::from_millis(1),
         |e| {
-            e.consumer = Consumer::Hyprland {
+            e.consumer = Consumer::Compositor {
                 pid: 124,
                 start: 456,
-                instance: "owned-model".into(),
+                display: "wayland-1".into(),
             }
         },
     ];
@@ -250,7 +238,7 @@ fn isolated_generated_keyboard_executes_owned_keys_and_exact_cancellation() {
         generation: kernel::now().as_nanos().try_into().unwrap(),
         ..source()
     };
-    let spec = Descriptor::generated_keyboard(source.clone(), BTreeMap::new()).unwrap();
+    let spec = Descriptor::generated_keyboard(source.clone()).unwrap();
     let consumer = kernel::receiver_identity();
     let publication = registry.prepare_generated_isolated(spec).unwrap();
     let mut prepared = Prepared::create(publication, consumer.clone(), kernel::now()).unwrap();
@@ -274,7 +262,6 @@ fn isolated_generated_keyboard_executes_owned_keys_and_exact_cancellation() {
             name: descriptor.name.clone(),
             class: Class::Keyboard,
             seat: source.seat.clone(),
-            settings: BTreeMap::new(),
             at: now,
         })
         .unwrap();

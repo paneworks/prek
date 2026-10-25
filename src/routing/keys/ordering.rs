@@ -13,14 +13,11 @@ fn keyboard(code: u16) -> bool {
 
 #[test]
 fn domain_key_codes_match_the_generated_keyboard_shape() {
-    let descriptor = crate::transport::Descriptor::generated_keyboard(
-        Source {
-            device: 100,
-            generation: 1,
-            seat: "seat0".into(),
-        },
-        BTreeMap::new(),
-    )
+    let descriptor = crate::transport::Descriptor::generated_keyboard(Source {
+        device: 100,
+        generation: 1,
+        seat: "seat0".into(),
+    })
     .unwrap();
     for code in 0..=1023 {
         assert_eq!(

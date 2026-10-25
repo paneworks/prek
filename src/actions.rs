@@ -17,28 +17,14 @@ use std::{
     process::{Child, Command, Stdio},
     time::Duration,
 };
-mod hyprland;
-mod morf;
-mod power;
-pub use hyprland::HyprlandAdapter;
-pub use morf::MorfAdapter;
-pub use power::PowerAdapter;
-
 pub const MAX_RUNNING: usize = 8;
 const MAX_PENDING: usize = 64;
 const MAX_GESTURES: usize = 4096;
-const MAX_SCROLLS: usize = 4;
 struct Pending {
     event: Box<Event>,
     expires: Option<Duration>,
     resolving: bool,
     resolved: Option<Vec<Action>>,
-    power_target: Option<crate::context::OutputState>,
-    window_target: Option<hyprland::Target>,
-    scroll_target: Option<hyprland::ScrollTarget>,
-    morf_target: Option<morf::Target>,
-    reorder_scope: Option<protocol::ReorderScope>,
-    reorder_granted: bool,
 }
 
 struct Running {
@@ -48,29 +34,11 @@ struct Running {
     child: Child,
     pidfd: Option<OwnedFd>,
 }
-struct Native {
-    until: Duration,
-    cancelled: bool,
-}
-/// One continuous workspace scroll and the state its next attempt is
-/// guarded against.
-struct Scroll {
-    target: hyprland::ScrollTarget,
-    view: hyprland::ScrollView,
-    motion: crate::hyprland::scrolling::Motion,
-}
 type ExecutionKey = ([u64; 2], u64, u64, u64, u64);
 struct ExecutionGroup {
     remaining: usize,
     result: Completion,
     multiple_effects: bool,
-}
-fn native_scope(
-    adapter: Option<&HyprlandAdapter>,
-    event: &Event,
-    now: Duration,
-) -> Option<protocol::ReorderScope> {
-    adapter?.native_scope(&crate::routing::native::event_target(event)?, now)
 }
 fn execution_key(fence: Fence, id: u64, ordinal: u64) -> ExecutionKey {
     (
@@ -95,12 +63,6 @@ pub struct Executor {
     lua_ready: bool,
     groups: BTreeMap<ExecutionKey, ExecutionGroup>,
     emitted: VecDeque<(Fence, u64, u64, String)>,
-    power: Option<PowerAdapter>,
-    hyprland: Option<HyprlandAdapter>,
-    morf: Option<MorfAdapter>,
-    native: BTreeMap<(u64, u64), Native>,
-    native_seen: BTreeMap<u64, u64>,
-    scrolls: BTreeMap<u64, Scroll>,
 }
 impl Executor {
     pub fn new(
@@ -131,12 +93,6 @@ impl Executor {
             lua_ready: false,
             groups: BTreeMap::new(),
             emitted: VecDeque::new(),
-            power: None,
-            hyprland: None,
-            morf: None,
-            native: BTreeMap::new(),
-            native_seen: BTreeMap::new(),
-            scrolls: BTreeMap::new(),
         })
     }
     pub fn transition(&mut self, fence: Fence) -> io::Result<()> {
@@ -156,12 +112,6 @@ impl Executor {
         self.reported_available = None;
         self.lua_ready = false;
         self.emitted.clear();
-        self.power = None;
-        self.hyprland = None;
-        self.morf = None;
-        self.native.clear();
-        self.native_seen.clear();
-        self.scrolls.clear();
         self.groups.clear();
         // Already dispatched commands cannot be undone. Keep reaping them,
         // counting them against the bound, and discard their old completions.
@@ -183,20 +133,9 @@ impl Executor {
         })
     }
     pub fn offer(&mut self, fence: Fence, event: Box<Event>, now: Duration) -> io::Result<()> {
-        self.offer_scoped(fence, event, None, now)
-    }
-    /// Offer a match with its original native claim proof; absent proofs disable reorder.
-    pub fn offer_scoped(
-        &mut self,
-        fence: Fence,
-        event: Box<Event>,
-        reorder_scope: Option<protocol::ReorderScope>,
-        now: Duration,
-    ) -> io::Result<()> {
         Reply::Dispatch {
             fence,
             event: event.clone(),
-            reorder_scope: reorder_scope.clone(),
         }
         .validate()?;
         let Event::Matched {
@@ -226,95 +165,6 @@ impl Executor {
             ));
         }
         crate::config::validate_action(action).map_err(|error| protocol::invalid(&error))?;
-        let power_target =
-            if protocol::action_capabilities(action).contains(&Capability::PowerActions) {
-                let adapter = self
-                    .power
-                    .as_ref()
-                    .ok_or_else(|| protocol::invalid("power adapter unavailable"))?;
-                let Event::Matched {
-                    output: Some(output),
-                    ..
-                } = event.as_ref()
-                else {
-                    return Err(protocol::invalid("power action requires a frozen output"));
-                };
-                Some(adapter.target(output, now)?)
-            } else {
-                None
-            };
-        let scroll = matches!(
-            action,
-            Action::Hyprland {
-                action: crate::config::WindowAction::ScrollStack
-            }
-        );
-        let scroll_target = if scroll {
-            let Event::Matched {
-                window: None,
-                output: Some(output),
-                workspace: Some(workspace),
-                ..
-            } = event.as_ref()
-            else {
-                return Err(protocol::invalid(
-                    "scrolling requires a frozen output workspace and no window",
-                ));
-            };
-            Some(
-                self.hyprland
-                    .as_ref()
-                    .ok_or_else(|| protocol::invalid("Hyprland adapter unavailable"))?
-                    .scroll_target(output, *workspace, now)?,
-            )
-        } else {
-            None
-        };
-        let window_target = if !scroll
-            && protocol::action_capabilities(action).contains(&Capability::HyprlandActions)
-        {
-            let adapter = self
-                .hyprland
-                .as_ref()
-                .ok_or_else(|| protocol::invalid("Hyprland adapter unavailable"))?;
-            let Event::Matched {
-                window: Some(window),
-                output: Some(output),
-                workspace: Some(workspace),
-                ..
-            } = event.as_ref()
-            else {
-                return Err(protocol::invalid(
-                    "Hyprland action requires a frozen window, output and workspace",
-                ));
-            };
-            let target = adapter.target(window, output, *workspace, now)?;
-            if matches!(action,Action::Hyprland{action:action @ (crate::config::WindowAction::ReorderUp|crate::config::WindowAction::ReorderDown)} if target.reorder(*action).is_none())
-            {
-                return Err(protocol::invalid("reorder has no frozen eligible neighbor"));
-            }
-            Some(target)
-        } else {
-            None
-        };
-        let morf_target =
-            if protocol::action_capabilities(action).contains(&Capability::MorfActions) {
-                let Event::Matched {
-                    output: Some(output),
-                    ..
-                } = event.as_ref()
-                else {
-                    return Err(protocol::invalid("Morf action requires its frozen output"));
-                };
-                Some(
-                    self.morf
-                        .as_ref()
-                        .ok_or_else(|| protocol::invalid("Morf submission adapter unavailable"))?
-                        .target(output, now)?,
-                )
-            } else {
-                None
-            };
         if self.seen.get(id).is_some_and(|old| ordinal <= old)
             || (!self.seen.contains_key(id) && self.seen.len() >= MAX_GESTURES)
             || self.pending.len() >= MAX_PENDING
@@ -325,14 +175,6 @@ impl Executor {
         }
         let (id, ordinal) = (*id, *ordinal);
         self.seen.insert(id, ordinal);
-        let reorder_scope = reorder_scope.filter(|scope| {
-            native_scope(self.hyprland.as_ref(), &event, now).as_ref() == Some(scope)
-        });
-        if matches!(event.as_ref(),Event::Matched{action,..} if crate::routing::native::required(action))
-            && reorder_scope.is_none()
-        {
-            return self.complete(id, ordinal, Completion::Unavailable);
-        }
         self.queue(Request::Authorize { fence, id, ordinal })?;
         self.pending.insert(
             (id, ordinal),
@@ -341,164 +183,9 @@ impl Executor {
                 expires: None,
                 resolving: false,
                 resolved: None,
-                power_target,
-                window_target,
-                scroll_target,
-                morf_target,
-                reorder_scope,
-                reorder_granted: false,
             },
         );
         Ok(())
-    }
-    /// Explicit host opt-in. Public broker negotiation remains separate.
-    pub fn set_hyprland_adapter(&mut self, adapter: HyprlandAdapter) -> io::Result<()> {
-        if !self.capabilities.contains(&Capability::HyprlandActions)
-            || self.hyprland.is_some()
-            || adapter.fence() != self.fence
-            || adapter.seat() != Some(self.seat.as_str())
-        {
-            return Err(protocol::invalid(
-                "Hyprland adapter exceeds executor authority",
-            ));
-        }
-        self.hyprland = Some(adapter);
-        self.reported_available = None;
-        Ok(())
-    }
-    pub fn sync_morf_context(&mut self, view: crate::context_transfer::View) -> io::Result<()> {
-        if !self.capabilities.contains(&Capability::MorfActions) || view.fence != self.fence {
-            return Err(protocol::invalid("Morf context exceeds executor authority"));
-        }
-        self.reported_available = None;
-        if let Some(adapter) = self.morf.as_mut() {
-            return adapter.update_context(view);
-        }
-        let adapter = MorfAdapter::new(view)?;
-        if adapter.seat() != Some(self.seat.as_str()) || adapter.fence() != self.fence {
-            return Err(protocol::invalid(
-                "Morf adapter belongs to another seat/fence",
-            ));
-        }
-        self.morf = Some(adapter);
-        Ok(())
-    }
-    pub fn update_hyprland_context(
-        &mut self,
-        view: crate::context_transfer::View,
-    ) -> io::Result<()> {
-        self.reported_available = None;
-        let result = self
-            .hyprland
-            .as_mut()
-            .ok_or_else(|| protocol::invalid("Hyprland adapter unavailable"))?
-            .update_context(view);
-        let now = monotonic()?;
-        for pending in self.pending.values_mut() {
-            if let Some(scope) = pending.reorder_scope.as_ref() {
-                let current = result
-                    .is_ok()
-                    .then(|| native_scope(self.hyprland.as_ref(), &pending.event, now))
-                    .flatten();
-                if current.as_ref() != Some(scope) {
-                    pending.reorder_scope = None;
-                    pending.reorder_granted = false;
-                }
-            }
-        }
-        result
-    }
-    /// Explicit host opt-in. Public broker negotiation remains separate.
-    pub fn set_power_adapter(&mut self, adapter: PowerAdapter) -> io::Result<()> {
-        if !self.capabilities.contains(&Capability::PowerActions)
-            || self.power.is_some()
-            || adapter.fence() != self.fence
-            || adapter.seat() != Some(self.seat.as_str())
-        {
-            return Err(protocol::invalid(
-                "power adapter exceeds executor authority",
-            ));
-        }
-        self.power = Some(adapter);
-        self.reported_available = None;
-        Ok(())
-    }
-    pub fn update_power_context(&mut self, view: crate::context_transfer::View) -> io::Result<()> {
-        self.reported_available = None;
-        self.power
-            .as_mut()
-            .ok_or_else(|| protocol::invalid("power adapter unavailable"))?
-            .update_context(view)
-    }
-    /// Install from the exact broker-owned compositor binding, never ambient focus.
-    pub fn sync_hyprland_context(
-        &mut self,
-        runtime: &std::path::Path,
-        instance: &str,
-        view: crate::context_transfer::View,
-    ) -> io::Result<()> {
-        if self.hyprland.is_some() {
-            return self.update_hyprland_context(view);
-        }
-        let Some(client) =
-            self.compositor_client(runtime, instance, &view, Capability::HyprlandActions)?
-        else {
-            return Ok(());
-        };
-        self.set_hyprland_adapter(HyprlandAdapter::new(client, view)?)
-    }
-    /// Install only from a fresh broker-owned binding; never trust a Lua target
-    /// or discover a compositor independently of that binding.
-    pub fn sync_power_context(
-        &mut self,
-        runtime: &std::path::Path,
-        instance: &str,
-        view: crate::context_transfer::View,
-    ) -> io::Result<()> {
-        if self.power.is_some() {
-            return self.update_power_context(view);
-        }
-        let Some(client) =
-            self.compositor_client(runtime, instance, &view, Capability::PowerActions)?
-        else {
-            return Ok(());
-        };
-        self.set_power_adapter(PowerAdapter::new(client, view)?)
-    }
-    fn compositor_client(
-        &self,
-        runtime: &std::path::Path,
-        instance: &str,
-        view: &crate::context_transfer::View,
-        capability: Capability,
-    ) -> io::Result<Option<crate::hyprland::Client>> {
-        view.validate()?;
-        if view.fence != self.fence || !self.capabilities.contains(&capability) {
-            return Err(protocol::invalid(
-                "compositor context exceeds current executor authority",
-            ));
-        }
-        let Some(context) = view.context.as_ref() else {
-            return Ok(None);
-        };
-        let now = monotonic()?;
-        if view.state != crate::context::State::Desktop
-            || context.snapshot.secure_overlay
-            || now < view.sampled_at
-            || now - view.sampled_at >= crate::context_transfer::FRESHNESS
-            || now < context.snapshot.captured_at
-            || now - context.snapshot.captured_at >= crate::context_transfer::FRESHNESS
-        {
-            return Ok(None);
-        }
-        // SAFETY: read-only current process credential query.
-        if context.binding.seat != self.seat || context.binding.uid != unsafe { libc::geteuid() } {
-            return Err(protocol::invalid(
-                "compositor context belongs to another owner",
-            ));
-        }
-        let client = crate::hyprland::Client::open_bound(runtime, instance, &context.binding)?;
-        Ok(Some(client))
     }
     pub fn grant(
         &mut self,
@@ -506,18 +193,6 @@ impl Executor {
         id: u64,
         ordinal: u64,
         expires: Duration,
-        now: Duration,
-    ) -> io::Result<()> {
-        self.grant_scoped(fence, id, ordinal, expires, None, now)
-    }
-    /// Grant one offer with the same native proof and a bounded execution deadline.
-    pub fn grant_scoped(
-        &mut self,
-        fence: Fence,
-        id: u64,
-        ordinal: u64,
-        expires: Duration,
-        reorder_scope: Option<protocol::ReorderScope>,
         now: Duration,
     ) -> io::Result<()> {
         if id == 0 || ordinal == 0 {
@@ -545,13 +220,6 @@ impl Executor {
             return Ok(());
         }
         pending.expires = Some(expires);
-        let current = native_scope(self.hyprland.as_ref(), &pending.event, now);
-        pending.reorder_granted = reorder_scope.is_some()
-            && reorder_scope == pending.reorder_scope
-            && current == reorder_scope;
-        if !pending.reorder_granted {
-            pending.reorder_scope = None;
-        }
         Ok(())
     }
     /// Call after draining current broker messages, so a queued generation
@@ -646,19 +314,6 @@ impl Executor {
         if self.seen.get(&id).is_none_or(|seen| ordinal > *seen) {
             return Err(protocol::invalid("cancellation has no offered action"));
         }
-        self.scrolls.remove(&id);
-        if self.native_seen.contains_key(&id) {
-            let send = self.cancelled.get(&id).is_none_or(|old| *old < ordinal);
-            for ((gesture, _), native) in &mut self.native {
-                if *gesture == id {
-                    native.cancelled = true;
-                }
-            }
-            if send {
-                self.queue(Request::MorfCancel { fence, id, ordinal })?;
-            }
-            self.remember_cancellation(id, ordinal);
-        }
         let Some(pending) = self.pending.get_mut(&(id, ordinal)) else {
             // Ordered control can repeat a cancellation while an earlier
             // acknowledgement is in flight. Already dispatched children remain
@@ -679,123 +334,6 @@ impl Executor {
         }
         self.remember_cancellation(id, ordinal);
         Ok(())
-    }
-    /// One granted ordinal of a continuous workspace scroll. Begin freezes a
-    /// fresh viewport; each ordinal then makes at most one paced attempt, and
-    /// end keeps attempting toward its last destination within the grant.
-    fn execute_scroll(
-        &mut self,
-        id: u64,
-        ordinal: u64,
-        pending: &Pending,
-    ) -> io::Result<Completion> {
-        use crate::{
-            gestures::{Space, TouchGesture},
-            hyprland::scrolling::{Motion, Phase, State},
-            rules::Evidence,
-        };
-        let Event::Matched {
-            stage, evidence, ..
-        } = pending.event.as_ref()
-        else {
-            unreachable!("offers were validated");
-        };
-        let expires = pending.expires.unwrap();
-        let total = match evidence {
-            Evidence::Touch {
-                space: Space::Logical,
-                gesture: TouchGesture::Pan { total, .. },
-            } => Some(total.y),
-            _ => None,
-        };
-        let (Some(adapter), Some(target), Some(total), true, true) = (
-            self.hyprland.as_mut(),
-            pending.scroll_target.as_ref(),
-            total,
-            pending.reorder_granted,
-            hyprland::supported(crate::config::WindowAction::ScrollStack),
-        ) else {
-            self.scrolls.remove(&id);
-            return Ok(Completion::Unavailable);
-        };
-        let now = monotonic()?;
-        match stage {
-            Stage::Begin if !self.scrolls.contains_key(&id) && self.scrolls.len() < MAX_SCROLLS => {
-                let until = std::time::Instant::now()
-                    + expires.saturating_sub(now).min(Duration::from_millis(200));
-                let Some(view) = adapter.scroll_view(target, until)? else {
-                    return Ok(Completion::Unavailable);
-                };
-                let motion = Motion::begin(id, view.viewport.clone(), total, now)?;
-                self.scrolls.insert(
-                    id,
-                    Scroll {
-                        target: target.clone(),
-                        view,
-                        motion,
-                    },
-                );
-            }
-            Stage::Update | Stage::End => {
-                let phase = if *stage == Stage::End {
-                    Phase::End
-                } else {
-                    Phase::Update
-                };
-                if !self
-                    .scrolls
-                    .get_mut(&id)
-                    .filter(|scroll| scroll.target.same(target))
-                    .is_some_and(|scroll| {
-                        scroll.motion.progress(ordinal, phase, total, now).is_ok()
-                    })
-                {
-                    self.scrolls.remove(&id);
-                    return Ok(Completion::Unavailable);
-                }
-            }
-            _ => return Ok(Completion::Unavailable),
-        }
-        if *stage == Stage::Update
-            && self
-                .pending
-                .range((id, ordinal + 1)..=(id, u64::MAX))
-                .any(|(_, newer)| newer.expires.is_some())
-        {
-            return Ok(Completion::Cancelled);
-        }
-        let scroll = self.scrolls.get_mut(&id).unwrap();
-        let mut result = Completion::Cancelled;
-        while monotonic()? < expires {
-            let Some(attempt) = scroll.motion.take(monotonic()?)? else {
-                if scroll.motion.state() != State::Ending {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(1));
-                continue;
-            };
-            let step = adapter.scroll_step(&scroll.target, &mut scroll.view, attempt, expires);
-            let observed = match step {
-                hyprland::Step::Settled(offset) => Some(offset),
-                _ => None,
-            };
-            scroll.motion.settle(attempt, observed, monotonic()?)?;
-            match step {
-                hyprland::Step::Settled(_) => result = Completion::Applied,
-                hyprland::Step::Unsent if result != Completion::Applied => {
-                    result = Completion::Unavailable
-                }
-                hyprland::Step::Unsent => {}
-                hyprland::Step::Unconfirmed => result = Completion::Uncertain,
-            }
-            if scroll.motion.state() != State::Ending {
-                break;
-            }
-        }
-        if *stage == Stage::End || !matches!(scroll.motion.state(), State::Active | State::Ending) {
-            self.scrolls.remove(&id);
-        }
-        Ok(result)
     }
     fn remember_cancellation(&mut self, id: u64, ordinal: u64) {
         // Only seen identities can be canceled, so this shares the existing
@@ -831,16 +369,6 @@ impl Executor {
             let Event::Matched { stage, action, .. } = pending.event.as_ref() else {
                 unreachable!("offers were validated");
             };
-            if matches!(
-                action,
-                Action::Hyprland {
-                    action: crate::config::WindowAction::ScrollStack
-                }
-            ) {
-                let result = self.execute_scroll(id, ordinal, &pending)?;
-                self.complete(id, ordinal, result)?;
-                continue;
-            }
             if matches!(action, Action::Lua { .. }) && pending.resolved.is_none() {
                 if pending.resolving {
                     self.pending.insert((id, ordinal), pending);
@@ -855,10 +383,8 @@ impl Executor {
                 }
                 continue;
             }
-            if matches!(
-                action,
-                Action::Command { .. } | Action::Power { .. } | Action::Hyprland { .. }
-            ) && !matches!(stage, Stage::Discrete | Stage::Begin)
+            if matches!(action, Action::Command { .. })
+                && !matches!(stage, Stage::Discrete | Stage::Begin)
             {
                 self.complete(id, ordinal, Completion::Cancelled)?;
                 continue;
@@ -871,53 +397,13 @@ impl Executor {
                 .iter()
                 .filter(|action| matches!(action, Action::Command { .. }))
                 .count();
-            let native = actions
-                .iter()
-                .filter(|action| matches!(action, Action::Morf { .. }))
-                .count();
-            if self.running.len() + self.native.len() + commands + native > MAX_RUNNING
-                || native > 1
+            if self.running.len() + commands > MAX_RUNNING
                 || self.emitted.len() + actions.len() > MAX_PENDING
-                || actions.iter().any(|action| {
-                    !matches!(
-                        action,
-                        Action::Command { .. }
-                            | Action::Event { .. }
-                            | Action::Morf { .. }
-                            | Action::Power {
-                                action: crate::config::PowerAction::Wake
-                                    | crate::config::PowerAction::Blank
-                            }
-                    ) && !matches!(action, Action::Hyprland { action } if hyprland::supported(*action))
-                })
                 || actions
                     .iter()
-                    .filter(|action| matches!(action, Action::Power { .. } | Action::Hyprland { .. }))
-                    .count()
-                    > 1
-                || actions
-                    .iter()
-                    .any(|action| matches!(action, Action::Power { .. }))
-                    && (self.power.is_none() || pending.power_target.is_none())
-                || actions.iter().any(|action| matches!(action, Action::Hyprland { .. }))
-                    && (self.hyprland.is_none() || pending.window_target.is_none())
-                || actions.iter().any(crate::routing::native::required) && !pending.reorder_granted
-                || native > 0 && (self.morf.is_none() || pending.morf_target.is_none())
-                || actions.iter().any(|action| matches!(action,Action::Morf {action}
-                    if crate::morf::controls::Request::from_event(self.fence,&pending.event,*action).is_err()))
+                    .any(|action| !matches!(action, Action::Command { .. } | Action::Event { .. }))
             {
                 self.complete(id, ordinal, Completion::Unavailable)?;
-                continue;
-            }
-            if native > 0
-                && self
-                    .morf
-                    .as_ref()
-                    .unwrap()
-                    .check(pending.morf_target.as_ref().unwrap(), monotonic()?)
-                    .is_err()
-            {
-                self.complete(id, ordinal, Completion::Cancelled)?;
                 continue;
             }
             let mut count = 0;
@@ -938,75 +424,6 @@ impl Executor {
                     applied = true;
                     emitted_event = true;
                     continue;
-                }
-                if let Action::Morf { action } = action {
-                    if self
-                        .morf
-                        .as_ref()
-                        .unwrap()
-                        .check(pending.morf_target.as_ref().unwrap(), monotonic()?)
-                        .is_err()
-                    {
-                        result = if applied {
-                            Completion::Uncertain
-                        } else {
-                            Completion::Cancelled
-                        };
-                        break;
-                    }
-                    self.queue(Request::MorfAction {
-                        fence: self.fence,
-                        id,
-                        ordinal,
-                        action,
-                    })?;
-                    self.native.insert(
-                        (id, ordinal),
-                        Native {
-                            until: pending.expires.unwrap() + Duration::from_secs(2),
-                            cancelled: false,
-                        },
-                    );
-                    self.native_seen.insert(id, ordinal);
-                    count += 1;
-                    applied = true;
-                    continue;
-                }
-                if let Action::Power { action } = action {
-                    let completion = self.power.as_mut().unwrap().execute(
-                        action,
-                        pending.power_target.as_ref().unwrap(),
-                        pending.expires.unwrap(),
-                    );
-                    if completion == Completion::Applied {
-                        applied = true;
-                        emitted_event = true;
-                        continue;
-                    }
-                    result = if applied {
-                        Completion::Uncertain
-                    } else {
-                        completion
-                    };
-                    break;
-                }
-                if let Action::Hyprland { action } = action {
-                    let completion = self.hyprland.as_mut().unwrap().execute(
-                        action,
-                        pending.window_target.as_ref().unwrap(),
-                        pending.expires.unwrap(),
-                    );
-                    if completion == Completion::Applied {
-                        applied = true;
-                        emitted_event = true;
-                        continue;
-                    }
-                    result = if applied {
-                        Completion::Uncertain
-                    } else {
-                        completion
-                    };
-                    break;
                 }
                 let Action::Command { argv } = action else {
                     unreachable!()
@@ -1080,24 +497,6 @@ impl Executor {
                 }
             }
         }
-        let now = monotonic()?;
-        let expired = self
-            .native
-            .iter()
-            .filter(|(_, native)| now >= native.until)
-            .map(|(key, _)| *key)
-            .collect::<Vec<_>>();
-        for (id, ordinal) in expired {
-            let native = self.native.remove(&(id, ordinal)).unwrap();
-            if !native.cancelled {
-                self.queue(Request::MorfCancel {
-                    fence: self.fence,
-                    id,
-                    ordinal,
-                })?;
-            }
-            self.finish_effect(id, ordinal, Completion::Uncertain)?;
-        }
         Ok(())
     }
     fn finish_effect(&mut self, id: u64, ordinal: u64, result: Completion) -> io::Result<()> {
@@ -1121,78 +520,25 @@ impl Executor {
         }
         Ok(())
     }
-    pub fn complete_morf(
-        &mut self,
-        fence: Fence,
-        id: u64,
-        ordinal: u64,
-        mut result: Completion,
-    ) -> io::Result<()> {
-        fence.validate()?;
-        if fence != self.fence {
-            return if fence.broker == self.fence.broker
-                && fence.configuration <= self.fence.configuration
-                && fence.session <= self.fence.session
-            {
-                Ok(())
-            } else {
-                Err(protocol::invalid("foreign or future Morf result"))
-            };
-        }
-        let Some(native) = self.native.remove(&(id, ordinal)) else {
-            return if self
-                .native_seen
-                .get(&id)
-                .is_some_and(|seen| ordinal > 0 && ordinal <= *seen)
-            {
-                Ok(())
-            } else {
-                Err(protocol::invalid("Morf result has no submitted action"))
-            };
-        };
-        if native.cancelled {
-            result = if matches!(result, Completion::Cancelled | Completion::Unavailable) {
-                Completion::Cancelled
-            } else {
-                Completion::Uncertain
-            };
-        }
-        self.finish_effect(id, ordinal, result)
-    }
     /// Current executor capacity; grants and fresh target authorization are
     /// still required for every effect. Shared by broker and Lua availability.
-    pub fn ready_capabilities(&self, now: Duration) -> BTreeSet<Capability> {
-        let available = self.mode == Mode::Route
-            && self.running.len() + self.pending.len() + self.native.len() < MAX_RUNNING;
+    pub fn ready_capabilities(&self) -> BTreeSet<Capability> {
+        let available =
+            self.mode == Mode::Route && self.running.len() + self.pending.len() < MAX_RUNNING;
         if available {
-            [
-                Capability::Commands,
-                Capability::LuaActions,
-                Capability::PowerActions,
-                Capability::HyprlandActions,
-                Capability::MorfActions,
-            ]
-            .into_iter()
-            .filter(|capability| {
-                self.capabilities.contains(capability)
-                    && (*capability != Capability::LuaActions || self.lua_ready)
-                    && (*capability != Capability::PowerActions
-                        || self.power.as_ref().is_some_and(|power| power.ready(now)))
-                    && (*capability != Capability::HyprlandActions
-                        || self
-                            .hyprland
-                            .as_ref()
-                            .is_some_and(|adapter| adapter.ready(now)))
-                    && (*capability != Capability::MorfActions
-                        || self.morf.as_ref().is_some_and(|adapter| adapter.ready(now)))
-            })
-            .collect()
+            [Capability::Commands, Capability::LuaActions]
+                .into_iter()
+                .filter(|capability| {
+                    self.capabilities.contains(capability)
+                        && (*capability != Capability::LuaActions || self.lua_ready)
+                })
+                .collect()
         } else {
             BTreeSet::new()
         }
     }
     pub fn flush(&mut self, channel: &mut Channel) -> io::Result<()> {
-        let capabilities = self.ready_capabilities(monotonic()?);
+        let capabilities = self.ready_capabilities();
         if self.reported_available.as_ref() != Some(&capabilities) {
             self.queue(Request::Availability {
                 fence: self.fence,
@@ -1226,7 +572,6 @@ impl Executor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    mod morf_transport;
     use crate::{input::Source, rules::Evidence};
     use std::{
         fs,
@@ -1288,9 +633,7 @@ mod tests {
             stage: Stage::Discrete,
             action: Action::Command { argv },
             evidence: Evidence::Key { down: true },
-            window: None,
             output: None,
-            workspace: None,
         })
     }
     fn finish(executor: &mut Executor) {

@@ -17,8 +17,6 @@ p.events.on("context_changed", function(event)
         session = binding.session,
         revision = snapshot.revision,
         outputs = #snapshot.outputs,
-        windows = #snapshot.windows,
-        regions = #snapshot.regions,
     })
 end)
 

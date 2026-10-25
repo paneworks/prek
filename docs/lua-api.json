@@ -12,45 +12,21 @@
       "commands"
     ],
     "grant_time_ms": 250,
-    "hyprland_alternative": {
-      "agent_flags": [
-        "lua",
-        "hyprland"
-      ],
-      "broker_mode": "route",
-      "system_permission": "policy.allow_hyprland_actions",
-      "target": "frozen window/output/workspace"
-    },
     "implemented_effects": [
       "commands",
-      "observations",
-      "power_actions",
-      "hyprland_actions"
-    ],
-    "power_alternative": {
-      "agent_flags": [
-        "lua",
-        "power"
-      ],
-      "broker_mode": "route",
-      "system_permission": "policy.allow_power_actions",
-      "target": "explicit frozen output"
-    }
+      "observations"
+    ]
   },
   "api_version": 1,
   "capability_queries": {
     "freshness_ms": 250,
     "grants": false,
-    "hyprland": "protected policy.allow_hyprland_actions and session --hyprland on a routing broker; production takeover remains unavailable",
     "in_flight_snapshots": 1,
     "lifetime": "negotiated flags immutable within the owning fence; stop clears metadata",
     "queued_snapshots": 1,
     "ready_families": [
       "commands",
-      "lua_actions",
-      "power_actions",
-      "hyprland_actions",
-      "morf_actions"
+      "lua_actions"
     ],
     "refresh_ms": 100,
     "source": "broker-negotiated registration flags and parent executor readiness; never inferred from Lua source",
@@ -84,7 +60,7 @@
     "capability": "custom_recognizers",
     "claims": false,
     "constructor": "recognizers.define",
-    "context": "fresh owning desktop without secure overlay",
+    "context": "fresh owning desktop",
     "custom_sequences": "source-bound nested plans; native coordinator required",
     "data_bytes": 4096,
     "data_depth": 8,
@@ -111,7 +87,7 @@
     ],
     "result": "nil for pending or a strict phase/data table; cancellation returns nil",
     "root_acceptance": "pending user-launched live tests",
-    "routing": "negotiable; stock Hyprland takeover only",
+    "routing": "negotiable; bound Wayland compositor takeover only",
     "source": "private canonical declaration, exact rule binding and complete approved snapshot parity",
     "system_permission": "policy.allow_input_events",
     "ticket_bytes": 65536,
@@ -166,123 +142,20 @@
     "context_changed",
     "rules_changed"
   ],
-  "experimental_adapters": {
-    "power": {
-      "actions": [
-        "blank",
-        "wake"
-      ],
-      "agent_flags": [
-        "power"
-      ],
-      "broker_mode": "route",
-      "cage_flags": [
-        "layers",
-        "input",
-        "power"
-      ],
-      "completion": "accepted dispatch and observed compositor-reported DPMS state; no hardware power claim",
-      "deadline": "remaining broker grant and 200ms total IPC budget",
-      "excluded": [
-        "lock_and_blank",
-        "toggle",
-        "suspend"
-      ],
-      "host_api": "actions::Executor::set_power_adapter(PowerAdapter)",
-      "named_handler_flags": [
-        "lua",
-        "power"
-      ],
-      "production_routing_available": false,
-      "public_session_negotiation": true,
-      "rule_output": "explicit name or validated input mapping; no focus fallback",
-      "system_permission": "policy.allow_power_actions",
-      "target": "explicit frozen owning output, exact geometry generation and binding",
-      "uncertain": "any failure after a mutating request may have been written; never retry"
-    }
-  },
   "geometry_queries": {
-    "context": "fresh owning desktop without secure overlay",
+    "context": "fresh owning desktop",
     "conversion": "finite numeric points, no clamping; arithmetic overflow raises an error",
     "effects": false,
     "local": "post-transform logical units; rotation and scale applied through output logical size",
-    "lookup": "exact output name or rendered region ID",
+    "lookup": "exact output name",
     "normalized": "post-transform output axes, not raw device axes",
-    "overlaps": "all matches in provider order, no target selection",
     "references": "canonical decimal-string fence, snapshot revision and output geometry generation; copies confer no authority",
-    "region_bounds": "global logical, half-open",
     "spaces": [
       "normalized",
       "local",
       "global"
     ],
-    "unavailable": "nil for absent/stale/inhibited context, missing name or retired reference; known empty arrays remain empty"
-  },
-  "hyprland_adapter": {
-    "actions": [
-      "close",
-      "move_left_and_follow",
-      "move_right_and_follow",
-      "reorder_up",
-      "reorder_down"
-    ],
-    "additional_versions": [
-      "0.56.2"
-    ],
-    "agent_flags": [
-      "hyprland"
-    ],
-    "broker_mode": "route",
-    "cage_flags": [
-      "layers",
-      "input",
-      "power",
-      "windows"
-    ],
-    "capability": "hyprland_actions",
-    "completion": "accepted dispatch plus observed target disappearance or exact workspace/output/focus",
-    "config_provider": "hyprlang or lua; frozen at installation and rechecked via j/status before each 0.56.2 mutation",
-    "deadline": "remaining broker grant and 200ms total IPC budget",
-    "desktop_operations_per_plan": 1,
-    "direct_phases": [
-      "discrete",
-      "begin"
-    ],
-    "excluded": [
-      "scroll_stack"
-    ],
-    "host_api": "actions::Executor::set_hyprland_adapter(HyprlandAdapter)",
-    "lua_dispatch": "closed typed factories check frozen stable_id, workspace, window/output geometry or explicit power monitor name; no raw dispatch API, nil target or syntax fallback",
-    "named_handler_flags": [
-      "lua",
-      "hyprland"
-    ],
-    "production_routing_available": false,
-    "public_session_negotiation": true,
-    "race": "legacy address selectors retain a read/dispatch race; Lua factories recheck native target fields; no atomic lock/overlay or rendered-visibility claim",
-    "reorder": {
-      "completion": "observed exact pair permutation with unchanged workspace/column topology; camera repositioning is not a failure",
-      "context": "complete same-generation/revision/capture native graph before claim and frozen source/neighbor/workspace at offer",
-      "dispatch": "one explicit-source/explicit-neighbor native swap; whole-graph checks in native factory",
-      "layout": "scrolling with unambiguous vertical native column order",
-      "neighbor": "adjacent vertical column; unique closest horizontally overlapping member",
-      "provider": "lua",
-      "refusals": [
-        "stack boundary",
-        "ambiguous alignment",
-        "horizontal or overlapping columns",
-        "hidden/floating/grouped/fullscreen app",
-        "missing or changed native graph"
-      ],
-      "version": "0.56.2"
-    },
-    "system_permission": "policy.allow_hyprland_actions",
-    "target": "explicit frozen window address plus stableId, output, geometry generation and workspace; focus never selects a target",
-    "uncertain": "any failure after mutation bytes were written; never retry",
-    "version": "0.54.3",
-    "workspace_id_max": 2147483647,
-    "workspace_id_min": 1,
-    "workspace_moves": "adjacent positive numeric workspace on a single-output desktop"
+    "unavailable": "nil for absent, stale or locked context, missing name or retired reference; known empty arrays remain empty"
   },
   "input_events": {
     "agent_flags": [
@@ -291,7 +164,7 @@
     ],
     "capability": "input_events",
     "configuration_mode": "observe",
-    "context": "fresh desktop without secure overlay",
+    "context": "fresh desktop",
     "coordinates": "device axis counts",
     "delivery": "ordered, no coalescing; overflow retires the affected stream or Lua component",
     "event": "input",
@@ -322,16 +195,6 @@
     "sources": "explicit policy.allowed_devices selectors on the owning seat; virtual devices excluded",
     "system_permission": "policy.allow_input_events"
   },
-  "keyboard_context": {
-    "hidden": "known without keyboard geometry",
-    "independent": "explicit global rules and explicit screen-off scopes need not infer keyboard state",
-    "knowledge": "OutputState.keyboard_known; false means unknown even without geometry",
-    "loss": "invalidates the frozen output target",
-    "native_annotations": "inspection only until complete verified mapping and coverage",
-    "stock_compositor": "unknown",
-    "unknown": "KeyboardUnavailable for visibility conditions and awake spatial scopes",
-    "visible": "known with keyboard geometry"
-  },
   "limits": {
     "instructions": 1000000,
     "memory_bytes": 33554432,
@@ -349,146 +212,6 @@
     "runtime": "approved sources only; no filesystem reads",
     "source_set_bytes": 1048576,
     "symlinks": false
-  },
-  "morf_adapter": {
-    "agent_flags": [
-      "morf"
-    ],
-    "cancellation": "known owning gesture only; no uncertain retry",
-    "completion": "native controller acceptance; no rendered animation/presentation proof",
-    "morf_effects_per_ordinal": 1,
-    "named_handler_flags": [
-      "lua",
-      "morf"
-    ],
-    "native_receipt_poll_ms": 5,
-    "ownership_refresh_ms": 100,
-    "pending_agent": 8,
-    "pending_broker": 64,
-    "production_gate": "native rendered context and physical cutover",
-    "public_session_negotiation": false,
-    "result_wait_after_grant_ms": 2000,
-    "transport": "broker offer ID/ordinal and typed action only; no caller target, motion or deadline"
-  },
-  "morf_provider_queries": {
-    "authority": "read-only connection/configure metadata; no presentation, rendered regions, authentication, recognizer ownership or action grant",
-    "capability": "context",
-    "discovery_ms": 1000,
-    "freshness_ms": 250,
-    "identity": "native Wayland socket credentials, exact executable/process, logind registration and bound compositor; connection epoch is independent of Lua configuration reload",
-    "integers": "compositor_start and fence identities are canonical decimal strings",
-    "ipc_budget_ms": 200,
-    "maximum_outputs": 64,
-    "phases": {
-      "configured": 2,
-      "pending": 1
-    },
-    "role": "shell",
-    "unavailable": "nil without a fresh owning desktop; empty array when no native provider is currently verified"
-  },
-  "morf_rendered_queries": {
-    "authority": "inspection only in the report; no keyboard-absence, authentication, stacking or presentation proof",
-    "capability": "context",
-    "coordinates": "surface-local logical bounding boxes",
-    "coverage": "primary_surface_named_bounds",
-    "freshness_ms": 250,
-    "identity": "verified native output/endpoint epoch, UI generation and broker fence",
-    "input_region": {
-      "capability": "input_region",
-      "coordinates": "integer Morf layout units in the frame; outward-rounded global logical boxes in the projection",
-      "maximum_rectangles": 512,
-      "unknown": "absent for a configured mask or too many rectangles; never empty by omission"
-    },
-    "integers": "node identity, UI generation, revision and sampled_ns are canonical decimal strings",
-    "ipc_budget_ms": 200,
-    "keyboard_registry": {
-      "absence": "hidden applies only to the registered Morf node; sets snapshot keyboard_known only through the routing refinement on an exclusive output",
-      "capability": "keyboard_registry",
-      "known": "one declared keyboard under the primary root, with node and layout",
-      "scope": "registered_morf_primary",
-      "states": [
-        "unknown",
-        "hidden",
-        "visible"
-      ]
-    },
-    "layout_projection": {
-      "basis": [
-        "stock_layer_layout",
-        "settled_stock_layer"
-      ],
-      "coordinates": "global logical layout boxes; the layer's current position only for settled_stock_layer, never presentation, stacking or input masks",
-      "exclusive": "no other process's bottom, top or overlay layer on the output in either bracketing sample",
-      "identity": "unique stable native producer PID, process birth, output, layer namespace/address/level/box and geometry generation",
-      "integers": "started_ns, sampled_ns, map_in_ns and rendered_from_ns are canonical decimal strings",
-      "map_in": "zero while animations:enabled or the layersIn node is off; otherwise speed tenths of a second for a listed cubic bezier; none for springs or unknown curves",
-      "missing_bounds": "viewport-clipped rows retain their native identities with null bounds",
-      "optional": true,
-      "settlement": "surface mapped_ns plus the stock layersIn bound agreed by both bracketing samples plus 100 ms, at or before started_ns"
-    },
-    "maximum_regions": 256,
-    "maximum_reply_bytes": 131072,
-    "routing_refinement": {
-      "adds": "local_control as interactive unscoped regions; clock_background, content_bottom, physical_bottom, top_left, top_right, side_left and side_right as scoped regions",
-      "keyboard": "registered hidden/visible state sets keyboard_known, with visible geometry, only on an exclusive output whose keyboard was unknown",
-      "replaces": "the coarse interactive layer region with morf:<epoch>:input:<i> interactive regions",
-      "requires": "fresh settled_stock_layer projection with a described input region naming the exact coarse layer:<output>:<address> region",
-      "secure_overlay": "any visible secure_overlay node, settled or not"
-    },
-    "scopes": false,
-    "semantic": {
-      "absence": "does not establish hidden keyboard or complete coverage",
-      "capability": "semantic_regions",
-      "coordinates": "native frame bounds only; caller coordinates rejected",
-      "fields": [
-        "role",
-        "layout"
-      ],
-      "layout": "required for keyboard only; 1 to 128 bytes without control characters",
-      "ownership": false,
-      "property": "input_context",
-      "roles": [
-        "keyboard",
-        "secure_overlay",
-        "clock_background",
-        "content_bottom",
-        "physical_bottom",
-        "top_left",
-        "top_right",
-        "side_left",
-        "side_right",
-        "local_control"
-      ]
-    },
-    "surface_space": {
-      "capability": "layer_space",
-      "fields": [
-        "namespace",
-        "width",
-        "height",
-        "local_scale",
-        "mapped_ns"
-      ],
-      "local_scale": "compositor logical units per native Morf layout unit",
-      "mapped_ns": "optional decimal CLOCK_MONOTONIC receipt of the first frame callback; an upper bound of compositor map time"
-    },
-    "unavailable": "nil without a fresh owning desktop; empty array when no fresh native frame is available"
-  },
-  "native_layout_queries": {
-    "authority": "inspection only; no camera/work-area/effective-rule bounds or input ownership/grants",
-    "backend": "Hyprland 0.56.2 Lua",
-    "capability": "context",
-    "columns": "zero-based native indices/rows; one-based Lua arrays; width is a native primary-axis fraction",
-    "combined_ipc_budget_ms": 200,
-    "coordinates": "integer native animation-goal rectangles [x,y,width,height], not rendered hit tests",
-    "effects": false,
-    "freshness_ms": 250,
-    "identity": "same owning desktop sample, generation, revision and conservative timestamp; current broker fence",
-    "integers": "generation/revision/fence identities are canonical decimal strings; window lifetime identities are address:stable hexadecimal strings",
-    "maximum_mapped_windows": 512,
-    "maximum_workspaces": 64,
-    "optional_ipc_budget_ms": 50,
-    "unavailable": "nil for unsupported, unavailable, inconsistent, non-desktop, stale or inhibited context; a verified empty inventory is an empty workspace array"
   },
   "native_value_limits": {
     "accounting": "expanded keys and values; aliases counted for every expansion; conservative bytes are not measured RSS",
@@ -611,7 +334,7 @@
     "production_broker": "observation_or_route_mode",
     "receipt_time_ms": 250,
     "revision_type": "decimal_string",
-    "routing": "negotiable; stock Hyprland takeover only",
+    "routing": "negotiable; bound Wayland compositor takeover only",
     "system_permission": "policy.allow_runtime_rules",
     "transaction_bytes": 32768,
     "transport": "explicit authorized host opt-in"
@@ -903,18 +626,6 @@
       "signature": "status.current() -> StatusView | nil"
     },
     {
-      "description": "Copy fresh broker-verified native shell connection bindings for the owning desktop/output; no rendered regions, lock proof, recognizer ownership or action grant is inferred.",
-      "name": "morf.providers",
-      "phase": "runtime_callback",
-      "signature": "morf.providers() -> MorfProviderBinding[] | nil"
-    },
-    {
-      "description": "Copy fresh native primary-frame named bounds in surface-local coordinates with output, endpoint/UI generation and fence; inspection only, without input-mask, keyboard-absence, authentication or compositor-presentation authority.",
-      "name": "morf.regions",
-      "phase": "runtime_callback",
-      "signature": "morf.regions() -> MorfRenderedContext[] | nil"
-    },
-    {
       "description": "Copy fresh broker-negotiated flags and parent executor readiness for this session fence; neither grants effects.",
       "name": "capabilities.current",
       "phase": "runtime_callback",
@@ -927,7 +638,7 @@
       "signature": "capabilities.has(name) -> boolean"
     },
     {
-      "description": "Test current parent executor capacity for commands, lua_actions, power_actions or hyprland_actions; every effect still requires fresh context, target checks and a broker grant.",
+      "description": "Test current parent executor capacity for commands or lua_actions; every effect still requires fresh context, target checks and a broker grant.",
       "name": "capabilities.ready",
       "phase": "runtime_callback",
       "signature": "capabilities.ready(name) -> boolean"
@@ -943,24 +654,6 @@
       "name": "outputs.get",
       "phase": "runtime_callback",
       "signature": "outputs.get(name) -> OutputView | nil"
-    },
-    {
-      "description": "Copy provider-reported rendered regions with their snapshot fence/revision; no guessed geometry.",
-      "name": "regions.list",
-      "phase": "runtime_callback",
-      "signature": "regions.list() -> RegionView[] | nil"
-    },
-    {
-      "description": "Query one rendered region by exact stable ID in the fresh snapshot.",
-      "name": "regions.get",
-      "phase": "runtime_callback",
-      "signature": "regions.get(id) -> RegionView | nil"
-    },
-    {
-      "description": "Return every rendered region containing a global logical point, with half-open bounds; does not arbitrate overlapping regions.",
-      "name": "regions.at",
-      "phase": "runtime_callback",
-      "signature": "regions.at(point) -> RegionView[] | nil"
     },
     {
       "description": "Convert normalized/output-local/global logical coordinates using host geometry; exact fence/revision/output generation required, stale references return nil, invalid arguments raise errors.",
@@ -1131,7 +824,7 @@
       "signature": "transaction:reset_mode() -> nil"
     },
     {
-      "description": "Return an owned copy of the complete fresh broker snapshot, including outputs, windows, regions and keyboard geometry; generations/revisions are decimal strings; nil when unavailable or expired.",
+      "description": "Return an owned copy of the complete fresh broker snapshot, including output geometry and screen state; generations/revisions are decimal strings; nil when unavailable or expired.",
       "name": "context.snapshot",
       "phase": "runtime",
       "signature": "context.snapshot() -> Snapshot | nil"
@@ -1141,12 +834,6 @@
       "name": "context.binding",
       "phase": "runtime",
       "signature": "context.binding() -> Binding | nil"
-    },
-    {
-      "description": "Copy native layout/column metadata matched to the fresh owning desktop snapshot and fence; nil when unavailable, inhibited or expired; no camera bounds, rendered scope or action authority.",
-      "name": "context.layouts",
-      "phase": "runtime",
-      "signature": "context.layouts() -> NativeLayouts | nil"
     },
     {
       "description": "Return the broker's fresh session state, or unknown after the view expires.",
@@ -1280,21 +967,6 @@
       "description": "Declare an action; configuration evaluation does not execute it.",
       "name": "actions.command",
       "signature": "actions.command(named_fields) -> Action"
-    },
-    {
-      "description": "Declare an action; configuration evaluation does not execute it.",
-      "name": "actions.morf",
-      "signature": "actions.morf(named_fields) -> Action"
-    },
-    {
-      "description": "Declare an action; configuration evaluation does not execute it.",
-      "name": "actions.hyprland",
-      "signature": "actions.hyprland(named_fields) -> Action"
-    },
-    {
-      "description": "Declare an action; configuration evaluation does not execute it.",
-      "name": "actions.power",
-      "signature": "actions.power(named_fields) -> Action"
     }
   ],
   "task_dependencies": {

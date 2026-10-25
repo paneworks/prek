@@ -13,14 +13,7 @@ fn model(slots: u16, edit: impl FnOnce(&mut Device)) -> Descriptor {
     device.axes.get_mut(&ABS_MT_SLOT).unwrap().maximum = i32::from(slots) - 1;
     edit(&mut device);
     assert_eq!(device.touch_capacity(), Some(usize::from(slots)));
-    let spec = Descriptor::mirror(
-        &device,
-        descriptor().identity,
-        None,
-        &BTreeMap::new(),
-        BTreeMap::new(),
-    )
-    .unwrap();
+    let spec = Descriptor::mirror(&device, descriptor().identity, None, &BTreeMap::new()).unwrap();
     spec.validate().unwrap();
     spec
 }

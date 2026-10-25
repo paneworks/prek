@@ -11,12 +11,6 @@ use std::{collections::BTreeSet, io, time::Duration};
 
 pub const VERSION: u32 = 1;
 
-/// Native source/workspace/output proof correlated with a trusted dispatch and grant.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReorderScope {
-    pub fingerprint: [u8; 32],
-}
 pub const MAX_PACKET: usize = 64 * 1024;
 pub const MAX_QUEUED_PACKETS: usize = 128;
 pub const MAX_QUEUED_BYTES: usize = 512 * 1024;
@@ -95,9 +89,6 @@ pub enum Capability {
     CustomRecognizers,
     LuaActions,
     RuntimeRules,
-    HyprlandActions,
-    MorfActions,
-    PowerActions,
     Commands,
     SyntheticInput,
 }
@@ -108,32 +99,12 @@ pub enum Mode {
     Route,
 }
 pub fn execution_capability(capability: Capability) -> bool {
-    matches!(
-        capability,
-        Capability::Commands
-            | Capability::LuaActions
-            | Capability::PowerActions
-            | Capability::HyprlandActions
-            | Capability::MorfActions
-    )
+    matches!(capability, Capability::Commands | Capability::LuaActions)
 }
 pub fn supported_session_action(action: &crate::config::Action) -> bool {
     matches!(
         action,
-        crate::config::Action::Command { .. }
-            | crate::config::Action::Lua { .. }
-            | crate::config::Action::Morf { .. }
-            | crate::config::Action::Hyprland {
-                action: crate::config::WindowAction::Close
-                    | crate::config::WindowAction::MoveLeftAndFollow
-                    | crate::config::WindowAction::MoveRightAndFollow
-                    | crate::config::WindowAction::ReorderUp
-                    | crate::config::WindowAction::ReorderDown
-                    | crate::config::WindowAction::ScrollStack
-            }
-            | crate::config::Action::Power {
-                action: crate::config::PowerAction::Wake | crate::config::PowerAction::Blank
-            }
+        crate::config::Action::Command { .. } | crate::config::Action::Lua { .. }
     )
 }
 pub fn effect_capability(kind: crate::config::EffectKind) -> Capability {
@@ -142,9 +113,6 @@ pub fn effect_capability(kind: crate::config::EffectKind) -> Capability {
         EffectKind::Observations => Capability::Observations,
         EffectKind::Commands => Capability::Commands,
         EffectKind::SyntheticInput => Capability::SyntheticInput,
-        EffectKind::HyprlandActions => Capability::HyprlandActions,
-        EffectKind::MorfActions => Capability::MorfActions,
-        EffectKind::PowerActions => Capability::PowerActions,
     }
 }
 pub fn action_capabilities(action: &crate::config::Action) -> BTreeSet<Capability> {
@@ -199,7 +167,7 @@ pub enum Request {
     /// No client-supplied path or configuration is accepted.
     Reload {},
     Register {
-        instance: String,
+        display: String,
         #[serde(default)]
         role: Role,
         capabilities: BTreeSet<Capability>,
@@ -230,20 +198,6 @@ pub enum Request {
     /// Ask for fresh authorization of a broker-offered action. This request
     /// carries no executable, argv, or target supplied by the session agent.
     Authorize {
-        fence: Fence,
-        id: u64,
-        ordinal: u64,
-    },
-    /// Select an allowed Morf effect for an existing delivered action grant.
-    /// Target, phase and motion are reconstructed from the broker's offer.
-    MorfAction {
-        fence: Fence,
-        id: u64,
-        ordinal: u64,
-        action: crate::config::MorfAction,
-    },
-    /// Cleanup only: retire the known gesture without introducing an effect.
-    MorfCancel {
         fence: Fence,
         id: u64,
         ordinal: u64,
@@ -279,8 +233,6 @@ impl Request {
             | Self::Context { fence, .. }
             | Self::LockRequested { fence }
             | Self::Authorize { fence, .. }
-            | Self::MorfAction { fence, .. }
-            | Self::MorfCancel { fence, .. }
             | Self::Availability { fence, .. }
             | Self::Complete { fence, .. }
             | Self::Status { fence }
@@ -325,15 +277,15 @@ impl Request {
             {
                 return Err(invalid("invalid Lua source request offset"));
             }
-            Self::Register { instance, .. }
-                if instance.is_empty()
-                    || instance.len() > 160
-                    || matches!(instance.as_str(), "." | "..")
-                    || !instance.bytes().all(|byte| {
+            Self::Register { display, .. }
+                if display.is_empty()
+                    || display.len() > 160
+                    || matches!(display.as_str(), "." | "..")
+                    || !display.bytes().all(|byte| {
                         byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')
                     }) =>
             {
-                return Err(invalid("invalid compositor instance"));
+                return Err(invalid("invalid Wayland display name"));
             }
             Self::Context { fence, snapshot } => {
                 if snapshot.generation != fence.session {
@@ -341,10 +293,7 @@ impl Request {
                 }
                 snapshot.validate().map_err(io::Error::other)?;
             }
-            Self::Complete { id, ordinal, .. }
-            | Self::Authorize { id, ordinal, .. }
-            | Self::MorfAction { id, ordinal, .. }
-            | Self::MorfCancel { id, ordinal, .. }
+            Self::Complete { id, ordinal, .. } | Self::Authorize { id, ordinal, .. }
                 if *id == 0 || *ordinal == 0 =>
             {
                 return Err(invalid("invalid action completion identity"));
@@ -446,8 +395,6 @@ pub enum Reply {
     Dispatch {
         fence: Fence,
         event: Box<Event>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reorder_scope: Option<ReorderScope>,
     },
     /// Short-lived permission for an already offered action. The consumer
     /// must still check its current fence and this deadline before execution.
@@ -456,8 +403,6 @@ pub enum Reply {
         id: u64,
         ordinal: u64,
         expires: Duration,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reorder_scope: Option<ReorderScope>,
     },
     /// Invalidate one offered effect before execution, without retiring
     /// unrelated gestures or this session's Lua VM.
@@ -465,13 +410,6 @@ pub enum Reply {
         fence: Fence,
         id: u64,
         ordinal: u64,
-    },
-    /// Native controller outcome, not an animation/presentation acknowledgement.
-    MorfResult {
-        fence: Fence,
-        id: u64,
-        ordinal: u64,
-        result: Completion,
     },
     Revoked {
         fence: Fence,
@@ -503,23 +441,11 @@ impl Reply {
             | Self::Dispatch { fence, .. }
             | Self::Execute { fence, .. }
             | Self::ActionCancelled { fence, .. }
-            | Self::MorfResult { fence, .. }
             | Self::RulesChanged { fence, .. }
             | Self::Revoked { fence, .. } => Some(*fence),
         }
     }
     pub fn validate(&self) -> io::Result<()> {
-        if let Self::Dispatch {
-            event,
-            reorder_scope: Some(_),
-            ..
-        } = self
-            && crate::routing::native::event_target(event).is_none()
-        {
-            return Err(invalid(
-                "native scope has no matching window or workspace action",
-            ));
-        }
         if let Some(fence) = self.fence() {
             fence.validate()?;
         }
@@ -554,9 +480,6 @@ impl Reply {
                     }) =>
             {
                 return Err(invalid("invalid recognizer receipt"));
-            }
-            Self::MorfResult { id, ordinal, .. } if *id == 0 || *ordinal == 0 => {
-                return Err(invalid("invalid native action result identity"));
             }
             Self::Input { input, .. } => input.validate()?,
             Self::RulesChanged { receipt, .. }

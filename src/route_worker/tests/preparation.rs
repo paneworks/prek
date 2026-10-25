@@ -50,15 +50,14 @@ fn descriptor() -> Descriptor {
         },
         None,
         &BTreeMap::new(),
-        BTreeMap::new(),
     )
     .unwrap()
 }
 fn consumer() -> Consumer {
-    Consumer::Hyprland {
+    Consumer::Compositor {
         pid: 10,
         start: 20,
-        instance: "private-model".into(),
+        display: "wayland-model".into(),
     }
 }
 fn evidence(descriptor: &Descriptor, consumer: Consumer) -> ConsumerEvidence {
@@ -68,7 +67,6 @@ fn evidence(descriptor: &Descriptor, consumer: Consumer) -> ConsumerEvidence {
         name: descriptor.name.clone(),
         class: descriptor.class,
         seat: descriptor.source.seat.clone(),
-        settings: descriptor.consumer_settings.clone(),
         at: Duration::ZERO,
     }
 }
@@ -96,7 +94,7 @@ fn native_preparation_binds_feedback_and_readiness_to_the_actual_publication() {
 }
 
 #[test]
-fn only_stock_hyprland_has_a_native_consumer_takeover_boundary() {
+fn only_the_bound_compositor_has_a_native_consumer_takeover_boundary() {
     let fixture = Fixture::new();
     let publication = fixture.registry.prepare_isolated(descriptor()).unwrap();
     for (consumer, admitted) in [

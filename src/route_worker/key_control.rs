@@ -168,7 +168,6 @@ impl Stream {
                     health,
                     source,
                     consumer.clone(),
-                    BTreeMap::new(),
                 )?;
                 self.seats.get_mut(&name).unwrap().keys =
                     Some(keys::Slot::new(subscription.fence, consumer, prepared)?);

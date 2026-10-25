@@ -116,7 +116,6 @@ fn ready(device: &Device) -> crate::transport::Ready {
         },
         None,
         &BTreeMap::new(),
-        BTreeMap::new(),
     )
     .unwrap();
     let consumer = Consumer::IsolatedReceiver { pid: 1, start: 1 };
@@ -130,7 +129,6 @@ fn ready(device: &Device) -> crate::transport::Ready {
                 name: descriptor.name,
                 class: descriptor.class,
                 seat: device.source.seat.clone(),
-                settings: BTreeMap::new(),
                 at: ms(0),
             },
             ms(0),
@@ -150,7 +148,6 @@ pub(crate) fn rule(id: &str, action: Action) -> Rule {
         scope: Scope::Everywhere,
         output: None,
         screen: None,
-        keyboard_visible: None,
         require_keys: vec![],
         keys_throughout: false,
         layer: None,
@@ -201,9 +198,6 @@ pub(crate) fn context(routing: &mut Routing, at: u64, revision: u64, state: Cont
                 captured_at: ms(at),
                 state,
                 outputs: vec![],
-                windows: vec![],
-                regions: vec![],
-                secure_overlay: false,
             },
             ms(at),
         )

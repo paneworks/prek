@@ -1,19 +1,29 @@
 use super::*;
 
-fn subscription(count: usize, at: Duration) -> Subscription {
-    let view = crate::context_transfer::tests::native_view(at, count);
+fn subscription_on(seat: &str, count: usize, at: Duration) -> Subscription {
+    let view = crate::context_transfer::tests::wide_view(at, count);
+    let mut context = view.context.unwrap();
+    context.binding.seat = seat.into();
     Subscription {
-        seat: "seat0".into(),
+        seat: seat.into(),
         fence: view.fence,
-        context: view.context,
+        context: Some(context),
         capabilities: BTreeSet::from([Capability::Context, Capability::Observations]),
         consumer: None,
     }
 }
+fn subscription(count: usize, at: Duration) -> Subscription {
+    subscription_on("seat0", count, at)
+}
+/// `count` outputs spread over seats of at most 256 outputs each.
 fn update(revision: u64, count: usize, at: Duration) -> Subscriptions {
     Subscriptions {
         revision,
-        seats: vec![subscription(count, at)],
+        seats: (0..count.div_ceil(256).max(1))
+            .map(|index| {
+                subscription_on(&format!("seat{index}"), (count - index * 256).min(256), at)
+            })
+            .collect(),
     }
 }
 pub(crate) fn commands(update: Subscriptions) -> Vec<Command> {
@@ -41,7 +51,7 @@ pub(crate) fn commands(update: Subscriptions) -> Vec<Command> {
 }
 
 #[test]
-fn complete_native_graph_crosses_real_channel_in_four_packet_bursts() {
+fn complete_large_snapshot_crosses_real_channel_in_four_packet_bursts() {
     let now = crate::ipc::monotonic().unwrap();
     let update = update(1, 512, now);
     let expected = serde_json::to_value(&update).unwrap();
@@ -75,7 +85,7 @@ fn pressure_retains_unsent_offsets_and_normal_refresh_cannot_starve_body() {
     let now = crate::ipc::monotonic().unwrap();
     let (mut parent, mut worker) = Channel::pair().unwrap();
     let mut sender = Sender::default();
-    sender.replace(update(1, 512, now), now).unwrap();
+    sender.replace(update(1, 2048, now), now).unwrap();
     let mut pressure = false;
     for _ in 0..64 {
         let before = sender.active.as_ref().map(|active| active.offset);
@@ -91,7 +101,7 @@ fn pressure_retains_unsent_offsets_and_normal_refresh_cannot_starve_body() {
     sender.send(&mut parent, now).unwrap();
     assert_eq!(sender.active.as_ref().unwrap().offset, offset);
     for revision in 2..=5 {
-        sender.replace(update(revision, 512, now), now).unwrap();
+        sender.replace(update(revision, 2048, now), now).unwrap();
     }
     assert_eq!(sender.active.as_ref().unwrap().revision, 1);
     assert_eq!(sender.latest.as_ref().unwrap().revision, 5);
@@ -128,12 +138,7 @@ fn changed_security_scope_preempts_but_geometry_refresh_coalesces() {
     sender.replace(update(2, 511, now), now).unwrap();
     assert_eq!(sender.active.as_ref().unwrap().revision, 1);
     let mut locked = update(3, 1, now);
-    locked.seats[0]
-        .context
-        .as_mut()
-        .unwrap()
-        .snapshot
-        .secure_overlay = true;
+    locked.seats[0].context.as_mut().unwrap().snapshot.state = crate::context::State::Locked;
     sender.replace(locked, now).unwrap();
     assert_eq!(sender.active.as_ref().unwrap().revision, 3);
     assert!(sender.latest.is_none());
@@ -175,7 +180,7 @@ fn superseded_and_cancelled_late_bodies_never_revive() {
 #[test]
 fn incomplete_timeout_releases_bytes_without_refreshing_original_capture() {
     let mut assembly = Assembly::default();
-    for command in commands(update(1, 512, Duration::ZERO)).into_iter().take(2) {
+    for command in commands(update(1, 256, Duration::ZERO)).into_iter().take(2) {
         assembly.accept(command, Duration::ZERO).unwrap();
     }
     assert!(!assembly.pending.as_ref().unwrap().data.is_empty());
@@ -191,11 +196,11 @@ fn incomplete_timeout_releases_bytes_without_refreshing_original_capture() {
     let mut sender = Sender::default();
     let (mut parent, _worker) = Channel::pair().unwrap();
     sender
-        .replace(update(1, 512, Duration::ZERO), Duration::ZERO)
+        .replace(update(1, 256, Duration::ZERO), Duration::ZERO)
         .unwrap();
     sender.send(&mut parent, Duration::ZERO).unwrap();
     sender
-        .replace(update(2, 512, Duration::ZERO), Duration::ZERO)
+        .replace(update(2, 256, Duration::ZERO), Duration::ZERO)
         .unwrap();
     sender.send(&mut parent, TIMEOUT).unwrap();
     let latest: Subscriptions =
@@ -343,7 +348,9 @@ fn bounds_and_revision_preflight_preserve_last_good_sender() {
     assert!(fits(std::slice::from_ref(&good)));
     assert!(!fits(&vec![good.clone(); crate::service::MAX_CLIENTS + 1]));
     let mut oversized = good;
-    oversized.context.as_mut().unwrap().snapshot.windows[0].id = "x".repeat(MAX_BYTES);
+    oversized.context.as_mut().unwrap().snapshot.outputs[0]
+        .geometry
+        .name = "x".repeat(MAX_BYTES);
     assert!(!fits(&[oversized]));
     let mut sender = Sender::default();
     sender

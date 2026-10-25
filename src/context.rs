@@ -2,7 +2,7 @@
 //! This is a state model, not peer authentication: the broker registration
 //! layer must verify a binding before supplying it here.
 use crate::{
-    config::{Action, Context, Delivery, MorfAction, Rule, Scope, Screen},
+    config::{Action, Context, Rule, Scope, Screen},
     gestures::{Mapping, Output, Point, Position},
     input::Source,
 };
@@ -82,23 +82,10 @@ impl State {
 }
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct Keyboard {
-    pub rect: Rect,
-    pub layout: String,
-}
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct OutputState {
     pub geometry: Output,
     pub geometry_generation: u64,
-    /// Required for workspace/viewport actions; never guess from current focus.
-    pub active_workspace: Option<i64>,
     pub screen: Screen,
-    /// True only when a bound provider explicitly establishes keyboard
-    /// visibility. Missing geometry alone cannot establish a hidden keyboard.
-    #[serde(default)]
-    pub keyboard_known: bool,
-    pub keyboard: Option<Keyboard>,
 }
 impl OutputState {
     pub fn rect(&self) -> Rect {
@@ -110,116 +97,16 @@ impl OutputState {
 }
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct Window {
-    pub id: String,
-    pub output: String,
-    pub workspace: i64,
-    pub rect: Rect,
-    pub content: Rect,
-    pub mapped: bool,
-    /// Provider-proven visibility, distinct from a mapped surface on another workspace.
-    pub visible: bool,
-    pub focused: bool,
-    /// None when the compositor cannot establish stacking order. Overlapping
-    /// targets then remain ambiguous instead of guessing from client-list order.
-    pub z_order: Option<i64>,
-}
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Region {
-    pub id: String,
-    /// None describes a local widget/overlay rather than a global gesture area.
-    pub scope: Option<Scope>,
-    pub output: String,
-    pub rect: Rect,
-    pub interactive: bool,
-}
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct Snapshot {
     pub generation: u64,
     pub revision: u64,
     pub captured_at: Duration,
     pub state: State,
     pub outputs: Vec<OutputState>,
-    pub windows: Vec<Window>,
-    pub regions: Vec<Region>,
-    pub secure_overlay: bool,
 }
 impl Snapshot {
-    /// Pure eligibility check shared by routing preclaim and broker dispatch.
-    /// Spatial scopes require provider-proven rendered visibility. Everywhere
-    /// rules retain the mapped window selected by focus when their permit began.
-    pub(crate) fn hyprland_target_available(
-        &self,
-        action: &Action,
-        scope: Scope,
-        window: Option<&str>,
-        output: Option<&str>,
-        workspace: Option<i64>,
-    ) -> bool {
-        if !action.requires_hyprland()
-            || self.state != State::Desktop
-            || self.secure_overlay
-            || matches!(action, Action::Hyprland { action } if !action.supported_session())
-        {
-            return false;
-        }
-        if !self.hyprland_window_target_available(scope, window, output, workspace) {
-            return false;
-        }
-        let window = self
-            .windows
-            .iter()
-            .find(|candidate| Some(candidate.id.as_str()) == window)
-            .unwrap();
-        match action {
-            Action::Hyprland { action } if *action != crate::config::WindowAction::Close => {
-                self.outputs.len() == 1 && action.workspace_destination(window.workspace).is_some()
-            }
-            _ => true,
-        }
-    }
-    pub(crate) fn hyprland_window_target_available(
-        &self,
-        scope: Scope,
-        window: Option<&str>,
-        output: Option<&str>,
-        workspace: Option<i64>,
-    ) -> bool {
-        if self.state != State::Desktop || self.secure_overlay {
-            return false;
-        }
-        let Some(window) = self
-            .windows
-            .iter()
-            .find(|candidate| Some(candidate.id.as_str()) == window)
-        else {
-            return false;
-        };
-        if !window.mapped
-            || scope != Scope::Everywhere && !window.visible
-            || window.workspace <= 0
-            || workspace != Some(window.workspace)
-            || crate::config::hyprland_window_address(&window.id).is_none()
-            || output != Some(window.output.as_str())
-        {
-            return false;
-        }
-        let Some(output) = self
-            .outputs
-            .iter()
-            .find(|candidate| candidate.geometry.name == window.output)
-        else {
-            return false;
-        };
-        if output.screen != Screen::On || output.active_workspace != Some(window.workspace) {
-            return false;
-        }
-        true
-    }
     pub fn validate(&self) -> Result<(), Rejection> {
-        if self.outputs.len() > 256 || self.windows.len() > 4096 || self.regions.len() > 4096 {
+        if self.outputs.len() > 256 {
             return Err(Rejection::InvalidGeometry);
         }
         let mut outputs = BTreeSet::new();
@@ -235,45 +122,6 @@ impl Snapshot {
                 || output.geometry.pixel_height <= 0.0
                 || output.geometry.name.is_empty()
                 || output.geometry.name.len() > 256
-                || !output.keyboard_known && output.keyboard.is_some()
-                || output.keyboard.as_ref().is_some_and(|keyboard| {
-                    !keyboard.rect.valid()
-                        || !output.rect().contains_rect(keyboard.rect)
-                        || keyboard.layout.len() > 128
-                })
-            {
-                return Err(Rejection::InvalidGeometry);
-            }
-        }
-        let mut ids = BTreeSet::new();
-        for window in &self.windows {
-            if window.id.is_empty()
-                || window.id.len() > 256
-                || !ids.insert(&window.id)
-                || !outputs.contains(&window.output)
-                || !window.rect.valid()
-                || !window.content.valid()
-                || !window.rect.contains_rect(window.content)
-            {
-                return Err(Rejection::InvalidGeometry);
-            }
-        }
-        ids.clear();
-        for region in &self.regions {
-            let output = self
-                .outputs
-                .iter()
-                .find(|output| output.geometry.name == region.output)
-                .ok_or(Rejection::InvalidGeometry)?;
-            if region.id.is_empty()
-                || region.id.len() > 256
-                || !ids.insert(&region.id)
-                || !region.rect.valid()
-                || !output.rect().contains_rect(region.rect)
-                || matches!(
-                    region.scope,
-                    Some(Scope::Everywhere | Scope::AppContent | Scope::Keyboard)
-                )
             {
                 return Err(Rejection::InvalidGeometry);
             }
@@ -295,16 +143,11 @@ pub enum Rejection {
     InvalidGeometry,
     ContextDenied,
     Locked,
-    SecureOverlay,
     UnmappedDevice,
     OutputChanged,
     TargetMissing,
-    TargetChanged,
     OutsideRegion,
     MixedTargets,
-    InteractiveReservation,
-    KeyboardVisible,
-    KeyboardUnavailable,
     ScreenState,
     SourceChanged,
 }
@@ -327,32 +170,18 @@ pub struct Permit {
     generation: u64,
     state: State,
     output: Option<OutputState>,
-    window: Option<Window>,
-    region: Option<Region>,
     scope: Scope,
     mapping_generation: Option<u64>,
-    secure_overlay: bool,
     starts: Vec<Point>,
 }
 impl Permit {
     pub(crate) fn retained_heap_bytes(&self) -> usize {
         self.source.seat.capacity()
             + self.starts.capacity() * std::mem::size_of::<Point>()
-            + self.output.as_ref().map_or(0, |output| {
-                output.geometry.name.capacity()
-                    + output
-                        .keyboard
-                        .as_ref()
-                        .map_or(0, |keyboard| keyboard.layout.capacity())
-            })
             + self
-                .window
+                .output
                 .as_ref()
-                .map_or(0, |window| window.id.capacity() + window.output.capacity())
-            + self
-                .region
-                .as_ref()
-                .map_or(0, |region| region.id.capacity() + region.output.capacity())
+                .map_or(0, |output| output.geometry.name.capacity())
     }
     pub fn generation(&self) -> u64 {
         self.generation
@@ -360,16 +189,8 @@ impl Permit {
     pub fn source(&self) -> &Source {
         &self.source
     }
-    pub fn window(&self) -> Option<&Window> {
-        self.window.as_ref()
-    }
     pub fn output(&self) -> Option<&OutputState> {
         self.output.as_ref()
-    }
-    pub(crate) fn desktop_output(&self) -> Option<&OutputState> {
-        (self.state == State::Desktop && !self.secure_overlay)
-            .then_some(self.output.as_ref())
-            .flatten()
     }
     pub fn scope(&self) -> Scope {
         self.scope
@@ -379,21 +200,6 @@ impl Permit {
             && self.state == later.state
             && self.scope == later.scope
             && self.output == later.output
-            && self.region == later.region
-            && self.secure_overlay == later.secure_overlay
-            && match (&self.window, &later.window) {
-                (None, None) => true,
-                (Some(first), Some(later)) => {
-                    first.id == later.id
-                        && first.output == later.output
-                        && first.workspace == later.workspace
-                        && first.rect == later.rect
-                        && first.content == later.content
-                        && first.mapped == later.mapped
-                        && first.visible == later.visible
-                }
-                _ => false,
-            }
     }
 }
 #[derive(Clone)]
@@ -404,8 +210,6 @@ pub struct Authority {
     console: Option<String>,
     barrier: LockBarrier,
     snapshot: Option<Snapshot>,
-    #[cfg(target_os = "linux")]
-    native_layouts: Option<Box<crate::hyprland::layouts::Snapshot>>,
     acknowledged_at: Option<Duration>,
     lease: Option<Duration>,
     revision: u64,
@@ -425,8 +229,6 @@ impl Default for Authority {
             console: None,
             barrier: LockBarrier::Open,
             snapshot: None,
-            #[cfg(target_os = "linux")]
-            native_layouts: None,
             acknowledged_at: None,
             lease: None,
             revision: 0,
@@ -498,10 +300,6 @@ impl Authority {
             .checked_add(1)
             .expect("session generation exhausted");
         self.snapshot = None;
-        #[cfg(target_os = "linux")]
-        {
-            self.native_layouts = None;
-        }
         self.acknowledged_at = None;
         self.lease = None;
         self.revision = 0;
@@ -558,7 +356,7 @@ impl Authority {
         self.revoke();
         self.barrier = LockBarrier::Locking;
     }
-    /// Called only after the bound lock provider's session-lock acknowledgement.
+    /// Called only once the session lock is confirmed.
     pub fn lock_confirmed(&mut self, generation: u64) -> Result<(), Rejection> {
         if generation != self.generation {
             return Err(Rejection::StaleGeneration);
@@ -569,8 +367,8 @@ impl Authority {
         self.barrier = LockBarrier::Locked;
         Ok(())
     }
-    /// Only the bound authentication/lock provider can complete this transition.
-    /// A fresh Desktop snapshot is still required before actions become eligible.
+    /// Called only once the session unlock is confirmed. A fresh Desktop
+    /// snapshot is still required before actions become eligible.
     pub fn unlock_completed(&mut self, generation: u64) -> Result<(), Rejection> {
         if generation != self.generation {
             return Err(Rejection::StaleGeneration);
@@ -624,84 +422,7 @@ impl Authority {
         self.lease = Some(acknowledged_at.saturating_add(PROVIDER_LEASE));
         self.acknowledged_at = Some(acknowledged_at);
         self.snapshot = Some(snapshot);
-        #[cfg(target_os = "linux")]
-        {
-            self.native_layouts = None;
-        }
         Ok(())
-    }
-    /// Install one trusted desktop sample and its matching native graph together.
-    #[cfg(target_os = "linux")]
-    pub fn update_native(
-        &mut self,
-        snapshot: Snapshot,
-        layouts: Option<crate::hyprland::layouts::Snapshot>,
-        at: Duration,
-    ) -> Result<(), Rejection> {
-        if let Some(layouts) = &layouts {
-            layouts
-                .validate_context(&snapshot)
-                .map_err(|_| Rejection::InvalidGeometry)?;
-        }
-        self.update(snapshot, at)?;
-        self.native_layouts = layouts.map(Box::new);
-        Ok(())
-    }
-    pub(crate) fn hyprland_target_available(
-        &self,
-        action: &Action,
-        scope: Scope,
-        window: Option<&str>,
-        output: Option<&str>,
-        workspace: Option<i64>,
-        at: Duration,
-    ) -> bool {
-        let Ok(snapshot) = self.fresh(at) else {
-            return false;
-        };
-        #[cfg(target_os = "linux")]
-        {
-            crate::hyprland::reorder::available(
-                snapshot,
-                self.native_layouts.as_deref(),
-                action,
-                scope,
-                window,
-                output,
-                workspace,
-            )
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            snapshot.hyprland_target_available(action, scope, window, output, workspace)
-        }
-    }
-    #[cfg(test)]
-    pub(crate) fn reorder_scope(
-        &self,
-        window: &str,
-        at: Duration,
-    ) -> Option<crate::protocol::ReorderScope> {
-        self.native_scope(&crate::routing::native::Target::Window(window.into()), at)
-    }
-    pub(crate) fn native_scope(
-        &self,
-        target: &crate::routing::native::Target,
-        at: Duration,
-    ) -> Option<crate::protocol::ReorderScope> {
-        #[cfg(target_os = "linux")]
-        {
-            crate::hyprland::reorder::native_scope(
-                self.fresh(at).ok()?,
-                self.native_layouts.as_deref()?,
-                target,
-            )
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = (target, at);
-            None
-        }
     }
     pub fn heartbeat(&mut self, generation: u64, at: Duration) -> Result<(), Rejection> {
         self.tick(at);
@@ -790,12 +511,7 @@ impl Authority {
                 || rule.scope != Scope::Everywhere
                 || rule.output.is_some()
                 || !rule.contexts.contains(&Context::Console)
-                || matches!(
-                    rule.action,
-                    Action::Morf { .. } | Action::Hyprland { .. } | Action::Power { .. }
-                )
                 || rule.screen.is_some()
-                || rule.keyboard_visible.is_some()
             {
                 return Err(Rejection::ContextDenied);
             }
@@ -804,11 +520,8 @@ impl Authority {
                 generation: self.generation,
                 state,
                 output: None,
-                window: None,
-                region: None,
                 scope: rule.scope,
                 mapping_generation: None,
-                secure_overlay: false,
                 starts: Vec::new(),
             });
         }
@@ -823,33 +536,13 @@ impl Authority {
         if state != State::Desktop
             && matches!(
                 rule.action,
-                Action::Hyprland { .. }
-                    | Action::Lua { .. }
+                Action::Lua { .. }
                     | Action::Command { .. }
                     | Action::Keys { .. }
                     | Action::Remap { .. }
             )
         {
             return Err(Rejection::Locked);
-        }
-        let keyboard_action = matches!(
-            rule.action,
-            Action::Morf {
-                action: MorfAction::KeyboardShow
-                    | MorfAction::KeyboardHide
-                    | MorfAction::KeyboardToggleLayout
-                    | MorfAction::RevealClockForm
-            }
-        );
-        if state != State::Desktop && matches!(rule.action, Action::Morf { .. }) && !keyboard_action
-        {
-            return Err(Rejection::Locked);
-        }
-        if snapshot.secure_overlay
-            && !keyboard_action
-            && !matches!(rule.action, Action::Power { .. })
-        {
-            return Err(Rejection::SecureOverlay);
         }
         let output = if let Some(mapping) = mapping {
             let mapped = mapping.output.as_ref().ok_or(Rejection::UnmappedDevice)?;
@@ -895,141 +588,24 @@ impl Authority {
             if rule.screen.is_some_and(|screen| screen != output.screen) {
                 return Err(Rejection::ScreenState);
             }
-            if !output.keyboard_known
-                && (rule.keyboard_visible.is_some()
-                    || rule.scope != Scope::Everywhere
-                        && !(output.screen == Screen::Off && rule.screen == Some(Screen::Off)))
-            {
-                return Err(Rejection::KeyboardUnavailable);
-            }
-            if rule
-                .keyboard_visible
-                .is_some_and(|visible| visible != output.keyboard.is_some())
-            {
-                return Err(Rejection::KeyboardVisible);
-            }
             if output.screen == Screen::Off && rule.screen != Some(Screen::Off) {
                 return Err(Rejection::ScreenState);
             }
-        } else if rule.screen.is_some() || rule.keyboard_visible.is_some() {
+        } else if rule.screen.is_some() {
             return Err(Rejection::UnmappedDevice);
-        }
-        let mut window = None;
-        let mut region = None;
-        if rule.scope == Scope::AppContent {
-            if state != State::Desktop || points.is_empty() || snapshot.secure_overlay {
-                return Err(Rejection::ContextDenied);
-            }
-            if output
-                .as_ref()
-                .and_then(|output| output.keyboard.as_ref())
-                .is_some_and(|keyboard| points.iter().any(|point| keyboard.rect.contains(*point)))
-                || snapshot
-                    .regions
-                    .iter()
-                    .any(|region| points.iter().any(|point| region.rect.contains(*point)))
-            {
-                return Err(Rejection::OutsideRegion);
-            }
-            let output_name = &output.as_ref().expect("mapped points").geometry.name;
-            let target = hit(snapshot, output_name, points[0])?.ok_or(Rejection::TargetMissing)?;
-            for point in &points {
-                if hit(snapshot, output_name, *point)?.is_none_or(|window| window.id != target.id) {
-                    return Err(Rejection::MixedTargets);
-                }
-            }
-            window = Some(target.clone());
-        } else if rule.scope == Scope::Keyboard {
-            let keyboard = output
-                .as_ref()
-                .and_then(|output| output.keyboard.as_ref())
-                .ok_or(Rejection::OutsideRegion)?;
-            if points.is_empty() || points.iter().any(|point| !keyboard.rect.contains(*point)) {
-                return Err(Rejection::OutsideRegion);
-            }
-        } else if rule.scope != Scope::Everywhere {
-            if points.is_empty() {
-                return Err(Rejection::OutsideRegion);
-            }
-            let output = output.as_ref().ok_or(Rejection::UnmappedDevice)?;
-            if let Some(keyboard) = &output.keyboard
-                && points.iter().any(|point| keyboard.rect.contains(*point))
-            {
-                return Err(Rejection::OutsideRegion);
-            }
-            let target = snapshot
-                .regions
-                .iter()
-                .find(|region| {
-                    region.scope == Some(rule.scope)
-                        && region.output == output.geometry.name
-                        && points.iter().all(|point| region.rect.contains(*point))
-                })
-                .ok_or(Rejection::OutsideRegion)?;
-            if rule.delivery == Delivery::Reserve
-                && (target.interactive
-                    || snapshot.regions.iter().any(|other| {
-                        other.interactive
-                            && other.id != target.id
-                            && points.iter().any(|point| other.rect.contains(*point))
-                    }))
-            {
-                return Err(Rejection::InteractiveReservation);
-            }
-            if rule.scope == Scope::ClockBackground
-                && snapshot.regions.iter().any(|other| {
-                    other.interactive && points.iter().any(|point| other.rect.contains(*point))
-                })
-            {
-                return Err(Rejection::OutsideRegion);
-            }
-            region = Some(target.clone());
-        }
-        if rule.action.requires_hyprland()
-            && window.is_none()
-            && !matches!(rule.scope, Scope::SideLeft | Scope::SideRight)
-        {
-            let mut focused = snapshot.windows.iter().filter(|window| {
-                window.mapped
-                    && (window.visible || rule.scope == Scope::Everywhere)
-                    && window.focused
-                    && output
-                        .as_ref()
-                        .is_none_or(|output| window.output == output.geometry.name)
-            });
-            window = Some(focused.next().ok_or(Rejection::TargetMissing)?.clone());
-            if focused.next().is_some() {
-                return Err(Rejection::MixedTargets);
-            }
-        }
-        if matches!(
-            rule.action,
-            Action::Hyprland {
-                action: crate::config::WindowAction::ScrollStack
-            } | Action::Morf {
-                action: MorfAction::WorkspacePreview
-            }
-        ) && output
-            .as_ref()
-            .is_none_or(|output| output.active_workspace.is_none())
-        {
-            return Err(Rejection::TargetMissing);
         }
         Ok(Permit {
             source: source.clone(),
             generation: self.generation,
             state,
             output,
-            window,
-            region,
             scope: rule.scope,
             mapping_generation: mapping.map(|mapping| mapping.generation),
-            secure_overlay: snapshot.secure_overlay,
             starts: points,
         })
     }
     /// Check again immediately before dispatch, and whenever another finger joins.
-    /// Focus changes do not retarget a permit; geometry/workspace changes revoke it.
+    /// Output geometry changes revoke a permit.
     pub fn validate(&self, permit: &Permit, input: InputContext<'_>) -> Result<(), Rejection> {
         let InputContext {
             source,
@@ -1053,9 +629,6 @@ impl Authority {
             };
         }
         let snapshot = self.fresh(at)?;
-        if snapshot.secure_overlay != permit.secure_overlay {
-            return Err(Rejection::SecureOverlay);
-        }
         if permit.mapping_generation != mapping.map(|mapping| mapping.generation) {
             return Err(Rejection::OutputChanged);
         }
@@ -1071,54 +644,6 @@ impl Authority {
                 return Err(Rejection::OutputChanged);
             }
         }
-        if let Some(window) = &permit.window {
-            let current = snapshot
-                .windows
-                .iter()
-                .find(|current| {
-                    current.id == window.id
-                        && current.mapped
-                        && (current.visible || permit.scope == Scope::Everywhere)
-                })
-                .ok_or(Rejection::TargetMissing)?;
-            if current.output != window.output
-                || current.workspace != window.workspace
-                || current.rect != window.rect
-                || current.content != window.content
-            {
-                return Err(Rejection::TargetChanged);
-            }
-            if permit.scope == Scope::AppContent {
-                if snapshot.regions.iter().any(|region| {
-                    permit
-                        .starts
-                        .iter()
-                        .any(|point| region.rect.contains(*point))
-                }) {
-                    return Err(Rejection::TargetChanged);
-                }
-                for point in &permit.starts {
-                    if hit(snapshot, &window.output, *point)?.is_none_or(|hit| hit.id != window.id)
-                    {
-                        return Err(Rejection::TargetChanged);
-                    }
-                }
-            }
-        }
-        if let Some(region) = &permit.region
-            && (!snapshot.regions.contains(region)
-                || !region.interactive
-                    && snapshot.regions.iter().any(|other| {
-                        other.interactive
-                            && other.id != region.id
-                            && permit
-                                .starts
-                                .iter()
-                                .any(|point| other.rect.contains(*point))
-                    }))
-        {
-            return Err(Rejection::TargetChanged);
-        }
         Ok(())
     }
     pub fn join(
@@ -1130,11 +655,7 @@ impl Authority {
     ) -> Result<(), Rejection> {
         self.validate(permit, input)?;
         let joined = self.start(rule, input, &[position])?;
-        if joined.window.as_ref().map(|window| &window.id)
-            != permit.window.as_ref().map(|window| &window.id)
-            || joined.region != permit.region
-            || joined.scope != permit.scope
-        {
+        if joined.scope != permit.scope || joined.output != permit.output {
             return Err(Rejection::MixedTargets);
         }
         if permit.starts.len() >= 64 {
@@ -1147,118 +668,16 @@ impl Authority {
     }
 }
 
-fn hit<'a>(
-    snapshot: &'a Snapshot,
-    output: &str,
-    point: Point,
-) -> Result<Option<&'a Window>, Rejection> {
-    let windows: Vec<_> = snapshot
-        .windows
-        .iter()
-        .filter(|window| {
-            window.mapped
-                && window.visible
-                && window.output == output
-                && window.content.contains(point)
-        })
-        .collect();
-    if windows.len() <= 1 {
-        return Ok(windows.first().copied());
-    }
-    if windows.iter().any(|window| window.z_order.is_none()) {
-        return Err(Rejection::MixedTargets);
-    }
-    let top = windows
-        .iter()
-        .max_by_key(|window| window.z_order)
-        .expect("overlap");
-    if windows
-        .iter()
-        .filter(|window| window.z_order == top.z_order)
-        .count()
-        != 1
-    {
-        return Err(Rejection::MixedTargets);
-    }
-    Ok(Some(top))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        config::{Config, PowerAction},
+        config::{Config, Delivery, Direction, Distance, Trigger},
         gestures::Transform,
         input::Axis,
     };
     #[test]
-    fn unknown_keyboard_is_neither_hidden_nor_eligible_spatial_context() {
-        let mut authority = authority();
-        let source = source();
-        let map = mapping();
-        let mut unknown = snapshot(authority.generation(), 2, 0);
-        unknown.outputs[0].keyboard = None;
-        unknown.outputs[0].keyboard_known = false;
-        authority.update(unknown.clone(), ms(0)).unwrap();
-        for name in ["G01", "G05", "G06", "G08_up"] {
-            error(
-                authority.start(&rule(name), input(&source, &map, 0), &[point(200, 200)]),
-                Rejection::KeyboardUnavailable,
-            );
-        }
-        let mut selected = rule("G08_up");
-        selected.action = Action::Event {
-            name: "keyboard-context".into(),
-        };
-        selected.scope = Scope::Everywhere;
-        selected.keyboard_visible = Some(false);
-        error(
-            authority.start(&selected, input(&source, &map, 0), &[]),
-            Rejection::KeyboardUnavailable,
-        );
-        selected.keyboard_visible = Some(true);
-        error(
-            authority.start(&selected, input(&source, &map, 0), &[]),
-            Rejection::KeyboardUnavailable,
-        );
-        // Explicit global rules can remain independent of keyboard knowledge.
-        selected.keyboard_visible = None;
-        authority
-            .start(&selected, input(&source, &map, 0), &[])
-            .unwrap();
-        let mut hidden = unknown;
-        hidden.revision = 3;
-        hidden.outputs[0].keyboard_known = true;
-        authority.update(hidden.clone(), ms(0)).unwrap();
-        selected.keyboard_visible = Some(false);
-        let permit = authority
-            .start(&selected, input(&source, &map, 0), &[])
-            .unwrap();
-        hidden.revision = 4;
-        hidden.outputs[0].keyboard_known = false;
-        authority.update(hidden, ms(0)).unwrap();
-        assert_eq!(
-            authority.validate(&permit, input(&source, &map, 0)),
-            Err(Rejection::OutputChanged)
-        );
-    }
-    #[test]
-    fn geometry_cannot_appear_under_unknown_keyboard_knowledge() {
-        let mut value = snapshot(1, 1, 0);
-        value.outputs[0].keyboard_known = false;
-        assert_eq!(value.validate(), Err(Rejection::InvalidGeometry));
-        value.outputs[0].keyboard = None;
-        value.validate().unwrap();
-        let mut encoded = serde_json::to_value(&value).unwrap();
-        encoded["outputs"][0]
-            .as_object_mut()
-            .unwrap()
-            .remove("keyboard_known");
-        let legacy: Snapshot = serde_json::from_value(encoded).unwrap();
-        assert!(!legacy.outputs[0].keyboard_known);
-    }
-    #[test]
-    fn explicit_output_freezes_keyboard_targets_without_inventing_a_mapping() {
+    fn explicit_output_freezes_targets_without_inventing_a_mapping() {
         let mut authority = authority();
         let mut candidate = Config::preset("desktop").unwrap().rules.remove(0);
         candidate.output = Some("phone".into());
@@ -1370,72 +789,11 @@ mod tests {
             revision,
             captured_at: ms(at),
             state: State::Desktop,
-            secure_overlay: false,
             outputs: vec![OutputState {
                 geometry: mapping().output.unwrap(),
                 geometry_generation: 1,
-                active_workspace: Some(1),
                 screen: Screen::On,
-                keyboard_known: true,
-                keyboard: Some(Keyboard {
-                    rect: rect(0.0, 800.0, 500.0, 200.0),
-                    layout: "normal".into(),
-                }),
             }],
-            windows: vec![
-                Window {
-                    id: "a".into(),
-                    output: "phone".into(),
-                    workspace: 1,
-                    rect: rect(0.0, 30.0, 250.0, 700.0),
-                    content: rect(8.0, 38.0, 234.0, 684.0),
-                    mapped: true,
-                    visible: true,
-                    focused: true,
-                    z_order: Some(1),
-                },
-                Window {
-                    id: "b".into(),
-                    output: "phone".into(),
-                    workspace: 1,
-                    rect: rect(250.0, 30.0, 250.0, 700.0),
-                    content: rect(258.0, 38.0, 234.0, 684.0),
-                    mapped: true,
-                    visible: true,
-                    focused: false,
-                    z_order: Some(2),
-                },
-            ],
-            regions: vec![
-                Region {
-                    id: "top_left".into(),
-                    scope: Some(Scope::TopLeft),
-                    output: "phone".into(),
-                    rect: rect(0.0, 0.0, 250.0, 30.0),
-                    interactive: true,
-                },
-                Region {
-                    id: "top_right".into(),
-                    scope: Some(Scope::TopRight),
-                    output: "phone".into(),
-                    rect: rect(250.0, 0.0, 250.0, 30.0),
-                    interactive: true,
-                },
-                Region {
-                    id: "bottom".into(),
-                    scope: Some(Scope::ContentBottom),
-                    output: "phone".into(),
-                    rect: rect(0.0, 770.0, 500.0, 30.0),
-                    interactive: true,
-                },
-                Region {
-                    id: "side_left".into(),
-                    scope: Some(Scope::SideLeft),
-                    output: "phone".into(),
-                    rect: rect(0.0, 30.0, 8.0, 740.0),
-                    interactive: false,
-                },
-            ],
         }
     }
     fn authority() -> Authority {
@@ -1444,13 +802,43 @@ mod tests {
         authority.update(snapshot(generation, 1, 0), ms(0)).unwrap();
         authority
     }
-    fn rule(id: &str) -> Rule {
-        Config::preset("phone")
-            .unwrap()
-            .rules
-            .into_iter()
-            .find(|rule| rule.id == id)
-            .unwrap()
+    fn rule() -> Rule {
+        Rule {
+            id: "swipe".into(),
+            enabled: true,
+            priority: 0,
+            devices: vec![],
+            seats: vec![],
+            contexts: vec![Context::Desktop],
+            scope: Scope::Everywhere,
+            output: None,
+            screen: None,
+            require_keys: vec![],
+            keys_throughout: false,
+            layer: None,
+            when_mode: None,
+            delivery: Delivery::Observe,
+            trigger: Trigger::Swipe {
+                fingers: 2,
+                direction: Direction::Up,
+                travel: Distance::Millimetres(12.0),
+                fallback_travel: Distance::Normalized(0.04),
+                continuous: false,
+            },
+            action: Action::Event {
+                name: "swipe".into(),
+            },
+        }
+    }
+    fn screen_off_rule() -> Rule {
+        let mut rule = rule();
+        rule.contexts = vec![Context::Locked, Context::Greeter];
+        rule.screen = Some(Screen::Off);
+        rule.trigger = Trigger::TouchTaps {
+            fingers: 1,
+            count: 2,
+        };
+        rule
     }
     fn point(x: i32, y: i32) -> Position {
         mapping().map(x, y).unwrap()
@@ -1474,188 +862,23 @@ mod tests {
         let authority = authority();
         let source = source();
         let map = mapping();
-        assert!(
-            authority
-                .start(
-                    &rule("G08_up"),
-                    input(&source, &map, 0),
-                    &[point(200, 200), point(400, 200)]
-                )
-                .is_ok()
-        );
-        error(
-            authority.start(
-                &rule("G08_up"),
-                input(&source, &map, 0),
-                &[point(200, 200), point(800, 200)],
-            ),
-            Rejection::MixedTargets,
-        );
-    }
-    #[test]
-    fn t62_keyboard_rectangle_excludes_apps_and_bottom_is_above_keyboard() {
-        let authority = authority();
-        let source = source();
-        let map = mapping();
-        assert!(
-            authority
-                .start(
-                    &rule("G06"),
-                    input(&source, &map, 0),
-                    &[point(200, 1800), point(400, 1800)]
-                )
-                .is_ok()
-        );
-        error(
-            authority.start(
-                &rule("G08_up"),
-                input(&source, &map, 0),
-                &[point(200, 1800)],
-            ),
-            Rejection::OutsideRegion,
-        );
-        assert!(
-            authority
-                .start(&rule("G01"), input(&source, &map, 0), &[point(200, 1580)])
-                .is_ok()
-        );
-        error(
-            authority.start(&rule("G01"), input(&source, &map, 0), &[point(200, 1800)]),
-            Rejection::OutsideRegion,
-        );
-    }
-    #[test]
-    fn t58_focus_changes_do_not_retarget_a_frozen_window() {
-        let mut authority = authority();
-        let source = source();
-        let map = mapping();
-        let permit = authority
-            .start(&rule("G08_up"), input(&source, &map, 0), &[point(200, 200)])
-            .unwrap();
-        let mut next = snapshot(authority.generation(), 2, 100);
-        next.windows[0].focused = false;
-        next.windows[1].focused = true;
-        authority.update(next, ms(100)).unwrap();
-        authority
-            .validate(&permit, input(&source, &map, 100))
-            .unwrap();
-        assert_eq!(permit.window().unwrap().id, "a");
-    }
-    #[test]
-    fn global_named_window_rules_freeze_stock_focus_without_inventing_spatial_visibility() {
-        let mut authority = authority();
-        let source = source();
-        let mut next = snapshot(authority.generation(), 2, 0);
-        next.windows[0].id = "0x1234:abc".into();
-        next.windows[1].id = "0x5678:def".into();
-        for window in &mut next.windows {
-            window.visible = false;
-        }
-        authority.update(next.clone(), ms(0)).unwrap();
-        let mut rule = rule("G08_up");
-        rule.scope = Scope::Everywhere;
-        rule.output = Some("phone".into());
-        rule.trigger = crate::config::Trigger::Key {
-            key: crate::config::Key(30),
-        };
-        rule.action = Action::Lua {
-            handler: "window".into(),
-            requires: BTreeSet::from([crate::config::EffectKind::HyprlandActions]),
-        };
         let permit = authority
             .start(
-                &rule,
-                InputContext {
-                    source: &source,
-                    mapping: None,
-                    at: ms(0),
-                },
-                &[],
+                &rule(),
+                input(&source, &map, 0),
+                &[point(200, 200), point(1000, 2000)],
             )
             .unwrap();
-        assert_eq!(permit.window().unwrap().id, "0x1234:abc");
-        next.revision = 3;
-        next.captured_at = ms(100);
-        next.windows[0].focused = false;
-        next.windows[1].focused = true;
-        authority.update(next.clone(), ms(100)).unwrap();
-        authority
-            .validate(
-                &permit,
-                InputContext {
-                    source: &source,
-                    mapping: None,
-                    at: ms(100),
-                },
-            )
-            .unwrap();
-        assert!(next.hyprland_target_available(
-            &rule.action,
-            Scope::Everywhere,
-            Some("0x1234:abc"),
-            Some("phone"),
-            Some(1)
-        ));
-        assert!(!next.hyprland_target_available(
-            &rule.action,
-            Scope::AppContent,
-            Some("0x1234:abc"),
-            Some("phone"),
-            Some(1)
-        ));
+        assert_eq!(permit.output().unwrap().geometry.name, "phone");
+        assert!(point(1000, 2000).global.unwrap().x < 500.0);
     }
     #[test]
-    fn t58_window_geometry_workspace_and_removal_cancel() {
-        for change in 0..3 {
-            let mut authority = authority();
-            let source = source();
-            let map = mapping();
-            let permit = authority
-                .start(&rule("G08_up"), input(&source, &map, 0), &[point(200, 200)])
-                .unwrap();
-            let mut next = snapshot(authority.generation(), 2, 100);
-            match change {
-                0 => {
-                    next.windows[0].rect.origin.x += 1.0;
-                    next.windows[0].content.origin.x += 1.0;
-                }
-                1 => next.windows[0].workspace = 2,
-                _ => next.windows[0].mapped = false,
-            }
-            authority.update(next, ms(100)).unwrap();
-            assert!(
-                authority
-                    .validate(&permit, input(&source, &map, 100))
-                    .is_err()
-            );
-        }
-    }
-    #[test]
-    fn t58_unknown_stacking_order_does_not_guess_overlap_target() {
-        let mut authority = authority();
-        let source = source();
-        let map = mapping();
-        let mut next = snapshot(authority.generation(), 2, 100);
-        next.windows[1].rect = next.windows[0].rect;
-        next.windows[1].content = next.windows[0].content;
-        next.windows[1].z_order = None;
-        authority.update(next, ms(100)).unwrap();
-        error(
-            authority.start(
-                &rule("G08_up"),
-                input(&source, &map, 100),
-                &[point(200, 200)],
-            ),
-            Rejection::MixedTargets,
-        );
-    }
-    #[test]
-    fn t19_output_geometry_change_cancels_even_if_window_stays() {
+    fn t19_output_geometry_change_cancels_the_permit() {
         let mut authority = authority();
         let source = source();
         let map = mapping();
         let permit = authority
-            .start(&rule("G08_up"), input(&source, &map, 0), &[point(200, 200)])
+            .start(&rule(), input(&source, &map, 0), &[point(200, 200)])
             .unwrap();
         let mut next = snapshot(authority.generation(), 2, 100);
         next.outputs[0].geometry_generation = 2;
@@ -1666,38 +889,11 @@ mod tests {
         );
     }
     #[test]
-    fn t28_additional_finger_must_start_in_the_original_target() {
-        let authority = authority();
-        let source = source();
-        let map = mapping();
-        let rule = rule("G08_up");
-        let mut permit = authority
-            .start(&rule, input(&source, &map, 0), &[point(200, 200)])
-            .unwrap();
-        authority
-            .join(
-                &mut permit,
-                &rule,
-                input(&source, &map, 50),
-                point(400, 200),
-            )
-            .unwrap();
-        error(
-            authority.join(
-                &mut permit,
-                &rule,
-                input(&source, &map, 100),
-                point(800, 200),
-            ),
-            Rejection::MixedTargets,
-        );
-    }
-    #[test]
-    fn t58_new_overlay_over_a_joined_finger_revokes_the_permit() {
+    fn t28_additional_finger_must_start_on_the_original_output() {
         let mut authority = authority();
         let source = source();
         let map = mapping();
-        let rule = rule("G08_up");
+        let rule = rule();
         let mut permit = authority
             .start(&rule, input(&source, &map, 0), &[point(200, 200)])
             .unwrap();
@@ -1710,17 +906,16 @@ mod tests {
             )
             .unwrap();
         let mut next = snapshot(authority.generation(), 2, 100);
-        next.regions.push(Region {
-            id: "overlay".into(),
-            scope: None,
-            output: "phone".into(),
-            rect: rect(180.0, 80.0, 50.0, 50.0),
-            interactive: true,
-        });
+        next.outputs[0].geometry.origin.x = 10.0;
         authority.update(next, ms(100)).unwrap();
         error(
-            authority.validate(&permit, input(&source, &map, 100)),
-            Rejection::TargetChanged,
+            authority.join(
+                &mut permit,
+                &rule,
+                input(&source, &map, 100),
+                point(800, 200),
+            ),
+            Rejection::OutputChanged,
         );
     }
     #[test]
@@ -1729,7 +924,7 @@ mod tests {
         let source = source();
         let map = mapping();
         let permit = authority
-            .start(&rule("G08_up"), input(&source, &map, 0), &[point(200, 200)])
+            .start(&rule(), input(&source, &map, 0), &[point(200, 200)])
             .unwrap();
         authority
             .validate(&permit, input(&source, &map, 250))
@@ -1783,7 +978,7 @@ mod tests {
         locked.state = State::Locked;
         authority.update(locked, ms(0)).unwrap();
         error(
-            authority.start(&rule("G08_up"), input(&source, &map, 0), &[point(200, 200)]),
+            authority.start(&rule(), input(&source, &map, 0), &[point(200, 200)]),
             Rejection::ContextDenied,
         );
         error(
@@ -1814,12 +1009,12 @@ mod tests {
         let source = source();
         let map = mapping();
         let permit = authority
-            .start(&rule("G08_up"), input(&source, &map, 0), &[point(200, 200)])
+            .start(&rule(), input(&source, &map, 0), &[point(200, 200)])
             .unwrap();
         let mut other = source.clone();
         other.seat = "seat1".into();
         error(
-            authority.start(&rule("G08_up"), input(&other, &map, 0), &[point(200, 200)]),
+            authority.start(&rule(), input(&other, &map, 0), &[point(200, 200)]),
             Rejection::ContextDenied,
         );
         other = source.clone();
@@ -1843,39 +1038,16 @@ mod tests {
         let mut snap = snapshot(generation, 1, 0);
         snap.state = State::Greeter;
         authority.update(snap, ms(0)).unwrap();
-        let mut rule = rule("G08_up");
+        let mut rule = rule();
         rule.contexts = vec![Context::Greeter];
+        rule.action = Action::Command {
+            argv: vec!["true".into()],
+        };
         let source = source();
         let map = mapping();
         error(
             authority.start(&rule, input(&source, &map, 0), &[point(200, 200)]),
             Rejection::Locked,
-        );
-    }
-    #[test]
-    fn t51_empty_strip_reservation_rejects_interactive_controls() {
-        let mut authority = authority();
-        let source = source();
-        let map = mapping();
-        let mut rule = rule("G11_left");
-        rule.delivery = Delivery::Reserve;
-        assert!(
-            authority
-                .start(&rule, input(&source, &map, 0), &[point(4, 200)])
-                .is_ok()
-        );
-        let mut next = snapshot(authority.generation(), 2, 100);
-        next.regions.push(Region {
-            id: "button".into(),
-            scope: None,
-            output: "phone".into(),
-            rect: rect(0.0, 80.0, 8.0, 40.0),
-            interactive: true,
-        });
-        authority.update(next, ms(100)).unwrap();
-        error(
-            authority.start(&rule, input(&source, &map, 100), &[point(4, 200)]),
-            Rejection::InteractiveReservation,
         );
     }
     #[test]
@@ -1892,18 +1064,19 @@ mod tests {
         let map = mapping();
         assert!(
             authority
-                .start(&rule("G16"), input(&source, &map, 0), &[point(200, 200)])
+                .start(
+                    &screen_off_rule(),
+                    input(&source, &map, 0),
+                    &[point(200, 200)]
+                )
                 .is_ok()
         );
-        let mut candidate = rule("G16");
+        let mut candidate = screen_off_rule();
         candidate.screen = None;
         error(
             authority.start(&candidate, input(&source, &map, 0), &[point(200, 200)]),
             Rejection::ScreenState,
         );
-        candidate.action = Action::Power {
-            action: PowerAction::Blank,
-        };
         candidate.screen = Some(Screen::On);
         error(
             authority.start(&candidate, input(&source, &map, 0), &[point(200, 200)]),
@@ -1942,130 +1115,11 @@ mod tests {
             Rejection::FutureTime,
         );
         let mut invalid = snapshot(generation, 2, 100);
-        invalid.outputs[0].keyboard.as_mut().unwrap().rect.size.y = f64::NAN;
+        invalid.outputs[0].geometry.scale = f64::NAN;
         error(
             authority.update(invalid, ms(100)),
             Rejection::InvalidGeometry,
         );
         assert_eq!(authority.state(ms(100)), State::Desktop);
-    }
-    #[test]
-    fn t58_viewport_actions_freeze_the_start_workspace() {
-        let mut authority = authority();
-        let source = source();
-        let map = mapping();
-        let permit = authority
-            .start(&rule("G11_left"), input(&source, &map, 0), &[point(4, 100)])
-            .unwrap();
-        let mut snap = snapshot(authority.generation(), 2, 100);
-        snap.outputs[0].active_workspace = Some(2);
-        authority.update(snap, ms(100)).unwrap();
-        error(
-            authority.validate(&permit, input(&source, &map, 100)),
-            Rejection::OutputChanged,
-        );
-        let mut snap = snapshot(authority.generation(), 3, 110);
-        snap.outputs[0].active_workspace = None;
-        authority.update(snap, ms(110)).unwrap();
-        error(
-            authority.start(
-                &rule("G11_left"),
-                input(&source, &map, 110),
-                &[point(4, 100)],
-            ),
-            Rejection::TargetMissing,
-        );
-    }
-    #[test]
-    fn t51_new_interactive_overlay_revokes_a_reserved_strip() {
-        let mut authority = authority();
-        let source = source();
-        let map = mapping();
-        let mut rule = rule("G11_left");
-        rule.delivery = Delivery::Reserve;
-        let permit = authority
-            .start(&rule, input(&source, &map, 0), &[point(4, 100)])
-            .unwrap();
-        let mut snap = snapshot(authority.generation(), 2, 100);
-        snap.regions.push(Region {
-            id: "popup".into(),
-            scope: None,
-            output: "phone".into(),
-            rect: rect(0.0, 30.0, 100.0, 100.0),
-            interactive: true,
-        });
-        authority.update(snap, ms(100)).unwrap();
-        error(
-            authority.validate(&permit, input(&source, &map, 100)),
-            Rejection::TargetChanged,
-        );
-    }
-    #[test]
-    fn t58_mapped_but_hidden_workspace_windows_cannot_take_a_touch_target() {
-        let mut authority = authority();
-        let mut snap = snapshot(authority.generation(), 2, 100);
-        let mut hidden = snap.windows[0].clone();
-        hidden.id = "hidden".into();
-        hidden.visible = false;
-        hidden.workspace = 2;
-        hidden.z_order = Some(100);
-        snap.windows.push(hidden);
-        authority.update(snap, ms(100)).unwrap();
-        let source = source();
-        let map = mapping();
-        let permit = authority
-            .start(
-                &rule("G08_up"),
-                input(&source, &map, 100),
-                &[point(100, 100)],
-            )
-            .unwrap();
-        assert_eq!(permit.window().unwrap().id, "a");
-        let mut snap = snapshot(authority.generation(), 3, 110);
-        snap.windows[0].visible = false;
-        authority.update(snap, ms(110)).unwrap();
-        error(
-            authority.validate(&permit, input(&source, &map, 110)),
-            Rejection::TargetMissing,
-        );
-    }
-    #[test]
-    fn a_settled_morf_shell_scopes_the_phone_edges_its_coarse_layer_hid() {
-        use crate::morf::rendered::{KeyboardState, scopes};
-        let mut authority = authority();
-        let source = source();
-        let map = mapping();
-        let mut strip = rule("G11_left");
-        strip.delivery = Delivery::Reserve;
-        let bottom = [point(100, 1960), point(300, 1960)];
-        let mut output = snapshot(1, 1, 0).outputs.remove(0);
-        output.keyboard_known = false;
-        output.keyboard = None;
-        let mut coarse = scopes::tests::coarse(output, ms(200));
-        coarse.generation = authority.generation();
-        coarse.revision = 2;
-        authority.update(coarse.clone(), ms(200)).unwrap();
-        error(
-            authority.start(&strip, input(&source, &map, 200), &[point(4, 200)]),
-            Rejection::KeyboardUnavailable,
-        );
-        error(
-            authority.start(&rule("G05"), input(&source, &map, 200), &bottom),
-            Rejection::KeyboardUnavailable,
-        );
-        let view = scopes::tests::shell(&coarse.outputs[0], ms(200), KeyboardState::Hidden);
-        scopes::apply(&mut coarse, &[view], ms(200));
-        coarse.revision = 3;
-        authority.update(coarse, ms(200)).unwrap();
-        authority
-            .start(&strip, input(&source, &map, 200), &[point(4, 200)])
-            .unwrap();
-        authority
-            .start(&rule("G05"), input(&source, &map, 200), &bottom)
-            .unwrap();
-        error(
-            authority.start(&strip, input(&source, &map, 200), &[point(4, 1960)]),
-            Rejection::OutsideRegion,
-        );
     }
 }

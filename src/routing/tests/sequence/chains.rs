@@ -4,7 +4,6 @@ use super::*;
 fn buffered() -> (Routing, Device, Device) {
     setup_profile(
         vec![Trigger::Key { key: Key(30) }, hold(48)],
-        false,
         Delivery::Buffer,
     )
 }
@@ -148,8 +147,7 @@ fn chord() -> Trigger {
 }
 #[test]
 fn chord_source_admission_requires_an_actual_required_key_not_any_selected_frame() {
-    let (mut routing, first, second) =
-        setup_profile(vec![chord(), hold(48)], false, Delivery::Reserve);
+    let (mut routing, first, second) = setup_profile(vec![chord(), hold(48)], Delivery::Reserve);
     key(&mut routing, &first, 1, 0, 30, 1);
     let id = parent(&routing);
     key(&mut routing, &second, 1, 10, 46, 1);
@@ -172,8 +170,7 @@ fn chord_source_admission_requires_an_actual_required_key_not_any_selected_frame
 
 #[test]
 fn a_required_chord_key_in_an_ordinary_group_invalidates_all_prefix_ownership() {
-    let (mut routing, first, second) =
-        setup_profile(vec![chord(), hold(48)], false, Delivery::Reserve);
+    let (mut routing, first, second) = setup_profile(vec![chord(), hold(48)], Delivery::Reserve);
     key(&mut routing, &first, 1, 0, 30, 1);
     key(&mut routing, &second, 1, 10, 46, 1);
     assert_eq!(received(&mut routing, &second, 10).len(), 1);
@@ -200,7 +197,6 @@ fn reused_tap_candidates_admit_each_fresh_group_without_renewing_the_lease() {
             },
             hold(48),
         ],
-        false,
         Delivery::Buffer,
     );
     let mut original_ticket = 0;
@@ -251,7 +247,6 @@ fn transport_retirement_cancels_native_parent_and_invalidates_queued_receipts() 
 fn delayed_frame_admission_cannot_claim_after_the_original_buffer_wall_deadline() {
     let (mut routing, first, _) = setup_profile(
         vec![Trigger::Key { key: Key(30) }, Trigger::Key { key: Key(48) }],
-        false,
         Delivery::Buffer,
     );
     key(&mut routing, &first, 1, 0, 30, 1);

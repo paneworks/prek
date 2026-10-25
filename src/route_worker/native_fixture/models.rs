@@ -108,13 +108,12 @@ fn endpoint_validation_does_not_accept_paths_or_nonisolated_roles() {
     endpoint.descriptor = kernel::descriptor(&devices[0]);
     assert!(endpoint.validate().is_err());
     let mut endpoint = endpoints[0].clone();
-    endpoint.descriptor =
-        Descriptor::generated_keyboard(devices[0].source.clone(), BTreeMap::new())
-            .unwrap()
-            .for_isolated()
-            .unwrap()
-            .bind_publication(Epoch([3, 4]))
-            .unwrap();
+    endpoint.descriptor = Descriptor::generated_keyboard(devices[0].source.clone())
+        .unwrap()
+        .for_isolated()
+        .unwrap()
+        .bind_publication(Epoch([3, 4]))
+        .unwrap();
     assert!(worker::validate_setup(&devices, &[endpoint, endpoints[1].clone()]).is_err());
 }
 
@@ -148,10 +147,10 @@ fn modeled_subscription_does_not_accept_a_compositor_consumer() {
     assert!(
         subscription(
             fence,
-            &Consumer::Hyprland {
+            &Consumer::Compositor {
                 pid: 1,
                 start: 1,
-                instance: "not-isolated".into()
+                display: "not-isolated".into()
             },
             1,
             true

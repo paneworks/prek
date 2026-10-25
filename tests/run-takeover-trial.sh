@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# User-launched physical takeover trial on one named device in the current Hyprland session.
+# User-launched physical takeover trial on one named device in the current Wayland session.
 set -euo pipefail
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 usage() {
   cat <<'HELP'
 Usage: ./tests/run-takeover-trial.sh --device "<exact kernel device name>" [--seconds N]
-Launch as your regular user while your Hyprland session runs; any terminal
-works, and the session agent is started through Hyprland itself.
+Launch as your regular user from a terminal of the Wayland session under test;
+WAYLAND_DISPLAY and XDG_RUNTIME_DIR select the compositor. The compositor is
+the process listening on that display socket, and the session agent joins the
+compositor's cgroup so it shares the compositor's login session or unit.
 Prompts for sudo before building. Routes only the named device through a
 temporary route broker for N seconds (default 60, 10..300) with no rules, so
 input should behave exactly as before. The broker takes the device over only
@@ -35,17 +37,18 @@ if ((EUID == 0)) || [[ -z $device ]] || ! [[ $seconds =~ ^[0-9]+$ ]] || ((second
   exit 2
 fi
 : "${XDG_RUNTIME_DIR:?Run as your regular user with a runtime directory}"
-if [[ -z ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
-  HYPRLAND_INSTANCE_SIGNATURE=$(hyprctl -j instances | jq -er \
-    'if length == 1 then .[0].instance else error("expected exactly one running Hyprland") end')
-  export HYPRLAND_INSTANCE_SIGNATURE
-fi
+: "${WAYLAND_DISPLAY:?Run from a terminal of the Wayland session under test}"
 if [[ $repo =~ [^A-Za-z0-9_./-] ]]; then
-  echo "The checkout path \"$repo\" has characters Hyprland's exec cannot pass safely." >&2
+  echo "The checkout path \"$repo\" has characters the agent launcher cannot quote safely." >&2
+  exit 2
+fi
+if [[ $WAYLAND_DISPLAY =~ [^A-Za-z0-9_.-] || $WAYLAND_DISPLAY == . || $WAYLAND_DISPLAY == .. ]]; then
+  echo "WAYLAND_DISPLAY \"$WAYLAND_DISPLAY\" is not a socket name inside XDG_RUNTIME_DIR." >&2
   exit 2
 fi
 devices=${PREK_TRIAL_INPUT_DEVICES:-/proc/bus/input/devices}
 run_root=${PREK_TRIAL_RUN_ROOT:-/run}
+cgroups=${PREK_TRIAL_CGROUP_ROOT:-/sys/fs/cgroup}
 if ! grep -Fxq "N: Name=\"$device\"" "$devices"; then
   echo "No input device is named exactly \"$device\"." >&2
   exit 2
@@ -73,6 +76,9 @@ finish() {
     if [[ $(tr '\0' ' ' < "/proc/$agent/cmdline" 2>/dev/null) == "$prek session "* ]]; then
       kill "$agent" 2>/dev/null || true
     fi
+  fi
+  if [[ -f $run/launcher.pid && ! -f $run/session.status ]]; then
+    kill "$(cat "$run/launcher.pid")" 2>/dev/null || true
   fi
   if [[ -n $broker ]]; then kill -TERM "$broker" 2>/dev/null || true; wait "$broker" 2>/dev/null || true; fi
   sudo -n rm -f "$rule" 2>/dev/null && sudo -n udevadm control --reload-rules 2>/dev/null || true
@@ -114,18 +120,25 @@ allowed_seats = ["seat0"]
 name = "$device"
 CONFIG
 "$prek" check --config "$run/config.toml" --json > "$run/check.json"
-if ! pid=$(hyprctl -j instances | jq -er --arg instance "$HYPRLAND_INSTANCE_SIGNATURE" \
-  '.[] | select(.instance == $instance) | .pid'); then
-  echo "No running Hyprland has instance $HYPRLAND_INSTANCE_SIGNATURE." >&2
+# The compositor holding capabilities is not dumpable, so only root sees its descriptors.
+display="$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"
+listeners=$(sudo ss -Hxlp src "$display" | grep -o 'pid=[0-9]*' | sort -u || true)
+if [[ $(printf '%s\n' "$listeners" | grep -c '^pid=') != 1 ]]; then
+  echo "Expected exactly one process listening on $display." >&2
   exit 1
 fi
-# A compositor holding capabilities is not dumpable, so only root can read its exe link.
+pid=${listeners#pid=}
 if ! compositor=$(sudo readlink -e "/proc/$pid/exe"); then
-  echo "Could not resolve the executable of Hyprland pid $pid." >&2
+  echo "Could not resolve the executable of compositor pid $pid." >&2
+  exit 1
+fi
+cgroup=$(sed -n 's/^0:://p' "/proc/$pid/cgroup")
+if [[ -z $cgroup || ! -f $cgroups$cgroup/cgroup.procs ]]; then
+  echo "Could not resolve the cgroup of compositor pid $pid." >&2
   exit 1
 fi
 logind=$(readlink -f "${PREK_TRIAL_LOGIND:-/run/current-system/sw/lib/libsystemd.so.0}")
-printf 'Compositor: %s (pid %s)\nlibsystemd: %s\n' "$compositor" "$pid" "$logind"
+printf 'Compositor: %s (pid %s, cgroup %s)\nlibsystemd: %s\n' "$compositor" "$pid" "$cgroup" "$logind"
 sudo install -d -m 0755 -o root -g root "$trial"
 sudo install -m 0644 -o root -g root "$run/config.toml" "$trial/config.toml"
 # udev reads /run/udev/rules.d but does not create it.
@@ -158,32 +171,36 @@ if ! sudo -n test -S "$socket"; then
   echo "The broker did not open its socket within 10 s; see $run/broker.log." >&2
   exit 1
 fi
-# Hyprland starts the agent so it runs in the compositor's own session or unit.
+# The launcher waits until it is in the compositor's cgroup, then starts the agent.
 cat > "$run/agent.sh" <<AGENT
 #!/bin/sh
-"$prek" session --socket "$socket" --observations --context --duration $((seconds - 2)) \\
-  > "$run/session.log" 2>&1 &
+echo \$\$ > "$run/launcher.pid"
+while [ ! -e "$run/agent.go" ]; do sleep 0.05; done
+"$prek" session --socket "$socket" --display "$WAYLAND_DISPLAY" --observations --context \\
+  --duration $((seconds - 2)) > "$run/session.log" 2>&1 &
 echo \$! > "$run/session.pid"
 wait \$!
 echo \$? > "$run/session.status"
 AGENT
 chmod 0755 "$run/agent.sh"
-provider=$(hyprctl -j status | jq -r '.configProvider // "hyprlang"')
-if [[ $provider == lua ]]; then
-  reply=$(hyprctl dispatch "hl.dsp.exec_cmd(\"$run/agent.sh\")")
-else
-  reply=$(hyprctl dispatch exec "$run/agent.sh")
-fi
-if [[ $reply != ok ]]; then
-  echo "Hyprland ($provider) refused to start the session agent: $reply" >&2
+"$run/agent.sh" </dev/null >/dev/null 2>&1 &
+for _ in $(seq 50); do
+  if [[ -s $run/launcher.pid ]]; then break; fi
+  sleep 0.1
+done
+if [[ ! -s $run/launcher.pid ]]; then
+  echo "The session agent launcher did not start within 5 s." >&2
   exit 1
 fi
+# shellcheck disable=SC2024
+sudo tee -a "$cgroups$cgroup/cgroup.procs" < "$run/launcher.pid" > /dev/null
+touch "$run/agent.go"
 for _ in $(seq 50); do
   if [[ -s $run/session.pid ]]; then break; fi
   sleep 0.1
 done
 if [[ ! -s $run/session.pid ]]; then
-  echo "Hyprland did not start the session agent within 5 s." >&2
+  echo "The session agent did not start within 5 s." >&2
   exit 1
 fi
 printf '\nType and use "%s" normally for %d seconds. If it stops responding,\n' "$device" "$seconds"
@@ -199,7 +216,7 @@ if [[ $agent_status != 0 ]]; then
 fi
 wait "$broker"
 broker=""
-grep -E 'taken over|stays with its original consumer|keeps no consumer evidence|lost its device settings' \
+grep -E 'taken over|stays with its original consumer|keeps no consumer evidence' \
   "$run/broker.log" || true
 if ! grep -q 'taken over at a neutral idle cut' "$run/broker.log"; then
   echo "\"$device\" was never taken over." >&2

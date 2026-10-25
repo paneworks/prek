@@ -7,7 +7,7 @@ use crate::{
     supervisor::Heartbeat,
     transport::{Consumer, ConsumerEvidence, Descriptor, Readiness, Ready},
 };
-use std::{collections::BTreeMap, io, time::Duration};
+use std::{io, time::Duration};
 
 struct Admission {
     gate: Option<Readiness>,
@@ -88,10 +88,9 @@ impl Prepared {
         health: &Heartbeat,
         source: Source,
         consumer: Consumer,
-        settings: BTreeMap<String, String>,
     ) -> io::Result<Self> {
         let at = crate::ipc::monotonic()?;
-        let descriptor = Descriptor::generated_keyboard(source, settings).map_err(invalid)?;
+        let descriptor = Descriptor::generated_keyboard(source).map_err(invalid)?;
         let publication = registry.prepare_generated_for_worker(descriptor, health)?;
         Self::create(publication, consumer, at)
     }
@@ -117,8 +116,7 @@ impl Prepared {
         source: Source,
         consumer: Consumer,
     ) -> io::Result<Self> {
-        let descriptor =
-            Descriptor::generated_keyboard(source, BTreeMap::new()).map_err(invalid)?;
+        let descriptor = Descriptor::generated_keyboard(source).map_err(invalid)?;
         let publication = registry.prepare_generated_isolated_for_worker(descriptor, health)?;
         Self::create(publication, consumer, crate::ipc::monotonic()?)
     }

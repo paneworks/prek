@@ -16,6 +16,8 @@ extern crate self as prek;
 #[cfg(target_os = "linux")]
 pub mod actions;
 mod buttons;
+#[cfg(target_os = "linux")]
+pub mod compositor;
 pub mod config;
 #[cfg(target_os = "linux")]
 pub mod configuration;
@@ -23,9 +25,12 @@ pub mod context;
 #[cfg(target_os = "linux")]
 pub mod context_transfer;
 pub mod diagnostics;
+#[cfg(target_os = "linux")]
+pub mod display;
+#[cfg(target_os = "linux")]
+mod fsuid;
 pub mod gestures;
 #[cfg(target_os = "linux")]
-pub mod hyprland;
 pub mod input;
 pub mod input_events;
 #[cfg(target_os = "linux")]
@@ -43,7 +48,6 @@ pub mod lua;
 #[cfg(target_os = "linux")]
 pub mod lua_compiler;
 #[cfg(target_os = "linux")]
-pub mod morf;
 pub mod paths;
 #[cfg(target_os = "linux")]
 mod process_clock;

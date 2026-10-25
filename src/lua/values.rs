@@ -130,12 +130,7 @@ pub(super) fn policy_booleans<'gc>(ctx: Context<'gc>, value: Value<'gc>) -> io::
     if let Value::Table(config) = value {
         let policy: Value = config.get(ctx, "policy").map_err(io::Error::other)?;
         if let Value::Table(policy) = policy {
-            for field in [
-                "allow_runtime_rules",
-                "allow_input_events",
-                "allow_power_actions",
-                "allow_hyprland_actions",
-            ] {
+            for field in ["allow_runtime_rules", "allow_input_events"] {
                 optional_boolean(ctx, policy, field)?;
             }
         }
@@ -399,22 +394,6 @@ pub(super) fn snapshot<'gc>(
 }
 
 #[cfg(target_os = "linux")]
-pub(super) fn layouts<'gc>(
-    ctx: Context<'gc>,
-    layouts: &crate::hyprland::layouts::Snapshot,
-    fence: crate::protocol::Fence,
-) -> Result<Value<'gc>, luna::Error<'gc>> {
-    let value = luna_util::serde::to_value(ctx, layouts).map_err(io::Error::other)?;
-    let Value::Table(table) = value else {
-        unreachable!("native layouts serialize as a table")
-    };
-    table.set(ctx, "generation", identity(ctx, layouts.generation))?;
-    table.set(ctx, "revision", identity(ctx, layouts.revision))?;
-    table.set(ctx, "fence", context_fence(ctx, &fence)?)?;
-    Ok(value)
-}
-
-#[cfg(target_os = "linux")]
 pub(super) fn binding<'gc>(
     ctx: Context<'gc>,
     binding: &crate::context::Binding,
@@ -465,7 +444,7 @@ local function event(payload)
   assert(e.id=='18446744073709551615' and e.ordinal=='18446744073709551614')
   assert(e.source.device=='9223372036854775808' and e.source.generation=='0')
   assert(e.config_generation=='1' and e.session_generation=='18446744073709551614')
-  assert(e.evidence.count==3 and e.action.fields.id==17 and e.workspace==-3)
+  assert(e.evidence.count==3 and e.action.fields.id==17 and e.priority==-3)
   p.log.info('exact-event',{id=e.id, broker=payload.fence.broker[1]})
 end
 p.events.on('matched',event)
@@ -486,7 +465,7 @@ return p.config.new{rules={p.rules.define{id='exact',trigger=p.triggers.key{key=
             "outcome":"matched","id":u64::MAX,"ordinal":u64::MAX-1,
             "source":{"device":1u64 << 63,"generation":0},"config_generation":1,
             "session_generation":u64::MAX-1,"evidence":{"count":3},
-            "action":{"fields":{"id":17}},"workspace":-3}});
+            "action":{"fields":{"id":17}},"priority":-3}});
         let logs = runtime.dispatch(EventKind::Matched, &payload).unwrap();
         assert_eq!(
             logs[0].fields,

@@ -320,38 +320,6 @@ fn mapping_loss_and_reconciliation_cannot_seed_a_retained_touch_ticket() {
 }
 
 #[test]
-fn retained_touch_handoffs_keep_the_original_frozen_window_when_focus_moves() {
-    let mut engine = held_touch_model();
-    let action = Action::Hyprland {
-        action: crate::config::WindowAction::Close,
-    };
-    engine.sequences[0].rule.action = action.clone();
-    engine.sequences[0].rule.output = Some("phone".into());
-    for child in &mut engine.sequences[0].steps {
-        child.workers[0].rule.action = action.clone();
-        child.workers[0].rule.output = Some("phone".into());
-    }
-    touch_start(&mut engine, 200);
-    let mut changed = snapshot(1, 2, 90);
-    changed.windows[0].focused = false;
-    changed.windows[1].focused = true;
-    engine.authority.update(changed, ms(90)).unwrap();
-    tick(&mut engine, 100);
-    let tickets = engine.recognition_requests(ms(100)).unwrap();
-    let [ticket] = &tickets[..] else {
-        panic!("{tickets:?}; {:?}", engine.events)
-    };
-    let candidate = &engine.sequences[0].steps[1].workers[0].candidates[&device(1).source];
-    assert_eq!(candidate.permit.as_ref().unwrap().window().unwrap().id, "a");
-    engine
-        .recognition_response(reply(ticket, CustomPhase::Discrete), ms(101))
-        .unwrap();
-    assert!(
-        matches!(&matches(&engine.events)[..],[Event::Matched{window:Some(window),..}] if window=="a")
-    );
-}
-
-#[test]
 fn retained_touch_tickets_obey_new_group_clocks_and_original_reply_windows() {
     let mut engine = held_touch_model();
     engine.sequences[0].groups.push(SequenceGroup {
@@ -927,60 +895,6 @@ fn input_loss_has_no_normalized_frame_to_activate_a_later_custom_step() {
         engine.sequences[0].steps[1].workers[0]
             .candidates
             .is_empty()
-    );
-}
-
-#[test]
-fn same_record_projection_checks_the_original_target_before_joining_another_source() {
-    let mut engine = model_steps(hold(100), custom("last"), 1, true);
-    let action = Action::Hyprland {
-        action: crate::config::WindowAction::Close,
-    };
-    engine.sequences[0].rule.action = action.clone();
-    engine.sequences[0].rule.output = Some("phone".into());
-    for child in &mut engine.sequences[0].steps {
-        child.workers[0].rule.action = action.clone();
-        child.workers[0].rule.output = Some("phone".into());
-    }
-    let mut other = engine.devices[&1].device.clone();
-    other.source.device = 2;
-    other.identity = "handoff-keyboard".into();
-    add(&mut engine, other.clone(), &[]);
-    key(&mut engine, 1, 0, 1, 115, true);
-    assert_eq!(
-        engine.sequences[0].pending["seat0"]
-            .first
-            .permit
-            .as_ref()
-            .unwrap()
-            .window()
-            .unwrap()
-            .id,
-        "a"
-    );
-    let mut changed = snapshot(1, 2, 90);
-    changed.windows[0].focused = false;
-    changed.windows[1].focused = true;
-    engine.authority.update(changed, ms(90)).unwrap();
-    frame(&mut engine, other.source, 110, 1, &[(EV_KEY, 30, 1)]);
-    assert!(
-        engine.sequences[0].pending.is_empty(),
-        "target mismatch was not rejected at admission"
-    );
-    assert!(
-        engine
-            .recognition_requests(ms(110))
-            .unwrap()
-            .iter()
-            .all(|ticket| ticket.recognizer == "direct")
-    );
-    assert!(engine.sequences[0].pending.is_empty());
-    assert!(
-        engine
-            .events
-            .iter()
-            .any(|event| matches!(event, Event::Cancelled { at, reason, .. }
-        if *at == ms(110) && reason == "sequence target changed"))
     );
 }
 

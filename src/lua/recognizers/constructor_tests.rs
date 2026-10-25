@@ -325,12 +325,7 @@ fn native_options_reject_unknown_fields_types_and_out_of_range_budgets() {
 
 #[test]
 fn protected_permission_fields_reject_lua_truthiness_in_models_and_exports() {
-    for field in [
-        "allow_runtime_rules",
-        "allow_input_events",
-        "allow_power_actions",
-        "allow_hyprland_actions",
-    ] {
+    for field in ["allow_runtime_rules", "allow_input_events"] {
         for value in ["'false'", "0", "{}", "function()end"] {
             let code = format!(
                 "local p=require('prek');return p.config.new{{policy={{{field}={value}}}}}"

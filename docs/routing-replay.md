@@ -55,10 +55,10 @@ advance or teardown at EOF.
 
 `descriptor` is the complete native `transport::Descriptor` snapshot, including
 the original device. `consumer` is `transport::ConsumerEvidence`. Ordinary
-descriptor, metadata, consumer identity/class/seat/settings, freshness, feedback
+descriptor, metadata, consumer identity/class/seat, freshness, feedback
 and readiness validators apply. The descriptor must match the registered device
 exactly. Admission requires synchronized neutral physical state, fresh recorded
-desktop context, no secure overlay and equal input/wall times. Held keys,
+desktop context and equal input/wall times. Held keys,
 contacts, loss without reconciliation and stale source incarnations are refused.
 An admitted source generation cannot be reused after retirement; register a
 newer connection generation and supply fresh readiness.
@@ -73,7 +73,7 @@ cannot exceed wall time. Wall-only polls/writes do not advance physical timers
 past unread frames; `input` ticks explicitly advance the drained watermark.
 Both clocks retain native deadline checks. Overdue writes fail instead of
 silently repairing their timing. Recorded context must be refreshed normally;
-expiry, secure state and session replacement retire affected transports and
+expiry, lock state and session replacement retire affected transports and
 pending write offers. Action availability expires independently, and dispatches
 are validated when a poll dequeues them, not merely when recognition completes.
 

@@ -1346,7 +1346,6 @@ mod tests {
             },
             None,
             &BTreeMap::new(),
-            BTreeMap::new(),
         )
         .unwrap()
     }
@@ -1429,7 +1428,6 @@ mod tests {
             },
             None,
             &BTreeMap::new(),
-            BTreeMap::new(),
         )
         .unwrap();
         let unmanaged = registry.prepare_isolated(spec).unwrap();
@@ -1581,7 +1579,6 @@ mod tests {
             publication.descriptor.identity,
             None,
             &BTreeMap::new(),
-            BTreeMap::new(),
         )
         .unwrap();
         assert!(registry.prepare_isolated(production).is_err());
@@ -1743,8 +1740,7 @@ mod tests {
     fn repeating_or_fuzzy_sources_fail_before_kernel_creation() {
         let mut device: Device = crate::transport::tests::touch();
         let id = descriptor().identity;
-        let fuzzy =
-            Descriptor::mirror(&device, id, None, &BTreeMap::new(), BTreeMap::new()).unwrap();
+        let fuzzy = Descriptor::mirror(&device, id, None, &BTreeMap::new()).unwrap();
         assert_eq!(
             supported_backend(&fuzzy).unwrap_err().kind(),
             io::ErrorKind::Unsupported
@@ -1762,7 +1758,6 @@ mod tests {
                     period_ms,
                 }),
                 &BTreeMap::new(),
-                BTreeMap::new(),
             )
             .unwrap();
             assert_eq!(
@@ -1791,13 +1786,8 @@ mod tests {
             product: 2,
             version: 1,
         };
-        let descriptor = Descriptor::mirror_with_compositor_repeat(
-            &device,
-            identity,
-            &BTreeMap::new(),
-            BTreeMap::new(),
-        )
-        .unwrap();
+        let descriptor =
+            Descriptor::mirror_with_compositor_repeat(&device, identity, &BTreeMap::new()).unwrap();
         assert!(supported_backend(&descriptor).is_ok());
         let publication = registry.registry().prepare_isolated(descriptor).unwrap();
         let path = files.path.join("output");

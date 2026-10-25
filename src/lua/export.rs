@@ -132,8 +132,7 @@ mod tests {
             );
         }
         let mut config = Config::preset("desktop").unwrap();
-        config.policy.allow_power_actions = true;
-        config.policy.allow_hyprland_actions = true;
+        config.policy.allow_runtime_rules = true;
         config.modes.push(crate::config::NamedMode {
             id: "normal".into(),
             active: true,

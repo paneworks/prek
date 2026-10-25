@@ -1,9 +1,9 @@
 # NixOS setup
 
-## Local development and Cage tests
+## Local development
 
-The flake supplies Rust, Python and ShellCheck; no Ubuntu packages or global
-Cage installation are needed. From this checkout:
+The flake supplies Rust, Python and ShellCheck; no Ubuntu packages are needed.
+From this checkout:
 
 ```sh
 mkdir -p target/cargo-home
@@ -11,49 +11,13 @@ export CARGO_HOME="$PWD/target/cargo-home"
 export CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2
 nix develop --no-write-lock-file
 oslo make verify
-oslo make test-cage-touch
-oslo make test-cage-wayland-fix
-oslo make test-cage-lua-wayland-fix
 ```
-
-The Cage recipes use the NixOS graphics driver directly, with one Nix build job
-and two build cores. `hardware.graphics.enable` must already be configured;
-`RENDER_NODE` overrides `/dev/dri/renderD128`. They create private headless
-compositors, homes, sockets and session buses, not a VM or a host login. Receipts
-are under `target/cage-touch/run-*` and `target/cage-host/run-*`. The touch fixture
-is a test-only Cage patch; the ordinary keyboard fixture uses stock dependencies.
-Neither opens physical input devices or enables production routing.
-
-`test-cage-wayland-fix` explicitly selects the patched Aquamarine fixture
-described in [the compositor notes](ubuntu-compositors.md#explicit-nested-wayland-test-variant).
-It passed the keyboard, Lua, mode-change and DPMS checks on NixOS with NVIDIA
-595.71.05. Its results are not unmodified stock compositor acceptance.
-The recipe runs separate mode/layer sessions and exercises frozen-target window
-moves, workspace follow and close with another owned window focused. The receiver uses a submitted-state sequence
-in each frame callback; keyboard batches and each touch frame must reach that
-watermark. The nested test config disables animations so its screencopy is not
-an intermediate opening frame. Frame callbacks establish compositor pacing, not
-physical display presentation; the keyboard fixture separately saves actual
-compositor pixels in `receiver-baseline.png`, `receiver-routed-keys.png` and
-`receiver-changed-keys.png`. Exact Hyprland 0.56.2 window/power effects freeze and
-verify the hyprlang or Lua provider; unknown/changed providers refuse before
-mutation. The Lua recipe starts `hyprland.lua`, verifies actual `j/status`, and
-uses typed Lua dispatch for both setup focus and the granted application effects.
-`oslo make test-cage` retains the original unpatched Hyprland 0.54.3 fixture and
-adds window-action checks. On this NVIDIA setup it timed out waiting for usable
-nested output dimensions; the runner does not silently substitute the patch.
 
 Only the user launches privileged tests, as a regular user without a sudo
 prefix: `./tests/run-root-routing.sh` for isolated synthetic kernel devices, or
-`./tests/run-root-handoff.sh --remote-session` for the bounded native PAM/logind
-handoff. The latter requires a separately built Morf ELF and shell; it refuses
-an occupied local user session. NixOS skips nixGL/nixVulkan wrappers and the
-root-session coordinator uses immutable Nix paths for systemd and console tools.
-Logs remain in `target/root-routing/latest` or `target/root-handoff/latest`.
-Do not launch the remote handoff from an active desktop: it can temporarily stop
-the display manager, with an owned cleanup guard for restoration.
-
-The driver setup is described in the [NixOS graphics documentation](https://wiki.nixos.org/wiki/Graphics).
+`./tests/run-takeover-trial.sh` for one physical device in the running Wayland
+session. Logs remain in `target/root-routing/latest` or
+`target/takeover-trial/latest`.
 
 ## System service
 
@@ -77,6 +41,7 @@ Import the module from the same flake revision as the package:
         {
           services.prek = {
             enable = true;
+            compositorExecutable = "/ABSOLUTE/PATH/TO/COMPOSITOR-ELF";
             luaConfig = ''
               local p = require("prek")
               return p.config.new {
@@ -104,12 +69,11 @@ published, use that repository's normal input/update flow.
 package for the host architecture; it can be overridden with another tested
 package. The broker and session launcher always use that same executable.
 
-`compositorPackage` defaults to `config.programs.hyprland.package`. It must be the
-package that runs the session. The build checks the actual ELF, selecting
-`.Hyprland-wrapped` for the standard Nix wrapper layout; a nonstandard layout can
-set `compositorExecutable` explicitly. `logindLibrary` defaults to the NixOS
-systemd package's absolute `libsystemd.so.0`. Set `morfExecutable` to Morf's actual
-ELF when native lock-provider verification is required.
+`compositorExecutable` is required: the actual Wayland compositor ELF, not a
+wrapper script. For a Nix-wrapped program the ELF is usually the `.NAME-wrapped`
+file beside the wrapper in the package's `bin`. The process listening on the
+session's `WAYLAND_DISPLAY` socket must run this exact file. `logindLibrary`
+defaults to the NixOS systemd package's absolute `libsystemd.so.0`.
 
 For reusable Lua modules, `luaModules."bindings.keyboard" = ''...''` produces
 `modules/bindings/keyboard.lua` beside the entry file. Module names follow the
@@ -121,8 +85,8 @@ copied as regular files into an immutable tree and checked with the selected
 match `services.prek.mode`. Lua still compiles in Prek's disposable unprivileged
 compiler when the root broker starts.
 
-`mode = "route"` takes over the configuration's allowed devices consumed by stock
-Hyprland at a neutral idle cut, from boot, so it also requires
+`mode = "route"` takes over the configuration's allowed devices held by the session's
+Wayland compositor at a neutral idle cut, from boot, so it also requires
 `allowPhysicalTakeover = true`. It widens the unit to `char-input rw` (LED
 feedback), `/dev/uinput rw` and a writable `/run/prek` device registry. Try one
 device with `tests/run-takeover-trial.sh` before enabling it here.
@@ -139,28 +103,21 @@ Confirmed suspend-clock discontinuities retire live process authority; see
 ## Start the owning session agent
 
 The module installs `prek-session`. Run it **from the compositor's own login
-session**, for example in the Hyprland configuration:
-
-```text
-exec-once = /run/current-system/sw/bin/prek-session
-```
-
-For a Lua-configured compositor, use its equivalent existing startup hook.
+session**, for example from the compositor's startup hook.
 The launcher starts `prek session --reconnect` with observation,
 verified context and Lua enabled. An authority-free guardian re-executes retired
 agents in that same login session; every replacement registers afresh. It inherits `XDG_RUNTIME_DIR` and
-`HYPRLAND_INSTANCE_SIGNATURE` from that session. It does not create a systemd
+`WAYLAND_DISPLAY` from that session. It does not create a systemd
 user service: the shared user manager does not prove owning logind membership,
 and its agents are deliberately rejected.
 
-With uwsm (`programs.hyprland.withUWSM`), Hyprland itself runs as a user service
-outside any login session. The broker then binds it to your active local display
-session only while logind records that exact Hyprland process as the session's
-controller, and requires the agent to share Hyprland's systemd unit. A startup
-hook does that; do not wrap `prek-session` in `uwsm app`, which moves it to its
-own unit. Any other compositor without an active logind user session cannot
-establish production registration. Local Cage
-acceptance uses explicit model seat authority and separate owned sockets.
+A compositor that runs as a systemd user service outside any login session is
+bound to your active local display session only while logind records that exact
+compositor process as the session's controller; the agent must then share the
+compositor's systemd unit. Starting `prek-session` from the compositor's startup
+hook does that; a launcher that moves it into its own unit breaks the binding.
+Any other compositor without an active logind user session cannot establish
+production registration.
 
 `services.prek.session.input = true` adds `--input`; the protected Lua policy
 must also set `allow_input_events=true`. `session.ruleMutations = true` adds
@@ -197,13 +154,13 @@ requires a stable initialized udev publication. See the
 [source re-entry contract](evdev-boundary.md#discovery-and-source-re-entry) for
 replacement handling and remaining hardware/consumer gates.
 
-## Route stock-Hyprland devices
+## Route compositor-held devices
 
 1. Find the device's exact kernel name with `grep '^N: Name=' /proc/bus/input/devices`.
    Interfaces that share one name, such as a KVM's keyboard and mouse, are
    selected together.
-2. Try it for one minute from any terminal while Hyprland runs (the trial starts
-   its agent through Hyprland), then read `target/takeover-trial/latest/broker.log`:
+2. Try it for one minute from a terminal of your Wayland session, then read
+   `target/takeover-trial/latest/broker.log`:
 
    ```sh
    ./tests/run-takeover-trial.sh --device "<name>" --seconds 60
@@ -216,29 +173,29 @@ replacement handling and remaining hardware/consumer gates.
      enable = true;
      mode = "route";
      allowPhysicalTakeover = true;
+     compositorExecutable = "/ABSOLUTE/PATH/TO/COMPOSITOR-ELF";
      luaConfig = ''
        local p = require("prek")
        return p.config.new {
          mode = "route",
          policy = {allowed_devices={"keyboard"}},
-         devices = {keyboard={name="<name>",hyprland={repeat_rate=35,repeat_delay=300}}},
+         devices = {keyboard={name="<name>"}},
        }
      '';
    };
    ```
 
 After you log in and `prek-session` registers, the broker mirrors each allowed
-device, copies the device's visible Hyprland settings and the declared
-`hyprland` options to the mirror, and takes the device over once it has been
-neutral and idle for 100 ms. `journalctl -u prek.service -b | grep -E 'taken
-over|stays with'` shows each outcome.
+device and takes it over once the compositor holds the mirror's event node and
+the device has been neutral and idle for 100 ms. `journalctl -u prek.service -b |
+grep -E 'taken over|stays with'` shows each outcome.
 
-Only stock Hyprland is a supported consumer. Console keyboards, devices with
-nonzero axis fuzz (most touchpads) and unclassified absolute pointers stay with
-Hyprland. A runtime rule change briefly releases routed devices until each is
-neutral and idle again, and settings Hyprland cannot show are trusted from its
-write reply. To roll back, `sudo systemctl stop prek.service` releases every
-grab and removes the mirrors; then set `mode = "observe"` or `enable = false`.
+Only the session's Wayland compositor is a supported consumer. Console
+keyboards, devices with nonzero axis fuzz (most touchpads) and unclassified
+absolute pointers stay with the compositor. A runtime rule change briefly
+releases routed devices until each is neutral and idle again. To roll back,
+`sudo systemctl stop prek.service` releases every grab and removes the mirrors;
+then set `mode = "observe"` or `enable = false`.
 
 ## Check, stop and recover
 
@@ -260,7 +217,7 @@ not an agent-stop command. Stop the owning `prek-session` process as well when
 shutting down the integration. One-shot agents must be restarted from the
 compositor's own startup hook. Do not launch a second agent while the first remains registered. Observation does not consume input,
 so stopping it preserves ordinary application delivery. Stopping a route broker
-releases its grabs and destroys its mirrors, returning each device to Hyprland;
+releases its grabs and destroys its mirrors, returning each device to the compositor;
 rollback on real hardware has not been accepted yet.
 
 Installed references, editor definitions, examples and three Lua presets are

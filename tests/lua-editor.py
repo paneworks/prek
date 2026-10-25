@@ -36,8 +36,6 @@ p.rules.on("editor-example", "cancel", function(payload) p.log.info(payload.even
 local actions = {
     p.actions.command {argv = {"printf", "%s", "hello"}},
     p.actions.keys {kind = "keys", keys = {"KEY_LEFTMETA", "KEY_A"}}, p.actions.remap {key = "KEY_B"},
-    p.actions.morf {action = "dashboard"}, p.actions.hyprland {action = "close"},
-    p.actions.power {action = "wake"},
     p.actions.define("editor-handler", {requires = {"observations"}}, function(payload)
         return p.actions.event {name = payload.event.rule}
     end),
@@ -57,23 +55,16 @@ p.events.on("ready", function(payload)
     local output = p.outputs.get("fixture-output")
     if output then
         local point = p.coordinates.convert(output.reference, {x=0.5,y=0.5}, "normalized", "global")
-        for _, view in ipairs(p.regions.at(point or {x=0,y=0}) or {}) do
-            p.log.info(view.region.id, {revision=view.revision})
-        end
+        if point then p.log.info("centre", {x = point.x, y = point.y}) end
     end
-    p.outputs.list(); p.regions.list(); p.regions.get("widget")
-    for _, provider in ipairs(p.morf.providers() or {}) do
-        ---@type string
-        local birth = provider.compositor_start
-        p.log.info(provider.output, {birth = birth, epoch = provider.epoch, fence = provider.fence})
-    end
+    p.outputs.list()
     local capabilities = p.capabilities.current()
     if capabilities then
         ---@type string
         local generation = capabilities.fence.session
         p.log.info(generation, {negotiated = capabilities.negotiated, ready = capabilities.ready})
     end
-    p.capabilities.has("future_capability"); p.capabilities.ready("power_actions")
+    p.capabilities.has("future_capability"); p.capabilities.ready("commands")
     if snapshot then
         ---@type string
         local revision = snapshot.revision

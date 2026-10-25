@@ -13,9 +13,9 @@ end)
 
 p.events.on("context_changed", function()
     -- A true readiness result still requires a broker grant for each effect.
-    p.log.info("power availability", {
-        negotiated = p.capabilities.has("power_actions"),
-        ready = p.capabilities.ready("power_actions"),
+    p.log.info("command availability", {
+        negotiated = p.capabilities.has("commands"),
+        ready = p.capabilities.ready("commands"),
     })
 end)
 

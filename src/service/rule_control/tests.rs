@@ -268,163 +268,6 @@ fn broker_rule_edits_use_retained_source_definitions_not_client_declarations() {
         assert_eq!(rules.revision(), 4);
     }
 }
-#[test]
-fn public_morf_transport_remains_gated_before_rendered_context_and_physical_cutover() {
-    let mut config = Config::preset("desktop").unwrap();
-    config.mode = crate::config::Mode::Route;
-    config.rules[0].enabled = true;
-    config.rules[0].action = Action::Morf {
-        action: crate::config::MorfAction::KeyboardHide,
-    };
-    let caps = BTreeSet::from([Capability::Context, Capability::MorfActions]);
-    assert!(
-        registration_capabilities(Some(&config), None, false, false, true, Role::Agent, &caps)
-            .is_err()
-    );
-    config.rules[0].action = Action::Lua {
-        handler: "native".into(),
-        requires: BTreeSet::from([
-            crate::config::EffectKind::MorfActions,
-            crate::config::EffectKind::Commands,
-        ]),
-    };
-    let caps = BTreeSet::from([
-        Capability::Context,
-        Capability::Observations,
-        Capability::MorfActions,
-        Capability::Commands,
-        Capability::LuaActions,
-        Capability::LuaEvents,
-    ]);
-    assert!(
-        registration_capabilities(Some(&config), None, true, false, true, Role::Agent, &caps)
-            .is_err()
-    );
-    assert!(
-        registration_capabilities(Some(&config), None, true, false, true, Role::Inspect, &caps)
-            .is_err()
-    );
-}
-#[test]
-fn public_hyprland_registration_requires_protected_route_policy_declared_effects_and_context() {
-    use crate::config::{EffectKind, Mode, WindowAction};
-    let mut config = Config::preset("desktop").unwrap();
-    config.mode = Mode::Route;
-    config.rules[0].enabled = true;
-    config.rules[0].action = Action::Hyprland {
-        action: WindowAction::Close,
-    };
-    let caps = BTreeSet::from([Capability::Context, Capability::HyprlandActions]);
-    let accepted = |config: Option<&Config>, lua, caps: &BTreeSet<Capability>| {
-        registration_capabilities(config, None, lua, false, true, Role::Agent, caps)
-    };
-    assert!(accepted(Some(&config), false, &caps).is_err());
-    config.policy.allow_hyprland_actions = true;
-    assert!(accepted(Some(&config), false, &caps).is_ok());
-    assert!(accepted(None, false, &caps).is_err());
-    assert!(
-        accepted(
-            Some(&config),
-            false,
-            &BTreeSet::from([Capability::HyprlandActions])
-        )
-        .is_err()
-    );
-    assert!(
-        registration_capabilities(
-            Some(&config),
-            None,
-            false,
-            false,
-            true,
-            Role::Inspect,
-            &caps
-        )
-        .is_err()
-    );
-    for action in [
-        WindowAction::ReorderUp,
-        WindowAction::ReorderDown,
-        WindowAction::ScrollStack,
-    ] {
-        config.rules[0].action = Action::Hyprland { action };
-        assert!(accepted(Some(&config), false, &caps).is_ok());
-    }
-    config.rules[0].action = Action::Lua {
-        handler: "window".into(),
-        requires: BTreeSet::from([EffectKind::HyprlandActions]),
-    };
-    let caps = BTreeSet::from([
-        Capability::Context,
-        Capability::Observations,
-        Capability::LuaEvents,
-        Capability::LuaActions,
-        Capability::HyprlandActions,
-    ]);
-    assert!(accepted(Some(&config), true, &caps).is_ok());
-    assert!(accepted(Some(&config), false, &caps).is_err());
-    config.rules[0].enabled = false;
-    assert!(accepted(Some(&config), true, &caps).is_err());
-    config.rules[0].enabled = true;
-    config.mode = Mode::Observe;
-    assert!(accepted(Some(&config), true, &caps).is_err());
-}
-#[test]
-fn public_power_registration_requires_route_policy_declared_effects_and_context() {
-    let mut config = Config::preset("desktop").unwrap();
-    config.mode = crate::config::Mode::Route;
-    config.rules[0].enabled = true;
-    config.rules[0].action = Action::Power {
-        action: crate::config::PowerAction::Blank,
-    };
-    let caps = BTreeSet::from([Capability::Context, Capability::PowerActions]);
-    let accepted = |config: Option<&Config>, lua, caps: &BTreeSet<Capability>| {
-        registration_capabilities(config, None, lua, false, true, Role::Agent, caps)
-    };
-    assert!(accepted(Some(&config), false, &caps).is_err());
-    config.policy.allow_power_actions = true;
-    assert!(accepted(Some(&config), false, &caps).is_ok());
-    assert!(accepted(None, false, &caps).is_err());
-    assert!(
-        accepted(
-            Some(&config),
-            false,
-            &BTreeSet::from([Capability::PowerActions])
-        )
-        .is_err()
-    );
-    assert!(
-        registration_capabilities(
-            Some(&config),
-            None,
-            false,
-            false,
-            true,
-            Role::Inspect,
-            &caps
-        )
-        .is_err()
-    );
-    config.rules[0].action = Action::Power {
-        action: crate::config::PowerAction::LockAndBlank,
-    };
-    assert!(accepted(Some(&config), false, &caps).is_err());
-    config.rules[0].action = Action::Lua {
-        handler: "power".into(),
-        requires: BTreeSet::from([crate::config::EffectKind::PowerActions]),
-    };
-    let caps = BTreeSet::from([
-        Capability::Context,
-        Capability::Observations,
-        Capability::LuaEvents,
-        Capability::LuaActions,
-        Capability::PowerActions,
-    ]);
-    assert!(accepted(Some(&config), true, &caps).is_ok());
-    assert!(accepted(Some(&config), false, &caps).is_err());
-    config.mode = crate::config::Mode::Observe;
-    assert!(accepted(Some(&config), true, &caps).is_err());
-}
 
 #[test]
 fn mode_selection_cannot_activate_actions_beyond_negotiated_capabilities() {
@@ -480,12 +323,7 @@ fn mode_selection_cannot_activate_actions_beyond_negotiated_capabilities() {
     assert!(rules.pending.as_ref().unwrap().config.modes[0].active);
 }
 #[test]
-fn power_offer_capabilities_are_rechecked_before_a_grant() {
-    let fence = Fence {
-        broker: Epoch([1, 2]),
-        configuration: 1,
-        session: 1,
-    };
+fn lua_offer_capabilities_are_rechecked_before_a_grant() {
     let snapshot = crate::context_transfer::tests::view(Duration::ZERO)
         .context
         .unwrap()
@@ -495,7 +333,7 @@ fn power_offer_capabilities_are_rechecked_before_a_grant() {
         version: 1,
         id: 1,
         ordinal: 1,
-        rule: "power".into(),
+        rule: "command".into(),
         source: crate::input::Source {
             device: 1,
             generation: 1,
@@ -506,19 +344,15 @@ fn power_offer_capabilities_are_rechecked_before_a_grant() {
         session_generation: 1,
         stage: crate::rules::Stage::Begin,
         action: Action::Lua {
-            handler: "power".into(),
-            requires: BTreeSet::from([crate::config::EffectKind::PowerActions]),
+            handler: "command".into(),
+            requires: BTreeSet::from([crate::config::EffectKind::Commands]),
         },
         evidence: crate::rules::Evidence::Key { down: true },
-        window: None,
         output: Some("fixture-output".into()),
-        workspace: None,
     };
-    ledger
-        .offer(fence, &event, &snapshot, Duration::ZERO)
-        .unwrap();
+    ledger.offer(&event, &snapshot, Duration::ZERO).unwrap();
     let offer = &ledger.pending[&(1, 1)];
-    let caps = BTreeSet::from([Capability::LuaActions, Capability::PowerActions]);
+    let caps = BTreeSet::from([Capability::LuaActions, Capability::Commands]);
     assert!(offer.capabilities_available(&caps, &caps));
     assert!(!offer.capabilities_available(&caps, &BTreeSet::from([Capability::LuaActions])));
     assert!(!offer.capabilities_available(&BTreeSet::from([Capability::LuaActions]), &caps));
@@ -912,24 +746,13 @@ fn rule_retirement_removes_unsent_offers_and_cancels_delivered_work() {
         captured_at: Duration::ZERO,
         state: State::Desktop,
         outputs: vec![],
-        windows: vec![],
-        regions: vec![],
-        secure_overlay: false,
     };
     let offer = |delivered| Offered {
-        reorder_scope: None,
-        reorder_required: false,
         source: source.clone(),
         snapshot: snapshot.clone(),
         output: None,
-        window: None,
-        native: None,
         deadline: RECEIPT_TIME,
         granted: true,
-        grant_until: Some(RECEIPT_TIME),
-        morf: None,
-        morf_submitted: false,
-        morf_result_sent: false,
         sent: delivered,
         delivered,
         cancelled: false,
@@ -951,15 +774,12 @@ fn rule_retirement_removes_unsent_offers_and_cancels_delivered_work() {
         stage: crate::rules::Stage::Discrete,
         action: Action::Event { name: "a".into() },
         evidence: crate::rules::Evidence::Key { down: true },
-        window: None,
         output: None,
-        workspace: None,
     };
     let mut outgoing = VecDeque::from([
         Reply::Dispatch {
             fence,
             event: Box::new(event.clone()),
-            reorder_scope: None,
         },
         Reply::Observation {
             fence,

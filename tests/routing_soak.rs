@@ -153,7 +153,6 @@ fn ready(device: &Device) -> prek::transport::Ready {
         },
         None,
         &BTreeMap::new(),
-        BTreeMap::new(),
     )
     .unwrap();
     let consumer = Consumer::IsolatedReceiver { pid: 2, start: 1 };
@@ -166,7 +165,6 @@ fn ready(device: &Device) -> prek::transport::Ready {
             name: descriptor.name,
             class: descriptor.class,
             seat: "seat0".into(),
-            settings: BTreeMap::new(),
             at: Duration::ZERO,
         },
         Duration::ZERO,
@@ -193,17 +191,11 @@ fn refresh(routing: &mut Routing, revision: u64, now: Duration) {
                 revision,
                 captured_at: now,
                 state: State::Desktop,
-                secure_overlay: false,
                 outputs: vec![OutputState {
                     geometry,
                     geometry_generation: 2,
-                    active_workspace: Some(1),
                     screen: Screen::On,
-                    keyboard_known: true,
-                    keyboard: None,
                 }],
-                windows: vec![],
-                regions: vec![],
             },
             now,
         )

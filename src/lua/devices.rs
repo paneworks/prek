@@ -124,7 +124,6 @@ impl Catalog {
             || view.state != crate::context::State::Desktop
             || view.context.as_ref().is_none_or(|context| {
                 context.binding.kind != crate::context::SessionKind::User
-                    || context.snapshot.secure_overlay
                     || context.snapshot.state != crate::context::State::Desktop
             })
         {

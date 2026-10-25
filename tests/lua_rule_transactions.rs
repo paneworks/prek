@@ -160,7 +160,7 @@ return p.config.new{policy={allow_input_events=true,allow_runtime_rules=true,all
     let context = serde_json::from_value::<prek::context_transfer::View>(serde_json::json!({
         "fence":fence(),"sampled_at":now,"state":"desktop","error":null,
         "context":{"binding":{"seat":"seat0","session":"model","uid":1000,"compositor_pid":123,"compositor_start":456,"kind":"user"},
-        "snapshot":{"generation":1,"revision":1,"captured_at":now,"state":"desktop","secure_overlay":false,"regions":[],"windows":[],"outputs":[]}}
+        "snapshot":{"generation":1,"revision":1,"captured_at":now,"state":"desktop","outputs":[]}}
     })).unwrap();
     let capabilities = BTreeSet::from([
         Capability::Context,

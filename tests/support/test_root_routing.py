@@ -758,13 +758,14 @@ os._exit(0)
                 os.close(child_fd)
 
     def test_takeover_trial_runs_one_bounded_broker_and_session_then_removes_its_rule(self):
-        for opens_socket, instance, provisioned, holds in ((True, "test", False, True), (True, None, True, True),
-                                                           (False, "test", False, True),
-                                                           (True, "test", False, False)):
-            with self.subTest(opens_socket=opens_socket, instance=instance, provisioned=provisioned, holds=holds):
-                self.takeover_trial(opens_socket, instance, provisioned, holds)
+        for opens_socket, provisioned, holds, listeners in ((True, False, True, 1), (True, True, True, 1),
+                                                            (False, False, True, 1),
+                                                            (True, False, False, 1),
+                                                            (True, False, True, 2)):
+            with self.subTest(opens_socket=opens_socket, provisioned=provisioned, holds=holds, listeners=listeners):
+                self.takeover_trial(opens_socket, provisioned, holds, listeners)
 
-    def takeover_trial(self, opens_socket, instance, provisioned, holds):
+    def takeover_trial(self, opens_socket, provisioned, holds, listeners):
         trial = Path(__file__).resolve().parents[1] / "run-takeover-trial.sh"
         with tempfile.TemporaryDirectory() as temporary:
             repo, mocks, run_root = Path(temporary), Path(temporary) / "bin", Path(temporary) / "run"
@@ -778,11 +779,18 @@ os._exit(0)
             shutil.copyfile(trial, script)
             devices = repo / "devices"
             devices.write_text('N: Name="Prek test keyboard"\n')
-            calls, dispatches, agent = repo / "sudo-calls", repo / "hyprctl-calls", repo / "agent-instance"
+            calls, agent = repo / "sudo-calls", repo / "agent-arguments"
+            cgroup = next(line[3:] for line in Path("/proc/self/cgroup").read_text().splitlines()
+                          if line.startswith("0::"))
+            cgroups = repo / "cgroups"
+            (cgroups / cgroup.lstrip("/")).mkdir(parents=True)
+            procs = cgroups / cgroup.lstrip("/") / "cgroup.procs"
+            procs.write_text("")
             prek = mocks / "prek-package"
             (prek / "bin").mkdir(parents=True)
             (prek / "lib/udev/rules.d").mkdir(parents=True)
             (prek / "lib/udev/rules.d/70-prek.rules").write_text("# rule\n")
+            owners = " ".join(f'users:(("compositor",pid={os.getpid() + index},fd=3))' for index in range(listeners))
             scripts = {
                 # Unprivileged stand-ins: sudo runs the remaining argv as this user.
                 "sudo": f"""#!/bin/sh
@@ -793,23 +801,8 @@ exec "$@"
 """,
                 "git": "#!/bin/sh\nexit 0\n",
                 "udevadm": "#!/bin/sh\nexit 0\n",
-                # Hyprland's exec is simulated by running the dispatched agent script.
-                "hyprctl": f"""#!/bin/sh
-printf '%s\\n' "$*" >> '{dispatches}'
-case "$1" in
-  dispatch)
-    "$(printf '%s' "$2" | sed -n 's/^hl\\.dsp\\.exec_cmd("\\(.*\\)")$/\\1/p')" >/dev/null 2>&1 &
-    echo ok ;;
-  *) echo '[]' ;;
-esac
-""",
-                "jq": f"""#!/bin/sh
-cat > /dev/null
-case "$*" in
-  *configProvider*) echo lua ;;
-  *'exactly one'*) echo discovered ;;
-  *) echo {os.getpid()} ;;
-esac
+                "ss": f"""#!/bin/sh
+echo 'u_str LISTEN 0 128 {temporary}/wayland-test 1 * 0 {owners}'
 """,
                 "install": """#!/bin/sh
 directory=0
@@ -841,16 +834,14 @@ case "$1" in
     echo "routing worker: Prek test keyboard taken over at a neutral idle cut" >&2
     {"" if holds else 'echo "routing worker: seat seat0 lost its context: state Unknown" >&2'}
     sleep 1 ;;
-  session) echo "$HYPRLAND_INSTANCE_SIGNATURE" > '{agent}'; sleep 0.2 ;;
+  session) echo "$*" > '{agent}'; sleep 0.2 ;;
 esac
 """)
             (prek / "bin/prek").chmod(0o755)
             env = {**os.environ, "PATH": f"{mocks}:{os.environ['PATH']}", "XDG_RUNTIME_DIR": temporary,
+                   "WAYLAND_DISPLAY": "wayland-test",
                    "PREK_TRIAL_INPUT_DEVICES": str(devices), "PREK_TRIAL_LOGIND": sys.executable,
-                   "PREK_TRIAL_RUN_ROOT": str(run_root)}
-            env.pop("HYPRLAND_INSTANCE_SIGNATURE", None)
-            if instance:
-                env["HYPRLAND_INSTANCE_SIGNATURE"] = instance
+                   "PREK_TRIAL_RUN_ROOT": str(run_root), "PREK_TRIAL_CGROUP_ROOT": str(cgroups)}
             result = subprocess.run(["bash", str(script), "--device", "Prek test keyboard", "--seconds", "10"],
                                     env=env, capture_output=True, text=True, timeout=60)
             run = (repo / "target/takeover-trial/latest").resolve(strict=True)
@@ -859,6 +850,12 @@ esac
             self.assertEqual((run_root / "prek/devices").is_dir(), provisioned)
             self.assertEqual((run_root / "prek").is_dir(), provisioned)
             self.assertFalse((run_root / "prek-trial").exists())
+            if listeners != 1:
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(f"Expected exactly one process listening on {temporary}/wayland-test",
+                              (run / "console.log").read_text())
+                self.assertFalse((run / "broker.log").exists())
+                return
             if not opens_socket:
                 self.assertEqual(result.returncode, 1)
                 self.assertEqual(json.loads((run / "status.json").read_text())["status"], "failed")
@@ -874,13 +871,15 @@ esac
             self.assertEqual(result.returncode, 0, (run / "console.log").read_text())
             self.assertEqual(json.loads((run / "status.json").read_text()), {"status": "passed", "exit_code": 0})
             self.assertIn("taken over at a neutral idle cut", (run / "console.log").read_text())
-            self.assertEqual(agent.read_text().strip(), instance or "discovered")
+            self.assertIn("--display wayland-test", agent.read_text())
             self.assertEqual((run / "session.status").read_text().strip(), "0")
-            self.assertIn(f'dispatch hl.dsp.exec_cmd("{run}/agent.sh")', dispatches.read_text().splitlines())
+            self.assertEqual(procs.read_text().split(), [(run / "launcher.pid").read_text().strip()])
             self.assertIn('name = "Prek test keyboard"', (run / "config.toml").read_text())
             sudo = calls.read_text().splitlines()
             self.assertEqual(sudo[0], "-v")
+            self.assertIn(f"ss -Hxlp src {temporary}/wayland-test", sudo)
             self.assertIn(f"readlink -e /proc/{os.getpid()}/exe", sudo)
+            self.assertIn(f"tee -a {procs}", sudo)
             created = f"install -d -m 0755 -o root -g root {run_root}/udev/rules.d"
             self.assertEqual(created in sudo, not provisioned)
             self.assertEqual(f"-n rmdir {run_root}/udev/rules.d" in sudo, not provisioned)

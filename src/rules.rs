@@ -84,9 +84,7 @@ pub enum Event {
         stage: Stage,
         action: Action,
         evidence: Evidence,
-        window: Option<String>,
         output: Option<String>,
-        workspace: Option<i64>,
     },
     Skipped {
         version: u32,
@@ -238,48 +236,6 @@ impl RouteIntent {
     }
     pub(crate) fn position(&self) -> Option<crate::input::InputPosition> {
         self.candidate.position
-    }
-    pub(crate) fn window_id(&self) -> Option<&str> {
-        self.candidate
-            .permit
-            .as_ref()?
-            .window()
-            .map(|window| window.id.as_str())
-    }
-    /// Native proof target, from the same selection its match event carries.
-    pub(crate) fn native_target(&self) -> Option<crate::routing::native::Target> {
-        let permit = self.candidate.permit.as_ref()?;
-        let output = permit.output();
-        crate::routing::native::target(
-            &self.rule.action,
-            self.window_id(),
-            output.map(|output| output.geometry.name.as_str()),
-            output.and_then(|output| output.active_workspace),
-        )
-    }
-    pub fn hyprland_target_available(&self, authority: &Authority, at: Duration) -> bool {
-        let Some(permit) = self.candidate.permit.as_ref() else {
-            return false;
-        };
-        let Some(output) = permit.desktop_output() else {
-            return false;
-        };
-        let window = permit.window();
-        authority.hyprland_target_available(
-            &self.rule.action,
-            self.rule.scope,
-            window.map(|window| window.id.as_str()),
-            Some(&output.geometry.name),
-            window.map_or(output.active_workspace, |window| Some(window.workspace)),
-            at,
-        )
-    }
-    pub fn power_target_available(&self) -> bool {
-        self.candidate
-            .permit
-            .as_ref()
-            .and_then(|permit| permit.desktop_output())
-            .is_some_and(|output| crate::config::valid_power_output(&output.geometry.name))
     }
     pub fn id(&self) -> u64 {
         self.candidate.id
@@ -2652,15 +2608,9 @@ impl Sequence {
                     },
                     action: self.rule.action.clone(),
                     evidence: Evidence::Sequence { steps },
-                    window: permit
-                        .and_then(Permit::window)
-                        .map(|window| window.id.clone()),
                     output: permit
                         .and_then(Permit::output)
                         .map(|output| output.geometry.name.clone()),
-                    workspace: permit
-                        .and_then(Permit::output)
-                        .and_then(|output| output.active_workspace),
                 });
                 if self.routing {
                     let mut candidate = pending.first.clone();
@@ -3416,7 +3366,6 @@ fn context_free(rule: &Rule) -> bool {
         && rule.contexts.is_empty()
         && rule.scope == Scope::Everywhere
         && rule.screen.is_none()
-        && rule.keyboard_visible.is_none()
         && matches!(rule.action, Action::Event { .. })
 }
 fn input(state: &DeviceState, at: Duration) -> InputContext<'_> {
@@ -3864,21 +3813,11 @@ fn report_signals(
                 stage,
                 action: worker.rule.action.clone(),
                 evidence,
-                window: candidate
-                    .permit
-                    .as_ref()
-                    .and_then(|p| p.window())
-                    .map(|w| w.id.clone()),
                 output: candidate
                     .permit
                     .as_ref()
                     .and_then(|p| p.output())
                     .map(|o| o.geometry.name.clone()),
-                workspace: candidate
-                    .permit
-                    .as_ref()
-                    .and_then(|p| p.output())
-                    .and_then(|o| o.active_workspace),
             });
             if worker.trace {
                 let mut completed = candidate.clone();
@@ -3944,10 +3883,8 @@ mod tests {
     mod composition;
     use super::*;
     use crate::{
-        config::{
-            Context, Delivery, Key, Layer, Millis, Screen, Selector, ShapeTemplate, WindowAction,
-        },
-        context::{Binding, OutputState, Rect, SessionKind, Snapshot, State, Window},
+        config::{Context, Delivery, Key, Layer, Millis, Screen, Selector, ShapeTemplate},
+        context::{Binding, OutputState, SessionKind, Snapshot, State},
         gestures::{Output, Point, Transform},
         input::*,
     };
@@ -4128,9 +4065,7 @@ mod tests {
                         name: "volume_double_tap".into(),
                     },
                     evidence: Evidence::Taps { count: 2 },
-                    window: None,
                     output: None,
-                    workspace: None,
                 }],
             })
             .unwrap();
@@ -4764,19 +4699,12 @@ mod tests {
         );
         assert_eq!(matches(&engine.events).len(), 1);
     }
-    fn rect(x: f64, y: f64, w: f64, h: f64) -> Rect {
-        Rect {
-            origin: Point { x, y },
-            size: Point { x: w, y: h },
-        }
-    }
     fn snapshot(generation: u64, revision: u64, at: u64) -> Snapshot {
         Snapshot {
             generation,
             revision,
             captured_at: ms(at),
             state: State::Desktop,
-            secure_overlay: false,
             outputs: vec![OutputState {
                 geometry: Output {
                     name: "phone".into(),
@@ -4787,42 +4715,38 @@ mod tests {
                     transform: Transform::Normal,
                 },
                 geometry_generation: 2,
-                active_workspace: Some(1),
                 screen: Screen::On,
-                keyboard_known: true,
-                keyboard: None,
             }],
-            windows: vec![
-                Window {
-                    id: "a".into(),
-                    output: "phone".into(),
-                    workspace: 1,
-                    rect: rect(0.0, 0.0, 500.0, 800.0),
-                    content: rect(0.0, 0.0, 500.0, 800.0),
-                    mapped: true,
-                    visible: true,
-                    focused: true,
-                    z_order: Some(1),
-                },
-                Window {
-                    id: "b".into(),
-                    output: "phone".into(),
-                    workspace: 1,
-                    rect: rect(500.0, 0.0, 500.0, 800.0),
-                    content: rect(500.0, 0.0, 500.0, 800.0),
-                    mapped: true,
-                    visible: true,
-                    focused: false,
-                    z_order: Some(2),
-                },
-            ],
-            regions: vec![],
         }
     }
     fn phone() -> Engine {
         let mut config = Config::preset("phone").unwrap();
-        config.rules.retain(|rule| rule.id == "G08_up");
-        assert_eq!(config.rules.len(), 1);
+        config.rules = vec![Rule {
+            id: "two_up".into(),
+            enabled: true,
+            priority: 100,
+            devices: vec!["touch".into()],
+            seats: vec![],
+            contexts: vec![Context::Desktop],
+            scope: Scope::Everywhere,
+            output: None,
+            screen: Some(Screen::On),
+            require_keys: vec![],
+            keys_throughout: false,
+            layer: None,
+            when_mode: None,
+            delivery: Delivery::Buffer,
+            trigger: Trigger::Swipe {
+                fingers: 2,
+                direction: crate::config::Direction::Up,
+                travel: crate::config::Distance::Millimetres(12.0),
+                fallback_travel: crate::config::Distance::Normalized(0.04),
+                continuous: false,
+            },
+            action: Action::Event {
+                name: "two_up".into(),
+            },
+        }];
         let mut engine = engine(config);
         let authority = engine.authority_mut();
         let generation = authority
@@ -4937,57 +4861,6 @@ mod tests {
         assert_eq!(engine.deadline(), Some(ms(120)));
         tick(&mut engine, 120);
         assert_eq!(matches(&engine.events).len(), 1);
-    }
-    #[test]
-    fn t58_configured_app_swipe_keeps_original_window_across_focus_change() {
-        let mut engine = phone();
-        touch_start(&mut engine, 200);
-        frame(
-            &mut engine,
-            device(1).source,
-            150,
-            2,
-            &[
-                (EV_ABS, ABS_MT_SLOT, 0),
-                (EV_ABS, ABS_MT_POSITION_Y, 300),
-                (EV_ABS, ABS_MT_SLOT, 1),
-                (EV_ABS, ABS_MT_POSITION_Y, 300),
-            ],
-        );
-        let generation = engine.authority.generation();
-        let mut snap = snapshot(generation, 2, 180);
-        snap.windows[0].focused = false;
-        snap.windows[1].focused = true;
-        engine.authority.update(snap, ms(180)).unwrap();
-        frame(
-            &mut engine,
-            device(1).source,
-            200,
-            3,
-            &[
-                (EV_ABS, ABS_MT_SLOT, 0),
-                (EV_ABS, ABS_MT_TRACKING_ID, -1),
-                (EV_ABS, ABS_MT_SLOT, 1),
-                (EV_ABS, ABS_MT_TRACKING_ID, -1),
-            ],
-        );
-        assert_eq!(matches(&engine.events).len(), 1);
-        assert!(
-            matches!(matches(&engine.events)[0], Event::Matched { window:Some(window), action:Action::Hyprland { action:WindowAction::ReorderUp }, .. } if window=="a")
-        );
-    }
-    #[test]
-    fn t58_different_start_windows_are_rejected_before_recognition() {
-        let mut engine = phone();
-        touch_start(&mut engine, 700);
-        tick(&mut engine, 120);
-        assert!(matches(&engine.events).is_empty());
-        assert!(
-            engine
-                .events
-                .iter()
-                .any(|e| matches!(e,Event::Skipped { reason, .. } if reason=="MixedTargets"))
-        );
     }
     #[test]
     fn t60_lock_revokes_an_in_progress_app_candidate() {
@@ -5658,63 +5531,6 @@ mod tests {
         tick(&mut engine, 2000);
         key(&mut engine, 2, 2010, 2, 125, true);
         assert!(matches(&engine.events).is_empty());
-    }
-    #[test]
-    fn sequence_context_keeps_the_first_window_across_focus_change() {
-        let mut engine = phone();
-        let mut config = engine.config.clone();
-        config.rules[0].trigger = Trigger::Sequence {
-            steps: vec![
-                Trigger::TouchHold {
-                    fingers: 2,
-                    after: Millis(150),
-                },
-                Trigger::Swipe {
-                    fingers: 2,
-                    direction: Direction::Up,
-                    travel: crate::config::Distance::Millimetres(12.0),
-                    fallback_travel: crate::config::Distance::Normalized(0.04),
-                    continuous: false,
-                },
-            ],
-            timeout: Millis(1000),
-        };
-        engine.reload(config, ms(0)).unwrap();
-        touch_start(&mut engine, 200);
-        tick(&mut engine, 150);
-        let generation = engine.authority.generation();
-        let mut snap = snapshot(generation, 2, 160);
-        snap.windows[0].focused = false;
-        snap.windows[1].focused = true;
-        engine.authority.update(snap, ms(160)).unwrap();
-        frame(
-            &mut engine,
-            device(1).source,
-            180,
-            2,
-            &[
-                (EV_ABS, ABS_MT_SLOT, 0),
-                (EV_ABS, ABS_MT_POSITION_Y, 300),
-                (EV_ABS, ABS_MT_SLOT, 1),
-                (EV_ABS, ABS_MT_POSITION_Y, 300),
-            ],
-        );
-        frame(
-            &mut engine,
-            device(1).source,
-            200,
-            3,
-            &[
-                (EV_ABS, ABS_MT_SLOT, 0),
-                (EV_ABS, ABS_MT_TRACKING_ID, -1),
-                (EV_ABS, ABS_MT_SLOT, 1),
-                (EV_ABS, ABS_MT_TRACKING_ID, -1),
-            ],
-        );
-        assert_eq!(matches(&engine.events).len(), 1);
-        assert!(
-            matches!(matches(&engine.events)[0],Event::Matched {window:Some(window),..} if window=="a")
-        );
     }
     #[test]
     fn event_loss_on_an_already_completed_step_cancels_the_remaining_chain() {

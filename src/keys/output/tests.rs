@@ -660,8 +660,7 @@ fn t46_native_virtual_output_implements_the_same_sink_without_opening_a_device()
 
 #[test]
 fn t46_native_key_role_refuses_a_physical_counterpart_before_any_io() {
-    let generated =
-        crate::transport::Descriptor::generated_keyboard(source(0), BTreeMap::new()).unwrap();
+    let generated = crate::transport::Descriptor::generated_keyboard(source(0)).unwrap();
     native_key_role(&generated).unwrap();
     let device = crate::transport::tests::touch();
     let mut physical = crate::transport::Descriptor::mirror(
@@ -674,7 +673,6 @@ fn t46_native_key_role_refuses_a_physical_counterpart_before_any_io() {
         },
         None,
         &BTreeMap::new(),
-        BTreeMap::new(),
     )
     .unwrap();
     physical.class = crate::transport::Class::Keyboard;

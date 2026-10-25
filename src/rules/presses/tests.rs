@@ -240,9 +240,6 @@ fn configured_mode(
                 captured_at: Duration::ZERO,
                 state: State::Desktop,
                 outputs: vec![],
-                windows: vec![],
-                regions: vec![],
-                secure_overlay: false,
             },
             Duration::ZERO,
         )

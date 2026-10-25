@@ -265,7 +265,6 @@ fn isolated_uinput_repeat_timer_and_consumer_settings_are_not_transparent() {
             period_ms: 20,
         }),
         &BTreeMap::new(),
-        BTreeMap::new(),
     )
     .unwrap();
     let mut test = Experiment::create(registry.prepare_isolated(spec).unwrap());

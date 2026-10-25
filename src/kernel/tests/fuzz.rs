@@ -63,14 +63,7 @@ fn clearing_fuzz_changes_the_declared_device_instead_of_preserving_parity() {
             axis.fuzz = 0;
         }
         device.axes.get_mut(&ABS_MT_POSITION_X).unwrap().fuzz = fuzz;
-        Descriptor::mirror(
-            &device,
-            descriptor().identity,
-            None,
-            &BTreeMap::new(),
-            BTreeMap::new(),
-        )
-        .unwrap()
+        Descriptor::mirror(&device, descriptor().identity, None, &BTreeMap::new()).unwrap()
     };
     let spec = build(16);
     assert_eq!(
@@ -116,7 +109,6 @@ impl Experiment {
             },
             None,
             &BTreeMap::new(),
-            BTreeMap::new(),
         )
         .unwrap();
         let publication = registry.prepare_isolated(spec).unwrap();

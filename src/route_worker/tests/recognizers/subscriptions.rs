@@ -2,16 +2,30 @@ use super::*;
 use crate::subscription_transfer::{Scope, Sender, tests::commands};
 
 #[test]
-fn private_subscription_route_large_graph_commits_complete_without_kernel_devices() {
+fn private_subscription_route_large_context_commits_complete_without_kernel_devices() {
     let mut fixture = Fixture::new(profile(), owner());
-    let mut view = crate::context_transfer::tests::native_view(monotonic().unwrap(), 512);
-    view.fence.session += 1;
-    let context = view.context.as_mut().unwrap();
-    context.snapshot.generation = view.fence.session;
-    context.layouts.as_mut().unwrap().generation = view.fence.session;
     let mut next = fixture.owner.clone();
-    next.fence.session = view.fence.session;
-    next.context = view.context;
+    next.fence.session += 1;
+    let context = next.context.as_mut().unwrap();
+    context.snapshot.generation = next.fence.session;
+    context.snapshot.captured_at = monotonic().unwrap();
+    context.snapshot.outputs = (0..256)
+        .map(|index| crate::context::OutputState {
+            geometry: crate::gestures::Output {
+                name: format!("{}-{index}", "o".repeat(200)),
+                pixel_width: 1000.0,
+                pixel_height: 800.0,
+                scale: 1.0,
+                origin: crate::gestures::Point {
+                    x: f64::from(index) * 1000.0,
+                    y: 0.0,
+                },
+                transform: crate::gestures::Transform::Normal,
+            },
+            geometry_generation: 1,
+            screen: crate::config::Screen::On,
+        })
+        .collect();
     let mut sender = Sender::default();
     sender
         .replace(
@@ -93,7 +107,7 @@ fn private_subscription_route_header_cannot_add_rights_or_renew_authority() {
 fn private_subscription_route_scope_lock_revokes_and_timeout_is_nonfatal() {
     let mut fixture = Fixture::new(profile(), owner());
     let mut next = fixture.owner.clone();
-    next.context.as_mut().unwrap().snapshot.secure_overlay = true;
+    next.context.as_mut().unwrap().snapshot.state = State::Locked;
     let mut packets = commands(Subscriptions {
         revision: 2,
         seats: vec![next],
@@ -156,33 +170,4 @@ fn private_subscription_route_reload_retires_body_and_stale_config_headers() {
         fixture.send(command);
     }
     assert_eq!(fixture.stream.seats["seat0"].subscription, fresh);
-}
-
-#[test]
-fn private_subscription_route_rejects_unmatched_native_graph_before_activation() {
-    let mut fixture = Fixture::new(profile(), owner());
-    let view = crate::context_transfer::tests::native_view(monotonic().unwrap(), 1);
-    let mut next = fixture.owner.clone();
-    next.fence.session = view.fence.session;
-    next.context = view.context;
-    next.context
-        .as_mut()
-        .unwrap()
-        .layouts
-        .as_mut()
-        .unwrap()
-        .revision += 1;
-    assert!(
-        fixture
-            .stream
-            .subscriptions(
-                Subscriptions {
-                    revision: 2,
-                    seats: vec![next]
-                },
-                monotonic().unwrap()
-            )
-            .is_err()
-    );
-    assert_eq!(fixture.stream.seats["seat0"].subscription, fixture.owner);
 }

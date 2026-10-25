@@ -51,11 +51,6 @@ pub enum Command {
         source: crate::input::Source,
         marker: String,
         evidence: crate::transport::ConsumerEvidence,
-        #[serde(default)]
-        admission: Option<crate::morf::admission::Admission>,
-    },
-    MorfActivated {
-        grant: crate::morf::admission::Grant,
     },
     KeyDrained {
         request: crate::keys::drain::Request,

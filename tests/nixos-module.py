@@ -36,9 +36,9 @@ def main():
         # No display, broker or input devices: --help proves generated flags are
         # accepted by this exact installed executable without registering.
         env = {key: value for key, value in os.environ.items()
-               if key not in ("HYPRLAND_INSTANCE_SIGNATURE", "WAYLAND_DISPLAY", "DISPLAY")}
+               if key not in ("WAYLAND_DISPLAY", "DISPLAY")}
         help_text = subprocess.check_output([launcher, "--help"], env=env, timeout=10, text=True)
-        assert "--rule-mutations" in help_text and "--hyprland" in help_text
+        assert "--rule-mutations" in help_text and "--display" in help_text
         assert "--reconnect" in help_text
         assert ("--reconnect" in launcher.read_text()) == (name != "reconnectDisabled")
         assert ("--logind-library" in launcher.read_text()) == (name != "reconnectDisabled")
@@ -70,10 +70,6 @@ def main():
                 binary.parent.parent / f"share/prek/presets/{preset}.lua", "--json"], timeout=10))
             assert result["status"] == "valid"
         assert (binary.parent.parent / "share/prek/nixos/module.nix").is_file()
-        if name in ("wrappedConfig", "defaultCompositor"):
-            elf = Path(args[args.index("--compositor-executable") + 1])
-            assert elf.read_bytes()[:4] == b"\x7fELF"
-            assert elf.is_symlink()
         with tempfile.TemporaryDirectory() as scratch:
             # Parse every directive with isolated dependencies and no generators.
             # User-scope syntax validation works inside the Nix sandbox (systemd

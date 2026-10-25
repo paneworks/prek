@@ -469,7 +469,6 @@ impl Slot<Prepared> {
             name: descriptor.name.clone(),
             class: descriptor.class,
             seat: descriptor.source.seat.clone(),
-            settings: descriptor.consumer_settings.clone(),
             at,
         };
         let actor = Actor::new(fence, Output::new(device)?).map_err(|failure| failure.error)?;

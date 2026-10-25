@@ -7,7 +7,7 @@ fn production_generated_preparation_cannot_use_the_test_receiver_or_reverse_its_
         generation: 1,
         seat: "seat0".into(),
     };
-    let descriptor = Descriptor::generated_keyboard(source, BTreeMap::new()).unwrap();
+    let descriptor = Descriptor::generated_keyboard(source).unwrap();
     let isolated = Consumer::IsolatedReceiver {
         pid: 123,
         start: 456,
@@ -27,10 +27,10 @@ fn production_generated_preparation_cannot_use_the_test_receiver_or_reverse_its_
     assert!(
         Admission::new(
             descriptor.clone(),
-            Consumer::Hyprland {
+            Consumer::Compositor {
                 pid: 123,
                 start: 456,
-                instance: "owned-model".into()
+                display: "wayland-1".into()
             },
             Duration::ZERO
         )
@@ -46,7 +46,6 @@ fn production_generated_preparation_cannot_use_the_test_receiver_or_reverse_its_
                 name: descriptor.name.clone(),
                 class: descriptor.class,
                 seat: descriptor.source.seat.clone(),
-                settings: BTreeMap::new(),
                 at: Duration::ZERO,
             },
             Duration::ZERO,

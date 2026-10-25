@@ -111,7 +111,6 @@ return p.config.new{policy={allow_input_events=true,allowed_devices={'keyboard'}
             Capability::Context,
         ]),
         context: Some(Box::new(ProvidedContext {
-            layouts: None,
             binding: Binding {
                 seat: "seat0".into(),
                 session: "model-session".into(),
@@ -127,16 +126,11 @@ return p.config.new{policy={allow_input_events=true,allowed_devices={'keyboard'}
                 captured_at: now,
                 state: State::Desktop,
                 outputs: vec![],
-                windows: vec![],
-                regions: vec![],
-                secure_overlay: false,
             },
         })),
     };
     session
         .update_context(prek::context_transfer::View {
-            morf: Vec::new(),
-            morf_rendered: Vec::new(),
             fence,
             sampled_at: now,
             state: State::Desktop,

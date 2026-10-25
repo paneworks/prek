@@ -1,24 +1,20 @@
 //! Authenticated, bounded broker control plane. Device descriptors belong to a
-//! separate supervised worker; this service performs no desktop actions and
-//! writes compositor settings only for its own mirror devices.
-//! Desktop context comes from the bound compositor, never client snapshots.
-//! Membership alone never establishes an unlocked desktop.
+//! separate supervised worker; this service performs no desktop actions.
+//! Desktop context comes from the Wayland protocol, the kernel and logind,
+//! never client snapshots. Membership alone never establishes an unlocked desktop.
 
 use crate::{
+    compositor::Compositor,
     context::{SNAPSHOT_MAX_AGE, State},
-    hyprland::{Client, ContextSampler},
     ipc::{Channel, Endpoint},
     protocol::{self, Capability, Epoch, Fence, Mode, Reply, Request, Role},
     session::{Logind, Peer, Registration},
     worker::{ProvidedContext, Report, Subscription},
 };
-use nix::{
-    libc,
-    poll::{PollFd, PollFlags},
-};
-mod morf_handoff;
+use nix::poll::{PollFd, PollFlags};
 mod recognizers;
 mod rule_control;
+mod sampler;
 mod source;
 mod transport_offer;
 use std::{
@@ -35,6 +31,7 @@ use std::{
 pub const MAX_CLIENTS: usize = 8;
 pub const REFRESH: Duration = Duration::from_millis(250);
 pub const CONTEXT_REFRESH: Duration = Duration::from_millis(100);
+const CONTEXT_SAMPLE_TIME: Duration = Duration::from_millis(80);
 
 #[derive(Default)]
 struct Grace {
@@ -64,7 +61,7 @@ impl Grace {
 }
 
 struct ContextFeed {
-    sampler: ContextSampler,
+    sampler: sampler::Sampler,
     value: Option<Box<ProvidedContext>>,
     state: State,
     usable: bool,
@@ -74,7 +71,7 @@ struct ContextFeed {
 impl Default for ContextFeed {
     fn default() -> Self {
         Self {
-            sampler: ContextSampler::default(),
+            sampler: sampler::Sampler::default(),
             value: None,
             state: State::Unknown,
             usable: false,
@@ -100,15 +97,6 @@ impl ContextFeed {
             State::Unknown
         }
     }
-    fn inhibit(&mut self) {
-        if self.state != State::Locked {
-            self.state = State::Locking;
-        }
-        self.usable = false;
-        self.value = None;
-        self.error =
-            Some("compositor lock requires a completed bound-provider unlock transition".into());
-    }
 }
 
 pub use crate::ipc::monotonic;
@@ -117,16 +105,11 @@ pub struct Policy {
     pub runtime_root: PathBuf,
     pub compositor_executable: PathBuf,
     pub agent_executable: PathBuf,
-    pub morf_executable: Option<PathBuf>,
     pub allowed_seats: BTreeSet<String>,
 }
 struct Bound {
     transport_started: bool,
-    /// Recent mirrors and whether their Hyprland device settings are applied.
-    mirrors: VecDeque<(crate::transport::Descriptor, bool)>,
-    /// Compositor reloads discard runtime mirror settings.
-    events: Option<crate::hyprland::Events>,
-    client: Client,
+    client: Compositor,
     registration: Registration,
     seat: String,
     role: Role,
@@ -138,140 +121,11 @@ struct Bound {
     previous: Grace,
     context: ContextFeed,
     compositor: (u32, u64),
-    native: Option<crate::morf::Client>,
-    native_shells: Vec<crate::morf::ShellClient>,
-    shell_states: Vec<crate::morf::ShellState>,
-    shell_rendered: Vec<crate::morf::rendered::OutputContext>,
-    shell_discovered: Duration,
     actions: ActionLedger,
     available_actions: BTreeSet<Capability>,
     context_export: Option<crate::context_transfer::Export>,
     rules: rule_control::Rules,
     recognizers: recognizers::Ledger,
-}
-
-fn refresh_native_shells(bound: &mut Bound, policy: &Policy, logind: &Logind, now: Duration) {
-    let Some(executable) = policy.morf_executable.as_ref().filter(|_| {
-        bound.context.fresh(now)
-            && bound.context.state == State::Desktop
-            && bound
-                .context
-                .value
-                .as_ref()
-                .is_some_and(|context| !context.snapshot.secure_overlay)
-    }) else {
-        bound.native_shells.clear();
-        bound.shell_states.clear();
-        bound.shell_rendered.clear();
-        bound.shell_discovered = Duration::ZERO;
-        return;
-    };
-    let until = std::time::Instant::now() + Duration::from_millis(200);
-    let result = (|| {
-        let states = if now.saturating_sub(bound.shell_discovered) >= Duration::from_secs(1) {
-            bound.native_shells = crate::morf::ShellClient::discover_all(
-                &policy
-                    .runtime_root
-                    .join(bound.registration.binding()?.uid.to_string()),
-                bound.registration.binding()?.uid,
-                executable,
-                logind,
-                &bound.client,
-            )?;
-            bound.shell_discovered = now;
-            bound
-                .native_shells
-                .iter()
-                .map(|client| {
-                    client
-                        .last_state()
-                        .cloned()
-                        .ok_or_else(|| protocol::invalid("native shell lacks sampled state"))
-                })
-                .collect::<io::Result<Vec<_>>>()?
-        } else {
-            bound
-                .native_shells
-                .iter_mut()
-                .map(|client| client.sample_until(logind, &bound.client, until))
-                .collect::<io::Result<Vec<_>>>()?
-        };
-        let mut outputs = BTreeSet::new();
-        let snapshot = &bound.context.value.as_ref().unwrap().snapshot;
-        let mut visible = Vec::new();
-        for state in states {
-            if !outputs.insert(state.output.clone()) {
-                return Err(protocol::invalid("ambiguous native Morf output providers"));
-            }
-            if snapshot
-                .outputs
-                .iter()
-                .any(|output| output.geometry.name == state.output)
-            {
-                visible.push(state);
-            }
-        }
-        let mut rendered = Vec::new();
-        let started = monotonic()?;
-        let before = bound
-            .context
-            .sampler
-            .sample_layers(&bound.client, &snapshot.outputs, until)
-            .ok();
-        let mut producers = Vec::new();
-        for client in &mut bound.native_shells {
-            let Some(state) = client.last_state().filter(|state| visible.contains(state)) else {
-                continue;
-            };
-            let output = state.output.clone();
-            if let Some(context) = client.rendered_context_until(logind, &bound.client, until)? {
-                producers.push(client.producer());
-                rendered.push(crate::morf::rendered::OutputContext {
-                    output,
-                    context,
-                    layout: None,
-                });
-            }
-        }
-        if let Some(before) = before
-            && let Ok(after) =
-                bound
-                    .context
-                    .sampler
-                    .sample_layers(&bound.client, &snapshot.outputs, until)
-        {
-            let sampled = monotonic()?;
-            for (view, producer) in rendered.iter_mut().zip(producers) {
-                let output = snapshot
-                    .outputs
-                    .iter()
-                    .find(|output| output.geometry.name == view.output)
-                    .unwrap();
-                view.layout = crate::morf::rendered::LayoutProjection::from_samples(
-                    &view.context,
-                    output,
-                    &before,
-                    &after,
-                    producer,
-                    (started, sampled),
-                )?;
-            }
-        }
-        Ok((visible, rendered))
-    })();
-    match result {
-        Ok((states, rendered)) => {
-            bound.shell_states = states;
-            bound.shell_rendered = rendered;
-        }
-        Err(_) => {
-            // Optional shell identity loss never fabricates a region, action
-            // grant or unlock, and does not inhibit unrelated generic rules.
-            bound.native_shells.clear();
-            bound.shell_states.clear();
-            bound.shell_rendered.clear();
-        }
-    }
 }
 
 fn registration_capabilities(
@@ -292,24 +146,6 @@ fn registration_capabilities(
                 )
         })
     });
-    let power = routing.is_some_and(|config| {
-        config.mode == crate::config::Mode::Route
-            && config.policy.allow_power_actions
-            && config.rules.iter().any(|rule| {
-                rule.enabled
-                    && rule.action.requires_power()
-                    && protocol::supported_session_action(&rule.action)
-            })
-    });
-    let hyprland = routing.is_some_and(|config| {
-        config.mode == crate::config::Mode::Route
-            && config.policy.allow_hyprland_actions
-            && config.rules.iter().any(|rule| {
-                rule.enabled
-                    && rule.action.requires_hyprland()
-                    && protocol::supported_session_action(&rule.action)
-            })
-    });
     if capabilities.iter().any(|capability| {
         !(matches!(capability, Capability::Observations | Capability::Context)
             || *capability == Capability::LuaEvents
@@ -320,15 +156,7 @@ fn registration_capabilities(
                 && routing.is_some()
                 && lua
                 && capabilities.contains(&Capability::LuaEvents)
-                && (capabilities.contains(&Capability::Commands)
-                    || capabilities.contains(&Capability::PowerActions)
-                    || capabilities.contains(&Capability::HyprlandActions))
-            || *capability == Capability::HyprlandActions
-                && hyprland
-                && capabilities.contains(&Capability::Context)
-            || *capability == Capability::PowerActions
-                && power
-                && capabilities.contains(&Capability::Context)
+                && capabilities.contains(&Capability::Commands)
             || *capability == Capability::RuntimeRules
                 && baseline.is_some_and(|config| config.policy.allow_runtime_rules)
                 && capabilities.contains(&Capability::LuaEvents)
@@ -374,57 +202,14 @@ struct Offered {
     source: crate::input::Source,
     snapshot: crate::context::Snapshot,
     output: Option<String>,
-    window: Option<String>,
-    native: Option<crate::routing::native::Target>,
     deadline: Duration,
     granted: bool,
-    grant_until: Option<Duration>,
-    morf: Option<(crate::config::Action, crate::morf::controls::Request)>,
-    morf_submitted: bool,
-    morf_result_sent: bool,
     sent: bool,
     delivered: bool,
     cancelled: bool,
     required: BTreeSet<Capability>,
-    reorder_scope: Option<protocol::ReorderScope>,
-    reorder_required: bool,
 }
 impl Offered {
-    fn morf_request(
-        &self,
-        selected: crate::config::MorfAction,
-    ) -> io::Result<crate::morf::controls::Request> {
-        let (action, template) = self
-            .morf
-            .as_ref()
-            .ok_or_else(|| protocol::invalid("action has no frozen Morf payload"))?;
-        if !match action {
-            crate::config::Action::Morf { action } => *action == selected,
-            crate::config::Action::Lua { requires, .. } => {
-                requires.contains(&crate::config::EffectKind::MorfActions)
-            }
-            _ => false,
-        } {
-            return Err(protocol::invalid(
-                "Morf selection exceeds its configured offer",
-            ));
-        }
-        let mut request = template.clone();
-        request.action = selected;
-        if request.phase == crate::morf::controls::Phase::Begin
-            && !matches!(
-                selected,
-                crate::config::MorfAction::Dashboard
-                    | crate::config::MorfAction::Notifications
-                    | crate::config::MorfAction::QuickSettings
-                    | crate::config::MorfAction::WorkspacePreview
-            )
-        {
-            request.phase = crate::morf::controls::Phase::Discrete;
-        }
-        request.validate()?;
-        Ok(request)
-    }
     fn target_valid(&self, snapshot: &crate::context::Snapshot, now: Duration) -> bool {
         let output = |snapshot: &crate::context::Snapshot| {
             snapshot
@@ -433,47 +218,14 @@ impl Offered {
                 .find(|output| Some(&output.geometry.name) == self.output.as_ref())
                 .cloned()
         };
-        let window = |snapshot: &crate::context::Snapshot| {
-            snapshot
-                .windows
-                .iter()
-                .find(|window| Some(&window.id) == self.window.as_ref())
-                .cloned()
-        };
         !self.cancelled
             && now < self.deadline
             && snapshot.captured_at <= now
             && now - snapshot.captured_at < SNAPSHOT_MAX_AGE
             && snapshot.state == State::Desktop
-            && !snapshot.secure_overlay
             && snapshot.generation == self.snapshot.generation
             && (self.output.is_none()
                 || output(&self.snapshot).is_some_and(|old| Some(old) == output(snapshot)))
-            && (self.window.is_none()
-                || window(&self.snapshot).is_some_and(|old| Some(old) == window(snapshot)))
-            && (self.output.is_none() || snapshot.regions == self.snapshot.regions)
-    }
-    fn morf_control(
-        &self,
-        request: &crate::morf::controls::Request,
-        snapshot: &crate::context::Snapshot,
-        now: Duration,
-    ) -> io::Result<Duration> {
-        let until = self
-            .grant_until
-            .filter(|until| now < *until)
-            .filter(|_| {
-                self.granted && self.sent && self.delivered && self.target_valid(snapshot, now)
-            })
-            .ok_or_else(|| {
-                protocol::invalid("native control has no live delivered execution grant")
-            })?;
-        if self.morf_request(request.action)? != *request {
-            return Err(protocol::invalid(
-                "native payload differs from frozen event",
-            ));
-        }
-        Ok(until)
     }
     fn capabilities_available(
         &self,
@@ -487,42 +239,18 @@ impl Offered {
     }
 }
 impl ActionLedger {
-    /// A scroll update is dropped while two offers of its gesture are still
-    /// pending; later progress carries the same cumulative travel.
-    fn backlogged_scroll(&self, event: &crate::rules::Event) -> bool {
-        matches!(event, crate::rules::Event::Matched {
-            id,
-            stage: crate::rules::Stage::Update,
-            action: crate::config::Action::Hyprland {
-                action: crate::config::WindowAction::ScrollStack
-            },
-            ..
-        } if self.pending.range((*id, 0)..=(*id, u64::MAX)).count() >= 2)
-    }
-    #[cfg(test)]
     fn offer(
         &mut self,
-        fence: Fence,
         event: &crate::rules::Event,
         snapshot: &crate::context::Snapshot,
-        now: Duration,
-    ) -> io::Result<()> {
-        self.offer_scoped(fence, event, snapshot, None, now)
-    }
-    fn offer_scoped(
-        &mut self,
-        fence: Fence,
-        event: &crate::rules::Event,
-        snapshot: &crate::context::Snapshot,
-        reorder_scope: Option<protocol::ReorderScope>,
         now: Duration,
     ) -> io::Result<()> {
         let crate::rules::Event::Matched {
             id,
             ordinal,
             output,
-            window,
             source,
+            action,
             ..
         } = event
         else {
@@ -542,42 +270,15 @@ impl ActionLedger {
         self.pending.insert(
             (*id, *ordinal),
             Offered {
-                reorder_scope,
-                reorder_required:matches!(event,crate::rules::Event::Matched{action,..} if crate::routing::native::required(action)),
                 source: source.clone(),
                 snapshot: snapshot.clone(),
                 output: output.clone(),
-                window: window.clone(),
-                native: crate::routing::native::event_target(event),
                 deadline: now + protocol::MAX_PACKET_AGE,
                 granted: false,
-                grant_until: None,
-                morf_submitted: false,
-                morf_result_sent: false,
-                morf: match event {
-                    crate::rules::Event::Matched { action, .. }
-                        if protocol::action_capabilities(action)
-                            .contains(&Capability::MorfActions) =>
-                    {
-                        let selected = match action {
-                            crate::config::Action::Morf { action } => *action,
-                            _ => crate::config::MorfAction::Dashboard,
-                        };
-                        crate::morf::controls::Request::from_event(fence, event, selected)
-                            .ok()
-                            .map(|request| (action.clone(), request))
-                    }
-                    _ => None,
-                },
                 sent: false,
                 delivered: false,
                 cancelled: false,
-                required: match event {
-                    crate::rules::Event::Matched { action, .. } => {
-                        protocol::action_capabilities(action)
-                    }
-                    _ => unreachable!(),
-                },
+                required: protocol::action_capabilities(action),
             },
         );
         Ok(())
@@ -593,57 +294,20 @@ impl ActionLedger {
             .pending
             .get_mut(&(id, ordinal))
             .ok_or_else(|| protocol::invalid("action authorization has no broker offer"))?;
-        if offer.granted
-            || !offer.target_valid(snapshot, now)
-            || offer.reorder_required && offer.reorder_scope.is_none()
-        {
+        if offer.granted || !offer.target_valid(snapshot, now) {
             return Err(protocol::invalid(
                 "action target or execution authority expired",
             ));
         }
         offer.granted = true;
-        offer.grant_until =
-            Some((now + SNAPSHOT_MAX_AGE).min(snapshot.captured_at + SNAPSHOT_MAX_AGE));
         Ok(())
     }
-    fn retire_native(
-        &mut self,
-        context: Option<&ProvidedContext>,
-    ) -> Vec<(crate::input::Source, u64)> {
-        let mut cancelled = Vec::new();
-        for ((id, _), offer) in &mut self.pending {
-            if let Some(scope) = &offer.reorder_scope {
-                let current = context.and_then(|context| {
-                    offer
-                        .native
-                        .as_ref()
-                        .and_then(|target| context.native_scope(target))
-                });
-                if current.as_ref() != Some(scope) {
-                    offer.reorder_scope = None;
-                }
-            }
-            if offer.reorder_required && offer.reorder_scope.is_none() && !offer.cancelled {
-                cancelled.push((offer.source.clone(), *id));
-            }
-        }
-        cancelled
-    }
-    fn authorize_native(
-        &mut self,
-        id: u64,
-        ordinal: u64,
-        context: &ProvidedContext,
-        now: Duration,
-    ) -> io::Result<Option<protocol::ReorderScope>> {
-        let _ = self.retire_native(Some(context));
-        self.authorize(id, ordinal, &context.snapshot, now)?;
-        Ok(self.pending[&(id, ordinal)].reorder_scope.clone())
-    }
     fn complete(&mut self, id: u64, ordinal: u64) -> io::Result<()> {
-        if self.pending.get(&(id, ordinal)).is_none_or(|offer| {
-            !offer.granted || !offer.sent || offer.morf_submitted && !offer.morf_result_sent
-        }) {
+        if self
+            .pending
+            .get(&(id, ordinal))
+            .is_none_or(|offer| !offer.granted || !offer.sent)
+        {
             return Err(protocol::invalid("completion has no granted broker action"));
         }
         self.pending.remove(&(id, ordinal));
@@ -723,7 +387,6 @@ impl Connection {
         Ok(())
     }
     fn flush(&mut self, now: Duration) -> io::Result<()> {
-        self.refresh_native_actions(now)?;
         if let Some(reply) = self.outgoing.front()
             && self.channel.send(reply, now)?
         {
@@ -746,56 +409,7 @@ impl Connection {
             {
                 offer.sent = true;
             }
-            if let Reply::MorfResult { id, ordinal, .. } = &reply
-                && let Some(bound) = self.bound.as_mut()
-                && let Some(offer) = bound.actions.pending.get_mut(&(*id, *ordinal))
-            {
-                offer.morf_result_sent = true;
-            }
             self.bytes -= reply_size(&reply)?;
-        }
-        Ok(())
-    }
-    fn refresh_native_actions(&mut self, now: Duration) -> io::Result<()> {
-        let Some(bound) = self.bound.as_mut() else {
-            return Ok(());
-        };
-        let context = bound
-            .context
-            .fresh(now)
-            .then_some(bound.context.value.as_deref())
-            .flatten();
-        let cancelled = bound.actions.retire_native(context);
-        for reply in &mut self.outgoing {
-            let identity = match reply {
-                Reply::Dispatch { event, .. } => match event.as_ref() {
-                    crate::rules::Event::Matched { id, ordinal, .. } => Some((*id, *ordinal)),
-                    _ => None,
-                },
-                Reply::Execute { id, ordinal, .. } => Some((*id, *ordinal)),
-                _ => None,
-            };
-            if identity.is_some_and(|identity| {
-                bound
-                    .actions
-                    .pending
-                    .get(&identity)
-                    .is_none_or(|offer| offer.reorder_scope.is_none())
-            }) {
-                match reply {
-                    Reply::Dispatch { reorder_scope, .. }
-                    | Reply::Execute { reorder_scope, .. } => *reorder_scope = None,
-                    _ => {}
-                }
-            }
-        }
-        self.bytes = self
-            .outgoing
-            .iter()
-            .map(reply_size)
-            .sum::<io::Result<usize>>()?;
-        for (source, id) in cancelled {
-            self.cancel_actions(&source, Some(id))?;
         }
         Ok(())
     }
@@ -856,9 +470,6 @@ fn subscriptions_fit(seats: &[Subscription]) -> bool {
 }
 
 pub struct Broker {
-    input_releases: Option<crate::morf::ownership::Ledger>,
-    morf_handoffs: Vec<crate::morf::handoff::Session>,
-    morf_pending: Vec<morf_handoff::Pending>,
     endpoint: Endpoint,
     logind: Logind,
     policy: Policy,
@@ -871,9 +482,6 @@ pub struct Broker {
     reload_requested: bool,
     reload_pending: bool,
     last_reload_error: Option<String>,
-    inhibited: BTreeSet<(u32, u64)>,
-    lock_proofs: BTreeMap<(u32, u64), crate::morf::Proof>,
-    completed_providers: BTreeSet<crate::morf::Proof>,
     routing: Option<crate::config::Config>,
     lua_source: Option<Vec<u8>>,
     rule_baseline: Option<std::sync::Arc<crate::config::Config>>,
@@ -888,19 +496,12 @@ impl Broker {
             || !policy.runtime_root.is_absolute()
             || !policy.agent_executable.is_absolute()
             || !policy.compositor_executable.is_absolute()
-            || policy
-                .morf_executable
-                .as_ref()
-                .is_some_and(|path| !path.is_absolute())
         {
             return Err(protocol::invalid(
                 "broker requires explicit trusted registration policy",
             ));
         }
         Ok(Self {
-            input_releases: None,
-            morf_handoffs: Vec::new(),
-            morf_pending: Vec::new(),
             endpoint,
             logind: Logind::open(library)?,
             policy,
@@ -913,75 +514,12 @@ impl Broker {
             reload_requested: false,
             reload_pending: false,
             last_reload_error: None,
-            inhibited: BTreeSet::new(),
-            lock_proofs: BTreeMap::new(),
-            completed_providers: BTreeSet::new(),
             routing: None,
             lua_source: None,
             rule_baseline: None,
             rule_handlers: Vec::new(),
             recognizer_bindings: Vec::new(),
         })
-    }
-    pub fn bind_input_worker(
-        &mut self,
-        worker: &crate::supervisor::Supervisor,
-        channel: &Channel,
-    ) -> io::Result<()> {
-        if self.input_releases.is_some() {
-            return Err(protocol::invalid("input worker already bound"));
-        }
-        self.input_releases = Some(crate::morf::ownership::Ledger::new(
-            worker.worker_identity(),
-            channel.peer(),
-        )?);
-        Ok(())
-    }
-    /// The handoff owner enrolls before any consumer readiness can be issued.
-    /// No public client request can create or complete this descriptor evidence.
-    pub fn watch_input_ownership(&mut self, fence: Fence, seat: &str) -> io::Result<()> {
-        if !self
-            .connections
-            .iter()
-            .filter_map(|c| c.bound.as_ref())
-            .any(|b| {
-                b.fence == fence && b.seat == seat && !b.transport_started && b.role == Role::Agent
-            })
-        {
-            return Err(protocol::invalid(
-                "ownership must enroll before transport readiness",
-            ));
-        }
-        self.input_releases
-            .as_mut()
-            .ok_or_else(|| protocol::invalid("input worker is not bound"))?
-            .watch(fence, seat)
-    }
-    pub fn input_released(
-        &mut self,
-        channel: &Channel,
-        worker: crate::supervisor::WorkerIdentity,
-        fence: Fence,
-        source: &crate::input::Source,
-    ) -> io::Result<()> {
-        self.input_releases
-            .as_mut()
-            .ok_or_else(|| protocol::invalid("input worker is not bound"))?
-            .released(channel, worker, fence, source)
-    }
-    pub fn input_worker_exited(&mut self, report: &crate::supervisor::Report) -> io::Result<()> {
-        self.input_releases
-            .as_mut()
-            .ok_or_else(|| protocol::invalid("input worker is not bound"))?
-            .exited(report)?;
-        self.release_morf_after_worker_exit()
-    }
-    pub fn take_released_inputs(
-        &mut self,
-        fence: Fence,
-        seat: &str,
-    ) -> Option<crate::morf::ownership::ReleasedInputs> {
-        self.input_releases.as_mut()?.take(fence, seat)
     }
     pub fn clients(&self) -> usize {
         self.connections
@@ -1178,22 +716,6 @@ impl Broker {
                         {
                             return false;
                         }
-                        if **capability == Capability::HyprlandActions
-                            && !self
-                                .routing
-                                .as_ref()
-                                .is_some_and(|config| config.policy.allow_hyprland_actions)
-                        {
-                            return false;
-                        }
-                        if **capability == Capability::PowerActions
-                            && !self
-                                .routing
-                                .as_ref()
-                                .is_some_and(|config| config.policy.allow_power_actions)
-                        {
-                            return false;
-                        }
                         !protocol::execution_capability(**capability)
                             || bound.available_actions.contains(capability)
                                 && bound.actions.pending.len() < crate::actions::MAX_RUNNING
@@ -1203,14 +725,6 @@ impl Broker {
                 consumer: Some(bound.client.consumer()),
             })
             .collect();
-        if let Some(ledger) = self.input_releases.as_mut() {
-            ledger.retire_except(
-                &subscriptions
-                    .iter()
-                    .map(|s| (s.fence, s.seat.clone()))
-                    .collect::<Vec<_>>(),
-            );
-        }
         if !subscriptions_fit(&subscriptions) {
             // Never publish a truncated target list or let an oversized
             // optional context snapshot stop the supervised input reader.
@@ -1290,18 +804,12 @@ impl Broker {
         match &report {
             Report::SourceInvalidated { source, .. } => {
                 connection.cancel_actions(source, None)?;
-                self.cancel_morf_source(connection.bound.as_ref().unwrap().fence, source, None);
                 self.connections.insert(index, connection);
                 return Ok(());
             }
             Report::Observation { event, .. } => {
                 if let crate::rules::Event::Cancelled { source, id, .. } = event.as_ref() {
                     connection.cancel_actions(source, Some(*id))?;
-                    self.cancel_morf_source(
-                        connection.bound.as_ref().unwrap().fence,
-                        source,
-                        Some(*id),
-                    );
                 }
             }
             _ => {}
@@ -1439,12 +947,8 @@ impl Broker {
                 }
                 Reply::Observation { fence, event }
             }
-            Report::Dispatch {
-                event,
-                reorder_scope,
-                ..
-            } if bound.observing => {
-                if bound.rules.busy() || bound.actions.backlogged_scroll(&event) {
+            Report::Dispatch { event, .. } if bound.observing => {
+                if bound.rules.busy() {
                     self.connections.insert(index, connection);
                     return Ok(());
                 }
@@ -1468,9 +972,7 @@ impl Broker {
                     source,
                     at,
                     action,
-                    window,
                     output,
-                    workspace,
                     ..
                 } = event.as_ref()
                 else {
@@ -1501,20 +1003,6 @@ impl Broker {
                                 && !bound.available_actions.contains(capability)
                         })
                     || !protocol::supported_session_action(action)
-                    || action.requires_hyprland()
-                        && (!config.policy.allow_hyprland_actions
-                            || !context.hyprland_target_available(
-                                action,
-                                configured.scope,
-                                window.as_deref(),
-                                output.as_deref(),
-                                *workspace,
-                            ))
-                    || action.requires_power()
-                        && (!config.policy.allow_power_actions
-                            || output
-                                .as_deref()
-                                .is_none_or(|name| !crate::config::valid_power_output(name)))
                     || configured
                         .output
                         .as_ref()
@@ -1524,11 +1012,9 @@ impl Broker {
                     || *at > now
                     || now - *at > protocol::MAX_PACKET_AGE
                     || context.snapshot.state != State::Desktop
-                    || context.snapshot.secure_overlay
                     || !configured
                         .contexts
                         .contains(&crate::config::Context::Desktop)
-                    || configured.scope != crate::config::Scope::Everywhere && output.is_none()
                     || output.as_ref().is_some_and(|name| {
                         !context
                             .snapshot
@@ -1536,47 +1022,18 @@ impl Broker {
                             .iter()
                             .any(|output| output.geometry.name == *name)
                     })
-                    || window.as_ref().is_some_and(|id| {
-                        !context.snapshot.windows.iter().any(|window| {
-                            window.id == *id
-                                && window.mapped
-                                && (window.visible
-                                    || configured.scope == crate::config::Scope::Everywhere)
-                        })
-                    })
                 {
                     return Err(protocol::invalid(
                         "action is unavailable for this session/context",
                     ));
                 }
-                let reorder_scope = reorder_scope.filter(|scope| {
-                    crate::routing::native::event_target(&event)
-                        .and_then(|target| context.native_scope(&target))
-                        .as_ref()
-                        == Some(scope)
-                });
-                if crate::routing::native::required(action) && reorder_scope.is_none() {
-                    self.connections.insert(index, connection);
-                    return Ok(());
-                }
                 Reply::Dispatch {
                     fence,
                     event: event.clone(),
-                    reorder_scope: reorder_scope.clone(),
                 }
                 .validate()?;
-                bound.actions.offer_scoped(
-                    bound.fence,
-                    &event,
-                    &context.snapshot,
-                    reorder_scope.clone(),
-                    now,
-                )?;
-                Reply::Dispatch {
-                    fence,
-                    event,
-                    reorder_scope,
-                }
+                bound.actions.offer(&event, &context.snapshot, now)?;
+                Reply::Dispatch { fence, event }
             }
             Report::Ended { reason, .. } => {
                 let _ = connection
@@ -1599,17 +1056,6 @@ impl Broker {
         now: Duration,
     ) -> io::Result<Option<crate::configuration::Command>> {
         descriptor.validate().map_err(protocol::invalid)?;
-        let generated = descriptor.is_generated_keyboard();
-        let owners = if generated {
-            Vec::new()
-        } else {
-            self.morf_requirements(subscription.fence, &subscription.seat)
-        };
-        let lease = if generated {
-            None
-        } else {
-            self.morf_lease(subscription.fence, &subscription.seat, now)
-        };
         let Some(bound) = self
             .connections
             .iter_mut()
@@ -1629,41 +1075,9 @@ impl Broker {
             ));
         }
         bound.registration.check(&self.logind, &bound.client)?;
-        if !generated {
-            let known = bound
-                .mirrors
-                .iter()
-                .find(|(known, _)| known.marker == descriptor.marker)
-                .map(|(_, configured)| *configured);
-            let configured = match known {
-                Some(configured) => configured,
-                None => {
-                    let result = bound.client.configure_mirror(descriptor);
-                    if let Err(error) = &result {
-                        eprintln!(
-                            "mirror {} keeps no consumer evidence: {error}",
-                            descriptor.name
-                        );
-                    }
-                    if bound.mirrors.len() >= 64 {
-                        bound.mirrors.pop_front();
-                    }
-                    bound
-                        .mirrors
-                        .push_back((descriptor.clone(), result.is_ok()));
-                    if result.is_ok() && bound.events.is_none() {
-                        bound.events = bound.client.events().ok();
-                    }
-                    result.is_ok()
-                }
-            };
-            if !configured {
-                return Ok(None);
-            }
-        }
         let evidence = match bound.client.device_evidence(descriptor, monotonic()?) {
             Ok(evidence) => evidence,
-            Err(error) if !generated => {
+            Err(error) if !descriptor.is_generated_keyboard() => {
                 eprintln!(
                     "mirror {} keeps no consumer evidence: {error}",
                     descriptor.name
@@ -1676,23 +1090,10 @@ impl Broker {
             return Ok(None);
         };
         bound.registration.check(&self.logind, &bound.client)?;
-        let admission = (!owners.is_empty()).then_some(crate::morf::admission::Admission {
-            owners,
-            expires: lease.map(|until| {
-                until
-                    .min(bound.context.checked + crate::context::SNAPSHOT_MAX_AGE)
-                    .min(
-                        bound.context.value.as_ref().unwrap().snapshot.captured_at
-                            + crate::context::SNAPSHOT_MAX_AGE,
-                    )
-            }),
-        });
         let reply = transport_offer::reply(
             descriptor,
             bound.fence,
             evidence,
-            admission,
-            self.input_releases.as_mut(),
             &mut bound.transport_started,
         )?;
         Ok(Some(reply))
@@ -1720,11 +1121,6 @@ impl Broker {
                     },
                 )
             })
-            .chain(
-                self.morf_handoffs
-                    .iter()
-                    .filter_map(|handoff| handoff.deadline()),
-            )
             .min()
     }
     pub fn poll_sources(&self) -> Vec<PollFd<'_>> {
@@ -1744,41 +1140,7 @@ impl Broker {
     }
     /// One incoming message/registration per step prevents a subscriber from
     /// monopolizing supervision. All sends are nonblocking and bounded.
-    /// Re-applies mirror device settings after a compositor configuration
-    /// reload, or after losing the event stream that would report one.
-    fn reapply_mirrors(&mut self) {
-        for bound in self
-            .connections
-            .iter_mut()
-            .filter_map(|connection| connection.bound.as_mut())
-        {
-            if !bound.mirrors.iter().any(|(_, configured)| *configured) {
-                continue;
-            }
-            let reloaded = match bound.events.as_mut().map(crate::hyprland::Events::reloaded) {
-                Some(Ok(reloaded)) => reloaded,
-                Some(Err(_)) | None => {
-                    bound.events = bound.client.events().ok();
-                    bound.events.is_some()
-                }
-            };
-            if !reloaded {
-                continue;
-            }
-            for (descriptor, configured) in &mut bound.mirrors {
-                let result = bound.client.configure_mirror(descriptor);
-                if let Err(error) = &result {
-                    eprintln!(
-                        "mirror {} lost its device settings after a compositor reload: {error}",
-                        descriptor.name
-                    );
-                }
-                *configured = result.is_ok();
-            }
-        }
-    }
     pub fn step(&mut self, now: Duration) -> io::Result<()> {
-        self.reapply_mirrors();
         if let Some(channel) = self.endpoint.accept()?
             && self.connections.len() < MAX_CLIENTS
         {
@@ -1793,8 +1155,6 @@ impl Broker {
             });
         }
         if self.connections.is_empty() {
-            self.poll_morf_handoffs(monotonic()?);
-            self.collect_morf_controls()?;
             return Ok(());
         }
         self.cursor %= self.connections.len();
@@ -1817,8 +1177,6 @@ impl Broker {
         }
         // A bad, stale or disconnected client loses all queued work and its
         // seat owner immediately. No raw payload is logged or returned to it.
-        self.poll_morf_handoffs(monotonic()?);
-        self.collect_morf_controls()?;
         Ok(())
     }
     fn process(&mut self, connection: &mut Connection, now: Duration) -> io::Result<()> {
@@ -1870,7 +1228,7 @@ impl Broker {
                     }
                 }
                 Request::Register {
-                    instance,
+                    display,
                     role,
                     capabilities,
                 } if connection.bound.is_none() => {
@@ -1885,15 +1243,12 @@ impl Broker {
                     )?;
                     let peer = Peer::from_socket(&connection.channel)?;
                     self.verify_agent(peer.pid())?;
-                    let client = Client::open(
+                    let client = Compositor::open(
                         &self.policy.runtime_root.join(peer.uid().to_string()),
-                        &instance,
+                        &display,
                         peer.uid(),
                         &self.policy.compositor_executable,
                     )?;
-                    if capabilities.contains(&Capability::HyprlandActions) {
-                        client.verify_window_actions()?;
-                    }
                     let registration = self.logind.register(peer, &client)?;
                     self.verify_agent(connection.channel.peer().pid)?;
                     let binding = registration.binding()?;
@@ -1922,14 +1277,9 @@ impl Broker {
                     let seat = binding.seat.clone();
                     let session = binding.session.clone();
                     let compositor = (binding.compositor_pid, binding.compositor_start);
-                    let mut context = ContextFeed::default();
-                    if self.inhibited.contains(&compositor) {
-                        context.inhibit();
-                    }
+                    let context = ContextFeed::default();
                     connection.bound = Some(Bound {
                         transport_started: false,
-                        mirrors: VecDeque::new(),
-                        events: None,
                         client,
                         registration,
                         seat: seat.clone(),
@@ -1942,11 +1292,6 @@ impl Broker {
                         previous: Grace::default(),
                         context,
                         compositor,
-                        native: None,
-                        native_shells: Vec::new(),
-                        shell_states: Vec::new(),
-                        shell_rendered: Vec::new(),
-                        shell_discovered: Duration::ZERO,
                         context_export: None,
                         rules: rule_control::Rules::new(self.rule_baseline.clone()),
                         recognizers: Default::default(),
@@ -1978,7 +1323,7 @@ impl Broker {
                     // An in-flight status read may precede a transition notice.
                     // Discard it without acting on stale authority or closing
                     // the agent before that notice can reach it.
-                    let old_status = matches!(&request, Request::Status { fence } | Request::LuaSource { fence, .. } | Request::ContextRead { fence, .. } | Request::Rules {fence,..} | Request::MorfAction {fence,..} | Request::MorfCancel {fence,..} | Request::RecognizerReady {fence,..} | Request::Recognize {fence,..} | Request::RecognitionCancelled {fence,..}
+                    let old_status = matches!(&request, Request::Status { fence } | Request::LuaSource { fence, .. } | Request::ContextRead { fence, .. } | Request::Rules {fence,..} | Request::RecognizerReady {fence,..} | Request::Recognize {fence,..} | Request::RecognitionCancelled {fence,..}
                         if now < bound.previous.expires && bound.previous.fences.contains(fence));
                     if !current && !old_heartbeat && !old_status {
                         return Err(protocol::invalid(
@@ -2008,16 +1353,6 @@ impl Broker {
                                 return Err(protocol::invalid("unnegotiated recognizer cleanup"));
                             }
                             bound.recognizers.cleaned(&cancellation)?;
-                        }
-                        Request::MorfAction { .. } | Request::MorfCancel { .. } if !current => {}
-                        Request::MorfAction {
-                            id,
-                            ordinal,
-                            action,
-                            ..
-                        } => self.submit_agent_morf(connection, id, ordinal, action)?,
-                        Request::MorfCancel { id, ordinal, .. } => {
-                            self.cancel_agent_morf(connection, id, ordinal)?
                         }
                         Request::Rules { .. } if !current => {}
                         Request::Rules {
@@ -2067,28 +1402,6 @@ impl Broker {
                                     sampled_at: now,
                                     state: bound.context.state(now),
                                     context,
-                                    morf_rendered: if bound.context.fresh(now)
-                                        && bound.context.state(now) == State::Desktop
-                                    {
-                                        bound
-                                            .shell_rendered
-                                            .iter()
-                                            .filter(|rendered| {
-                                                rendered.context.frame.is_none()
-                                                    || rendered.context.fresh(now)
-                                            })
-                                            .cloned()
-                                            .collect()
-                                    } else {
-                                        Vec::new()
-                                    },
-                                    morf: if bound.context.fresh(now)
-                                        && bound.context.state(now) == State::Desktop
-                                    {
-                                        bound.shell_states.clone()
-                                    } else {
-                                        Vec::new()
-                                    },
                                     error: bound.context.error.as_ref().map(|error| {
                                         error
                                             .chars()
@@ -2201,8 +1514,9 @@ impl Broker {
                                 connection.push(Reply::ActionCancelled { fence, id, ordinal })?;
                                 return connection.flush(monotonic()?);
                             }
-                            let reorder_scope =
-                                bound.actions.authorize_native(id, ordinal, context, now)?;
+                            bound
+                                .actions
+                                .authorize(id, ordinal, &context.snapshot, now)?;
                             let expires = (now + SNAPSHOT_MAX_AGE)
                                 .min(context.snapshot.captured_at + SNAPSHOT_MAX_AGE);
                             connection.push(Reply::Execute {
@@ -2210,7 +1524,6 @@ impl Broker {
                                 id,
                                 ordinal,
                                 expires,
-                                reorder_scope,
                             })?;
                         }
                         Request::Complete {
@@ -2247,14 +1560,6 @@ impl Broker {
                                 return Err(protocol::invalid(
                                     "action availability exceeds negotiated capabilities",
                                 ));
-                            }
-                            if bound
-                                .available_actions
-                                .contains(&Capability::HyprlandActions)
-                                && !capabilities.contains(&Capability::HyprlandActions)
-                            {
-                                bound.context.sampler.retire_native();
-                                bound.context.checked = Duration::ZERO;
                             }
                             bound.available_actions = capabilities;
                         }
@@ -2367,22 +1672,21 @@ impl Broker {
             self.advance_session(connection, now)?;
             return Ok(false);
         }
-        let result = bound.context.sampler.check_lock(&bound.client);
+        let result = bound.registration.locked(&self.logind);
         bound.registration.check(&self.logind, &bound.client)?;
         match result {
             Ok(false) if bound.context.fresh(monotonic()?) => return Ok(true),
             Ok(true) => {
-                if self.inhibited.len() >= 4096 && !self.inhibited.contains(&bound.compositor) {
-                    return Err(protocol::invalid("locked compositor history exhausted"));
-                }
-                self.inhibited.insert(bound.compositor);
-                bound.context.inhibit();
+                bound.context.state = State::Locked;
+                bound.context.usable = false;
+                bound.context.value = None;
+                bound.context.error = Some("session is locked".into());
             }
             Ok(false) | Err(_) => {
                 bound.context.state = State::Unknown;
                 bound.context.usable = false;
                 bound.context.value = None;
-                bound.context.error = Some("compositor lock state is unavailable".into());
+                bound.context.error = Some("session lock state is unavailable".into());
             }
         }
         self.advance_session(connection, monotonic()?)?;
@@ -2420,154 +1724,63 @@ impl Broker {
         let was_fresh = bound.context.fresh(now);
         let old_usable = bound.context.usable;
         let old_state = bound.context.state;
-        if let Some(executable) = &self.policy.morf_executable {
-            if bound.native.is_none() {
-                match crate::morf::Client::discover(
-                    &self.policy.runtime_root.join(binding.uid.to_string()),
-                    binding.uid,
-                    executable,
-                    &self.logind,
-                    &bound.client,
-                ) {
-                    Ok(client) => bound.native = client,
-                    Err(error) => {
-                        bound.context.inhibit();
-                        bound.context.error = Some(error.to_string());
-                    }
-                }
+        let socket = self
+            .policy
+            .runtime_root
+            .join(binding.uid.to_string())
+            .join(bound.client.display());
+        let result = bound.registration.locked(&self.logind).and_then(|locked| {
+            if !bound.capabilities.contains(&Capability::Context) {
+                return Ok((locked, None));
             }
-            if let Some(native) = bound.native.as_mut() {
-                match native.sample(&self.logind, &bound.client) {
-                    Ok(state) => {
-                        let proof = native.proof(&state);
-                        match state.phase {
-                            crate::morf::Phase::Pending => {
-                                self.lock_proofs.insert(bound.compositor, proof);
-                                bound.context.inhibit();
-                            }
-                            crate::morf::Phase::Locked => {
-                                if bound.client.lock_state()? {
-                                    self.lock_proofs.insert(bound.compositor, proof);
-                                    bound.context.state = State::Locked;
-                                }
-                                bound.context.inhibit();
-                            }
-                            crate::morf::Phase::UnlockDispatched => {
-                                if self.completed_providers.contains(&proof) {
-                                    let _ = native.release(&state);
-                                    bound.native = None;
-                                } else if self.lock_proofs.get(&bound.compositor) == Some(&proof)
-                                    && !bound.client.lock_state()?
-                                {
-                                    // The same live native producer observed its
-                                    // lock acknowledgement and flushed unlock;
-                                    // actual compositor unlock is independently
-                                    // confirmed before retiring the provider.
-                                    bound.registration.check(&self.logind, &bound.client)?;
-                                    self.inhibited.remove(&bound.compositor);
-                                    self.lock_proofs.remove(&bound.compositor);
-                                    if self.completed_providers.len() >= 4096 {
-                                        return Err(protocol::invalid(
-                                            "native provider completion history exhausted",
-                                        ));
-                                    }
-                                    self.completed_providers.insert(proof);
-                                    bound.context.sampler.provider_unlock_completed();
-                                    bound.context.state = State::Unknown;
-                                    bound.context.usable = false;
-                                    bound.context.value = None;
-                                    let _ = native.release(&state);
-                                    bound.native = None;
-                                } else {
-                                    bound.context.inhibit();
-                                }
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        bound.native = None;
-                        bound.context.state = State::Locking;
-                        bound.context.inhibit();
-                        bound.context.error = Some(error.to_string());
-                    }
-                }
-            }
-        }
-        let result = if matches!(bound.context.state, State::Locking | State::Locked) {
-            Ok(None)
-        } else if bound.capabilities.contains(&Capability::Context) {
-            bound
-                .context
-                .sampler
-                .sample_with_layouts(&bound.client, bound.fence.session, binding.kind)
-                .map(|(snapshot, layouts)| {
-                    Some(ProvidedContext {
-                        binding: binding.clone(),
-                        snapshot,
-                        layouts,
-                    })
-                })
-        } else {
-            bound
-                .context
-                .sampler
-                .check_lock(&bound.client)
-                .map(|_| None)
-        };
+            let until = std::time::Instant::now() + CONTEXT_SAMPLE_TIME;
+            let snapshot = bound.context.sampler.sample(
+                &socket,
+                binding.uid,
+                bound.fence.session,
+                binding.kind,
+                locked,
+                until,
+            )?;
+            Ok((
+                locked,
+                Some(ProvidedContext {
+                    binding: binding.clone(),
+                    snapshot,
+                }),
+            ))
+        });
         bound.registration.check(&self.logind, &bound.client)?;
-        let mut checked = monotonic()?;
-        bound.context.checked = checked;
-        if matches!(bound.context.state, State::Locking | State::Locked)
-            || bound.context.sampler.inhibited()
-        {
-            // Persist inhibition across agent disconnect/re-registration for
-            // the same compositor lifetime. No caller can clear this latch.
-            if self.inhibited.len() >= 4096 && !self.inhibited.contains(&bound.compositor) {
-                return Err(protocol::invalid("locked compositor history exhausted"));
+        match result {
+            Ok((true, _)) => {
+                bound.context.value = None;
+                bound.context.state = State::Locked;
+                bound.context.usable = false;
+                bound.context.error = Some("session is locked".into());
             }
-            self.inhibited.insert(bound.compositor);
-            bound.context.inhibit();
-        } else {
-            match result {
-                Ok(snapshot) => {
-                    bound.context.state = snapshot
-                        .as_ref()
-                        .map_or(State::Unknown, |provided| provided.snapshot.state);
-                    bound.context.value = snapshot.map(Box::new);
-                    bound.context.usable = true;
-                    bound.context.error = None;
-                }
-                Err(error) => {
-                    bound.context.value = None;
-                    bound.context.state = State::Unknown;
-                    bound.context.usable = false;
-                    bound.context.error = Some(
-                        error
-                            .to_string()
-                            .chars()
-                            .filter(|character| !character.is_control())
-                            .take(512)
-                            .collect(),
-                    );
-                }
+            Ok((false, snapshot)) => {
+                bound.context.state = snapshot
+                    .as_ref()
+                    .map_or(State::Unknown, |provided| provided.snapshot.state);
+                bound.context.value = snapshot.map(Box::new);
+                bound.context.usable = true;
+                bound.context.error = None;
+            }
+            Err(error) => {
+                bound.context.value = None;
+                bound.context.state = State::Unknown;
+                bound.context.usable = false;
+                bound.context.error = Some(
+                    error
+                        .to_string()
+                        .chars()
+                        .filter(|character| !character.is_control())
+                        .take(512)
+                        .collect(),
+                );
             }
         }
-        refresh_native_shells(bound, &self.policy, &self.logind, checked);
-        if let Some(value) = bound.context.value.as_mut() {
-            crate::morf::rendered::scopes::apply(
-                &mut value.snapshot,
-                &bound.shell_rendered,
-                monotonic()?,
-            );
-        }
-        if bound.context.sampler.inhibited() {
-            if self.inhibited.len() >= 4096 && !self.inhibited.contains(&bound.compositor) {
-                return Err(protocol::invalid("locked compositor history exhausted"));
-            }
-            self.inhibited.insert(bound.compositor);
-            bound.context.inhibit();
-        }
-        checked = monotonic()?;
+        let checked = monotonic()?;
         bound.context.checked = checked;
         if bound.context.value.as_ref().is_some_and(|value| {
             checked.saturating_sub(value.snapshot.captured_at) > SNAPSHOT_MAX_AGE
@@ -2580,7 +1793,6 @@ impl Broker {
         let transition = old_state != bound.context.state
             || old_usable != bound.context.usable
             || old_usable && !was_fresh;
-        connection.refresh_native_actions(checked)?;
         if transition {
             self.advance_session(connection, checked)?;
         }
@@ -2606,7 +1818,6 @@ impl AsFd for Broker {
 
 #[cfg(test)]
 mod tests {
-    mod native_reorder;
     use super::*;
     use crate::{
         config::{Action, Direction},
@@ -2630,20 +1841,11 @@ mod tests {
             captured_at: Duration::ZERO,
             state: State::Desktop,
             outputs: vec![],
-            windows: vec![],
-            regions: vec![],
-            secure_overlay: false,
         };
         let mut actions = ActionLedger::default();
         assert!(actions.authorize(1, 1, &snapshot, Duration::ZERO).is_err());
-        actions
-            .offer(fence, &event, &snapshot, Duration::ZERO)
-            .unwrap();
-        assert!(
-            actions
-                .offer(fence, &event, &snapshot, Duration::ZERO)
-                .is_err()
-        );
+        actions.offer(&event, &snapshot, Duration::ZERO).unwrap();
+        assert!(actions.offer(&event, &snapshot, Duration::ZERO).is_err());
         assert!(actions.complete(1, 1).is_err());
         actions.authorize(1, 1, &snapshot, Duration::ZERO).unwrap();
         assert!(actions.authorize(1, 1, &snapshot, Duration::ZERO).is_err());
@@ -2652,12 +1854,6 @@ mod tests {
             "unsent grant accepted a receipt"
         );
         actions.pending.get_mut(&(1, 1)).unwrap().sent = true;
-        actions.pending.get_mut(&(1, 1)).unwrap().morf_submitted = true;
-        assert!(
-            actions.complete(1, 1).is_err(),
-            "agent acknowledged a native action before its outcome was delivered"
-        );
-        actions.pending.get_mut(&(1, 1)).unwrap().morf_result_sent = true;
         actions.complete(1, 1).unwrap();
         assert!(actions.complete(1, 1).is_err());
 
@@ -2668,9 +1864,7 @@ mod tests {
             (1, State::Desktop, 2),
         ] {
             let mut actions = ActionLedger::default();
-            actions
-                .offer(fence, &event, &snapshot, Duration::ZERO)
-                .unwrap();
+            actions.offer(&event, &snapshot, Duration::ZERO).unwrap();
             let changed = crate::context::Snapshot {
                 state,
                 generation,
@@ -2684,183 +1878,21 @@ mod tests {
         }
     }
     #[test]
-    fn native_controls_require_delivered_grants_and_exact_frozen_event_and_target() {
-        // Explicit context/registration model; this does not establish live
-        // root, logind, native controller execution or physical ownership.
+    fn an_absent_frozen_target_cannot_match_an_absent_current_target() {
         let at = Duration::from_secs(1);
         let view = crate::context_transfer::tests::view(at);
-        let snapshot = view.context.unwrap().snapshot;
         let fence = view.fence;
-        let Reply::Observation { mut event, .. } = progress(fence, 1, Stage::Begin) else {
-            unreachable!()
-        };
-        let Event::Matched {
-            action,
-            output,
-            evidence,
-            at: event_at,
-            ..
-        } = event.as_mut()
-        else {
-            unreachable!()
-        };
-        *action = Action::Morf {
-            action: crate::config::MorfAction::Dashboard,
-        };
-        *output = Some(snapshot.outputs[0].geometry.name.clone());
-        *event_at = at;
-        let Evidence::Touch { space, .. } = evidence else {
-            unreachable!()
-        };
-        *space = Space::Logical;
-        let request = crate::morf::controls::Request::from_event(
-            fence,
-            &event,
-            crate::config::MorfAction::Dashboard,
-        )
-        .unwrap();
-        let mut actions = ActionLedger::default();
-        actions.offer(fence, &event, &snapshot, at).unwrap();
-        assert!(
-            actions.pending[&(1, 1)]
-                .morf_control(&request, &snapshot, at)
-                .is_err()
-        );
-        actions.authorize(1, 1, &snapshot, at).unwrap();
-        let offer = actions.pending.get_mut(&(1, 1)).unwrap();
-        assert!(offer.morf_control(&request, &snapshot, at).is_err());
-        offer.sent = true;
-        assert!(offer.morf_control(&request, &snapshot, at).is_err());
-        offer.delivered = true;
-        let until = at + SNAPSHOT_MAX_AGE;
-        assert_eq!(offer.morf_control(&request, &snapshot, at).unwrap(), until);
-        for field in ["dx", "output", "epoch", "ordinal", "action"] {
-            let mut bad = request.clone();
-            match field {
-                "dx" => bad.dx += 1.,
-                "output" => bad.output = "other".into(),
-                "epoch" => bad.epoch = "f".repeat(32),
-                "ordinal" => bad.ordinal += 1,
-                _ => bad.action = crate::config::MorfAction::Notifications,
-            }
-            assert!(offer.morf_control(&bad, &snapshot, at).is_err(), "{field}");
-        }
-        let mut fresh = snapshot.clone();
-        fresh.captured_at += Duration::from_millis(100);
-        assert_eq!(
-            offer
-                .morf_control(&request, &fresh, fresh.captured_at)
-                .unwrap(),
-            until
-        );
-        fresh.captured_at = until;
-        assert!(
-            offer.morf_control(&request, &fresh, until).is_err(),
-            "context refresh extended the original grant"
-        );
-        for changed in [
-            crate::context::Snapshot {
-                secure_overlay: true,
-                ..snapshot.clone()
-            },
-            crate::context::Snapshot {
-                outputs: vec![],
-                ..snapshot.clone()
-            },
-            crate::context::Snapshot {
-                regions: vec![],
-                ..snapshot.clone()
-            },
-        ] {
-            assert!(offer.morf_control(&request, &changed, at).is_err());
-        }
-        offer.cancelled = true;
-        assert!(offer.morf_control(&request, &snapshot, at).is_err());
-
-        let Event::Matched { action, .. } = event.as_mut() else {
-            unreachable!()
-        };
-        *action = Action::Lua {
-            handler: "shell".into(),
-            requires: BTreeSet::from([crate::config::EffectKind::MorfActions]),
-        };
-        let mut actions = ActionLedger::default();
-        actions.offer(fence, &event, &snapshot, at).unwrap();
-        actions.authorize(1, 1, &snapshot, at).unwrap();
-        let offer = actions.pending.get_mut(&(1, 1)).unwrap();
-        offer.sent = true;
-        offer.delivered = true;
-        let mut selected = request.clone();
-        selected.action = crate::config::MorfAction::Notifications;
-        assert_eq!(offer.morf_control(&selected, &snapshot, at).unwrap(), until);
-        selected.dy += 1.;
-        assert!(offer.morf_control(&selected, &snapshot, at).is_err());
-    }
-    #[test]
-    fn native_progress_needs_logical_evidence_and_current_event_generations() {
-        let fence = Fence {
-            broker: Epoch([1, 2]),
-            configuration: 1,
-            session: 1,
-        };
+        let snapshot = view.context.unwrap().snapshot;
         let Reply::Observation { mut event, .. } = progress(fence, 1, Stage::Begin) else {
             unreachable!()
         };
         let Event::Matched { output, .. } = event.as_mut() else {
             unreachable!()
         };
-        *output = Some("TEST-1".into());
-        let build = |event: &Event| {
-            crate::morf::controls::Request::from_event(
-                fence,
-                event,
-                crate::config::MorfAction::Dashboard,
-            )
-        };
-        assert!(
-            build(&event).is_err(),
-            "normalized values passed as logical displacement"
-        );
-        let Event::Matched {
-            evidence: Evidence::Touch { space, .. },
-            ..
-        } = event.as_mut()
-        else {
-            unreachable!()
-        };
-        *space = Space::Logical;
-        assert!(build(&event).is_ok());
-        let Event::Matched {
-            config_generation, ..
-        } = event.as_mut()
-        else {
-            unreachable!()
-        };
-        *config_generation += 1;
-        assert!(build(&event).is_err());
-    }
-    #[test]
-    fn an_absent_frozen_target_cannot_match_an_absent_current_target() {
-        let at = Duration::from_secs(1);
-        let view = crate::context_transfer::tests::view(at);
-        let fence = view.fence;
-        let snapshot = view.context.unwrap().snapshot;
-        for missing_window in [false, true] {
-            let Reply::Observation { mut event, .. } = progress(fence, 1, Stage::Begin) else {
-                unreachable!()
-            };
-            let Event::Matched { output, window, .. } = event.as_mut() else {
-                unreachable!()
-            };
-            if missing_window {
-                *window = Some("missing".into());
-            } else {
-                *output = Some("missing".into());
-            }
-            let mut actions = ActionLedger::default();
-            actions.offer(fence, &event, &snapshot, at).unwrap();
-            assert!(actions.authorize(1, 1, &snapshot, at).is_err());
-        }
+        *output = Some("missing".into());
+        let mut actions = ActionLedger::default();
+        actions.offer(&event, &snapshot, at).unwrap();
+        assert!(actions.authorize(1, 1, &snapshot, at).is_err());
     }
     #[test]
     fn cancelled_offers_are_scoped_and_unsent_offers_cannot_reappear() {
@@ -2878,9 +1910,6 @@ mod tests {
             captured_at: Duration::ZERO,
             state: State::Desktop,
             outputs: vec![],
-            windows: vec![],
-            regions: vec![],
-            secure_overlay: false,
         };
         let Event::Matched { source, .. } = event.as_ref() else {
             unreachable!()
@@ -2898,12 +1927,8 @@ mod tests {
         *id = 2;
         other_source.device += 1;
         let mut actions = ActionLedger::default();
-        actions
-            .offer(fence, &event, &snapshot, Duration::ZERO)
-            .unwrap();
-        actions
-            .offer(fence, &other, &snapshot, Duration::ZERO)
-            .unwrap();
+        actions.offer(&event, &snapshot, Duration::ZERO).unwrap();
+        actions.offer(&other, &snapshot, Duration::ZERO).unwrap();
         actions.pending.get_mut(&(1, 1)).unwrap().delivered = true;
         assert_eq!(actions.cancel(&source, Some(1)), vec![((1, 1), true)]);
         assert!(actions.authorize(1, 1, &snapshot, Duration::ZERO).is_err());
@@ -2913,11 +1938,7 @@ mod tests {
         );
         actions.complete_unexecuted(1, 1).unwrap();
         assert!(actions.complete_unexecuted(1, 1).is_err());
-        assert!(
-            actions
-                .offer(fence, &event, &snapshot, Duration::ZERO)
-                .is_err()
-        );
+        assert!(actions.offer(&event, &snapshot, Duration::ZERO).is_err());
         actions.authorize(2, 1, &snapshot, Duration::ZERO).unwrap();
 
         let Event::Matched { source, .. } = other.as_ref() else {
@@ -2967,7 +1988,7 @@ mod tests {
         assert!(!grace.permits(&Request::Heartbeat { fence }, Duration::from_secs(1)));
     }
     #[test]
-    fn lock_inhibition_outlives_geometry_and_a_plain_lease_refresh() {
+    fn context_state_expires_with_freshness_except_a_reported_lock() {
         let mut feed = ContextFeed::default();
         assert!(!feed.fresh(Duration::ZERO));
         feed.usable = true;
@@ -2976,11 +1997,10 @@ mod tests {
         assert_eq!(feed.state(Duration::from_millis(20)), State::Desktop);
         assert_eq!(feed.state(Duration::from_millis(261)), State::Unknown);
         assert!(!feed.fresh(Duration::ZERO));
-        feed.inhibit();
-        feed.checked = Duration::from_secs(2);
-        assert!(!feed.fresh(Duration::from_secs(2)));
-        assert_eq!(feed.state(Duration::from_secs(3)), State::Locking);
-        assert!(feed.value.is_none());
+        feed.state = State::Locked;
+        feed.usable = false;
+        assert!(!feed.fresh(Duration::from_millis(20)));
+        assert_eq!(feed.state(Duration::from_secs(3)), State::Locked);
     }
     #[test]
     fn private_context_header_limit_rejects_the_whole_snapshot() {
@@ -2998,7 +2018,6 @@ mod tests {
         assert!(subscriptions_fit(std::slice::from_ref(&subscription)));
         let mut oversized = subscription;
         oversized.context = Some(Box::new(ProvidedContext {
-            layouts: None,
             binding: crate::context::Binding {
                 seat: "seat0".into(),
                 session: "verified".into(),
@@ -3013,28 +2032,10 @@ mod tests {
                 captured_at: Duration::ZERO,
                 state: State::Desktop,
                 outputs: vec![],
-                windows: vec![],
-                regions: vec![],
-                secure_overlay: false,
             },
         }));
         oversized.context.as_mut().unwrap().binding.session = "x".repeat(protocol::MAX_PACKET);
         assert!(!subscriptions_fit(&[oversized]));
-    }
-
-    #[test]
-    fn native_layout_private_transfer_preserves_the_complete_graph() {
-        let view = crate::context_transfer::tests::native_view(Duration::ZERO, 512);
-        let subscription = Subscription {
-            seat: "seat0".into(),
-            fence: view.fence,
-            context: view.context.clone(),
-            capabilities: BTreeSet::from([Capability::Context]),
-            consumer: None,
-        };
-        assert!(serde_json::to_vec(&subscription).unwrap().len() > protocol::MAX_PACKET);
-        assert!(subscriptions_fit(std::slice::from_ref(&subscription)));
-        assert_eq!(subscription.context, view.context);
     }
     fn progress(fence: Fence, ordinal: u64, stage: Stage) -> Reply {
         let phase = match stage {
@@ -3077,9 +2078,7 @@ mod tests {
                         swipe: true,
                     },
                 },
-                window: None,
                 output: None,
-                workspace: None,
             }),
         }
     }

@@ -2,7 +2,6 @@
 mod actual;
 mod composed;
 mod keys;
-mod native_reorder;
 mod subscriptions;
 mod takeover;
 use super::*;
@@ -87,7 +86,6 @@ fn owner() -> Subscription {
             session: 1,
         },
         context: Some(Box::new(ProvidedContext {
-            layouts: None,
             binding: Binding {
                 seat: "seat0".into(),
                 session: "model".into(),
@@ -102,9 +100,6 @@ fn owner() -> Subscription {
                 captured_at: monotonic().unwrap(),
                 state: State::Desktop,
                 outputs: vec![],
-                windows: vec![],
-                regions: vec![],
-                secure_overlay: false,
             },
         })),
         capabilities: BTreeSet::from([
@@ -181,7 +176,6 @@ impl Fixture {
             },
             None,
             &BTreeMap::new(),
-            BTreeMap::new(),
         )
         .unwrap();
         let consumer = self.owner.consumer.clone().unwrap();
@@ -194,7 +188,6 @@ impl Fixture {
                 name: descriptor.name,
                 class: descriptor.class,
                 seat: "seat0".into(),
-                settings: BTreeMap::new(),
                 at: now,
             },
             now,

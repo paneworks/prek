@@ -70,10 +70,7 @@ fn routed(rules: Vec<Rule>, touch: bool, layer: bool) -> Routing {
         snapshot.outputs = vec![crate::context::OutputState {
             geometry,
             geometry_generation: mapping.generation,
-            active_workspace: Some(1),
             screen: crate::config::Screen::On,
-            keyboard_known: true,
-            keyboard: None,
         }];
         routing.authority_mut().update(snapshot, ms(0)).unwrap();
         Some(mapping)

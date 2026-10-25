@@ -6,25 +6,19 @@ use crate::{
 
 #[test]
 fn edited_public_observations_cannot_be_reinterpreted_as_native_work() {
-    for edit_scope in [false, true] {
-        let mut routing = routing(vec![rule("shift", Action::Remap { key: Key(42) })]);
-        routing
-            .push(Record::Frame {
-                frame: frame(1, 1, 10, 30, 1),
-            })
-            .unwrap();
-        let mut dispatch = routing.take_scoped_dispatches(ms(10)).pop().unwrap();
-        if edit_scope {
-            dispatch.reorder_scope = Some(crate::protocol::ReorderScope {
-                fingerprint: [1; 32],
-            });
-        } else if let Event::Matched { action, .. } = &mut dispatch.event {
-            *action = Action::Keys {
-                keys: vec![Key(30)],
-            };
-        }
-        assert!(dispatch.into_key_work().is_err());
+    let mut routing = routing(vec![rule("shift", Action::Remap { key: Key(42) })]);
+    routing
+        .push(Record::Frame {
+            frame: frame(1, 1, 10, 30, 1),
+        })
+        .unwrap();
+    let mut dispatch = routing.take_scoped_dispatches(ms(10)).pop().unwrap();
+    if let Event::Matched { action, .. } = &mut dispatch.event {
+        *action = Action::Keys {
+            keys: vec![Key(30)],
+        };
     }
+    assert!(dispatch.into_key_work().is_err());
 }
 
 #[test]

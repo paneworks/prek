@@ -65,12 +65,9 @@ enum Command {
         /// Route supervises a routing worker; physical takeover is still refused per device.
         #[arg(long, default_value = "observe", value_parser = ["observe", "route"])]
         mode: String,
-        /// Trusted actual Hyprland executable (the ELF, rather than a wrapper).
+        /// Trusted actual compositor executable (the ELF, rather than a wrapper).
         #[arg(long)]
         compositor_executable: PathBuf,
-        /// Trusted actual Morf ELF for native lock handoff.
-        #[arg(long)]
-        morf_executable: Option<PathBuf>,
         /// Trusted absolute path to the system libsystemd.so.0.
         #[arg(long)]
         logind_library: PathBuf,
@@ -93,9 +90,9 @@ enum Command {
         logind_library: Option<PathBuf>,
         #[arg(long, default_value = "/run/prek/control.sock")]
         socket: PathBuf,
-        /// Defaults to HYPRLAND_INSTANCE_SIGNATURE; the broker verifies it.
+        /// Defaults to WAYLAND_DISPLAY; the broker verifies it.
         #[arg(long)]
-        instance: Option<String>,
+        display: Option<String>,
         #[arg(long)]
         json: bool,
         #[arg(long, value_parser = clap::value_parser!(u64).range(1..=3600))]
@@ -110,18 +107,6 @@ enum Command {
         /// a routing broker; fresh compositor context is negotiated implicitly.
         #[arg(long)]
         commands: bool,
-        /// Execute protected-policy DPMS blank/wake on explicit frozen outputs.
-        /// Requires a routing broker and verified desktop context.
-        #[arg(long)]
-        power: bool,
-        /// Execute protected-policy targeted Hyprland close and workspace moves.
-        /// Requires a routing broker and verified stock compositor context.
-        #[arg(long)]
-        hyprland: bool,
-        /// Submit typed Morf effects through the broker. Native rendered-context
-        /// and physical-cutover gates must be satisfied before negotiation.
-        #[arg(long)]
-        morf: bool,
         /// Run approved Lua callbacks, timers and named handlers in a separate VM.
         #[arg(long)]
         lua: bool,
@@ -140,7 +125,7 @@ enum Command {
         #[arg(long, default_value = "/run/prek/control.sock")]
         socket: PathBuf,
         #[arg(long)]
-        instance: Option<String>,
+        display: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -417,7 +402,6 @@ fn run(command: Command) -> io::Result<()> {
             config,
             mode,
             compositor_executable,
-            morf_executable,
             logind_library,
             runtime_dir,
             json,
@@ -426,7 +410,6 @@ fn run(command: Command) -> io::Result<()> {
             &config,
             &runtime_dir,
             &compositor_executable,
-            morf_executable.as_deref(),
             &logind_library,
             BrokerWorker {
                 route: mode == "route",
@@ -439,15 +422,12 @@ fn run(command: Command) -> io::Result<()> {
             reconnect_child,
             logind_library,
             socket,
-            instance,
+            display,
             json,
             duration,
             observations,
             context,
             commands,
-            power,
-            hyprland,
-            morf,
             lua,
             rule_mutations,
             input,
@@ -460,9 +440,6 @@ fn run(command: Command) -> io::Result<()> {
                 observations,
                 context,
                 commands,
-                power,
-                hyprland,
-                morf,
                 lua,
                 rule_mutations,
                 input,
@@ -476,20 +453,20 @@ fn run(command: Command) -> io::Result<()> {
                     ));
                 }
                 let executable = std::env::current_exe()?;
-                let instance = session_instance(instance)?;
+                let display = session_display(display)?;
                 let sleep = logind_library
                     .as_deref()
                     .map(prek::sleep_watch::Watch::open)
                     .transpose()?;
                 return prek::session_launcher::run_with_sleep(
-                    || options.command(&executable, &socket, &instance),
+                    || options.command(&executable, &socket, &display),
                     sleep,
                 );
             }
             let mut ready = reconnect_child
                 .then(prek::session_launcher::Ready::connect)
                 .transpose()?;
-            let result = run_session(&socket, instance, options, &mut output, ready.as_mut());
+            let result = run_session(&socket, display, options, &mut output, ready.as_mut());
             if reconnect_child {
                 result.map_err(prek::session_launcher::classify)
             } else {
@@ -498,11 +475,11 @@ fn run(command: Command) -> io::Result<()> {
         }
         Command::Status {
             socket,
-            instance,
+            display,
             json,
         } => run_session(
             &socket,
-            instance,
+            display,
             SessionOptions {
                 json,
                 inspect: true,
@@ -865,7 +842,6 @@ fn run_broker(
     config_path: &std::path::Path,
     runtime: &std::path::Path,
     compositor: &std::path::Path,
-    morf: Option<&std::path::Path>,
     library: &std::path::Path,
     worker: BrokerWorker,
 ) -> io::Result<()> {
@@ -930,7 +906,6 @@ fn run_broker(
             runtime_root: "/run/user".into(),
             compositor_executable: compositor.into(),
             agent_executable: std::env::current_exe()?,
-            morf_executable: morf.map(Into::into),
             allowed_seats: config.policy.allowed_seats.iter().cloned().collect(),
         },
     )?;
@@ -961,7 +936,6 @@ fn run_broker(
         delay,
     );
     let ((compiler, control, broker), supervisor) = lifetime.parts();
-    broker.bind_input_worker(supervisor, control)?;
     if !route {
         broker.enable_observations();
     }
@@ -981,8 +955,7 @@ fn run_broker(
         let state = sleep.step()?;
         if state.preparing || state.generation != sleep_generation {
             supervisor.request_stop()?;
-            let report = supervisor.wait()?;
-            broker.input_worker_exited(&report)?;
+            supervisor.wait()?;
             drop(lifetime);
             while sleep.step()?.preparing {
                 if signals.requested() {
@@ -999,7 +972,6 @@ fn run_broker(
             supervisor.request_stop()?;
         }
         if let Some(report) = supervisor.check()? {
-            broker.input_worker_exited(&report)?;
             return if signals.requested()
                 || report.reason() == Reason::Requested
                 || report.reason() == Reason::Exited && report.status().success()
@@ -1168,11 +1140,6 @@ fn run_broker(
                     } => {
                         broker.recognition_receipt(&seat, fence, ticket, error, monotonic()?)?;
                     }
-                    prek::worker::Message::Released {
-                        worker,
-                        fence,
-                        source,
-                    } => broker.input_released(control, worker, fence, &source)?,
                     prek::worker::Message::RulesChanged {
                         seat,
                         fence,
@@ -1229,11 +1196,6 @@ fn run_broker(
                         if let Some(command) =
                             broker.transport(&subscription, &descriptor, monotonic()?)?
                         {
-                            let _ = control.send(&command, monotonic()?)?;
-                        }
-                    }
-                    prek::worker::Message::MorfReady { activation } => {
-                        if let Some(command) = broker.activate_morf_handoff(control, &activation)? {
                             let _ = control.send(&command, monotonic()?)?;
                         }
                     }
@@ -1386,9 +1348,6 @@ struct SessionOptions {
     observations: bool,
     context: bool,
     commands: bool,
-    power: bool,
-    hyprland: bool,
-    morf: bool,
     lua: bool,
     rule_mutations: bool,
     input: bool,
@@ -1401,7 +1360,7 @@ impl SessionOptions {
         &self,
         executable: &std::path::Path,
         socket: &std::path::Path,
-        instance: &str,
+        display: &str,
     ) -> std::process::Command {
         let mut command = std::process::Command::new(executable);
         command
@@ -1409,17 +1368,14 @@ impl SessionOptions {
             .arg("--reconnect-child")
             .arg("--socket")
             .arg(socket)
-            .arg("--instance")
-            .arg(instance)
+            .arg("--display")
+            .arg(display)
             .stdin(std::process::Stdio::null());
         for (enabled, flag) in [
             (self.json, "--json"),
             (self.observations, "--observations"),
             (self.context, "--context"),
             (self.commands, "--commands"),
-            (self.power, "--power"),
-            (self.hyprland, "--hyprland"),
-            (self.morf, "--morf"),
             (self.lua, "--lua"),
             (self.rule_mutations, "--rule-mutations"),
             (self.input, "--input"),
@@ -1434,13 +1390,11 @@ impl SessionOptions {
 }
 
 #[cfg(target_os = "linux")]
-fn session_instance(instance: Option<String>) -> io::Result<String> {
-    instance
-        .or_else(|| std::env::var("HYPRLAND_INSTANCE_SIGNATURE").ok())
+fn session_display(display: Option<String>) -> io::Result<String> {
+    display
+        .or_else(|| std::env::var("WAYLAND_DISPLAY").ok())
         .ok_or_else(|| {
-            io::Error::other(
-                "select the live compositor with --instance or HYPRLAND_INSTANCE_SIGNATURE",
-            )
+            io::Error::other("select the live compositor with --display or WAYLAND_DISPLAY")
         })
 }
 
@@ -1454,9 +1408,6 @@ mod session_launcher_tests {
             observations: true,
             context: true,
             commands: true,
-            power: true,
-            hyprland: true,
-            morf: true,
             lua: true,
             rule_mutations: true,
             input: true,
@@ -1467,7 +1418,7 @@ mod session_launcher_tests {
         let command = options.command(
             executable,
             std::path::Path::new("/owned path/control.sock"),
-            "original-instance",
+            "original-display",
         );
         assert_eq!(command.get_program(), executable);
         assert_eq!(
@@ -1477,15 +1428,12 @@ mod session_launcher_tests {
                 "--reconnect-child",
                 "--socket",
                 "/owned path/control.sock",
-                "--instance",
-                "original-instance",
+                "--display",
+                "original-display",
                 "--json",
                 "--observations",
                 "--context",
                 "--commands",
-                "--power",
-                "--hyprland",
-                "--morf",
                 "--lua",
                 "--rule-mutations",
                 "--input",
@@ -1521,7 +1469,7 @@ fn spawn_lua_session(
 #[cfg(target_os = "linux")]
 fn run_session(
     socket: &std::path::Path,
-    instance: Option<String>,
+    display: Option<String>,
     options: SessionOptions,
     output: &mut impl Write,
     mut ready: Option<&mut prek::session_launcher::Ready>,
@@ -1533,15 +1481,12 @@ fn run_session(
         observations,
         context,
         commands,
-        power,
-        hyprland,
-        morf,
         lua,
         rule_mutations,
         input,
         recognizers,
     } = options;
-    let effects = commands || power || hyprland || morf;
+    let effects = commands;
     use nix::{
         libc,
         poll::{PollFd, PollFlags, PollTimeout, poll},
@@ -1558,7 +1503,7 @@ fn run_session(
             "session agent must run as the compositor's unprivileged user",
         ));
     }
-    let instance = session_instance(instance)?;
+    let display = session_display(display)?;
     let mut requested = std::collections::BTreeSet::new();
     let observations = observations || lua;
     if observations {
@@ -1569,15 +1514,6 @@ fn run_session(
     }
     if commands {
         requested.insert(Capability::Commands);
-    }
-    if power {
-        requested.insert(Capability::PowerActions);
-    }
-    if hyprland {
-        requested.insert(Capability::HyprlandActions);
-    }
-    if morf {
-        requested.insert(Capability::MorfActions);
     }
     if lua {
         requested.insert(Capability::LuaEvents);
@@ -1595,7 +1531,7 @@ fn run_session(
         requested.insert(Capability::CustomRecognizers);
     }
     let registration = Request::Register {
-        instance: instance.clone(),
+        display: display.clone(),
         role: if inspect { Role::Inspect } else { Role::Agent },
         capabilities: requested.clone(),
     };
@@ -1787,9 +1723,8 @@ fn run_session(
                         let _ = channel.send(&Request::Disconnect { fence: observed }, now);
                         return Ok(());
                     }
-                    if (power
-                        || hyprland
-                        || lua && (lua_runtime.is_some() || lua_download.is_some()))
+                    if lua
+                        && (lua_runtime.is_some() || lua_download.is_some())
                         && context_download.is_none()
                     {
                         context_download =
@@ -1810,46 +1745,13 @@ fn run_session(
                     offset,
                     bytes,
                     data,
-                } if (lua || power || hyprland) && Some(incoming) == fence => {
+                } if lua && Some(incoming) == fence => {
                     let now = monotonic()?;
                     let download = context_download
                         .as_mut()
                         .ok_or_else(|| io::Error::other("unsolicited broker context"))?;
                     match download.push(incoming, offset, bytes, &data, now)? {
                         Some(view) => {
-                            if (power || hyprland || morf)
-                                && let Some(executor) = executor.as_mut()
-                            {
-                                let runtime = std::env::var_os("XDG_RUNTIME_DIR")
-                                    .map(PathBuf::from)
-                                    .ok_or_else(|| {
-                                        io::Error::other(
-                                            "desktop adapters require the owning XDG_RUNTIME_DIR",
-                                        )
-                                    })?;
-                                if power
-                                    && let Err(error) = executor.sync_power_context(
-                                        &runtime,
-                                        &instance,
-                                        view.clone(),
-                                    )
-                                {
-                                    eprintln!("Power adapter unavailable: {error}");
-                                }
-                                if hyprland
-                                    && let Err(error) = executor.sync_hyprland_context(
-                                        &runtime,
-                                        &instance,
-                                        view.clone(),
-                                    )
-                                {
-                                    eprintln!("Hyprland adapter unavailable: {error}");
-                                }
-                                if morf && let Err(error) = executor.sync_morf_context(view.clone())
-                                {
-                                    eprintln!("Morf submission unavailable: {error}");
-                                }
-                            }
                             if let Some(runtime) = lua_runtime.as_mut() {
                                 runtime.update_context(view.clone())?;
                             }
@@ -2151,14 +2053,11 @@ fn run_session(
                 Reply::Dispatch {
                     fence: offered,
                     event,
-                    reorder_scope,
                 } if effects && Some(offered) == fence => {
-                    executor.as_mut().unwrap().offer_scoped(
-                        offered,
-                        event,
-                        reorder_scope,
-                        monotonic()?,
-                    )?;
+                    executor
+                        .as_mut()
+                        .unwrap()
+                        .offer(offered, event, monotonic()?)?;
                 }
                 Reply::LuaSource {
                     fence: incoming,
@@ -2240,14 +2139,12 @@ fn run_session(
                     id,
                     ordinal,
                     expires,
-                    reorder_scope,
                 } if effects && Some(granted) == fence => {
-                    executor.as_mut().unwrap().grant_scoped(
+                    executor.as_mut().unwrap().grant(
                         granted,
                         id,
                         ordinal,
                         expires,
-                        reorder_scope,
                         monotonic()?,
                     )?;
                 }
@@ -2263,17 +2160,6 @@ fn run_session(
                     if let Some(runtime) = lua_runtime.as_mut() {
                         runtime.cancel_action(id, ordinal)?;
                     }
-                }
-                Reply::MorfResult {
-                    fence: incoming,
-                    id,
-                    ordinal,
-                    result,
-                } if effects => {
-                    executor
-                        .as_mut()
-                        .unwrap()
-                        .complete_morf(incoming, id, ordinal, result)?;
                 }
                 Reply::Rejected { reason } | Reply::Revoked { reason, .. } => {
                     return Err(io::Error::other(reason));
@@ -2338,11 +2224,10 @@ fn run_session(
         }
         let mut recognizer_failed = false;
         if drained && let Some(runtime) = lua_runtime.as_mut() {
-            let capability_now = monotonic()?;
             let ready = executor
                 .as_ref()
                 .map_or_else(std::collections::BTreeSet::new, |executor| {
-                    executor.ready_capabilities(capability_now)
+                    executor.ready_capabilities()
                 });
             if let Some(view) = status_view
                 .as_ref()
@@ -2450,8 +2335,7 @@ fn run_session(
                 "broker context transfer timed out",
             ));
         }
-        let context_active =
-            power || hyprland || lua && (lua_runtime.is_some() || lua_download.is_some());
+        let context_active = lua && (lua_runtime.is_some() || lua_download.is_some());
         if context_active
             && context_download.is_none()
             && now >= next_context

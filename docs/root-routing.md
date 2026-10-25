@@ -100,7 +100,7 @@ or fixture-owned writer duplicate substitutes for that acknowledgement.
 
 This is an explicitly modeled desktop context and isolated source normalization,
 not production discovery, the production reader/cutover loop or broker grant.
-It does not prove stock compositor delivery, consumer retirement, native partial
+It does not prove compositor delivery, consumer retirement, native partial
 writes or injected worker-failure recovery. The production consumer boundary and
 public synthetic-input grant remain closed. Building/inventory checking this
 fixture is not a kernel execution result; its body is user-launched only.
@@ -112,7 +112,7 @@ configured touch consumption/fallback and cadence, reader error/panic teardown,
 five evdev boundary experiments (one keeps an active camera-lens-cover switch out
 of a neutral handoff) and sole-reader prefix/cutover/tail ordering.
 Desktop context in configured routing tests
-is explicitly modeled. The tests do not establish stock-compositor retirement,
+is explicitly modeled. The tests do not establish compositor retirement,
 physical takeover, live broker admission or phone acceptance.
 
 Eight additional recovery gates hold a keyboard chord or touch contact while
@@ -194,17 +194,15 @@ acceptance. The Nix `root-routing-receipts` check also lints the launchers.
 `oslo make test-native-managed-model` runs pure fixture models, compiles the
 custom harness and checks its inventory without invoking the kernel body.
 
-The separate `tests/run-root-handoff.sh` remains the native Morf/root/logind
-probe. Ordinary builds and Cage runs execute neither root script automatically.
-
 ## Physical takeover trial
 
 `tests/run-takeover-trial.sh --device "<exact kernel name>" [--seconds N]` is the
-first test on a real device. Run it as your user from any terminal while your
-Hyprland session runs; it asks for sudo before building. When
-`HYPRLAND_INSTANCE_SIGNATURE` is unset it uses the only running instance, and it
-starts the session agent through Hyprland's exec, so the agent shares the
-compositor's login session or, under uwsm, its systemd unit. It writes a route
+first test on a real device. Run it as your user from a terminal of the Wayland
+session under test; it asks for sudo before building. `WAYLAND_DISPLAY` and
+`XDG_RUNTIME_DIR` select the display socket, and the compositor is the one
+process listening on it. The agent launcher is moved into the compositor's
+cgroup before it starts the session agent, so the agent shares the
+compositor's login session or systemd unit. It writes a route
 configuration with one selector for that name and no rules, installs it
 root-owned under `/run/prek-trial`, temporarily installs Prek's udev metadata
 rule under `/run/udev/rules.d`, then runs a route broker and a session agent for
@@ -212,4 +210,4 @@ N seconds (default 60, at most 300). Every device with that exact name is
 routed: each is taken over only after it is neutral and idle for 100 ms, and the
 broker releases it when it exits. Input should behave exactly as before. Logs
 are under `target/takeover-trial/latest/`; `broker.log` records each takeover
-or the reason a device stayed with Hyprland.
+or the reason a device stayed with the compositor.
