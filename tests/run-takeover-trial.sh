@@ -205,7 +205,7 @@ if ! grep -q 'taken over at a neutral idle cut' "$run/broker.log"; then
   echo "\"$device\" was never taken over." >&2
   exit 1
 fi
-losses=$(grep -c 'lost its context' "$run/broker.log" || true)
+losses=$(sed -n '/taken over at a neutral idle cut/,$p' "$run/broker.log" | grep -c 'lost its context' || true)
 if ((losses > 0)); then
   echo "The seat lost its context $losses times, so the takeover did not hold." >&2
   exit 1

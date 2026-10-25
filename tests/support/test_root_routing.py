@@ -837,6 +837,7 @@ case "$1" in
     while [ "$1" != --runtime-dir ]; do shift; done
     mkdir -p "$2" "$2/../../prek/devices"
     {bind}
+    echo "routing worker: seat seat0 lost its context: StaleSnapshot" >&2
     echo "routing worker: Prek test keyboard taken over at a neutral idle cut" >&2
     {"" if holds else 'echo "routing worker: seat seat0 lost its context: state Unknown" >&2'}
     sleep 1 ;;
