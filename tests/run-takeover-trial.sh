@@ -227,3 +227,12 @@ if ((losses > 0)); then
   echo "The seat lost its context $losses times, so the takeover did not hold." >&2
   exit 1
 fi
+if [[ $agent_status != 0 ]]; then
+  echo "The session agent exited with status $agent_status, so the takeover was not verified." >&2
+  exit 1
+fi
+left=$(grep -E '^context [A-Za-z]+;' "$run/session.log" | grep -vc '^context Desktop;' || true)
+if ((left > 0)); then
+  echo "The seat's context left Desktop $left times during the trial." >&2
+  exit 1
+fi

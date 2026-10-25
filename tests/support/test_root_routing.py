@@ -758,14 +758,15 @@ os._exit(0)
                 os.close(child_fd)
 
     def test_takeover_trial_runs_one_bounded_broker_and_session_then_removes_its_rule(self):
-        for opens_socket, provisioned, holds, listeners in ((True, False, True, 1), (True, True, True, 1),
-                                                            (False, False, True, 1),
-                                                            (True, False, False, 1),
-                                                            (True, False, True, 2)):
-            with self.subTest(opens_socket=opens_socket, provisioned=provisioned, holds=holds, listeners=listeners):
-                self.takeover_trial(opens_socket, provisioned, holds, listeners)
+        for opens_socket, provisioned, holds, listeners, agent in (
+                (True, False, True, 1, "ok"), (True, True, True, 1, "ok"), (False, False, True, 1, "ok"),
+                (True, False, False, 1, "ok"), (True, False, True, 2, "ok"), (True, False, True, 1, "fails"),
+                (True, False, True, 1, "leaves")):
+            with self.subTest(opens_socket=opens_socket, provisioned=provisioned, holds=holds, listeners=listeners,
+                              agent=agent):
+                self.takeover_trial(opens_socket, provisioned, holds, listeners, agent)
 
-    def takeover_trial(self, opens_socket, provisioned, holds, listeners):
+    def takeover_trial(self, opens_socket, provisioned, holds, listeners, agent):
         trial = Path(__file__).resolve().parents[1] / "run-takeover-trial.sh"
         with tempfile.TemporaryDirectory() as temporary:
             repo, mocks, run_root = Path(temporary), Path(temporary) / "bin", Path(temporary) / "run"
@@ -779,7 +780,7 @@ os._exit(0)
             shutil.copyfile(trial, script)
             devices = repo / "devices"
             devices.write_text('N: Name="Prek test keyboard"\n')
-            calls, agent = repo / "sudo-calls", repo / "agent-arguments"
+            calls, arguments = repo / "sudo-calls", repo / "agent-arguments"
             cgroup = next(line[3:] for line in Path("/proc/self/cgroup").read_text().splitlines()
                           if line.startswith("0::"))
             cgroups = repo / "cgroups"
@@ -834,7 +835,9 @@ case "$1" in
     echo "routing worker: Prek test keyboard taken over at a neutral idle cut" >&2
     {"" if holds else 'echo "routing worker: seat seat0 lost its context: state Unknown" >&2'}
     sleep 1 ;;
-  session) echo "$*" > '{agent}'; sleep 0.2 ;;
+  session) echo "$*" > '{arguments}'; sleep 0.2
+    {'exit 1' if agent == "fails" else ''}
+    {'echo "context Unknown; previous gesture progress cancelled"' if agent == "leaves" else ''} ;;
 esac
 """)
             (prek / "bin/prek").chmod(0o755)
@@ -868,10 +871,17 @@ esac
                 self.assertIn("lost its context 1 times, so the takeover did not hold",
                               (run / "console.log").read_text())
                 return
+            if agent != "ok":
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(json.loads((run / "status.json").read_text())["status"], "failed")
+                expected = ("session agent exited with status 1" if agent == "fails"
+                            else "context left Desktop 1 times")
+                self.assertIn(expected, (run / "console.log").read_text())
+                return
             self.assertEqual(result.returncode, 0, (run / "console.log").read_text())
             self.assertEqual(json.loads((run / "status.json").read_text()), {"status": "passed", "exit_code": 0})
             self.assertIn("taken over at a neutral idle cut", (run / "console.log").read_text())
-            self.assertIn("--display wayland-test", agent.read_text())
+            self.assertIn("--display wayland-test", arguments.read_text())
             self.assertEqual((run / "session.status").read_text().strip(), "0")
             self.assertEqual(procs.read_text().split(), [(run / "launcher.pid").read_text().strip()])
             self.assertIn('name = "Prek test keyboard"', (run / "config.toml").read_text())
