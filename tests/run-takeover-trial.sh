@@ -200,4 +200,13 @@ fi
 wait "$broker"
 broker=""
 grep -E 'taken over|stays with its original consumer|keeps no consumer evidence|lost its device settings' \
-  "$run/broker.log" || echo "No takeover outcome was logged for \"$device\"."
+  "$run/broker.log" || true
+if ! grep -q 'taken over at a neutral idle cut' "$run/broker.log"; then
+  echo "\"$device\" was never taken over." >&2
+  exit 1
+fi
+losses=$(grep -c 'lost its context' "$run/broker.log" || true)
+if ((losses > 0)); then
+  echo "The seat lost its context $losses times, so the takeover did not hold." >&2
+  exit 1
+fi

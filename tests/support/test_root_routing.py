@@ -758,12 +758,13 @@ os._exit(0)
                 os.close(child_fd)
 
     def test_takeover_trial_runs_one_bounded_broker_and_session_then_removes_its_rule(self):
-        for opens_socket, instance, provisioned in ((True, "test", False), (True, None, True),
-                                                    (False, "test", False)):
-            with self.subTest(opens_socket=opens_socket, instance=instance, provisioned=provisioned):
-                self.takeover_trial(opens_socket, instance, provisioned)
+        for opens_socket, instance, provisioned, holds in ((True, "test", False, True), (True, None, True, True),
+                                                           (False, "test", False, True),
+                                                           (True, "test", False, False)):
+            with self.subTest(opens_socket=opens_socket, instance=instance, provisioned=provisioned, holds=holds):
+                self.takeover_trial(opens_socket, instance, provisioned, holds)
 
-    def takeover_trial(self, opens_socket, instance, provisioned):
+    def takeover_trial(self, opens_socket, instance, provisioned, holds):
         trial = Path(__file__).resolve().parents[1] / "run-takeover-trial.sh"
         with tempfile.TemporaryDirectory() as temporary:
             repo, mocks, run_root = Path(temporary), Path(temporary) / "bin", Path(temporary) / "run"
@@ -837,6 +838,7 @@ case "$1" in
     mkdir -p "$2" "$2/../../prek/devices"
     {bind}
     echo "routing worker: Prek test keyboard taken over at a neutral idle cut" >&2
+    {"" if holds else 'echo "routing worker: seat seat0 lost its context: state Unknown" >&2'}
     sleep 1 ;;
   session) echo "$HYPRLAND_INSTANCE_SIGNATURE" > '{agent}'; sleep 0.2 ;;
 esac
@@ -861,6 +863,12 @@ esac
                 self.assertEqual(json.loads((run / "status.json").read_text())["status"], "failed")
                 self.assertIn("exited with status 3 before opening its socket", (run / "console.log").read_text())
                 self.assertFalse((run / "session.log").exists())
+                return
+            if not holds:
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(json.loads((run / "status.json").read_text())["status"], "failed")
+                self.assertIn("lost its context 1 times, so the takeover did not hold",
+                              (run / "console.log").read_text())
                 return
             self.assertEqual(result.returncode, 0, (run / "console.log").read_text())
             self.assertEqual(json.loads((run / "status.json").read_text()), {"status": "passed", "exit_code": 0})
