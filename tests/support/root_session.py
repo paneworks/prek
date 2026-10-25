@@ -334,10 +334,15 @@ def cleanup(runtime):
                 if facts:
                     validate_session(facts, state, state["leader"])
                     command([tool("loginctl"), "terminate-session", state["session"]], timeout=10)
-                    until = time.monotonic() + 5
+                    killed, until = False, time.monotonic() + 5
                     while properties("session", state["session"]):
                         if time.monotonic() >= until:
-                            raise RuntimeError("owned PAM session did not retire within its bound")
+                            if killed:
+                                raise RuntimeError("owned PAM session did not retire within its bound")
+                            # Processes that outlive SIGTERM, like a PAM-started keyring daemon, get SIGKILL.
+                            command([tool("loginctl"), "kill-session", "--signal=SIGKILL", state["session"]],
+                                    timeout=10)
+                            killed, until = True, time.monotonic() + 5
                         time.sleep(.05)
         retired = attempt("stop owned PAM session", stop_session)
 

@@ -223,13 +223,16 @@ class Transport(unittest.TestCase):
 class CleanupModel(unittest.TestCase):
     state = Policy.state
     facts = Policy.facts
-    def run_cleanup(self, state=None, fail=None, foreign=False, initial_vt=9):
+    def run_cleanup(self, state=None, fail=None, foreign=False, initial_vt=9, lingering=False):
         state = copy.deepcopy(state or self.state())
         calls = []
         current_vt = [initial_vt]
         alive = [state["session"] is not None]
         snapshots = []
         marker = mock.Mock()
+        clock = [0.0]
+        fake_time = mock.Mock(monotonic=lambda: clock[0],
+                              sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds))
 
         def properties(kind, name):
             if kind == "session":
@@ -247,7 +250,7 @@ class CleanupModel(unittest.TestCase):
             calls.append(arguments)
             if fail and fail in arguments:
                 raise RuntimeError("modeled host failure")
-            if "terminate-session" in arguments:
+            if "terminate-session" in arguments and not lingering or "kill-session" in arguments:
                 alive[0] = False
             if TOOLS["chvt"] in arguments:
                 current_vt[0] = int(arguments[-1])
@@ -263,6 +266,7 @@ class CleanupModel(unittest.TestCase):
                 mock.patch.object(session, "active_vt", side_effect=lambda: current_vt[0]), \
                 mock.patch.object(session, "sessions", return_value=[]), \
                 mock.patch.object(session, "command", side_effect=command), \
+                mock.patch.object(session, "time", fake_time), \
                 mock.patch.object(session, "MARKER", marker), \
                 mock.patch("builtins.open", mock.mock_open()), \
                 mock.patch.object(session.fcntl, "ioctl") as ioctl, \
@@ -280,6 +284,16 @@ class CleanupModel(unittest.TestCase):
         self.assertEqual(snapshots[-1]["cleanup"]["status"], "passed")
         self.assertFalse(snapshots[-1]["cleanup"]["ssh_sessions_touched"])
         self.assertFalse(snapshots[-1]["cleanup"]["sudoers_modified"])
+        marker.unlink.assert_called_once()
+        self.assertEqual(ioctl.call_args.args[1:], (0x5608, 9))
+
+    def test_a_session_that_outlives_sigterm_is_killed_before_its_vt_is_released(self):
+        code, calls, snapshots, marker, ioctl = self.run_cleanup(lingering=True)
+        self.assertEqual(code, 0)
+        terminate = calls.index([TOOLS["loginctl"], "terminate-session", "c99"])
+        kill = calls.index([TOOLS["loginctl"], "kill-session", "--signal=SIGKILL", "c99"])
+        self.assertLess(terminate, kill)
+        self.assertEqual(snapshots[-1]["cleanup"]["status"], "passed")
         marker.unlink.assert_called_once()
         self.assertEqual(ioctl.call_args.args[1:], (0x5608, 9))
 
