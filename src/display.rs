@@ -66,18 +66,32 @@ pub struct Output {
 /// transform above 7, or outputs still incomplete after the last roundtrip. A
 /// `wl_display.error` event fails the query.
 pub fn outputs(socket: &Path, until: Instant) -> io::Result<Vec<Output>> {
-    let mut client = Client::new(connect(socket, until)?, until);
-    let registry = client.create(Object::Registry);
-    client.queue(Message::new(DISPLAY, 1).uint(registry));
-    client.roundtrip()?;
-    client.bind(registry)?;
-    for _ in 0..MAX_ROUNDTRIPS {
+    Watch::open(socket, until)?.outputs(until)
+}
+
+/// A retained display connection whose outputs follow the compositor's
+/// events: outputs announced later are bound, removed ones are released, and
+/// object ids are reused only after the compositor deletes them.
+pub struct Watch {
+    client: Client,
+}
+impl Watch {
+    /// Connects and binds every advertised output, with the limits of [`outputs`].
+    pub fn open(socket: &Path, until: Instant) -> io::Result<Self> {
+        let mut client = Client::new(connect(socket, until)?, until);
+        client.registry = client.create(Object::Registry);
+        client.queue(Message::new(DISPLAY, 1).uint(client.registry));
         client.roundtrip()?;
-        if client.complete() {
-            return client.finish();
-        }
+        client.bind()?;
+        client.settle()?;
+        Ok(Self { client })
     }
-    Err(invalid("compositor never completed its outputs"))
+    /// Every output after delivering all events sent before this call.
+    pub fn outputs(&mut self, until: Instant) -> io::Result<Vec<Output>> {
+        self.client.until = until;
+        self.client.settle()?;
+        self.client.collect()
+    }
 }
 
 /// Kernel screen power for the DRM connector `connector` under `sysfs_drm`.
@@ -292,17 +306,18 @@ enum Object {
     Registry,
     Callback,
     Manager,
-    Output(usize),
-    XdgOutput(usize),
+    Output(u32),
+    XdgOutput(u32),
+    Released,
 }
 
 /// Properties of one bound output collected from its events.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Pending {
-    global: u32,
+    output: u32,
+    xdg: u32,
     version: u32,
     xdg_version: u32,
-    removed: bool,
     name: Option<String>,
     xdg_name: Option<String>,
     description: Option<String>,
@@ -317,8 +332,7 @@ struct Pending {
 }
 impl Pending {
     fn complete(&self) -> bool {
-        self.removed
-            || ((self.version < 2 || self.output_done) && (self.xdg_version >= 3 || self.xdg_done))
+        (self.version < 2 || self.output_done) && (self.xdg_version >= 3 || self.xdg_done)
     }
     fn output(self) -> io::Result<Output> {
         let name = self
@@ -360,18 +374,21 @@ impl Pending {
     }
 }
 
-/// Connection state of one bounded output query.
+/// Connection state of one display client.
 struct Client {
     stream: UnixStream,
     until: Instant,
     input: Vec<u8>,
     output: Vec<u8>,
     next_id: u32,
+    free: Vec<u32>,
     objects: BTreeMap<u32, Object>,
+    registry: u32,
     globals: Vec<(u32, u32)>,
     manager: Option<(u32, u32)>,
-    bound: bool,
-    pending: Vec<Pending>,
+    bound: Option<(u32, u32)>,
+    manager_lost: bool,
+    pending: BTreeMap<u32, Pending>,
     synced: Option<u32>,
 }
 impl Client {
@@ -382,17 +399,22 @@ impl Client {
             input: Vec::new(),
             output: Vec::new(),
             next_id: 2,
+            free: Vec::new(),
             objects: BTreeMap::new(),
+            registry: 0,
             globals: Vec::new(),
             manager: None,
-            bound: false,
-            pending: Vec::new(),
+            bound: None,
+            manager_lost: false,
+            pending: BTreeMap::new(),
             synced: None,
         }
     }
     fn create(&mut self, object: Object) -> u32 {
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.free.pop().unwrap_or_else(|| {
+            self.next_id += 1;
+            self.next_id - 1
+        });
         self.objects.insert(id, object);
         id
     }
@@ -469,52 +491,75 @@ impl Client {
             let (object, opcode, body) = self.message()?;
             self.dispatch(object, opcode, &body)?;
         }
-        Ok(())
+        self.synced = None;
+        if self.manager_lost {
+            return Err(invalid("compositor removed xdg-output"));
+        }
+        self.flush()
     }
-    fn bind(&mut self, registry: u32) -> io::Result<()> {
-        self.bound = true;
+    fn settle(&mut self) -> io::Result<()> {
+        for _ in 0..MAX_ROUNDTRIPS {
+            self.roundtrip()?;
+            if self.pending.values().all(Pending::complete) {
+                return Ok(());
+            }
+        }
+        Err(invalid("compositor never completed its outputs"))
+    }
+    fn bind(&mut self) -> io::Result<()> {
         let (global, version) = self
             .manager
             .ok_or_else(|| invalid("compositor does not offer xdg-output"))?;
         let xdg_version = version.min(XDG_VERSION);
         let manager = self.create(Object::Manager);
         self.queue(
-            Message::new(registry, 0)
+            Message::new(self.registry, 0)
                 .uint(global)
                 .string(MANAGER_INTERFACE)
                 .uint(xdg_version)
                 .uint(manager),
         );
+        self.bound = Some((manager, xdg_version));
         for (global, version) in std::mem::take(&mut self.globals) {
-            let index = self.pending.len();
-            let version = version.min(OUTPUT_VERSION);
-            self.pending.push(Pending {
-                global,
-                version,
-                xdg_version,
-                ..Pending::default()
-            });
-            let output = self.create(Object::Output(index));
-            self.queue(
-                Message::new(registry, 0)
-                    .uint(global)
-                    .string(OUTPUT_INTERFACE)
-                    .uint(version)
-                    .uint(output),
-            );
-            let xdg = self.create(Object::XdgOutput(index));
-            self.queue(Message::new(manager, 1).uint(xdg).uint(output));
+            self.bind_output(global, version)?;
         }
         Ok(())
     }
-    fn complete(&self) -> bool {
-        self.pending.iter().all(Pending::complete)
+    fn bind_output(&mut self, global: u32, version: u32) -> io::Result<()> {
+        let Some((manager, xdg_version)) = self.bound else {
+            return Ok(());
+        };
+        if self.pending.len() >= MAX_OUTPUTS {
+            return Err(invalid("compositor advertises more than 64 outputs"));
+        }
+        let version = version.min(OUTPUT_VERSION);
+        let output = self.create(Object::Output(global));
+        self.queue(
+            Message::new(self.registry, 0)
+                .uint(global)
+                .string(OUTPUT_INTERFACE)
+                .uint(version)
+                .uint(output),
+        );
+        let xdg = self.create(Object::XdgOutput(global));
+        self.queue(Message::new(manager, 1).uint(xdg).uint(output));
+        self.pending.insert(
+            global,
+            Pending {
+                output,
+                xdg,
+                version,
+                xdg_version,
+                ..Pending::default()
+            },
+        );
+        Ok(())
     }
-    fn finish(self) -> io::Result<Vec<Output>> {
+    fn collect(&self) -> io::Result<Vec<Output>> {
         let mut outputs = self
             .pending
-            .into_iter()
-            .filter(|pending| !pending.removed)
+            .values()
+            .cloned()
             .map(Pending::output)
             .collect::<io::Result<Vec<_>>>()?;
         outputs.sort_by(|left, right| left.name.cmp(&right.name));
@@ -536,7 +581,10 @@ impl Client {
                     )))
                 }
                 1 => {
-                    self.objects.remove(&args.uint()?);
+                    let id = args.uint()?;
+                    if self.objects.remove(&id).is_some() {
+                        self.free.push(id);
+                    }
                     Ok(())
                 }
                 _ => Ok(()),
@@ -560,20 +608,30 @@ impl Client {
                 self.synced = Some(object);
                 Ok(())
             }
-            (Object::Output(index), opcode) => output_event(&mut self.pending[index], opcode, args),
-            (Object::XdgOutput(index), opcode) => xdg_event(&mut self.pending[index], opcode, args),
+            (Object::Output(global), opcode) => match self.pending.get_mut(&global) {
+                Some(pending) => output_event(pending, opcode, args),
+                None => Ok(()),
+            },
+            (Object::XdgOutput(global), opcode) => match self.pending.get_mut(&global) {
+                Some(pending) => xdg_event(pending, opcode, args),
+                None => Ok(()),
+            },
             _ => Ok(()),
         }
     }
     fn global(&mut self, name: u32, interface: &str, version: u32) -> io::Result<()> {
-        if self.bound || (interface != OUTPUT_INTERFACE && interface != MANAGER_INTERFACE) {
+        if interface != OUTPUT_INTERFACE && interface != MANAGER_INTERFACE {
             return Ok(());
         }
         if version == 0 {
             return Err(invalid(format!("{interface} advertised at version 0")));
         }
         if interface == MANAGER_INTERFACE {
-            self.manager = Some((name, version));
+            if self.bound.is_none() {
+                self.manager = Some((name, version));
+            }
+        } else if self.bound.is_some() {
+            self.bind_output(name, version)?;
         } else if self.globals.len() >= MAX_OUTPUTS {
             return Err(invalid("compositor advertises more than 64 outputs"));
         } else {
@@ -582,20 +640,25 @@ impl Client {
         Ok(())
     }
     fn global_remove(&mut self, name: u32) {
-        if self.bound {
-            for pending in self
-                .pending
-                .iter_mut()
-                .filter(|pending| pending.global == name)
-            {
-                pending.removed = true;
-            }
-        } else {
+        if self.bound.is_none() {
             self.globals.retain(|(global, _)| *global != name);
             if self.manager.is_some_and(|(global, _)| global == name) {
                 self.manager = None;
             }
+            return;
         }
+        if self.manager.is_some_and(|(global, _)| global == name) {
+            self.manager_lost = true;
+        }
+        let Some(pending) = self.pending.remove(&name) else {
+            return;
+        };
+        self.queue(Message::new(pending.xdg, 0));
+        self.objects.insert(pending.xdg, Object::Released);
+        if pending.version >= 3 {
+            self.queue(Message::new(pending.output, 0));
+        }
+        self.objects.insert(pending.output, Object::Released);
     }
 }
 
@@ -691,12 +754,19 @@ mod tests {
         Error,
     }
 
+    #[derive(Clone)]
+    enum Change {
+        Add(Head),
+        Remove(u32),
+    }
+
     /// In-process compositor fake answering one client connection.
     struct Fake {
         heads: Vec<Head>,
         output_version: u32,
         xdg_version: Option<u32>,
         reply: Reply,
+        changes: BTreeMap<u32, Change>,
     }
     impl Fake {
         fn new(heads: Vec<Head>) -> Self {
@@ -705,13 +775,12 @@ mod tests {
                 output_version: 4,
                 xdg_version: Some(3),
                 reply: Reply::Normal,
+                changes: BTreeMap::new(),
             }
         }
-        fn serve(self, listener: UnixListener) -> JoinHandle<Vec<(String, u32)>> {
+        fn serve(self, listener: UnixListener) -> JoinHandle<Server> {
             thread::spawn(move || {
-                let Ok((stream, _)) = listener.accept() else {
-                    return Vec::new();
-                };
+                let (stream, _) = listener.accept().unwrap();
                 let mut server = Server {
                     fake: self,
                     stream,
@@ -720,6 +789,9 @@ mod tests {
                     manager: (0, 0),
                     outputs: BTreeMap::new(),
                     binds: Vec::new(),
+                    syncs: 0,
+                    largest_id: 0,
+                    released: Vec::new(),
                 };
                 while let Some((object, opcode, body)) = server.request() {
                     if server.fake.reply == Reply::Silent {
@@ -731,7 +803,7 @@ mod tests {
                         break;
                     }
                 }
-                server.binds
+                server
             })
         }
     }
@@ -744,6 +816,9 @@ mod tests {
         manager: (u32, u32),
         outputs: BTreeMap<u32, (usize, u32)>,
         binds: Vec<(String, u32)>,
+        syncs: u32,
+        largest_id: u32,
+        released: Vec<u32>,
     }
     impl Server {
         fn request(&mut self) -> Option<(u32, u16, Vec<u8>)> {
@@ -780,10 +855,30 @@ mod tests {
                 }
                 (DISPLAY, 0) => {
                     let callback = args.uint().unwrap();
-                    vec![
-                        Message::new(callback, 0).uint(7),
-                        Message::new(DISPLAY, 1).uint(callback),
-                    ]
+                    self.largest_id = self.largest_id.max(callback);
+                    self.syncs += 1;
+                    let mut events = match self.fake.changes.remove(&self.syncs) {
+                        Some(Change::Add(head)) => {
+                            self.fake.heads.push(head);
+                            vec![
+                                Message::new(self.registry, 0)
+                                    .uint(self.fake.heads.len() as u32)
+                                    .string(OUTPUT_INTERFACE)
+                                    .uint(self.fake.output_version),
+                            ]
+                        }
+                        Some(Change::Remove(global)) => {
+                            vec![Message::new(self.registry, 1).uint(global)]
+                        }
+                        None => Vec::new(),
+                    };
+                    events.push(Message::new(callback, 0).uint(7));
+                    events.push(Message::new(DISPLAY, 1).uint(callback));
+                    events
+                }
+                (_, 0) if self.outputs.contains_key(&object) => {
+                    self.released.push(object);
+                    vec![Message::new(DISPLAY, 1).uint(object)]
                 }
                 (_, 0) if object == self.registry => {
                     let global = args.uint().unwrap();
@@ -898,9 +993,42 @@ mod tests {
         let listener = UnixListener::bind(&socket).unwrap();
         let server = fake.serve(listener);
         let result = outputs(&socket, Instant::now() + within);
-        let binds = server.join().unwrap();
+        let binds = server.join().unwrap().binds;
         fs::remove_dir_all(root).unwrap();
         (result, binds)
+    }
+
+    fn names(outputs: &[Output]) -> Vec<&str> {
+        outputs.iter().map(|output| output.name.as_str()).collect()
+    }
+
+    #[test]
+    fn a_retained_watch_follows_hotplug_and_releases_removed_outputs() {
+        let mut fake = Fake::new(panels());
+        fake.changes
+            .insert(3, Change::Add(head("HDMI-A-1", (3200, 0), (1920, 1080), 1)));
+        fake.changes.insert(5, Change::Remove(1));
+        let root = scratch("watch");
+        let socket = root.join("wayland-0");
+        let server = fake.serve(UnixListener::bind(&socket).unwrap());
+        let until = || Instant::now() + Duration::from_secs(5);
+        let mut watch = Watch::open(&socket, until()).unwrap();
+        assert_eq!(
+            names(&watch.outputs(until()).unwrap()),
+            ["DP-2", "HDMI-A-1", "eDP-1"]
+        );
+        assert_eq!(
+            names(&watch.outputs(until()).unwrap()),
+            ["DP-2", "HDMI-A-1"]
+        );
+        for _ in 0..50 {
+            assert_eq!(watch.outputs(until()).unwrap().len(), 2);
+        }
+        drop(watch);
+        let server = server.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(server.released.len(), 1);
+        assert!(server.largest_id < 16, "{}", server.largest_id);
     }
 
     fn panels() -> Vec<Head> {

@@ -14,13 +14,15 @@ use std::{
 
 const MAX_HISTORY: usize = 4096;
 
-/// Assigns each distinct output geometry a generation that is never reused,
-/// so a removed and re-added output cannot match an older permit.
+/// Keeps one display connection and gives each distinct output geometry a
+/// generation that is never reused, so a removed and re-added output cannot
+/// match an older permit.
 #[derive(Default)]
 pub(super) struct Sampler {
     revision: u64,
     history: BTreeMap<String, (Output, u64)>,
     active: BTreeSet<String>,
+    display: Option<crate::display::Watch>,
 }
 impl Sampler {
     pub(super) fn sample(
@@ -33,7 +35,12 @@ impl Sampler {
         until: Instant,
     ) -> io::Result<Snapshot> {
         let captured_at = crate::ipc::monotonic()?;
-        let listed = crate::fsuid::with_fsuid(uid, || crate::display::outputs(socket, until))?;
+        let listed = match self.display.as_mut() {
+            Some(watch) => watch.outputs(until),
+            None => crate::fsuid::with_fsuid(uid, || crate::display::Watch::open(socket, until))
+                .and_then(|watch| self.display.insert(watch).outputs(until)),
+        }
+        .inspect_err(|_| self.display = None)?;
         let revision = self
             .revision
             .checked_add(1)
