@@ -758,16 +758,19 @@ os._exit(0)
                 os.close(child_fd)
 
     def test_takeover_trial_runs_one_bounded_broker_and_session_then_removes_its_rule(self):
-        for opens_socket, instance in ((True, "test"), (True, None), (False, "test")):
-            with self.subTest(opens_socket=opens_socket, instance=instance):
-                self.takeover_trial(opens_socket, instance)
+        for opens_socket, instance, rules_exist in ((True, "test", False), (True, None, True),
+                                                    (False, "test", False)):
+            with self.subTest(opens_socket=opens_socket, instance=instance, rules_exist=rules_exist):
+                self.takeover_trial(opens_socket, instance, rules_exist)
 
-    def takeover_trial(self, opens_socket, instance):
+    def takeover_trial(self, opens_socket, instance, rules_exist):
         trial = Path(__file__).resolve().parents[1] / "run-takeover-trial.sh"
         with tempfile.TemporaryDirectory() as temporary:
             repo, mocks, run_root = Path(temporary), Path(temporary) / "bin", Path(temporary) / "run"
             (repo / "tests").mkdir()
-            (run_root / "udev/rules.d").mkdir(parents=True)
+            (run_root / "udev").mkdir(parents=True)
+            if rules_exist:
+                (run_root / "udev/rules.d").mkdir()
             mocks.mkdir()
             script = repo / "tests/run-takeover-trial.sh"
             shutil.copyfile(trial, script)
@@ -848,6 +851,7 @@ esac
                                     env=env, capture_output=True, text=True, timeout=60)
             run = (repo / "target/takeover-trial/latest").resolve(strict=True)
             self.assertFalse((run_root / "udev/rules.d/70-prek-trial.rules").exists())
+            self.assertEqual((run_root / "udev/rules.d").is_dir(), rules_exist)
             self.assertFalse((run_root / "prek-trial").exists())
             if not opens_socket:
                 self.assertEqual(result.returncode, 1)
@@ -865,6 +869,9 @@ esac
             sudo = calls.read_text().splitlines()
             self.assertEqual(sudo[0], "-v")
             self.assertIn(f"readlink -e /proc/{os.getpid()}/exe", sudo)
+            created = f"install -d -m 0755 -o root -g root {run_root}/udev/rules.d"
+            self.assertEqual(created in sudo, not rules_exist)
+            self.assertEqual(f"-n rmdir {run_root}/udev/rules.d" in sudo, not rules_exist)
             broker = next(line for line in sudo if " broker " in line)
             self.assertIn("--mode route", broker)
             self.assertIn("--duration 10", broker)

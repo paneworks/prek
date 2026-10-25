@@ -57,10 +57,12 @@ mkdir -p "$repo/target/takeover-trial"
 run=$(mktemp -d "$repo/target/takeover-trial/run-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")
 ln -sfn -- "$run" "$repo/target/takeover-trial/latest"
 exec > >(tee -a "$run/console.log") 2>&1
-rule=$run_root/udev/rules.d/70-prek-trial.rules
+rules=$run_root/udev/rules.d
+rule=$rules/70-prek-trial.rules
 trial=$run_root/prek-trial
 broker=""
 prek=""
+made_rules=""
 finish() {
   result=$?
   trap - EXIT
@@ -72,6 +74,7 @@ finish() {
   fi
   if [[ -n $broker ]]; then kill -TERM "$broker" 2>/dev/null || true; wait "$broker" 2>/dev/null || true; fi
   sudo -n rm -f "$rule" 2>/dev/null && sudo -n udevadm control --reload-rules 2>/dev/null || true
+  if [[ -n $made_rules ]]; then sudo -n rmdir "$rules" 2>/dev/null || true; fi
   sudo -n rm -rf "$trial" 2>/dev/null || true
   if [[ -n ${keepalive:-} ]]; then kill "$keepalive" 2>/dev/null || true; fi
   status=failed
@@ -120,6 +123,11 @@ logind=$(readlink -f "${PREK_TRIAL_LOGIND:-/run/current-system/sw/lib/libsystemd
 printf 'Compositor: %s (pid %s)\nlibsystemd: %s\n' "$compositor" "$pid" "$logind"
 sudo install -d -m 0755 -o root -g root "$trial"
 sudo install -m 0644 -o root -g root "$run/config.toml" "$trial/config.toml"
+# udev reads /run/udev/rules.d but does not create it.
+if [[ ! -d $rules ]]; then
+  sudo install -d -m 0755 -o root -g root "$rules"
+  made_rules=1
+fi
 sudo install -m 0644 -o root -g root "$run/prek/lib/udev/rules.d/70-prek.rules" "$rule"
 sudo udevadm control --reload-rules
 # shellcheck disable=SC2024
