@@ -1003,6 +1003,22 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "needs a live Wayland session: XDG_RUNTIME_DIR and WAYLAND_DISPLAY"]
+    fn a_live_watch_reads_the_same_outputs_on_every_roundtrip() {
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR").unwrap();
+        let display = std::env::var_os("WAYLAND_DISPLAY").unwrap();
+        let socket = Path::new(&runtime).join(display);
+        let until = || Instant::now() + Duration::from_secs(1);
+        let mut watch = Watch::open(&socket, until()).unwrap();
+        let first = watch.outputs(until()).unwrap();
+        assert!(!first.is_empty());
+        for _ in 0..200 {
+            assert_eq!(watch.outputs(until()).unwrap(), first);
+        }
+        println!("{first:?}");
+    }
+
+    #[test]
     fn a_retained_watch_follows_hotplug_and_releases_removed_outputs() {
         let mut fake = Fake::new(panels());
         fake.changes
