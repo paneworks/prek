@@ -96,11 +96,10 @@ impl Compositor {
         })
     }
 
-    /// Reconnect and require the same socket inode, peer, process start time
-    /// and executable; any difference is `PermissionDenied`.
+    /// Require the same socket inode, process start time and executable
+    /// without connecting; any difference is `PermissionDenied`.
     pub fn check_binding(&self) -> io::Result<()> {
-        let (inode, _stream, pid) = endpoint(&self.runtime, &self.display, self.uid)?;
-        if inode != self.socket_inode || pid != self.pid {
+        if socket_inode(&self.runtime, &self.display, self.uid)? != self.socket_inode {
             return Err(denied("compositor binding changed"));
         }
         let process = self.process()?;
@@ -212,22 +211,24 @@ fn private(path: &Path, uid: u32) -> io::Result<File> {
     Ok(directory)
 }
 
+/// Inode of the display socket, which must be a socket owned by `uid`.
+fn socket_inode(directory: &File, display: &str, uid: u32) -> io::Result<u64> {
+    let stat = fs::symlink_metadata(beneath(directory, display))?;
+    if !stat.file_type().is_socket() || stat.uid() != uid {
+        return Err(denied(
+            "display endpoint must be a socket owned by its user",
+        ));
+    }
+    Ok(stat.ino())
+}
+
 /// Socket inode, live connection and peer PID of a display socket owned by `uid`.
 fn endpoint(directory: &File, display: &str, uid: u32) -> io::Result<(u64, UnixStream, u32)> {
     let path = beneath(directory, display);
-    let socket = || -> io::Result<u64> {
-        let stat = fs::symlink_metadata(&path)?;
-        if !stat.file_type().is_socket() || stat.uid() != uid {
-            return Err(denied(
-                "display endpoint must be a socket owned by its user",
-            ));
-        }
-        Ok(stat.ino())
-    };
-    let inode = socket()?;
+    let inode = socket_inode(directory, display, uid)?;
     let stream = crate::fsuid::with_fsuid(uid, || connect(&path, Instant::now() + CONNECT_TIME))?;
     let peer = credentials(&stream)?;
-    if socket()? != inode {
+    if socket_inode(directory, display, uid)? != inode {
         return Err(denied("display socket changed while connecting"));
     }
     if peer.uid != uid || peer.pid <= 0 {

@@ -22,9 +22,12 @@ use std::{
     mem::size_of,
     os::{
         fd::{AsFd, AsRawFd, FromRawFd, OwnedFd},
-        unix::fs::{MetadataExt, OpenOptionsExt},
+        unix::{
+            ffi::OsStrExt,
+            fs::{MetadataExt, OpenOptionsExt},
+        },
     },
-    path::Path,
+    path::{Path, PathBuf},
     ptr::NonNull,
     time::{Duration, Instant},
 };
@@ -78,7 +81,7 @@ impl Process {
             .filter(|value| *value > 0)
             .ok_or_else(|| invalid("process birth is missing"))
     }
-    fn check(&self) -> io::Result<()> {
+    fn exited(&self) -> io::Result<bool> {
         let mut poll = libc::pollfd {
             fd: self.handle.as_raw_fd(),
             events: libc::POLLIN,
@@ -89,9 +92,13 @@ impl Process {
         if ready < 0 {
             return Err(io::Error::last_os_error());
         }
-        if ready != 0
+        Ok(ready != 0)
+    }
+    /// Fails unless the pidfd is live before and after the owner is read.
+    fn check(&self) -> io::Result<()> {
+        if self.exited()?
             || fs::metadata(format!("/proc/{}", self.pid))?.uid() != self.uid
-            || self.birth()? != self.start
+            || self.exited()?
         {
             return Err(denied("registered process exited or changed identity"));
         }
@@ -175,6 +182,125 @@ impl Peer {
             return Err(denied("registered agent disconnected"));
         }
         Ok(())
+    }
+}
+
+/// Logind's state directories; every session, seat and user fact is read from them.
+const STATE: [&str; 3] = [
+    "/run/systemd/sessions",
+    "/run/systemd/seats",
+    "/run/systemd/users",
+];
+
+/// Count that advances whenever the watched directories may have changed, and
+/// on every read while they cannot be watched.
+struct Generation {
+    directories: Vec<PathBuf>,
+    changes: std::cell::RefCell<Option<Changes>>,
+    count: std::cell::Cell<u64>,
+}
+impl Generation {
+    fn new(directories: impl IntoIterator<Item = impl Into<PathBuf>>) -> Self {
+        Self {
+            directories: directories.into_iter().map(Into::into).collect(),
+            changes: std::cell::RefCell::new(None),
+            count: std::cell::Cell::new(0),
+        }
+    }
+    fn current(&self) -> u64 {
+        let mut changes = self.changes.borrow_mut();
+        let unchanged = match changes.as_ref().map(Changes::drain) {
+            Some(Ok(changed)) => !changed,
+            Some(Err(_)) => {
+                *changes = None;
+                false
+            }
+            None => {
+                *changes = Changes::open(&self.directories).ok();
+                false
+            }
+        };
+        if !unchanged {
+            self.count.set(self.count.get() + 1);
+        }
+        self.count.get()
+    }
+}
+
+/// Inotify watch on directories whose entries may change.
+struct Changes(OwnedFd);
+impl Changes {
+    fn open(directories: &[PathBuf]) -> io::Result<Self> {
+        // SAFETY: inotify_init1 takes scalar flags and returns a new descriptor.
+        let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let changes = Self(unsafe { OwnedFd::from_raw_fd(fd) });
+        let mask = libc::IN_CREATE
+            | libc::IN_DELETE
+            | libc::IN_MODIFY
+            | libc::IN_ATTRIB
+            | libc::IN_CLOSE_WRITE
+            | libc::IN_MOVED_FROM
+            | libc::IN_MOVED_TO
+            | libc::IN_DELETE_SELF
+            | libc::IN_MOVE_SELF
+            | libc::IN_ONLYDIR
+            | libc::IN_DONT_FOLLOW;
+        for directory in directories {
+            let path = CString::new(directory.as_os_str().as_bytes())
+                .map_err(|_| invalid("invalid state directory"))?;
+            // SAFETY: live inotify descriptor and terminated path.
+            if unsafe { libc::inotify_add_watch(changes.0.as_raw_fd(), path.as_ptr(), mask) } < 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(changes)
+    }
+    /// Drains queued events; whether any arrived. A lost watch or an overflowed
+    /// queue is an error, after which the watch must be reopened.
+    fn drain(&self) -> io::Result<bool> {
+        const HEADER: usize = size_of::<libc::inotify_event>();
+        let mut buffer = [0u8; 4096];
+        let mut changed = false;
+        loop {
+            // SAFETY: live descriptor and writable buffer of the given length.
+            let read =
+                unsafe { libc::read(self.0.as_raw_fd(), buffer.as_mut_ptr().cast(), buffer.len()) };
+            if read < 0 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::EAGAIN) {
+                    return Ok(changed);
+                }
+                return Err(error);
+            }
+            let read = read as usize;
+            if read == 0 {
+                return Ok(changed);
+            }
+            changed = true;
+            let mut offset = 0;
+            while offset + HEADER <= read {
+                // SAFETY: a complete event header lies inside the bytes read.
+                let event = unsafe {
+                    std::ptr::read_unaligned(
+                        buffer[offset..].as_ptr().cast::<libc::inotify_event>(),
+                    )
+                };
+                if event.mask
+                    & (libc::IN_IGNORED
+                        | libc::IN_Q_OVERFLOW
+                        | libc::IN_DELETE_SELF
+                        | libc::IN_MOVE_SELF
+                        | libc::IN_UNMOUNT)
+                    != 0
+                {
+                    return Err(invalid("logind state watch was lost"));
+                }
+                offset += HEADER + event.len as usize;
+            }
+        }
     }
 }
 
@@ -269,6 +395,7 @@ pub struct Logind {
     seat_active: SeatActive,
     library: Library,
     lock_hints: std::cell::RefCell<Option<crate::sleep_watch::LockHints>>,
+    generation: Generation,
 }
 impl Logind {
     pub fn open(library: &Path) -> io::Result<Self> {
@@ -297,7 +424,12 @@ impl Logind {
             seat_active: symbol!("sd_seat_get_active", SeatActive),
             library,
             lock_hints: std::cell::RefCell::new(None),
+            generation: Generation::new(STATE),
         })
+    }
+    /// Advances whenever logind's state may have changed.
+    fn generation(&self) -> u64 {
+        self.generation.current()
     }
     fn process_session(&self, process: &Process) -> io::Result<String> {
         process.check()?;
@@ -408,6 +540,8 @@ impl Logind {
         if compositor.start != start {
             return Err(denied("compositor process was replaced"));
         }
+        let generation = self.generation();
+        let cgroups = cgroups(&peer, &compositor)?;
         let facts = self.facts(&peer, &compositor)?;
         // Unique bus names are never reused, so rechecks compare only the name.
         if let Some(name) = &facts.controller {
@@ -422,6 +556,11 @@ impl Logind {
         // seat switch grants a binding. Later changes revoke this lifetime.
         if self.facts(&peer, &compositor)? != facts {
             return Err(denied("logind session changed during registration"));
+        }
+        if self::cgroups(&peer, &compositor)? != cgroups {
+            return Err(denied(
+                "a registered process moved cgroups during registration",
+            ));
         }
         client.check_binding()?;
         let binding = Binding {
@@ -443,6 +582,8 @@ impl Logind {
             binding,
             consumer: client.consumer(),
             checked_at,
+            generation,
+            cgroups,
             session_path: None,
             revoked: false,
         };
@@ -480,6 +621,18 @@ fn allocated(call: impl FnOnce(*mut *mut libc::c_char) -> i32) -> io::Result<Str
         libc::free(pointer.cast());
     }
     value
+}
+
+/// Raw cgroup membership of the agent and the compositor, each read while its
+/// process stays live.
+fn cgroups(peer: &Peer, compositor: &Process) -> io::Result<[String; 2]> {
+    let read = |process: &Process| -> io::Result<String> {
+        process.check()?;
+        let membership = fs::read_to_string(format!("/proc/{}/cgroup", process.pid))?;
+        process.check()?;
+        Ok(membership)
+    };
+    Ok([read(&peer.process)?, read(compositor)?])
 }
 
 fn user_manager_cgroup(cgroup: &str, uid: u32) -> bool {
@@ -577,6 +730,8 @@ pub struct Registration {
     binding: Binding,
     consumer: Consumer,
     checked_at: Instant,
+    generation: u64,
+    cgroups: [String; 2],
     session_path: Option<CString>,
     revoked: bool,
 }
@@ -599,17 +754,26 @@ impl Registration {
             return Err(denied("session registration has been revoked"));
         }
         let checked_at = Instant::now();
+        let generation = logind.generation();
         let result = (|| {
             client.check_binding()?;
             if client.uid() != self.binding.uid || client.consumer() != self.consumer {
                 return Err(denied("registration compositor changed"));
             }
-            if logind.facts(&self.peer, &self.compositor)? != self.facts {
-                return Err(denied("active session changed"));
+            // Logind's facts are reread only after its state directories changed.
+            self.peer.check()?;
+            if generation != self.generation {
+                if logind.facts(&self.peer, &self.compositor)? != self.facts {
+                    return Err(denied("active session changed"));
+                }
+                if logind.facts(&self.peer, &self.compositor)? != self.facts {
+                    return Err(denied("active session changed during recheck"));
+                }
             }
-            if logind.facts(&self.peer, &self.compositor)? != self.facts {
-                return Err(denied("active session changed during recheck"));
+            if cgroups(&self.peer, &self.compositor)? != self.cgroups {
+                return Err(denied("a registered process moved cgroups"));
             }
+            self.peer.check()?;
             client.check_binding()?;
             if checked_at.elapsed() > Duration::from_millis(250) {
                 return Err(denied("session inspection exceeded its freshness budget"));
@@ -620,6 +784,7 @@ impl Registration {
             self.revoked = true;
         } else {
             self.checked_at = checked_at;
+            self.generation = generation;
         }
         result
     }
@@ -719,5 +884,52 @@ mod tests {
     fn library_path_requires_explicit_system_policy() {
         assert!(Logind::open(Path::new("libsystemd.so.0")).is_err());
         assert!(Logind::open(Path::new("/does-not-exist/libsystemd.so.0")).is_err());
+    }
+    #[test]
+    fn the_state_generation_advances_only_on_changes_and_reopens_a_lost_watch() {
+        let root = std::env::temp_dir().join(format!("prek-state-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let [sessions, seats] = ["sessions", "seats"].map(|name| root.join(name));
+        fs::create_dir_all(&sessions).unwrap();
+        fs::create_dir_all(&seats).unwrap();
+        let generation = Generation::new([&sessions, &seats]);
+        let first = generation.current();
+        assert_eq!(generation.current(), first);
+        fs::write(sessions.join(".c3.tmp"), b"STATE=active\n").unwrap();
+        fs::rename(sessions.join(".c3.tmp"), sessions.join("c3")).unwrap();
+        let renamed = generation.current();
+        assert!(renamed > first);
+        assert_eq!(generation.current(), renamed);
+        fs::write(seats.join("seat0"), b"ACTIVE=c3\n").unwrap();
+        let written = generation.current();
+        assert!(written > renamed);
+        fs::remove_dir_all(&seats).unwrap();
+        let lost = generation.current();
+        assert!(lost > written);
+        let reopened = generation.current();
+        assert!(
+            reopened > lost,
+            "a missing directory keeps every read fresh"
+        );
+        assert!(generation.current() > reopened);
+        fs::create_dir(&seats).unwrap();
+        let watched = generation.current();
+        assert_eq!(generation.current(), watched);
+        fs::remove_dir_all(&root).unwrap();
+    }
+    #[test]
+    fn an_exited_process_fails_its_check() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let process = Process::open(child.id(), unsafe { libc::geteuid() }).unwrap();
+        process.check().unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(
+            process.check().unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
     }
 }
