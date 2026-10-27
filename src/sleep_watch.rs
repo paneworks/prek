@@ -21,15 +21,53 @@ const SYSTEM_BUS: &CStr = c"unix:path=/run/dbus/system_bus_socket";
 pub(crate) fn connection_pid(library: &crate::session::Library, name: &CStr) -> io::Result<u32> {
     Connection::open(Api::load(library)?, SYSTEM_BUS)?.pid(name)
 }
-/// One retained system-bus connection for logind lock-hint queries.
+/// One retained system-bus connection for logind lock-hint queries that counts
+/// the property changes logind announces for its session objects.
 pub(crate) struct LockHints {
+    slots: Vec<NonNull<Slot>>,
     bus: Connection,
+    state: Box<Notices>,
+    fd: Option<OwnedFd>,
 }
 impl LockHints {
     pub(crate) fn open(library: &crate::session::Library) -> io::Result<Self> {
-        Ok(Self {
-            bus: Connection::open(Api::load(library)?, SYSTEM_BUS)?,
-        })
+        let api = Api::load(library)?;
+        let bus = Connection::open(api, SYSTEM_BUS)?;
+        let owner = bus.string(c"GetNameOwner", LOGIN)?;
+        if !owner.to_bytes().starts_with(b":") || bus.uid(&owner)? != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "lock-hint provider has no authorized unique bus owner",
+            ));
+        }
+        let mut hints = Self {
+            slots: Vec::new(),
+            bus,
+            state: Box::new(Notices {
+                api,
+                owner,
+                changes: Cell::new(0),
+                failed: Cell::new(false),
+            }),
+            fd: None,
+        };
+        let data = (&raw const *hints.state).cast_mut().cast();
+        let rule = CString::new(format!(
+            "type='signal',sender='{}',interface='org.freedesktop.DBus.Properties',member='PropertiesChanged',path_namespace='/org/freedesktop/login1/session',arg0='org.freedesktop.login1.Session'",
+            hints.state.owner.to_str().map_err(|_| invalid("invalid provider bus name"))?
+        ))
+        .unwrap();
+        hints
+            .slots
+            .push(add_match(&hints.bus, &rule, session_changed, data)?);
+        hints
+            .slots
+            .push(add_match(&hints.bus, LOGIN_OWNER, provider_replaced, data)?);
+        if hints.bus.string(c"GetNameOwner", LOGIN)? != hints.state.owner {
+            return Err(invalid("lock-hint provider changed during subscription"));
+        }
+        hints.fd = Some(pinned(&hints.bus)?);
+        Ok(hints)
     }
     pub(crate) fn session_path(&self, session: &CStr) -> io::Result<CString> {
         self.bus.session_path(session)
@@ -37,6 +75,110 @@ impl LockHints {
     pub(crate) fn locked(&self, path: &CStr) -> io::Result<bool> {
         self.bus.locked_hint(path)
     }
+    /// Dispatches queued messages and returns how many session property
+    /// changes arrived so far; a replaced provider is an error.
+    pub(crate) fn changes(&mut self) -> io::Result<u64> {
+        for _ in 0..64 {
+            let result = checked(unsafe {
+                (self.bus.api.process)(self.bus.ptr.as_ptr(), std::ptr::null_mut())
+            })?;
+            if self.state.failed.get() {
+                return Err(invalid("lock-hint provider was replaced"));
+            }
+            if result == 0 {
+                return Ok(self.state.changes.get());
+            }
+        }
+        Err(invalid("lock-hint notification queue exceeds work bound"))
+    }
+    pub(crate) fn events(&self) -> io::Result<i16> {
+        Ok(checked(unsafe { (self.bus.api.events)(self.bus.ptr.as_ptr()) })? as i16)
+    }
+}
+impl AsFd for LockHints {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.fd.as_ref().unwrap().as_fd()
+    }
+}
+impl Drop for LockHints {
+    fn drop(&mut self) {
+        for slot in self.slots.drain(..) {
+            unsafe {
+                (self.bus.api.slot_unref)(slot.as_ptr());
+            }
+        }
+    }
+}
+/// Session property changes announced by one logind bus owner.
+struct Notices {
+    api: Api,
+    owner: CString,
+    changes: Cell<u64>,
+    failed: Cell<bool>,
+}
+unsafe extern "C" fn session_changed(
+    message: *mut Message,
+    data: *mut libc::c_void,
+    _error: *mut libc::c_void,
+) -> i32 {
+    // SAFETY: the retained slot points to these pinned notices until slot removal.
+    let notices = unsafe { &*data.cast::<Notices>() };
+    let sender = unsafe { (notices.api.sender)(message) };
+    match notices.changes.get().checked_add(1) {
+        Some(changes)
+            if !sender.is_null()
+                && unsafe { CStr::from_ptr(sender) } == notices.owner.as_c_str() =>
+        {
+            notices.changes.set(changes)
+        }
+        _ => notices.failed.set(true),
+    }
+    1
+}
+unsafe extern "C" fn provider_replaced(
+    _message: *mut Message,
+    data: *mut libc::c_void,
+    _error: *mut libc::c_void,
+) -> i32 {
+    let notices = unsafe { &*data.cast::<Notices>() };
+    notices.failed.set(true);
+    1
+}
+
+const LOGIN_OWNER: &CStr = c"type='signal',sender='org.freedesktop.DBus',path='/org/freedesktop/DBus',interface='org.freedesktop.DBus',member='NameOwnerChanged',arg0='org.freedesktop.login1'";
+
+/// Installs a signal match whose callback receives `data`.
+fn add_match(
+    bus: &Connection,
+    rule: &CStr,
+    callback: Callback,
+    data: *mut libc::c_void,
+) -> io::Result<NonNull<Slot>> {
+    let mut slot = std::ptr::null_mut();
+    checked(unsafe {
+        (bus.api.add_match)(
+            bus.ptr.as_ptr(),
+            &mut slot,
+            rule.as_ptr(),
+            Some(callback),
+            data,
+        )
+    })?;
+    NonNull::new(slot).ok_or_else(|| invalid("missing bus subscription"))
+}
+
+/// A close-on-exec duplicate of the bus descriptor for polling.
+fn pinned(bus: &Connection) -> io::Result<OwnedFd> {
+    let fd = checked(unsafe { (bus.api.fd)(bus.ptr.as_ptr()) })?;
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 || flags & libc::FD_CLOEXEC == 0 {
+        return Err(invalid("system bus descriptor is inheritable"));
+    }
+    let pin = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+    if pin < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(pin) })
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -174,7 +316,7 @@ impl Watch {
         };
         let rule=CString::new(format!("type='signal',sender='{}',path='/org/freedesktop/login1',interface='org.freedesktop.login1.Manager',member='PrepareForSleep'",watch.state.owner.to_str().map_err(|_|invalid("invalid provider bus name"))?)).unwrap();
         watch.subscribe(&rule, prepare)?;
-        watch.subscribe(c"type='signal',sender='org.freedesktop.DBus',path='/org/freedesktop/DBus',interface='org.freedesktop.DBus',member='NameOwnerChanged',arg0='org.freedesktop.login1'",owner_changed)?;
+        watch.subscribe(LOGIN_OWNER, owner_changed)?;
         if watch.bus.string(c"GetNameOwner", LOGIN)? != watch.state.owner
             || watch.bus.uid(&watch.state.owner)? != uid
         {
@@ -197,32 +339,12 @@ impl Watch {
             value.preparing = preparing != 0;
         }
         watch.state.lifecycle.value.set(value);
-        let fd = checked(unsafe { (api.fd)(watch.bus.ptr.as_ptr()) })?;
-        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-        if flags < 0 || flags & libc::FD_CLOEXEC == 0 {
-            return Err(invalid("system bus descriptor is inheritable"));
-        }
-        let pin = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
-        if pin < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        watch.fd = Some(unsafe { OwnedFd::from_raw_fd(pin) });
+        watch.fd = Some(pinned(&watch.bus)?);
         Ok(watch)
     }
     fn subscribe(&mut self, rule: &CStr, callback: Callback) -> io::Result<()> {
-        let mut slot = std::ptr::null_mut();
         let data = (&raw const *self.state).cast_mut().cast();
-        checked(unsafe {
-            (self.bus.api.add_match)(
-                self.bus.ptr.as_ptr(),
-                &mut slot,
-                rule.as_ptr(),
-                Some(callback),
-                data,
-            )
-        })?;
-        self.slots
-            .push(NonNull::new(slot).ok_or_else(|| invalid("missing sleep subscription"))?);
+        self.slots.push(add_match(&self.bus, rule, callback, data)?);
         Ok(())
     }
     fn property(&self, name: &CStr, kind: u8) -> io::Result<i32> {

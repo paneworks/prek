@@ -324,7 +324,7 @@ impl Broker {
                 self.advance_session(&mut connection, now)?;
                 return Ok(None);
             }
-            bound.registration.check(&self.logind, &bound.client)?;
+            bound.registration.check(&mut self.logind, &bound.client)?;
             self.verify_agent(connection.channel.peer().pid)?;
             let Some(pending) = bound.rules.pending.as_ref() else {
                 return Ok(None);
@@ -381,7 +381,7 @@ impl Broker {
             if bound.fence != fence {
                 return Ok(());
             }
-            bound.registration.check(&self.logind, &bound.client)?;
+            bound.registration.check(&mut self.logind, &bound.client)?;
             self.verify_agent(connection.channel.peer().pid)?;
             let checked = monotonic()?;
             if !bound.context.fresh(checked)

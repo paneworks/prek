@@ -21,7 +21,7 @@ use std::{
     io::{self, Read},
     mem::size_of,
     os::{
-        fd::{AsFd, AsRawFd, FromRawFd, OwnedFd},
+        fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd},
         unix::{
             ffi::OsStrExt,
             fs::{MetadataExt, OpenOptionsExt},
@@ -196,34 +196,33 @@ const STATE: [&str; 3] = [
 /// on every read while they cannot be watched.
 struct Generation {
     directories: Vec<PathBuf>,
-    changes: std::cell::RefCell<Option<Changes>>,
-    count: std::cell::Cell<u64>,
+    changes: Option<Changes>,
+    count: u64,
 }
 impl Generation {
     fn new(directories: impl IntoIterator<Item = impl Into<PathBuf>>) -> Self {
         Self {
             directories: directories.into_iter().map(Into::into).collect(),
-            changes: std::cell::RefCell::new(None),
-            count: std::cell::Cell::new(0),
+            changes: None,
+            count: 0,
         }
     }
-    fn current(&self) -> u64 {
-        let mut changes = self.changes.borrow_mut();
-        let unchanged = match changes.as_ref().map(Changes::drain) {
+    fn current(&mut self) -> u64 {
+        let unchanged = match self.changes.as_ref().map(Changes::drain) {
             Some(Ok(changed)) => !changed,
             Some(Err(_)) => {
-                *changes = None;
+                self.changes = None;
                 false
             }
             None => {
-                *changes = Changes::open(&self.directories).ok();
+                self.changes = Changes::open(&self.directories).ok();
                 false
             }
         };
         if !unchanged {
-            self.count.set(self.count.get() + 1);
+            self.count += 1;
         }
-        self.count.get()
+        self.count
     }
 }
 
@@ -394,8 +393,16 @@ pub struct Logind {
     session_remote: SessionBool,
     seat_active: SeatActive,
     library: Library,
-    lock_hints: std::cell::RefCell<Option<crate::sleep_watch::LockHints>>,
+    lock_hints: Option<crate::sleep_watch::LockHints>,
+    lock_epoch: u64,
+    lock_seen: Option<Seen>,
     generation: Generation,
+}
+/// Lock-hint connection and the session property changes it had counted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Seen {
+    epoch: u64,
+    changes: u64,
 }
 impl Logind {
     pub fn open(library: &Path) -> io::Result<Self> {
@@ -423,13 +430,50 @@ impl Logind {
             session_remote: symbol!("sd_session_is_remote", SessionBool),
             seat_active: symbol!("sd_seat_get_active", SeatActive),
             library,
-            lock_hints: std::cell::RefCell::new(None),
+            lock_hints: None,
+            lock_epoch: 0,
+            lock_seen: None,
             generation: Generation::new(STATE),
         })
     }
     /// Advances whenever logind's state may have changed.
-    fn generation(&self) -> u64 {
+    fn generation(&mut self) -> u64 {
         self.generation.current()
+    }
+    /// Drains logind's change notifications; whether a watched state directory
+    /// or a session property changed, or a watch was lost, since the last call.
+    pub fn changed(&mut self) -> bool {
+        let watched = self.generation.changes.is_some();
+        let before = self.generation.count;
+        let advanced = self.generation.current() != before;
+        let lock = match self.lock_hints.as_mut().map(|bus| bus.changes()) {
+            Some(Ok(changes)) => Some(Seen {
+                epoch: self.lock_epoch,
+                changes,
+            }),
+            Some(Err(_)) => {
+                self.lock_hints = None;
+                None
+            }
+            None => None,
+        };
+        let lock_changed = lock != self.lock_seen;
+        self.lock_seen = lock;
+        watched && advanced || lock_changed
+    }
+    /// Descriptors that become ready when logind's state may have changed,
+    /// with the poll events each needs.
+    pub fn poll_sources(&self) -> Vec<(BorrowedFd<'_>, i16)> {
+        let mut sources: Vec<_> = self
+            .generation
+            .changes
+            .iter()
+            .map(|changes| (changes.0.as_fd(), libc::POLLIN))
+            .collect();
+        if let Some(bus) = &self.lock_hints {
+            sources.push((bus.as_fd(), bus.events().unwrap_or(libc::POLLIN)));
+        }
+        sources
     }
     fn process_session(&self, process: &Process) -> io::Result<String> {
         process.check()?;
@@ -511,28 +555,58 @@ impl Logind {
         compositor.check()?;
         Ok(facts)
     }
-    /// Lock hint of `session` through one retained bus connection; any failure
-    /// drops the connection and the cached object path.
-    fn locked(&self, session: &str, path: &mut Option<CString>) -> io::Result<bool> {
-        let mut hints = self.lock_hints.borrow_mut();
+    /// Lock hint of `session` through one retained bus connection, queried again
+    /// only after logind announced a session property change; any failure
+    /// drops the connection, the cached object path and the cached hint.
+    fn locked(
+        &mut self,
+        session: &str,
+        path: &mut Option<CString>,
+        cached: &mut Option<(Seen, bool)>,
+    ) -> io::Result<bool> {
         let result = (|| {
-            if hints.is_none() {
-                *hints = Some(crate::sleep_watch::LockHints::open(&self.library)?);
+            if self.lock_hints.is_none() {
+                self.lock_epoch = self
+                    .lock_epoch
+                    .checked_add(1)
+                    .ok_or_else(|| invalid("lock-hint connections exhausted"))?;
+                self.lock_hints = Some(crate::sleep_watch::LockHints::open(&self.library)?);
             }
-            let bus = hints.as_ref().unwrap();
+            let bus = self.lock_hints.as_mut().unwrap();
+            let mut seen = Seen {
+                epoch: self.lock_epoch,
+                changes: bus.changes()?,
+            };
+            if let Some((at, locked)) = *cached
+                && at == seen
+            {
+                return Ok(locked);
+            }
             if path.is_none() {
                 let id = CString::new(session).map_err(|_| invalid("invalid session ID"))?;
                 *path = Some(bus.session_path(&id)?);
             }
-            bus.locked(path.as_ref().unwrap())
+            // Drains signals read along with each reply and reads the hint again
+            // when one arrived.
+            for _ in 0..4 {
+                let locked = bus.locked(path.as_ref().unwrap())?;
+                let changes = bus.changes()?;
+                if changes == seen.changes {
+                    *cached = Some((seen, locked));
+                    return Ok(locked);
+                }
+                seen.changes = changes;
+            }
+            Err(invalid("logind lock hint kept changing"))
         })();
         if result.is_err() {
-            *hints = None;
+            self.lock_hints = None;
             *path = None;
+            *cached = None;
         }
         result
     }
-    pub fn register(&self, peer: Peer, client: &Compositor) -> io::Result<Registration> {
+    pub fn register(&mut self, peer: Peer, client: &Compositor) -> io::Result<Registration> {
         let checked_at = Instant::now();
         client.check_binding()?;
         let (pid, start) = (client.pid(), client.start());
@@ -585,6 +659,7 @@ impl Logind {
             generation,
             cgroups,
             session_path: None,
+            lock: None,
             revoked: false,
         };
         registration.binding()?;
@@ -733,12 +808,28 @@ pub struct Registration {
     generation: u64,
     cgroups: [String; 2],
     session_path: Option<CString>,
+    lock: Option<(Seen, bool)>,
     revoked: bool,
 }
 impl Registration {
     /// Logind's lock hint for the bound session.
-    pub fn locked(&mut self, logind: &Logind) -> io::Result<bool> {
-        logind.locked(&self.facts.session, &mut self.session_path)
+    pub fn locked(&mut self, logind: &mut Logind) -> io::Result<bool> {
+        logind.locked(&self.facts.session, &mut self.session_path, &mut self.lock)
+    }
+    /// Pidfds of the agent and the compositor; each becomes readable when its
+    /// process exits.
+    pub fn poll_sources(&self) -> [BorrowedFd<'_>; 2] {
+        [
+            self.peer.process.handle.as_fd(),
+            self.compositor.handle.as_fd(),
+        ]
+    }
+    /// Whether the agent or the compositor has exited.
+    pub fn exited(&self) -> bool {
+        !matches!(
+            (self.peer.process.exited(), self.compositor.exited()),
+            (Ok(false), Ok(false))
+        )
     }
     pub fn binding(&self) -> io::Result<&Binding> {
         if self.revoked {
@@ -749,7 +840,7 @@ impl Registration {
             Ok(&self.binding)
         }
     }
-    pub fn check(&mut self, logind: &Logind, client: &Compositor) -> io::Result<()> {
+    pub fn check(&mut self, logind: &mut Logind, client: &Compositor) -> io::Result<()> {
         if self.revoked {
             return Err(denied("session registration has been revoked"));
         }
@@ -886,13 +977,41 @@ mod tests {
         assert!(Logind::open(Path::new("/does-not-exist/libsystemd.so.0")).is_err());
     }
     #[test]
+    #[ignore = "needs the system bus, a logind session and PREK_LOGIND_LIBRARY"]
+    fn a_live_lock_hint_is_queried_once_until_logind_announces_a_change() {
+        let library = std::env::var_os("PREK_LOGIND_LIBRARY").unwrap();
+        let mut logind = Logind::open(Path::new(&library)).unwrap();
+        let session = allocated(|out| unsafe { (logind.pid_session)(0, out) }).unwrap();
+        let (mut path, mut cached) = (None, None);
+        let locked = logind.locked(&session, &mut path, &mut cached).unwrap();
+        let seen = cached.unwrap().0;
+        assert!(
+            logind.changed(),
+            "opening the bus connection is reported once"
+        );
+        assert!(!logind.changed());
+        assert!(!logind.poll_sources().is_empty());
+        for _ in 0..20 {
+            assert_eq!(
+                logind.locked(&session, &mut path, &mut cached).unwrap(),
+                locked
+            );
+        }
+        assert_eq!(
+            cached.unwrap().0,
+            seen,
+            "an unchanged session is not queried again"
+        );
+        println!("session {session} locked={locked} {seen:?}");
+    }
+    #[test]
     fn the_state_generation_advances_only_on_changes_and_reopens_a_lost_watch() {
         let root = std::env::temp_dir().join(format!("prek-state-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let [sessions, seats] = ["sessions", "seats"].map(|name| root.join(name));
         fs::create_dir_all(&sessions).unwrap();
         fs::create_dir_all(&seats).unwrap();
-        let generation = Generation::new([&sessions, &seats]);
+        let mut generation = Generation::new([&sessions, &seats]);
         let first = generation.current();
         assert_eq!(generation.current(), first);
         fs::write(sessions.join(".c3.tmp"), b"STATE=active\n").unwrap();
@@ -904,7 +1023,16 @@ mod tests {
         let written = generation.current();
         assert!(written > renamed);
         fs::remove_dir_all(&seats).unwrap();
-        let lost = generation.current();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while generation.changes.is_some() {
+            assert!(
+                Instant::now() < deadline,
+                "the removed directory was never reported"
+            );
+            generation.current();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let lost = generation.count;
         assert!(lost > written);
         let reopened = generation.current();
         assert!(

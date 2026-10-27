@@ -14,7 +14,8 @@ use std::{
 
 const MAX_HISTORY: usize = 4096;
 
-/// Keeps one display connection and gives each distinct output geometry a
+/// Keeps one display connection, lists its outputs again only after the
+/// compositor sent an output event, and gives each distinct output geometry a
 /// generation that is never reused, so a removed and re-added output cannot
 /// match an older permit.
 #[derive(Default)]
@@ -23,8 +24,19 @@ pub(super) struct Sampler {
     history: BTreeMap<String, (Output, u64)>,
     active: BTreeSet<String>,
     display: Option<crate::display::Watch>,
+    listed: Option<Vec<crate::display::Output>>,
 }
 impl Sampler {
+    /// Delivers pending display events; whether the outputs changed or the
+    /// connection failed since the last sample.
+    pub(super) fn changed(&mut self) -> bool {
+        self.display
+            .as_mut()
+            .is_some_and(|watch| !matches!(watch.receive(), Ok(false)))
+    }
+    pub(super) fn poll_source(&self) -> Option<std::os::fd::BorrowedFd<'_>> {
+        self.display.as_ref().map(std::os::fd::AsFd::as_fd)
+    }
     pub(super) fn sample(
         &mut self,
         socket: &Path,
@@ -36,11 +48,19 @@ impl Sampler {
     ) -> io::Result<Snapshot> {
         let captured_at = crate::ipc::monotonic()?;
         let listed = match self.display.as_mut() {
-            Some(watch) => watch.outputs(until),
+            Some(watch) => match watch.receive() {
+                Ok(false) if self.listed.is_some() => Ok(self.listed.clone().unwrap()),
+                Ok(_) => watch.outputs(until),
+                Err(error) => Err(error),
+            },
             None => crate::fsuid::with_fsuid(uid, || crate::display::Watch::open(socket, until))
                 .and_then(|watch| self.display.insert(watch).outputs(until)),
         }
-        .inspect_err(|_| self.display = None)?;
+        .inspect_err(|_| {
+            self.display = None;
+            self.listed = None;
+        })?;
+        self.listed = Some(listed.clone());
         let revision = self
             .revision
             .checked_add(1)

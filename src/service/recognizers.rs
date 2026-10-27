@@ -609,7 +609,7 @@ impl Broker {
         let mut connection = self.connections.remove(index);
         let result: io::Result<()> = (|| {
             let bound = connection.bound.as_mut().unwrap();
-            bound.registration.check(&self.logind, &bound.client)?;
+            bound.registration.check(&mut self.logind, &bound.client)?;
             self.verify_agent(connection.channel.peer().pid)?;
             if bound.recognizers.overdue(now) {
                 self.advance_session(&mut connection, now)?;

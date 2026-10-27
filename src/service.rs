@@ -66,6 +66,7 @@ struct ContextFeed {
     state: State,
     usable: bool,
     checked: Duration,
+    due: bool,
     error: Option<String>,
 }
 impl Default for ContextFeed {
@@ -76,6 +77,7 @@ impl Default for ContextFeed {
             state: State::Unknown,
             usable: false,
             checked: Duration::ZERO,
+            due: false,
             error: None,
         }
     }
@@ -487,6 +489,7 @@ pub struct Broker {
     rule_baseline: Option<std::sync::Arc<crate::config::Config>>,
     rule_handlers: Vec<crate::lua::HandlerRegistration>,
     recognizer_bindings: Vec<crate::lua::RecognizerBinding>,
+    published: bool,
 }
 impl Broker {
     /// Context is sampled directly from a verified compositor. Action dispatch
@@ -519,7 +522,30 @@ impl Broker {
             rule_baseline: None,
             rule_handlers: Vec::new(),
             recognizer_bindings: Vec::new(),
+            published: false,
         })
+    }
+    /// Whether a change notification refreshed an agent's context since the
+    /// last call.
+    pub fn take_published(&mut self) -> bool {
+        std::mem::take(&mut self.published)
+    }
+    /// Marks an agent's context due once logind, its display connection or
+    /// one of its registered processes reports a change.
+    fn observe(&mut self) {
+        let logind = self.logind.changed();
+        for bound in self
+            .connections
+            .iter_mut()
+            .filter_map(|connection| connection.bound.as_mut())
+            .filter(|bound| bound.role == Role::Agent)
+        {
+            let display = bound.context.sampler.changed();
+            let exited = bound.registration.exited();
+            if logind || display || exited {
+                bound.context.due = true;
+            }
+        }
     }
     pub fn clients(&self) -> usize {
         self.connections
@@ -668,7 +694,7 @@ impl Broker {
             } else if now.saturating_sub(bound.renewed) >= protocol::MAX_PACKET_AGE {
                 Err(protocol::invalid("session agent lease expired"))
             } else {
-                bound.registration.check(&self.logind, &bound.client)
+                bound.registration.check(&mut self.logind, &bound.client)
             };
             if let Err(error) = result {
                 let reason = error
@@ -782,7 +808,7 @@ impl Broker {
         } else {
             bound
                 .registration
-                .check(&self.logind, &bound.client)
+                .check(&mut self.logind, &bound.client)
                 .and_then(|()| self.verify_agent(connection.channel.peer().pid))
         };
         if let Err(error) = verification {
@@ -1074,7 +1100,7 @@ impl Broker {
                 "transport source belongs to another seat",
             ));
         }
-        bound.registration.check(&self.logind, &bound.client)?;
+        bound.registration.check(&mut self.logind, &bound.client)?;
         let evidence = match bound.client.device_evidence(descriptor, monotonic()?) {
             Ok(evidence) => evidence,
             Err(error) if !descriptor.is_generated_keyboard() => {
@@ -1089,7 +1115,7 @@ impl Broker {
         let Some(evidence) = evidence else {
             return Ok(None);
         };
-        bound.registration.check(&self.logind, &bound.client)?;
+        bound.registration.check(&mut self.logind, &bound.client)?;
         let reply = transport_offer::reply(
             descriptor,
             bound.fence,
@@ -1113,10 +1139,10 @@ impl Broker {
                         (bound.checked + REFRESH)
                             .min(bound.recognizers.deadline().unwrap_or(Duration::MAX))
                             .min(bound.renewed + protocol::MAX_PACKET_AGE)
-                            .min(if bound.role == Role::Agent {
-                                bound.context.checked + CONTEXT_REFRESH
-                            } else {
-                                Duration::MAX
+                            .min(match bound.role {
+                                Role::Agent if bound.context.due => Duration::ZERO,
+                                Role::Agent => bound.context.checked + CONTEXT_REFRESH,
+                                _ => Duration::MAX,
                             })
                     },
                 )
@@ -1136,11 +1162,33 @@ impl Broker {
                     },
             )
         }));
+        fds.extend(
+            self.logind
+                .poll_sources()
+                .into_iter()
+                .map(|(fd, events)| PollFd::new(fd, PollFlags::from_bits_truncate(events))),
+        );
+        for bound in self
+            .connections
+            .iter()
+            .filter_map(|connection| connection.bound.as_ref())
+            .filter(|bound| bound.role == Role::Agent)
+        {
+            fds.extend(
+                bound
+                    .registration
+                    .poll_sources()
+                    .into_iter()
+                    .chain(bound.context.sampler.poll_source())
+                    .map(|fd| PollFd::new(fd, PollFlags::POLLIN)),
+            );
+        }
         fds
     }
     /// One incoming message/registration per step prevents a subscriber from
     /// monopolizing supervision. All sends are nonblocking and bounded.
     pub fn step(&mut self, now: Duration) -> io::Result<()> {
+        self.observe();
         if let Some(channel) = self.endpoint.accept()?
             && self.connections.len() < MAX_CLIENTS
         {
@@ -1192,7 +1240,7 @@ impl Broker {
                 return Err(protocol::invalid("session timeline moved backward"));
             }
             if now - bound.checked >= REFRESH {
-                bound.registration.check(&self.logind, &bound.client)?;
+                bound.registration.check(&mut self.logind, &bound.client)?;
                 bound.checked = now;
             }
         } else if now - connection.opened
@@ -1330,7 +1378,7 @@ impl Broker {
                             "stale broker/configuration/session generation",
                         ));
                     }
-                    bound.registration.check(&self.logind, &bound.client)?;
+                    bound.registration.check(&mut self.logind, &bound.client)?;
                     self.verify_agent(connection.channel.peer().pid)?;
                     bound.checked = now;
                     if current {
@@ -1672,8 +1720,8 @@ impl Broker {
             self.advance_session(connection, now)?;
             return Ok(false);
         }
-        let result = bound.registration.locked(&self.logind);
-        bound.registration.check(&self.logind, &bound.client)?;
+        let result = bound.registration.locked(&mut self.logind);
+        bound.registration.check(&mut self.logind, &bound.client)?;
         match result {
             Ok(false) if bound.context.fresh(monotonic()?) => return Ok(true),
             Ok(true) => {
@@ -1716,10 +1764,13 @@ impl Broker {
     }
     fn refresh_context(&mut self, connection: &mut Connection, now: Duration) -> io::Result<()> {
         let bound = connection.bound.as_mut().unwrap();
-        if bound.role != Role::Agent || now < bound.context.checked + CONTEXT_REFRESH {
+        if bound.role != Role::Agent
+            || !bound.context.due && now < bound.context.checked + CONTEXT_REFRESH
+        {
             return Ok(());
         }
-        bound.registration.check(&self.logind, &bound.client)?;
+        self.published |= std::mem::take(&mut bound.context.due);
+        bound.registration.check(&mut self.logind, &bound.client)?;
         let binding = bound.registration.binding()?.clone();
         let was_fresh = bound.context.fresh(now);
         let old_usable = bound.context.usable;
@@ -1729,28 +1780,31 @@ impl Broker {
             .runtime_root
             .join(binding.uid.to_string())
             .join(bound.client.display());
-        let result = bound.registration.locked(&self.logind).and_then(|locked| {
-            if !bound.capabilities.contains(&Capability::Context) {
-                return Ok((locked, None));
-            }
-            let until = std::time::Instant::now() + CONTEXT_SAMPLE_TIME;
-            let snapshot = bound.context.sampler.sample(
-                &socket,
-                binding.uid,
-                bound.fence.session,
-                binding.kind,
-                locked,
-                until,
-            )?;
-            Ok((
-                locked,
-                Some(ProvidedContext {
-                    binding: binding.clone(),
-                    snapshot,
-                }),
-            ))
-        });
-        bound.registration.check(&self.logind, &bound.client)?;
+        let result = bound
+            .registration
+            .locked(&mut self.logind)
+            .and_then(|locked| {
+                if !bound.capabilities.contains(&Capability::Context) {
+                    return Ok((locked, None));
+                }
+                let until = std::time::Instant::now() + CONTEXT_SAMPLE_TIME;
+                let snapshot = bound.context.sampler.sample(
+                    &socket,
+                    binding.uid,
+                    bound.fence.session,
+                    binding.kind,
+                    locked,
+                    until,
+                )?;
+                Ok((
+                    locked,
+                    Some(ProvidedContext {
+                        binding: binding.clone(),
+                        snapshot,
+                    }),
+                ))
+            });
+        bound.registration.check(&mut self.logind, &bound.client)?;
         match result {
             Ok((true, _)) => {
                 bound.context.value = None;

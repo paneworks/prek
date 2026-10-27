@@ -86,11 +86,30 @@ impl Watch {
         client.settle()?;
         Ok(Self { client })
     }
-    /// Every output after delivering all events sent before this call.
+    /// Every output after delivering all events sent before this call, and
+    /// none left unread behind the final roundtrip.
     pub fn outputs(&mut self, until: Instant) -> io::Result<Vec<Output>> {
         self.client.until = until;
-        self.client.settle()?;
-        self.client.collect()
+        for _ in 0..MAX_ROUNDTRIPS {
+            self.client.settle()?;
+            self.client.changed = false;
+            self.client.receive()?;
+            if !self.client.changed {
+                return self.client.collect();
+            }
+        }
+        Err(invalid("compositor outputs kept changing"))
+    }
+    /// Delivers the events the compositor already sent, without waiting;
+    /// whether an output or the output manager changed since [`Watch::outputs`].
+    pub fn receive(&mut self) -> io::Result<bool> {
+        self.client.receive()?;
+        Ok(self.client.changed)
+    }
+}
+impl AsFd for Watch {
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        self.client.stream.as_fd()
     }
 }
 
@@ -390,6 +409,7 @@ struct Client {
     manager_lost: bool,
     pending: BTreeMap<u32, Pending>,
     synced: Option<u32>,
+    changed: bool,
 }
 impl Client {
     fn new(stream: UnixStream, until: Instant) -> Self {
@@ -408,6 +428,7 @@ impl Client {
             manager_lost: false,
             pending: BTreeMap::new(),
             synced: None,
+            changed: false,
         }
     }
     fn create(&mut self, object: Object) -> u32 {
@@ -448,38 +469,62 @@ impl Client {
             Err(error) => Err(error.into()),
         }
     }
+    /// The next complete message already buffered.
+    fn buffered(&mut self) -> io::Result<Option<(u32, u16, Vec<u8>)>> {
+        if self.input.len() < HEADER {
+            return Ok(None);
+        }
+        let header = word(&self.input, 4);
+        let size = (header >> 16) as usize;
+        if size < HEADER || !size.is_multiple_of(4) || size > MAX_MESSAGE {
+            return Err(invalid("malformed Wayland message header"));
+        }
+        if self.input.len() < size {
+            return Ok(None);
+        }
+        let object = word(&self.input, 0);
+        let body = self.input[HEADER..size].to_vec();
+        self.input.drain(..size);
+        Ok(Some((object, header as u16, body)))
+    }
+    /// Reads one chunk; `false` when nothing is readable yet.
+    fn read_chunk(&mut self) -> io::Result<bool> {
+        let mut chunk = [0; READ_CHUNK];
+        match self.stream.read(&mut chunk) {
+            Ok(0) => Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "compositor closed the connection",
+            )),
+            Ok(count) => {
+                self.input.extend_from_slice(&chunk[..count]);
+                Ok(true)
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(false),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => Ok(true),
+            Err(error) => Err(error),
+        }
+    }
     fn message(&mut self) -> io::Result<(u32, u16, Vec<u8>)> {
         loop {
             if Instant::now() >= self.until {
                 return Err(timed_out());
             }
-            if self.input.len() >= HEADER {
-                let header = word(&self.input, 4);
-                let size = (header >> 16) as usize;
-                if size < HEADER || !size.is_multiple_of(4) || size > MAX_MESSAGE {
-                    return Err(invalid("malformed Wayland message header"));
-                }
-                if self.input.len() >= size {
-                    let object = word(&self.input, 0);
-                    let body = self.input[HEADER..size].to_vec();
-                    self.input.drain(..size);
-                    return Ok((object, header as u16, body));
-                }
+            if let Some(message) = self.buffered()? {
+                return Ok(message);
             }
-            let mut chunk = [0; READ_CHUNK];
-            match self.stream.read(&mut chunk) {
-                Ok(0) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "compositor closed the connection",
-                    ));
-                }
-                Ok(count) => self.input.extend_from_slice(&chunk[..count]),
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    self.wait(PollFlags::POLLIN)?
-                }
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                Err(error) => return Err(error),
+            if !self.read_chunk()? {
+                self.wait(PollFlags::POLLIN)?
+            }
+        }
+    }
+    /// Dispatches every message readable now without waiting.
+    fn receive(&mut self) -> io::Result<()> {
+        loop {
+            while let Some((object, opcode, body)) = self.buffered()? {
+                self.dispatch(object, opcode, &body)?;
+            }
+            if !self.read_chunk()? {
+                return Ok(());
             }
         }
     }
@@ -609,11 +654,17 @@ impl Client {
                 Ok(())
             }
             (Object::Output(global), opcode) => match self.pending.get_mut(&global) {
-                Some(pending) => output_event(pending, opcode, args),
+                Some(pending) => {
+                    self.changed = true;
+                    output_event(pending, opcode, args)
+                }
                 None => Ok(()),
             },
             (Object::XdgOutput(global), opcode) => match self.pending.get_mut(&global) {
-                Some(pending) => xdg_event(pending, opcode, args),
+                Some(pending) => {
+                    self.changed = true;
+                    xdg_event(pending, opcode, args)
+                }
                 None => Ok(()),
             },
             _ => Ok(()),
@@ -626,6 +677,7 @@ impl Client {
         if version == 0 {
             return Err(invalid(format!("{interface} advertised at version 0")));
         }
+        self.changed = true;
         if interface == MANAGER_INTERFACE {
             if self.bound.is_none() {
                 self.manager = Some((name, version));
@@ -649,10 +701,12 @@ impl Client {
         }
         if self.manager.is_some_and(|(global, _)| global == name) {
             self.manager_lost = true;
+            self.changed = true;
         }
         let Some(pending) = self.pending.remove(&name) else {
             return;
         };
+        self.changed = true;
         self.queue(Message::new(pending.xdg, 0));
         self.objects.insert(pending.xdg, Object::Released);
         if pending.version >= 3 {
@@ -758,6 +812,7 @@ mod tests {
     enum Change {
         Add(Head),
         Remove(u32),
+        RemoveAfter(u32),
     }
 
     /// In-process compositor fake answering one client connection.
@@ -767,6 +822,7 @@ mod tests {
         xdg_version: Option<u32>,
         reply: Reply,
         changes: BTreeMap<u32, Change>,
+        stream: Option<std::sync::mpsc::Sender<UnixStream>>,
     }
     impl Fake {
         fn new(heads: Vec<Head>) -> Self {
@@ -776,11 +832,15 @@ mod tests {
                 xdg_version: Some(3),
                 reply: Reply::Normal,
                 changes: BTreeMap::new(),
+                stream: None,
             }
         }
         fn serve(self, listener: UnixListener) -> JoinHandle<Server> {
             thread::spawn(move || {
                 let (stream, _) = listener.accept().unwrap();
+                if let Some(sender) = &self.stream {
+                    sender.send(stream.try_clone().unwrap()).unwrap();
+                }
                 let mut server = Server {
                     fake: self,
                     stream,
@@ -857,7 +917,8 @@ mod tests {
                     let callback = args.uint().unwrap();
                     self.largest_id = self.largest_id.max(callback);
                     self.syncs += 1;
-                    let mut events = match self.fake.changes.remove(&self.syncs) {
+                    let change = self.fake.changes.remove(&self.syncs);
+                    let mut events = match change.clone() {
                         Some(Change::Add(head)) => {
                             self.fake.heads.push(head);
                             vec![
@@ -870,10 +931,13 @@ mod tests {
                         Some(Change::Remove(global)) => {
                             vec![Message::new(self.registry, 1).uint(global)]
                         }
-                        None => Vec::new(),
+                        Some(Change::RemoveAfter(_)) | None => Vec::new(),
                     };
                     events.push(Message::new(callback, 0).uint(7));
                     events.push(Message::new(DISPLAY, 1).uint(callback));
+                    if let Some(Change::RemoveAfter(global)) = change {
+                        events.push(Message::new(self.registry, 1).uint(global));
+                    }
                     events
                 }
                 (_, 0) if self.outputs.contains_key(&object) => {
@@ -1045,6 +1109,85 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
         assert_eq!(server.released.len(), 1);
         assert!(server.largest_id < 16, "{}", server.largest_id);
+    }
+
+    #[test]
+    fn a_watch_reports_only_output_events_the_compositor_sent_on_its_own() {
+        let (sender, streams) = std::sync::mpsc::channel();
+        let mut fake = Fake::new(panels());
+        fake.stream = Some(sender);
+        let root = scratch("receive");
+        let socket = root.join("wayland-0");
+        let server = fake.serve(UnixListener::bind(&socket).unwrap());
+        let until = || Instant::now() + Duration::from_secs(5);
+        let mut watch = Watch::open(&socket, until()).unwrap();
+        let mut compositor = streams.recv().unwrap();
+        assert_eq!(names(&watch.outputs(until()).unwrap()), ["DP-2", "eDP-1"]);
+        for _ in 0..3 {
+            assert!(!watch.receive().unwrap(), "roundtrip traffic is no change");
+        }
+        let registry = 2;
+        compositor
+            .write_all(
+                &Message::new(registry, 0)
+                    .uint(70)
+                    .string("wl_seat")
+                    .uint(9)
+                    .finish(),
+            )
+            .unwrap();
+        assert!(!watch.receive().unwrap(), "other globals are no change");
+        compositor
+            .write_all(&Message::new(registry, 1).uint(1).finish())
+            .unwrap();
+        assert!(watch.receive().unwrap());
+        assert!(
+            watch.receive().unwrap(),
+            "a change stays reported until listed"
+        );
+        assert_eq!(names(&watch.outputs(until()).unwrap()), ["DP-2"]);
+        assert!(!watch.receive().unwrap());
+        drop(compositor);
+        drop(watch);
+        assert_eq!(server.join().unwrap().released.len(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_output_event_behind_the_final_callback_is_listed_before_returning() {
+        let mut fake = Fake::new(panels());
+        fake.changes.insert(3, Change::RemoveAfter(1));
+        let root = scratch("trailing");
+        let socket = root.join("wayland-0");
+        let server = fake.serve(UnixListener::bind(&socket).unwrap());
+        let until = || Instant::now() + Duration::from_secs(5);
+        let mut watch = Watch::open(&socket, until()).unwrap();
+        assert_eq!(names(&watch.outputs(until()).unwrap()), ["DP-2"]);
+        assert!(!watch.receive().unwrap());
+        drop(watch);
+        assert_eq!(server.join().unwrap().released.len(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_closed_compositor_fails_a_receive() {
+        let (sender, streams) = std::sync::mpsc::channel();
+        let mut fake = Fake::new(panels());
+        fake.stream = Some(sender);
+        let root = scratch("closed");
+        let socket = root.join("wayland-0");
+        let server = fake.serve(UnixListener::bind(&socket).unwrap());
+        let until = || Instant::now() + Duration::from_secs(5);
+        let mut watch = Watch::open(&socket, until()).unwrap();
+        let compositor = streams.recv().unwrap();
+        watch.outputs(until()).unwrap();
+        compositor.shutdown(std::net::Shutdown::Both).unwrap();
+        server.join().unwrap();
+        assert_eq!(
+            watch.receive().unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn panels() -> Vec<Head> {

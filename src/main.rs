@@ -1078,7 +1078,7 @@ fn run_broker(
                 Err(error) => return Err(error),
             }
         }
-        if now >= refresh {
+        if broker.take_published() || now >= refresh {
             revision = revision
                 .checked_add(1)
                 .ok_or_else(|| io::Error::other("worker subscription revision exhausted"))?;
