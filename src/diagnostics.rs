@@ -114,6 +114,21 @@ impl Report {
             if crate::rules::requires_context(rule) {
                 add("context_provider_unavailable", None, Some(&rule.id), "Needs live context from a broker-verified session agent (`prek session --context`); observation without one skips this rule".into());
             }
+            if config.mode == Mode::Route
+                && rule.delivery != crate::config::Delivery::Observe
+                && rule.trigger.contains_touch()
+                && rule.region.is_none()
+            {
+                add(
+                    "touch_start_delay",
+                    None,
+                    Some(&rule.id),
+                    format!(
+                        "Every touch start on this rule's devices can wait up to the {} ms join window for further fingers; a region limits the wait to its edge strip",
+                        config.timing.join_window.0
+                    ),
+                );
+            }
             let finger_count = maximum_fingers(&rule.trigger);
             for (id, selector) in config
                 .devices
@@ -282,6 +297,29 @@ mod tests {
                 .any(|finding| finding.code == "routing_pending")
         );
         assert!(!report.ready);
+    }
+    #[test]
+    fn consuming_touch_rules_without_a_region_report_their_start_delay() {
+        let delayed = |config: &Config| {
+            Report::inspect(config, &[touch(10, false)])
+                .findings
+                .iter()
+                .any(|finding| {
+                    finding.code == "touch_start_delay" && finding.rule.as_deref() == Some("three")
+                })
+        };
+        let mut config = phone();
+        assert!(delayed(&config));
+        config.rules.last_mut().unwrap().region = Some(crate::config::Region {
+            edge: crate::config::Edge::Bottom,
+            depth: crate::config::Distance::Pixels(20.0),
+            from: 0.0,
+            to: 1.0,
+        });
+        assert!(!delayed(&config));
+        config.rules.last_mut().unwrap().region = None;
+        config.rules.last_mut().unwrap().delivery = crate::config::Delivery::Observe;
+        assert!(!delayed(&config));
     }
     #[test]
     fn t04_unreadable_explicit_node_and_ambiguous_identity_are_distinct() {

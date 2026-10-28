@@ -399,6 +399,8 @@ bindings. `check` validates syntax, units, references, bounded nesting, system
 device/seat policy and conflicting exclusive rules. `doctor` additionally checks
 readable hardware, stable identity ambiguity and touch capacity, and reports
 unconnected runtime features, routing and unavailable adapters as explicit findings.
+It also reports `touch_start_delay` for each consuming touch rule without a
+`region`, since every touch start on its devices can then wait for the join window.
 
 Timing values have explicit `ms`, `s`, or `m` units. Distances use `mm`, `px`, or
 `norm`. Pixel thresholds require mapped output geometry; millimetre thresholds
