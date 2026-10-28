@@ -761,13 +761,17 @@ os._exit(0)
         for opens_socket, provisioned, holds, listeners, agent in (
                 (True, False, True, 1, "ok"), (True, True, True, 1, "ok"), (False, False, True, 1, "ok"),
                 (True, False, False, 1, "ok"), (True, False, True, 2, "ok"), (True, False, True, 1, "fails"),
-                (True, False, True, 1, "leaves"), (True, False, True, 1, "swipes"), (True, False, True, 1, "silent")):
+                (True, False, True, 1, "leaves"), (True, False, True, 1, "swipes"), (True, False, True, 1, "silent"),
+                (True, False, True, 1, "presses"), (True, False, True, 1, "unpressed"),
+                (True, False, False, 1, "locks"), (True, False, False, 1, "stuck"), (True, False, True, 1, "unlocked")):
             with self.subTest(opens_socket=opens_socket, provisioned=provisioned, holds=holds, listeners=listeners,
                               agent=agent):
                 self.takeover_trial(opens_socket, provisioned, holds, listeners, agent)
 
     def takeover_trial(self, opens_socket, provisioned, holds, listeners, agent):
         swipe = agent in ("swipes", "silent")
+        keys = agent in ("presses", "unpressed")
+        lock = agent in ("locks", "stuck", "unlocked")
         trial = Path(__file__).resolve().parents[1] / "run-takeover-trial.sh"
         with tempfile.TemporaryDirectory() as temporary:
             repo, mocks, run_root = Path(temporary), Path(temporary) / "bin", Path(temporary) / "run"
@@ -825,6 +829,10 @@ done
                 (mocks / name).chmod(0o755)
             matched = "echo 'Matched { version: 1, rule: \"trial-swipe\", id: 1 }'"
             fired = f"date >> '{repo}/target/takeover-trial/latest/fired.log'"
+            pressed = "echo 'Matched { version: 1, rule: \"trial-keys\", id: 2 }'"
+            retaken = 'echo "routing worker: Prek test keyboard taken over at a neutral idle cut" >&2'
+            relocked = ('echo "context Locked; previous gesture progress cancelled"; '
+                        'echo "context Desktop; previous gesture progress cancelled"')
             bind = (f"'{sys.executable}' -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "
                     '"$2/control.sock"') if opens_socket else "exit 3"
             (prek / "bin/prek").write_text(f"""#!/bin/sh
@@ -837,12 +845,15 @@ case "$1" in
     echo "routing worker: seat seat0 lost its context: StaleSnapshot" >&2
     echo "routing worker: Prek test keyboard taken over at a neutral idle cut" >&2
     {"" if holds else 'echo "routing worker: seat seat0 lost its context: state Unknown" >&2'}
+    {retaken if agent == "locks" else ''}
     sleep 1 ;;
   session) echo "$*" > '{arguments}'; sleep 0.2
     {'exit 1' if agent == "fails" else ''}
     {'echo "context Unknown; previous gesture progress cancelled"' if agent == "leaves" else ''}
     {matched if swipe else ''}
-    {fired if agent == "swipes" else ''} ;;
+    {fired if agent == "swipes" else ''}
+    {pressed if agent == "presses" else ''}
+    {relocked if agent == "locks" else ''} ;;
 esac
 """)
             (prek / "bin/prek").chmod(0o755)
@@ -851,7 +862,8 @@ esac
                    "PREK_TRIAL_INPUT_DEVICES": str(devices), "PREK_TRIAL_LOGIND": sys.executable,
                    "PREK_TRIAL_RUN_ROOT": str(run_root), "PREK_TRIAL_CGROUP_ROOT": str(cgroups)}
             result = subprocess.run(["bash", str(script), "--device", "Prek test keyboard", "--seconds", "10",
-                                     *(["--swipe"] if swipe else [])],
+                                     *(["--swipe"] if swipe else []), *(["--keys"] if keys else []),
+                                     *(["--lock"] if lock else [])],
                                     env=env, capture_output=True, text=True, timeout=60)
             run = (repo / "target/takeover-trial/latest").resolve(strict=True)
             self.assertFalse((run_root / "udev/rules.d/70-prek-trial.rules").exists())
@@ -871,6 +883,18 @@ esac
                 self.assertIn("exited with status 3 before opening its socket", (run / "console.log").read_text())
                 self.assertFalse((run / "session.log").exists())
                 return
+            if lock:
+                console = (run / "console.log").read_text()
+                if agent == "locks":
+                    self.assertEqual(result.returncode, 0, console)
+                    self.assertIn("Context losses after takeover: 1; takeovers after the last loss: 1", console)
+                elif agent == "stuck":
+                    self.assertEqual(result.returncode, 1)
+                    self.assertIn("was not taken over again after the last unlock", console)
+                else:
+                    self.assertEqual(result.returncode, 1)
+                    self.assertIn("never left its desktop, so the lock was not exercised", console)
+                return
             if not holds:
                 self.assertEqual(result.returncode, 1)
                 self.assertEqual(json.loads((run / "status.json").read_text())["status"], "failed")
@@ -889,6 +913,19 @@ esac
                 config = (run / "config.toml").read_text()
                 self.assertIn('trigger = { kind = "swipe", fingers = 3, direction = "down"', config)
                 self.assertIn(f">> {run}/fired.log", config)
+                return
+            if agent == "unpressed":
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("Swipes up recognized: 0;", (run / "console.log").read_text())
+                self.assertIn("swipe up was never recognized", (run / "console.log").read_text())
+                return
+            if keys:
+                self.assertEqual(result.returncode, 0, (run / "console.log").read_text())
+                self.assertIn("Swipes up recognized: 1;", (run / "console.log").read_text())
+                self.assertIn("--observations --context --keys", arguments.read_text())
+                config = (run / "config.toml").read_text()
+                self.assertIn('action = { kind = "keys", keys = ["volume_up"] }', config)
+                self.assertNotIn("trial-swipe", config)
                 return
             if agent != "ok":
                 self.assertEqual(result.returncode, 1)

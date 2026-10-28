@@ -4,7 +4,7 @@ set -euo pipefail
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 usage() {
   cat <<'HELP'
-Usage: ./tests/run-takeover-trial.sh --device "<exact kernel device name>" [--seconds N] [--swipe]
+Usage: ./tests/run-takeover-trial.sh --device "<exact kernel device name>" [--seconds N] [--swipe] [--keys] [--lock]
 Launch as your regular user from a terminal of the Wayland session under test;
 WAYLAND_DISPLAY and XDG_RUNTIME_DIR select the compositor. The compositor is
 the process listening on that display socket, and the session agent joins the
@@ -18,6 +18,11 @@ time is up, releasing the device; Ctrl-C ends it early.
 and runs a command in the session that appends a timestamp to fired.log in the
 run's log directory. Every other touch should behave exactly as before. The
 trial then fails unless the swipe ran its command at least once.
+--keys adds a three-finger swipe up that presses volume up through a generated
+keyboard; the trial fails unless that swipe was recognized at least once.
+--lock expects the session to be locked and unlocked during the trial: the
+device must return to its compositor while locked, be taken over again after
+the last unlock, and the session must end on its desktop.
 Temporarily installs Prek's udev metadata rule under /run/udev/rules.d and a
 root-owned trial configuration under /run/prek-trial; both are removed on exit,
 as is the broker's /run/prek device registry when the trial created it.
@@ -29,11 +34,15 @@ HELP
 device=""
 seconds=60
 swipe=""
+keys=""
+lock=""
 while (($#)); do
   case "$1" in
     --device) device=${2:-}; shift 2 ;;
     --seconds) seconds=${2:-}; shift 2 ;;
     --swipe) swipe=1; shift ;;
+    --keys) keys=1; shift ;;
+    --lock) lock=1; shift ;;
     --help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac
@@ -140,6 +149,20 @@ action = { kind = "command", argv = ["$sh", "-c", "date -u +%T.%N >> $run/fired.
 CONFIG
   agent_flags+=(--commands)
 fi
+if [[ -n $keys ]]; then
+  cat >> "$run/config.toml" <<CONFIG
+
+[[rules]]
+id = "trial-keys"
+priority = 1
+devices = ["trial"]
+contexts = ["desktop"]
+delivery = "buffer"
+trigger = { kind = "swipe", fingers = 3, direction = "up", travel = "15mm", fallback_travel = "0.1norm" }
+action = { kind = "keys", keys = ["volume_up"] }
+CONFIG
+  agent_flags+=(--keys)
+fi
 "$prek" check --config "$run/config.toml" --json > "$run/check.json"
 # The compositor holding capabilities is not dumpable, so only root sees its descriptors.
 display="$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"
@@ -230,6 +253,14 @@ if [[ -n $swipe ]]; then
   printf 'Also swipe down with three fingers a few times; each swipe should run\n'
   printf 'the trial command instead of reaching the application under your fingers.\n\n'
 fi
+if [[ -n $keys ]]; then
+  printf 'Also swipe up with three fingers a few times; each swipe should raise\n'
+  printf 'the volume one step instead of reaching the application under your fingers.\n\n'
+fi
+if [[ -n $lock ]]; then
+  printf 'Lock the session (power key), wait a few seconds, wake and unlock it,\n'
+  printf 'then keep using "%s" until the timer ends.\n\n' "$device"
+fi
 for _ in $(seq "$((seconds * 10 + 100))"); do
   if [[ -s $run/session.status ]]; then break; fi
   sleep 0.1
@@ -241,14 +272,26 @@ if [[ $agent_status != 0 ]]; then
 fi
 wait "$broker"
 broker=""
-grep -E 'taken over|stays with its original consumer|keeps no consumer evidence' \
+grep -E 'taken over|stays with its original consumer|keeps no consumer evidence|forwarded' \
   "$run/broker.log" || true
 if ! grep -q 'taken over at a neutral idle cut' "$run/broker.log"; then
   echo "\"$device\" was never taken over." >&2
   exit 1
 fi
 losses=$(sed -n '/taken over at a neutral idle cut/,$p' "$run/broker.log" | grep -c 'lost its context' || true)
-if ((losses > 0)); then
+if [[ -n $lock ]]; then
+  retaken=$(awk '/lost its context/ { n = 0 } /taken over at a neutral idle cut/ { n++ } END { print n + 0 }' \
+    "$run/broker.log")
+  printf 'Context losses after takeover: %d; takeovers after the last loss: %d\n' "$losses" "$retaken"
+  if ((losses == 0)); then
+    echo "The seat never left its desktop, so the lock was not exercised." >&2
+    exit 1
+  fi
+  if ((retaken == 0)); then
+    echo "\"$device\" was not taken over again after the last unlock." >&2
+    exit 1
+  fi
+elif ((losses > 0)); then
   echo "The seat lost its context $losses times, so the takeover did not hold." >&2
   exit 1
 fi
@@ -256,10 +299,18 @@ if [[ $agent_status != 0 ]]; then
   echo "The session agent exited with status $agent_status, so the takeover was not verified." >&2
   exit 1
 fi
-left=$(grep -E '^context [A-Za-z]+;' "$run/session.log" | grep -vc '^context Desktop;' || true)
-if ((left > 0)); then
-  echo "The seat's context left Desktop $left times during the trial." >&2
-  exit 1
+if [[ -n $lock ]]; then
+  last=$(grep -E '^context [A-Za-z]+;' "$run/session.log" | tail -n 1)
+  if [[ -n $last && $last != "context Desktop;"* ]]; then
+    echo "The session ended outside its desktop: $last" >&2
+    exit 1
+  fi
+else
+  left=$(grep -E '^context [A-Za-z]+;' "$run/session.log" | grep -vc '^context Desktop;' || true)
+  if ((left > 0)); then
+    echo "The seat's context left Desktop $left times during the trial." >&2
+    exit 1
+  fi
 fi
 if [[ -n $swipe ]]; then
   matched=$(grep -c '^Matched {.* rule: "trial-swipe"' "$run/session.log" || true)
@@ -267,6 +318,14 @@ if [[ -n $swipe ]]; then
   printf 'Swipes recognized: %d; commands run: %d\n' "$matched" "$fired"
   if ((fired == 0)); then
     echo "The three-finger swipe never ran its command." >&2
+    exit 1
+  fi
+fi
+if [[ -n $keys ]]; then
+  pressed=$(grep -c '^Matched {.* rule: "trial-keys"' "$run/session.log" || true)
+  printf 'Swipes up recognized: %d; each should have raised the volume\n' "$pressed"
+  if ((pressed == 0)); then
+    echo "The three-finger swipe up was never recognized." >&2
     exit 1
   fi
 fi
