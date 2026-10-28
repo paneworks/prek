@@ -4,7 +4,7 @@ set -euo pipefail
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 usage() {
   cat <<'HELP'
-Usage: ./tests/run-takeover-trial.sh --device "<exact kernel device name>" [--seconds N]
+Usage: ./tests/run-takeover-trial.sh --device "<exact kernel device name>" [--seconds N] [--swipe]
 Launch as your regular user from a terminal of the Wayland session under test;
 WAYLAND_DISPLAY and XDG_RUNTIME_DIR select the compositor. The compositor is
 the process listening on that display socket, and the session agent joins the
@@ -14,6 +14,10 @@ temporary route broker for N seconds (default 60, 10..300) with no rules, so
 input should behave exactly as before. The broker takes the device over only
 after it has been neutral and idle for 100 ms, and exits by itself when the
 time is up, releasing the device; Ctrl-C ends it early.
+--swipe adds one rule for a touchscreen: a three-finger swipe down is consumed
+and runs a command in the session that appends a timestamp to fired.log in the
+run's log directory. Every other touch should behave exactly as before. The
+trial then fails unless the swipe ran its command at least once.
 Temporarily installs Prek's udev metadata rule under /run/udev/rules.d and a
 root-owned trial configuration under /run/prek-trial; both are removed on exit,
 as is the broker's /run/prek device registry when the trial created it.
@@ -24,10 +28,12 @@ HELP
 }
 device=""
 seconds=60
+swipe=""
 while (($#)); do
   case "$1" in
     --device) device=${2:-}; shift 2 ;;
     --seconds) seconds=${2:-}; shift 2 ;;
+    --swipe) swipe=1; shift ;;
     --help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac
@@ -119,6 +125,21 @@ allowed_seats = ["seat0"]
 [devices.trial]
 name = "$device"
 CONFIG
+agent_flags=(--observations --context)
+if [[ -n $swipe ]]; then
+  sh=$(command -v sh)
+  cat >> "$run/config.toml" <<CONFIG
+
+[[rules]]
+id = "trial-swipe"
+devices = ["trial"]
+contexts = ["desktop"]
+delivery = "buffer"
+trigger = { kind = "swipe", fingers = 3, direction = "down", travel = "15mm", fallback_travel = "0.1norm" }
+action = { kind = "command", argv = ["$sh", "-c", "date -u +%T.%N >> $run/fired.log"] }
+CONFIG
+  agent_flags+=(--commands)
+fi
 "$prek" check --config "$run/config.toml" --json > "$run/check.json"
 # The compositor holding capabilities is not dumpable, so only root sees its descriptors.
 display="$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"
@@ -176,7 +197,7 @@ cat > "$run/agent.sh" <<AGENT
 #!/bin/sh
 echo \$\$ > "$run/launcher.pid"
 while [ ! -e "$run/agent.go" ]; do sleep 0.05; done
-"$prek" session --socket "$socket" --display "$WAYLAND_DISPLAY" --observations --context \\
+"$prek" session --socket "$socket" --display "$WAYLAND_DISPLAY" ${agent_flags[*]} \\
   --duration $((seconds - 2)) > "$run/session.log" 2>&1 &
 echo \$! > "$run/session.pid"
 wait \$!
@@ -205,6 +226,10 @@ if [[ ! -s $run/session.pid ]]; then
 fi
 printf '\nType and use "%s" normally for %d seconds. If it stops responding,\n' "$device" "$seconds"
 printf 'wait for the timer or press Ctrl-C; the broker then releases it.\n\n'
+if [[ -n $swipe ]]; then
+  printf 'Also swipe down with three fingers a few times; each swipe should run\n'
+  printf 'the trial command instead of reaching the application under your fingers.\n\n'
+fi
 for _ in $(seq "$((seconds * 10 + 100))"); do
   if [[ -s $run/session.status ]]; then break; fi
   sleep 0.1
@@ -235,4 +260,13 @@ left=$(grep -E '^context [A-Za-z]+;' "$run/session.log" | grep -vc '^context Des
 if ((left > 0)); then
   echo "The seat's context left Desktop $left times during the trial." >&2
   exit 1
+fi
+if [[ -n $swipe ]]; then
+  matched=$(grep -c '^Matched {.* rule: "trial-swipe"' "$run/session.log" || true)
+  fired=$(wc -l < "$run/fired.log" 2>/dev/null || echo 0)
+  printf 'Swipes recognized: %d; commands run: %d\n' "$matched" "$fired"
+  if ((fired == 0)); then
+    echo "The three-finger swipe never ran its command." >&2
+    exit 1
+  fi
 fi
