@@ -62,13 +62,17 @@ fn events(values: &[(u16, u16, i32)]) -> Vec<InputEvent> {
 }
 
 fn prepared(fixture: &mut Fixture) {
+    prepared_device(fixture, &device());
+}
+
+fn prepared_device(fixture: &mut Fixture, device: &Device) {
     let now = monotonic().unwrap();
     let descriptor = Descriptor::mirror(
-        &device(),
+        device,
         KernelIdentity {
             bus: 3,
-            vendor: 1,
-            product: 1,
+            vendor: device.vendor,
+            product: device.product,
             version: 1,
         },
         None,
@@ -106,7 +110,7 @@ fn prepared(fixture: &mut Fixture) {
         )
         .unwrap();
     fixture.stream.outputs.insert(
-        device().source,
+        device.source.clone(),
         Output {
             fence: fixture.owner.fence,
             virtual_device,
@@ -220,4 +224,125 @@ fn a_failed_grab_classification_or_readiness_refuses_the_source_and_removes_its_
             _ => assert!(matches!(disposition, ReaderDisposition::Keep)),
         }
     }
+}
+
+#[test]
+fn a_taken_over_touchscreen_maps_onto_the_only_output_and_dispatches_its_swipe() {
+    use crate::input::{ABS_MT_POSITION_X, ABS_MT_POSITION_Y, ABS_MT_SLOT, ABS_MT_TRACKING_ID};
+    let mut touch = crate::transport::tests::touch();
+    for axis in touch.axes.values_mut() {
+        axis.fuzz = 0;
+    }
+    touch.identity = "test:touch".into();
+    touch.name = "Prek test touchscreen".into();
+    touch.physical = "fixture/touch".into();
+    touch.path = String::new();
+    let mut config = profile();
+    config.policy.allowed_devices = vec!["touch".into()];
+    config.devices = BTreeMap::from([(
+        "touch".into(),
+        Selector {
+            identity: Some(touch.identity.clone()),
+            ..Selector::default()
+        },
+    )]);
+    let rule = &mut config.rules[0];
+    rule.devices = vec!["touch".into()];
+    rule.contexts = vec![crate::config::Context::Desktop];
+    rule.delivery = Delivery::Buffer;
+    rule.trigger = Trigger::Swipe {
+        fingers: 3,
+        direction: crate::config::Direction::Down,
+        travel: crate::config::Distance::Millimetres(15.0),
+        fallback_travel: crate::config::Distance::Normalized(0.1),
+        continuous: false,
+    };
+    let mut owner = owner();
+    owner.context.as_mut().unwrap().snapshot.outputs = vec![crate::context::OutputState {
+        geometry: crate::gestures::Output {
+            name: "DSI-1".into(),
+            pixel_width: 600.0,
+            pixel_height: 1200.0,
+            scale: 1.0,
+            origin: crate::gestures::Point { x: 0.0, y: 0.0 },
+            transform: crate::gestures::Transform::Normal,
+        },
+        geometry_generation: 2,
+        screen: crate::config::Screen::On,
+    }];
+    let mut fixture = Fixture::subscribed(config, owner);
+    fixture
+        .stream
+        .push(Record::Device {
+            device: touch.clone(),
+            keys: BTreeSet::new(),
+            contacts: vec![],
+        })
+        .unwrap();
+    prepared_device(&mut fixture, &touch);
+    let disposition = fixture
+        .stream
+        .take_over(&touch, &mut Fake::default())
+        .unwrap();
+    assert!(matches!(disposition, ReaderDisposition::Cutover(_)));
+    fixture.stream.attach_takeover(&touch.source).unwrap();
+    assert_eq!(
+        fixture.stream.mapped[&touch.source],
+        Some(("DSI-1".into(), 2))
+    );
+    let mut push = |sequence: u64, wait: u64, values: Vec<(u16, u16, i32)>| {
+        std::thread::sleep(Duration::from_millis(wait));
+        let mut events: Vec<_> = values
+            .into_iter()
+            .map(|(kind, code, value)| RawEvent { kind, code, value })
+            .collect();
+        events.push(RawEvent {
+            kind: EV_SYN,
+            code: SYN_REPORT,
+            value: 0,
+        });
+        fixture
+            .stream
+            .push(Record::Frame {
+                frame: Frame {
+                    source: touch.source.clone(),
+                    at: monotonic().unwrap(),
+                    sequence,
+                    events,
+                },
+            })
+            .unwrap();
+    };
+    let mut down = vec![(EV_KEY, 0x14a, 1)];
+    let mut moved = Vec::new();
+    let mut up = vec![(EV_KEY, 0x14a, 0)];
+    for slot in 0..3 {
+        down.extend([
+            (crate::input::EV_ABS, ABS_MT_SLOT, slot),
+            (crate::input::EV_ABS, ABS_MT_TRACKING_ID, slot + 10),
+            (crate::input::EV_ABS, ABS_MT_POSITION_X, 1000 + slot * 500),
+            (crate::input::EV_ABS, ABS_MT_POSITION_Y, 1000),
+        ]);
+        moved.extend([
+            (crate::input::EV_ABS, ABS_MT_SLOT, slot),
+            (crate::input::EV_ABS, ABS_MT_POSITION_Y, 2500),
+        ]);
+        up.extend([
+            (crate::input::EV_ABS, ABS_MT_SLOT, slot),
+            (crate::input::EV_ABS, ABS_MT_TRACKING_ID, -1),
+        ]);
+    }
+    push(1, 0, down);
+    push(2, 140, moved);
+    push(3, 40, up);
+    let messages = fixture.drain();
+    assert!(
+        messages.iter().any(|message| matches!(
+            message,
+            Message::Outcome {
+                report: Report::Dispatch { .. }
+            }
+        )),
+        "{messages:?}"
+    );
 }
