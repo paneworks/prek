@@ -185,6 +185,7 @@ fn physical_file(fixture: &mut Fixture, original: &Device, name: &str) -> PathBu
             offered: now,
             started: now,
             in_flight: None,
+            queued: None,
             sequence: 0,
         },
     );
@@ -332,6 +333,35 @@ fn sole_worker_interleaves_mixed_input_and_generated_reports_on_owned_regular_fi
     }
     assert_eq!(events(&generated), [(42, 1), (42, 2), (42, 0)]);
     assert_eq!(events(&physical), [(48, 1), (48, 0)]);
+}
+
+#[test]
+fn a_forwarded_frame_records_its_delay_for_the_taken_over_device() {
+    let mut fixture = Fixture::new(profile(), owner());
+    let physical = physical_file(&mut fixture, &device(), "physical-delays");
+    let source = device().source;
+    fixture.stream.forwarding.insert(
+        source.clone(),
+        crate::route_worker::latency::Forwarding::new("Delays".into(), Duration::ZERO),
+    );
+    fixture
+        .stream
+        .push(Record::Frame {
+            frame: raw_frame(&device(), 1, &[(48, 1)]),
+        })
+        .unwrap();
+    for _ in 0..4 {
+        fixture.stream.flush().unwrap();
+    }
+    assert_eq!(events(&physical), [(48, 1)]);
+    let summary = fixture.stream.forwarding[&source].summary();
+    assert!(
+        summary.starts_with("routing worker: Delays forwarded 1 frames; Prek overhead median ≤ "),
+        "{summary}"
+    );
+    fixture.stream.outputs.clear();
+    fixture.stream.settle_forwarding();
+    assert!(fixture.stream.forwarding.is_empty());
 }
 
 #[test]
@@ -544,6 +574,7 @@ fn a_late_generated_reply_cannot_mutate_a_physical_output_with_equal_source_numb
             offered: now,
             started: now,
             in_flight: None,
+            queued: None,
             sequence: 0,
         },
     );

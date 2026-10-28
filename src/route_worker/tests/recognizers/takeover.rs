@@ -117,6 +117,7 @@ fn prepared(fixture: &mut Fixture) {
             offered: now,
             started: now,
             in_flight: None,
+            queued: None,
             sequence: 0,
         },
     );

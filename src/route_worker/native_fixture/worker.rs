@@ -214,6 +214,7 @@ fn serve(held: &mut Option<Owned>) -> io::Result<()> {
                 offered: Duration::ZERO,
                 started: now,
                 in_flight: None,
+                queued: None,
                 sequence: 0,
             },
         );

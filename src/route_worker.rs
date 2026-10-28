@@ -29,6 +29,7 @@ use std::{
 
 mod key_control;
 mod keys;
+mod latency;
 #[cfg(feature = "native-test-harness")]
 #[doc(hidden)]
 pub mod native_fixture;
@@ -57,6 +58,7 @@ struct Output {
     offered: Duration,
     started: Duration,
     in_flight: Option<u64>,
+    queued: Option<(Duration, Duration)>,
     sequence: u64,
 }
 #[cfg(feature = "native-test-harness")]
@@ -135,6 +137,7 @@ pub struct Stream {
     key_holds: BTreeMap<String, Duration>,
     refused: BTreeSet<Source>,
     committed: BTreeMap<Source, takeover::Committed>,
+    forwarding: BTreeMap<Source, latency::Forwarding>,
     last_input: BTreeMap<Source, Duration>,
     key_generation: u64,
     key_failure: Option<io::Error>,
@@ -331,6 +334,7 @@ impl Stream {
             key_holds: BTreeMap::new(),
             refused: BTreeSet::new(),
             committed: BTreeMap::new(),
+            forwarding: BTreeMap::new(),
             last_input: BTreeMap::new(),
             key_generation: 0,
             key_failure: None,
@@ -339,6 +343,22 @@ impl Stream {
     fn queue(&mut self, message: Message) -> io::Result<()> {
         self.messages
             .push_reserved(message, self.pending.len(), self.pending_bytes)
+    }
+    /// Logs and drops the forwarding delays of devices that no longer have an output.
+    fn settle_forwarding(&mut self) {
+        let outputs = &self.outputs;
+        self.forwarding.retain(|source, forwarding| {
+            outputs.contains_key(source) || {
+                eprintln!("{}", forwarding.summary());
+                false
+            }
+        });
+    }
+    /// Logs the forwarding delays of every device taken over since the last report.
+    pub fn report_forwarding(&mut self) {
+        for forwarding in std::mem::take(&mut self.forwarding).into_values() {
+            eprintln!("{}", forwarding.summary());
+        }
     }
     fn retire(&mut self, recovery: crate::router::Recovery, now: Duration) {
         if let Some(output) = self.outputs.remove(&recovery.source) {
@@ -711,6 +731,7 @@ impl Stream {
                 offered: Duration::ZERO,
                 started: now,
                 in_flight: None,
+                queued: None,
                 sequence: 0,
             },
         );
@@ -1180,11 +1201,18 @@ impl InputSink for Stream {
                 };
                 output.virtual_device.enqueue(&frame)?;
                 output.in_flight = Some(scheduled.ticket);
+                output.queued = Some((scheduled.frame.at, scheduled.due));
             }
             if output.in_flight.is_some() && output.virtual_device.flush()? == Flush::Complete {
                 let ticket = output.in_flight.take().unwrap();
+                let written = monotonic()?;
+                if let Some((at, due)) = output.queued.take()
+                    && let Some(forwarding) = self.forwarding.get_mut(&source)
+                {
+                    forwarding.record(at, due, written);
+                }
                 seat.routing
-                    .delivered_after_input(&source, ticket, monotonic()?)?;
+                    .delivered_after_input(&source, ticket, written)?;
             }
         }
         self.messages.flush(&mut self.channel)

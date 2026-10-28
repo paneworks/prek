@@ -175,8 +175,12 @@ impl Stream {
             "routing worker: {} taken over at a neutral idle cut",
             device.name
         );
+        let name = device.name.clone();
         seat.routing.attach(device, &ready, None, at)?;
         self.grabbed.insert(source.clone());
+        self.settle_forwarding();
+        self.forwarding
+            .insert(source.clone(), latency::Forwarding::new(name, at));
         Ok(())
     }
     /// Refuses a failed attempt and returns any original events it consumed.

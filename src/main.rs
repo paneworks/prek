@@ -515,12 +515,14 @@ fn run(command: Command) -> io::Result<()> {
                 "Routing worker: each allowed device moves to Prek only after it is neutral and idle."
             );
             let mut stream = prek::route_worker::Stream::new(config, channel)?;
-            linux::observe_supervised(
+            let result = linux::observe_supervised(
                 &[],
                 duration.map(Duration::from_secs),
                 &mut stream,
                 &mut health,
-            )
+            );
+            stream.report_forwarding();
+            result
         }
         Command::ObserveWorker {
             config: path,
