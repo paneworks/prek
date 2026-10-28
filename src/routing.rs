@@ -1351,6 +1351,9 @@ impl Routing {
     pub(crate) fn has_source(&self, source: &Source) -> bool {
         self.routes.contains_key(source)
     }
+    pub(crate) fn device(&self, source: &Source) -> Option<&Device> {
+        self.routes.get(source).map(|route| route.router.device())
+    }
     #[track_caller]
     pub fn recover(&mut self, source: &Source) {
         let domain = self

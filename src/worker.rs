@@ -37,6 +37,34 @@ pub struct ProvidedContext {
     pub snapshot: crate::context::Snapshot,
 }
 impl Subscription {
+    /// The mapping of a touch device onto its selector's named output, or onto
+    /// this session's only output; `None` for devices without contact axes.
+    pub(crate) fn touch_mapping(
+        &self,
+        config: &Config,
+        device: &crate::input::Device,
+    ) -> Option<crate::gestures::Mapping> {
+        let mut mapping = crate::gestures::Mapping::from_device(device).ok()?;
+        let outputs = self
+            .context
+            .as_ref()
+            .map_or(&[][..], |context| &context.snapshot.outputs[..]);
+        let named = config
+            .devices
+            .values()
+            .filter(|selector| selector.matches(device))
+            .find_map(|selector| selector.output.as_deref());
+        let output = match named {
+            Some(name) => outputs.iter().find(|output| output.geometry.name == name),
+            None if outputs.len() == 1 => outputs.first(),
+            None => None,
+        };
+        if let Some(output) = output {
+            mapping.output = Some(output.geometry.clone());
+            mapping.generation = output.geometry_generation;
+        }
+        Some(mapping)
+    }
     pub(crate) fn same_registration(&self, other: &Self) -> bool {
         self.seat == other.seat && self.fence == other.fence
     }
@@ -170,6 +198,25 @@ struct Observer {
 }
 
 impl Observer {
+    /// Maps each touch device onto this subscription's output geometry; the
+    /// engine ignores a mapping that did not change.
+    fn map_touch(&mut self, config: &Config, now: Duration) -> io::Result<()> {
+        let records: Vec<_> = self
+            .engine
+            .devices()
+            .filter_map(|device| {
+                Some(Record::Mapping {
+                    source: device.source.clone(),
+                    at: now,
+                    mapping: self.subscription.touch_mapping(config, device)?,
+                })
+            })
+            .collect();
+        for record in records {
+            self.engine.push(record)?;
+        }
+        Ok(())
+    }
     fn sync_recognition(&mut self, config: &Config, now: Duration) -> io::Result<Vec<Report>> {
         let ready = crate::recognition::permitted_subscription(
             config,
@@ -527,6 +574,7 @@ impl Registry {
                     *observer.engine.authority_mut() = authority;
                 }
                 observer.subscription = subscription;
+                observer.map_touch(&self.config, now)?;
                 initial_inputs.extend(observer.sync_recognition(&self.config, now)?);
                 initial_inputs.extend(observer.take_recognition_reports(None)?);
                 continue;
@@ -569,6 +617,7 @@ impl Registry {
                 now,
             )?;
             if let Some(observer) = self.observers.get_mut(&subscription.seat) {
+                observer.map_touch(&self.config, now)?;
                 initial_inputs.extend(observer.sync_recognition(&self.config, now)?);
                 initial_inputs.extend(observer.take_recognition_reports(None)?);
             }

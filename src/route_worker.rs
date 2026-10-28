@@ -30,6 +30,7 @@ use std::{
 mod key_control;
 mod keys;
 mod latency;
+mod mapping;
 #[cfg(feature = "native-test-harness")]
 #[doc(hidden)]
 pub mod native_fixture;
@@ -139,6 +140,7 @@ pub struct Stream {
     committed: BTreeMap<Source, takeover::Committed>,
     forwarding: BTreeMap<Source, latency::Forwarding>,
     key_actions: BTreeMap<String, u64>,
+    mapped: BTreeMap<Source, Option<(String, u64)>>,
     last_input: BTreeMap<Source, Duration>,
     key_generation: u64,
     key_failure: Option<io::Error>,
@@ -337,6 +339,7 @@ impl Stream {
             committed: BTreeMap::new(),
             forwarding: BTreeMap::new(),
             key_actions: BTreeMap::new(),
+            mapped: BTreeMap::new(),
             last_input: BTreeMap::new(),
             key_generation: 0,
             key_failure: None,
@@ -420,6 +423,7 @@ impl Stream {
             }
         }
         self.outputs.retain(|source, _| source.seat != seat);
+        self.mapped.retain(|source, _| source.seat != seat);
         self.messages.discard_seat(seat);
         self.pending.retain(|pending| {
             if pending.seat == seat {
@@ -677,6 +681,7 @@ impl Stream {
             seat.subscription = subscription;
             seat.expires = now + protocol::LEASE;
             let name = seat.subscription.seat.clone();
+            self.remap(&name, now)?;
             self.sync_seat(&name, now)?;
             self.collect(&name, now, None)?;
         }
@@ -1013,6 +1018,7 @@ impl InputSink for Stream {
             self.grabbed.remove(&source);
             self.refused.remove(&source);
             self.committed.remove(&source);
+            self.mapped.remove(&source);
             self.last_input.remove(&source);
         }
         Ok(())

@@ -994,6 +994,14 @@ every listed `keys` code and every listed `absolute_axes` code (numeric
 `EV_ABS` codes, for example `53`/`54` for multi-touch X/Y), and which has every
 listed input `properties` code.
 
+Prek maps a touchscreen onto the output named by its selector's `output`, or
+onto the session's only output when none is named, in both route and
+observation workers. The
+output geometry comes from the session's Wayland `wl_output`/`xdg-output`
+state. With several outputs and no `output`, or with a named output that is
+not present, the touchscreen stays unmapped and touch rules that need a
+position, region or desktop context do not apply to it.
+
 A `shapes` template has a `name`, 2–2048 `points`, a `threshold`
 (minimum similarity in `(0, 1]`) and a `margin` (minimum lead over the runner-up
 in `(0, 1]`; a smaller lead is ambiguous and produces no match). Optional

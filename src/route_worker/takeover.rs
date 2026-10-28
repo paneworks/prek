@@ -176,7 +176,11 @@ impl Stream {
             device.name
         );
         let name = device.name.clone();
-        seat.routing.attach(device, &ready, None, at)?;
+        let mapping = seat.subscription.touch_mapping(&self.config, &device);
+        if let Some(mapping) = &mapping {
+            self.mapped.insert(source.clone(), mapping::target(mapping));
+        }
+        seat.routing.attach(device, &ready, mapping, at)?;
         self.grabbed.insert(source.clone());
         self.settle_forwarding();
         self.forwarding

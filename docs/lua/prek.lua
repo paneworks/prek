@@ -46,6 +46,7 @@
 ---@field keys? prek.Key[] Required capabilities, not held-key conditions.
 ---@field absolute_axes? integer[]
 ---@field properties? integer[]
+---@field output? string Output a matched touchscreen maps to; default the session's only output.
 
 ---@class (exact) prek.Policy
 ---@field allowed_devices? string[]

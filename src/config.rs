@@ -270,6 +270,8 @@ pub struct Selector {
     pub keys: Vec<Key>,
     pub absolute_axes: Vec<u16>,
     pub properties: Vec<u16>,
+    /// Output a matched touch device maps to; the session's only output when unset.
+    pub output: Option<String>,
 }
 impl Selector {
     pub fn matches(&self, device: &Device) -> bool {
@@ -1068,6 +1070,15 @@ impl Config {
             if id.is_empty() || !selector.constrained() {
                 return fail(format!(
                     "devices.{id}: selector requires identity, path or capability constraints"
+                ));
+            }
+            if selector
+                .output
+                .as_ref()
+                .is_some_and(|name| name.is_empty() || name.len() > 256)
+            {
+                return fail(format!(
+                    "devices.{id}.output: use a nonempty output name of at most 256 bytes"
                 ));
             }
         }
