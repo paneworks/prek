@@ -55,6 +55,8 @@ let
     ++ lib.optionals cfg.session.reconnect [ "--logind-library" (toString cfg.logindLibrary) ]
     ++ lib.optional cfg.session.observations "--observations"
     ++ lib.optional cfg.session.context "--context"
+    ++ lib.optional cfg.session.commands "--commands"
+    ++ lib.optional cfg.session.keys "--keys"
     ++ lib.optional cfg.session.lua "--lua"
     ++ lib.optional cfg.session.input "--input"
     ++ lib.optional cfg.session.recognizers "--recognizers"
@@ -122,6 +124,8 @@ in {
       enable = mkEnableOption "the prek-session launcher, to run as a child of the compositor login session" // { default = true; };
       observations = mkOption { type = types.bool; default = true; description = "Request own-seat configured semantic outcomes."; };
       context = mkOption { type = types.bool; default = true; description = "Request broker-verified compositor context."; };
+      commands = mkEnableOption "root-configured argv actions for gestures consumed in route mode";
+      keys = mkEnableOption "root-configured key and remap actions through a generated keyboard in route mode";
       lua = mkOption { type = types.bool; default = true; description = "Run approved callbacks in the unprivileged session helper."; };
       input = mkEnableOption "permitted normalized Lua input events; protected Lua policy must also allow them";
       recognizers = mkEnableOption "source-bound custom Lua recognizers; protected input policy and owning desktop context are required";
@@ -139,6 +143,7 @@ in {
       { assertion = cfg.configFile == null || cfg.luaConfig == null && cfg.luaModules == { }; message = "services.prek: choose configFile or inline luaConfig/luaModules."; }
       { assertion = lib.all moduleName (builtins.attrNames cfg.luaModules); message = "services.prek.luaModules: use bounded dotted identifiers outside the reserved prek namespace."; }
       { assertion = cfg.session.lua || !(cfg.session.input || cfg.session.recognizers || cfg.session.ruleMutations); message = "services.prek.session: input, recognizers and ruleMutations require lua."; }
+      { assertion = route || !(cfg.session.commands || cfg.session.keys); message = "services.prek.session: commands and keys require route mode."; }
     ];
     services.prek.configurationPackage = configuration;
     services.prek.session.package = sessionPackage;

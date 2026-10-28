@@ -89,7 +89,10 @@ compiler when the root broker starts.
 Wayland compositor at a neutral idle cut, from boot, so it also requires
 `allowPhysicalTakeover = true`. It widens the unit to `char-input rw` (LED
 feedback), `/dev/uinput rw` and a writable `/run/prek` device registry. Try one
-device with `tests/run-takeover-trial.sh` before enabling it here.
+device with `tests/run-takeover-trial.sh` before enabling it here. Set
+`session.commands = true` so the session agent runs the configuration's argv
+actions for the gestures Prek consumes, and `session.keys = true` so its key and
+remap actions type through a generated keyboard; both require route mode.
 
 The generated tree is available as `services.prek.configurationPackage`, with
 `config.lua`, `modules/` and `validation.json`. The service reads its store path

@@ -107,6 +107,10 @@ enum Command {
         /// a routing broker; fresh compositor context is negotiated implicitly.
         #[arg(long)]
         commands: bool,
+        /// Let root-configured key and remap actions type into this session through
+        /// a generated keyboard. Requires a routing broker.
+        #[arg(long)]
+        keys: bool,
         /// Run approved Lua callbacks, timers and named handlers in a separate VM.
         #[arg(long)]
         lua: bool,
@@ -428,6 +432,7 @@ fn run(command: Command) -> io::Result<()> {
             observations,
             context,
             commands,
+            keys,
             lua,
             rule_mutations,
             input,
@@ -440,6 +445,7 @@ fn run(command: Command) -> io::Result<()> {
                 observations,
                 context,
                 commands,
+                keys,
                 lua,
                 rule_mutations,
                 input,
@@ -1350,6 +1356,7 @@ struct SessionOptions {
     observations: bool,
     context: bool,
     commands: bool,
+    keys: bool,
     lua: bool,
     rule_mutations: bool,
     input: bool,
@@ -1378,6 +1385,7 @@ impl SessionOptions {
             (self.observations, "--observations"),
             (self.context, "--context"),
             (self.commands, "--commands"),
+            (self.keys, "--keys"),
             (self.lua, "--lua"),
             (self.rule_mutations, "--rule-mutations"),
             (self.input, "--input"),
@@ -1410,6 +1418,7 @@ mod session_launcher_tests {
             observations: true,
             context: true,
             commands: true,
+            keys: true,
             lua: true,
             rule_mutations: true,
             input: true,
@@ -1436,6 +1445,7 @@ mod session_launcher_tests {
                 "--observations",
                 "--context",
                 "--commands",
+                "--keys",
                 "--lua",
                 "--rule-mutations",
                 "--input",
@@ -1483,6 +1493,7 @@ fn run_session(
         observations,
         context,
         commands,
+        keys,
         lua,
         rule_mutations,
         input,
@@ -1511,11 +1522,14 @@ fn run_session(
     if observations {
         requested.insert(Capability::Observations);
     }
-    if context || effects || lua {
+    if context || effects || keys || lua {
         requested.insert(Capability::Context);
     }
     if commands {
         requested.insert(Capability::Commands);
+    }
+    if keys {
+        requested.insert(Capability::SyntheticInput);
     }
     if lua {
         requested.insert(Capability::LuaEvents);

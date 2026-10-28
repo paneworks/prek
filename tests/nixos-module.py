@@ -41,6 +41,8 @@ def main():
         assert "--rule-mutations" in help_text and "--display" in help_text
         assert "--reconnect" in help_text
         assert ("--reconnect" in launcher.read_text()) == (name != "reconnectDisabled")
+        assert ("--commands" in launcher.read_text()) == (name == "route")
+        assert ("--keys" in launcher.read_text()) == (name == "route")
         assert ("--logind-library" in launcher.read_text()) == (name != "reconnectDisabled")
         assert unit["KillMode"] == "control-group" and unit["TimeoutStopSec"] == 5
         if name == "route":

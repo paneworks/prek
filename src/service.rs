@@ -157,6 +157,15 @@ fn registration_capabilities(
                 )
         })
     });
+    let keys = routing.is_some_and(|config| {
+        config.rules.iter().any(|rule| {
+            rule.enabled
+                && matches!(
+                    rule.action,
+                    crate::config::Action::Keys { .. } | crate::config::Action::Remap { .. }
+                )
+        })
+    });
     if capabilities.iter().any(|capability| {
         !(matches!(capability, Capability::Observations | Capability::Context)
             || *capability == Capability::LuaEvents
@@ -194,6 +203,9 @@ fn registration_capabilities(
                 && capabilities.contains(&Capability::Observations)
             || *capability == Capability::Commands
                 && commands
+                && capabilities.contains(&Capability::Context)
+            || *capability == Capability::SyntheticInput
+                && keys
                 && capabilities.contains(&Capability::Context))
     }) || !capabilities.is_empty() && (!observations || role != Role::Agent)
     {
@@ -731,11 +743,10 @@ impl Broker {
                 bound.role == Role::Agent
                     && (bound.capabilities.contains(&Capability::Observations)
                         || self.routing.is_some()
-                            && bound
-                                .capabilities
-                                .iter()
-                                .copied()
-                                .any(protocol::execution_capability))
+                            && bound.capabilities.iter().copied().any(|capability| {
+                                protocol::execution_capability(capability)
+                                    || capability == Capability::SyntheticInput
+                            }))
                     && bound.context.fresh(now)
             })
             .map(|bound| Subscription {
@@ -2077,6 +2088,36 @@ mod tests {
         assert!(!grace.permits(&Request::Heartbeat { fence }, Duration::from_secs(1)));
         grace.remember(next, Duration::from_secs(1)).unwrap();
         assert!(!grace.permits(&Request::Heartbeat { fence }, Duration::from_secs(1)));
+    }
+    #[test]
+    fn key_output_is_negotiated_only_beside_context_for_enabled_routed_key_rules() {
+        let mut config = crate::config::Config::preset("desktop").unwrap();
+        config.mode = crate::config::Mode::Route;
+        config.rules.truncate(1);
+        config.rules[0].enabled = true;
+        config.rules[0].action = Action::Keys {
+            keys: vec![crate::config::Key(115)],
+        };
+        let keys = BTreeSet::from([
+            Capability::Observations,
+            Capability::Context,
+            Capability::SyntheticInput,
+        ]);
+        let negotiate = |routing: Option<&crate::config::Config>, capabilities| {
+            registration_capabilities(routing, None, false, false, true, Role::Agent, capabilities)
+        };
+        assert!(negotiate(Some(&config), &keys).is_ok());
+        assert!(negotiate(None, &keys).is_err());
+        let mut contextless = keys.clone();
+        contextless.remove(&Capability::Context);
+        assert!(negotiate(Some(&config), &contextless).is_err());
+        let mut commands = config.clone();
+        commands.rules[0].action = Action::Command {
+            argv: vec!["true".into()],
+        };
+        assert!(negotiate(Some(&commands), &keys).is_err());
+        config.rules[0].enabled = false;
+        assert!(negotiate(Some(&config), &keys).is_err());
     }
     #[test]
     fn grace_discards_in_flight_reads_and_action_reports_but_not_control_requests() {

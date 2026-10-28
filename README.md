@@ -16,7 +16,8 @@ replay. Ordered temporal sequences now compose those recognizers.
 `prek broker --mode route` takes allowed devices over from the session's
 compositor and forwards them through equivalent virtual devices;
 `prek session --commands` runs root-configured argv actions for the gestures it
-consumes.
+consumes, and `--keys` lets root-configured key and remap actions type through a
+generated keyboard while the session's desktop is unlocked.
 
 The library also has virtual-device preflight, a bounded raw-frame router and
 a configured routing coordinator.

@@ -65,6 +65,8 @@ let
         devices = {keyboard={keys={"KEY_A"}}},
       }
     '';
+    session.commands = true;
+    session.keys = true;
   };
   cases = { inherit minimal inline fromFile sessionDisabled reconnectDisabled route; };
   snapshot = cfg: {
@@ -89,6 +91,8 @@ let
     { session.lua = false; session.input = true; }
     { session.lua = false; session.recognizers = true; }
     { session.lua = false; session.ruleMutations = true; }
+    { session.commands = true; }
+    { session.keys = true; }
   ];
 in
 assert !(builtins.hasAttr "prek" disabled.systemd.services);
