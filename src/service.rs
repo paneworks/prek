@@ -58,6 +58,15 @@ impl Grace {
         matches!(request, Request::Heartbeat { fence }
             if now < self.expires && self.fences.contains(fence))
     }
+    /// Whether a request sent under a remembered fence is discarded unanswered.
+    fn discards(&self, request: &Request, now: Duration) -> bool {
+        matches!(request, Request::Status { fence } | Request::LuaSource { fence, .. }
+            | Request::ContextRead { fence, .. } | Request::Rules { fence, .. }
+            | Request::RecognizerReady { fence, .. } | Request::Recognize { fence, .. }
+            | Request::RecognitionCancelled { fence, .. } | Request::Authorize { fence, .. }
+            | Request::Complete { fence, .. } | Request::Availability { fence, .. }
+            if now < self.expires && self.fences.contains(fence))
+    }
 }
 
 struct ContextFeed {
@@ -1368,11 +1377,10 @@ impl Broker {
                     })?;
                     let current = request.fence() == Some(bound.fence);
                     let old_heartbeat = bound.previous.permits(&request, now);
-                    // An in-flight status read may precede a transition notice.
-                    // Discard it without acting on stale authority or closing
-                    // the agent before that notice can reach it.
-                    let old_status = matches!(&request, Request::Status { fence } | Request::LuaSource { fence, .. } | Request::ContextRead { fence, .. } | Request::Rules {fence,..} | Request::RecognizerReady {fence,..} | Request::Recognize {fence,..} | Request::RecognitionCancelled {fence,..}
-                        if now < bound.previous.expires && bound.previous.fences.contains(fence));
+                    // An in-flight read or action report may precede a transition
+                    // notice. Discard it without acting on stale authority or
+                    // closing the agent before that notice can reach it.
+                    let old_status = bound.previous.discards(&request, now);
                     if !current && !old_heartbeat && !old_status {
                         return Err(protocol::invalid(
                             "stale broker/configuration/session generation",
@@ -1517,6 +1525,10 @@ impl Broker {
                         Request::Disconnect { .. } => {
                             return Err(io::ErrorKind::UnexpectedEof.into());
                         }
+                        Request::Authorize { .. }
+                        | Request::Complete { .. }
+                        | Request::Availability { .. }
+                            if !current => {}
                         Request::Authorize { id, ordinal, .. } => {
                             if !bound
                                 .capabilities
@@ -2065,6 +2077,54 @@ mod tests {
         assert!(!grace.permits(&Request::Heartbeat { fence }, Duration::from_secs(1)));
         grace.remember(next, Duration::from_secs(1)).unwrap();
         assert!(!grace.permits(&Request::Heartbeat { fence }, Duration::from_secs(1)));
+    }
+    #[test]
+    fn grace_discards_in_flight_reads_and_action_reports_but_not_control_requests() {
+        let fence = Fence {
+            broker: Epoch([1, 2]),
+            configuration: 1,
+            session: 3,
+        };
+        let unissued = Fence {
+            session: 4,
+            ..fence
+        };
+        let mut grace = Grace::default();
+        grace.remember(fence, Duration::ZERO).unwrap();
+        let reports = |fence| {
+            [
+                Request::Status { fence },
+                Request::Availability {
+                    fence,
+                    capabilities: [Capability::Commands].into(),
+                },
+                Request::Authorize {
+                    fence,
+                    id: 1,
+                    ordinal: 1,
+                },
+                Request::Complete {
+                    fence,
+                    id: 1,
+                    ordinal: 1,
+                    result: protocol::Completion::Applied,
+                },
+            ]
+        };
+        let late = Duration::from_millis(999);
+        for request in reports(fence) {
+            assert!(grace.discards(&request, late), "{request:?}");
+            assert!(!grace.permits(&request, late), "{request:?}");
+            assert!(
+                !grace.discards(&request, Duration::from_secs(1)),
+                "{request:?}"
+            );
+        }
+        for request in reports(unissued) {
+            assert!(!grace.discards(&request, Duration::ZERO), "{request:?}");
+        }
+        assert!(!grace.discards(&Request::Heartbeat { fence }, Duration::ZERO));
+        assert!(!grace.discards(&Request::LockRequested { fence }, Duration::ZERO));
     }
     #[test]
     fn context_state_expires_with_freshness_except_a_reported_lock() {
