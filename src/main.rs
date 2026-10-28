@@ -527,7 +527,7 @@ fn run(command: Command) -> io::Result<()> {
                 &mut stream,
                 &mut health,
             );
-            stream.report_forwarding();
+            stream.report();
             result
         }
         Command::ObserveWorker {
@@ -2070,6 +2070,18 @@ fn run_session(
                     fence: offered,
                     event,
                 } if effects && Some(offered) == fence => {
+                    if !json
+                        && let prek::rules::Event::Matched {
+                            rule,
+                            id,
+                            ordinal,
+                            stage,
+                            ..
+                        } = event.as_ref()
+                    {
+                        writeln!(output, "action offered: {rule} {id}/{ordinal} {stage:?}")?;
+                        output.flush()?;
+                    }
                     executor
                         .as_mut()
                         .unwrap()
@@ -2156,6 +2168,10 @@ fn run_session(
                     ordinal,
                     expires,
                 } if effects && Some(granted) == fence => {
+                    if !json {
+                        writeln!(output, "action granted: {id}/{ordinal}")?;
+                        output.flush()?;
+                    }
                     executor.as_mut().unwrap().grant(
                         granted,
                         id,
@@ -2169,6 +2185,10 @@ fn run_session(
                     id,
                     ordinal,
                 } if effects && Some(cancelled) == fence => {
+                    if !json {
+                        writeln!(output, "action cancelled: {id}/{ordinal}")?;
+                        output.flush()?;
+                    }
                     executor
                         .as_mut()
                         .unwrap()
@@ -2237,6 +2257,12 @@ fn run_session(
                 executor.execute_ready_with_lua(monotonic()?, lua_runtime.as_mut())?;
             }
             executor.flush(&mut channel)?;
+            for (id, ordinal, result) in executor.take_reported() {
+                if !json {
+                    writeln!(output, "action {id}/{ordinal}: {result:?}")?;
+                    output.flush()?;
+                }
+            }
         }
         let mut recognizer_failed = false;
         if drained && let Some(runtime) = lua_runtime.as_mut() {

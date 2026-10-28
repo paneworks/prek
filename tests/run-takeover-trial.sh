@@ -313,8 +313,10 @@ else
   fi
 fi
 if [[ -n $swipe ]]; then
-  matched=$(grep -c '^Matched {.* rule: "trial-swipe"' "$run/session.log" || true)
-  fired=$(wc -l < "$run/fired.log" 2>/dev/null || echo 0)
+  matched=$(grep -c '^action offered: trial-swipe ' "$run/session.log" || true)
+  fired=0
+  if [[ -f $run/fired.log ]]; then fired=$(wc -l < "$run/fired.log"); fi
+  grep -E '^action ' "$run/session.log" | tail -n 20 || true
   printf 'Swipes recognized: %d; commands run: %d\n' "$matched" "$fired"
   if ((fired == 0)); then
     echo "The three-finger swipe never ran its command." >&2
@@ -322,7 +324,8 @@ if [[ -n $swipe ]]; then
   fi
 fi
 if [[ -n $keys ]]; then
-  pressed=$(grep -c '^Matched {.* rule: "trial-keys"' "$run/session.log" || true)
+  pressed=$(sed -n 's/.*rule trial-keys queued its keys \([0-9]*\) times.*/\1/p' "$run/broker.log" | tail -n 1)
+  pressed=${pressed:-0}
   printf 'Swipes up recognized: %d; each should have raised the volume\n' "$pressed"
   if ((pressed == 0)); then
     echo "The three-finger swipe up was never recognized." >&2

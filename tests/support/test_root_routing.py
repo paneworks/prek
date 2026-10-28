@@ -827,9 +827,9 @@ done
             for name, text in scripts.items():
                 (mocks / name).write_text(text)
                 (mocks / name).chmod(0o755)
-            matched = "echo 'Matched { version: 1, rule: \"trial-swipe\", id: 1 }'"
+            matched = "echo 'action offered: trial-swipe 1/1 Discrete'"
             fired = f"date >> '{repo}/target/takeover-trial/latest/fired.log'"
-            pressed = "echo 'Matched { version: 1, rule: \"trial-keys\", id: 2 }'"
+            pressed = 'echo "routing worker: rule trial-keys queued its keys 1 times" >&2'
             retaken = 'echo "routing worker: Prek test keyboard taken over at a neutral idle cut" >&2'
             relocked = ('echo "context Locked; previous gesture progress cancelled"; '
                         'echo "context Desktop; previous gesture progress cancelled"')
@@ -846,13 +846,13 @@ case "$1" in
     echo "routing worker: Prek test keyboard taken over at a neutral idle cut" >&2
     {"" if holds else 'echo "routing worker: seat seat0 lost its context: state Unknown" >&2'}
     {retaken if agent == "locks" else ''}
+    {pressed if agent == "presses" else ''}
     sleep 1 ;;
   session) echo "$*" > '{arguments}'; sleep 0.2
     {'exit 1' if agent == "fails" else ''}
     {'echo "context Unknown; previous gesture progress cancelled"' if agent == "leaves" else ''}
     {matched if swipe else ''}
     {fired if agent == "swipes" else ''}
-    {pressed if agent == "presses" else ''}
     {relocked if agent == "locks" else ''} ;;
 esac
 """)

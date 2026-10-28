@@ -138,6 +138,7 @@ pub struct Stream {
     refused: BTreeSet<Source>,
     committed: BTreeMap<Source, takeover::Committed>,
     forwarding: BTreeMap<Source, latency::Forwarding>,
+    key_actions: BTreeMap<String, u64>,
     last_input: BTreeMap<Source, Duration>,
     key_generation: u64,
     key_failure: Option<io::Error>,
@@ -335,6 +336,7 @@ impl Stream {
             refused: BTreeSet::new(),
             committed: BTreeMap::new(),
             forwarding: BTreeMap::new(),
+            key_actions: BTreeMap::new(),
             last_input: BTreeMap::new(),
             key_generation: 0,
             key_failure: None,
@@ -354,10 +356,14 @@ impl Stream {
             }
         });
     }
-    /// Logs the forwarding delays of every device taken over since the last report.
-    pub fn report_forwarding(&mut self) {
+    /// Logs the forwarding delays of every device taken over since the last
+    /// report and how often each key-action rule queued its keys.
+    pub fn report(&mut self) {
         for forwarding in std::mem::take(&mut self.forwarding).into_values() {
             eprintln!("{}", forwarding.summary());
+        }
+        for (rule, count) in std::mem::take(&mut self.key_actions) {
+            eprintln!("routing worker: rule {rule} queued its keys {count} times");
         }
     }
     fn retire(&mut self, recovery: crate::router::Recovery, now: Duration) {
@@ -826,6 +832,15 @@ impl Stream {
         }
         let mut key_work = Vec::new();
         for dispatch in dispatches {
+            if let crate::rules::Event::Matched {
+                rule,
+                action: crate::config::Action::Keys { .. },
+                stage: crate::rules::Stage::Discrete | crate::rules::Stage::Begin,
+                ..
+            } = &dispatch.event
+            {
+                *self.key_actions.entry(rule.clone()).or_default() += 1;
+            }
             if matches!(
                 &dispatch.event,
                 crate::rules::Event::Matched {

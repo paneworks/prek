@@ -63,6 +63,7 @@ pub struct Executor {
     lua_ready: bool,
     groups: BTreeMap<ExecutionKey, ExecutionGroup>,
     emitted: VecDeque<(Fence, u64, u64, String)>,
+    reported: Vec<(u64, u64, Completion)>,
 }
 impl Executor {
     pub fn new(
@@ -93,6 +94,7 @@ impl Executor {
             lua_ready: false,
             groups: BTreeMap::new(),
             emitted: VecDeque::new(),
+            reported: Vec::new(),
         })
     }
     pub fn transition(&mut self, fence: Fence) -> io::Result<()> {
@@ -553,9 +555,22 @@ impl Executor {
             if !channel.send(request, monotonic()?)? {
                 break;
             }
+            if let Request::Complete {
+                id,
+                ordinal,
+                result,
+                ..
+            } = request
+            {
+                self.reported.push((*id, *ordinal, *result));
+            }
             self.outgoing.pop_front();
         }
         Ok(())
+    }
+    /// Completions sent to the broker since the last call.
+    pub fn take_reported(&mut self) -> Vec<(u64, u64, Completion)> {
+        std::mem::take(&mut self.reported)
     }
     pub fn wants_write(&self) -> bool {
         !self.outgoing.is_empty()
@@ -1049,6 +1064,11 @@ mod tests {
                 ..
             }
         )));
+        assert!(executor.take_reported().is_empty());
+        let (mut channel, _broker) = crate::ipc::Channel::pair().unwrap();
+        executor.flush(&mut channel).unwrap();
+        assert_eq!(executor.take_reported(), [(1, 1, Completion::Applied)]);
+        assert!(executor.take_reported().is_empty());
         fs::remove_file(output).unwrap();
     }
 
