@@ -146,6 +146,7 @@ pub(crate) fn rule(id: &str, action: Action) -> Rule {
         seats: vec![],
         contexts: vec![Context::Desktop],
         scope: Scope::Everywhere,
+        region: None,
         output: None,
         screen: None,
         require_keys: vec![],

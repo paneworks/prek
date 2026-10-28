@@ -2,7 +2,7 @@
 //! This is a state model, not peer authentication: the broker registration
 //! layer must verify a binding before supplying it here.
 use crate::{
-    config::{Action, Context, Rule, Scope, Screen},
+    config::{Action, Context, Distance, Edge, Region, Rule, Scope, Screen},
     gestures::{Mapping, Output, Point, Position},
     input::Source,
 };
@@ -22,6 +22,35 @@ pub const DECISION_MAX_AGE: Duration = Duration::from_millis(250);
 pub struct Rect {
     pub origin: Point,
     pub size: Point,
+}
+/// Whether a point lies in a rule's edge strip of an output's logical rectangle.
+fn starts_in(region: &Region, output: Rect, point: Point) -> bool {
+    let Rect { origin, size } = output;
+    let (along, across, length, thickness) = match region.edge {
+        Edge::Top => (point.x - origin.x, point.y - origin.y, size.x, size.y),
+        Edge::Bottom => (
+            point.x - origin.x,
+            origin.y + size.y - point.y,
+            size.x,
+            size.y,
+        ),
+        Edge::Left => (point.y - origin.y, point.x - origin.x, size.y, size.x),
+        Edge::Right => (
+            point.y - origin.y,
+            origin.x + size.x - point.x,
+            size.y,
+            size.x,
+        ),
+    };
+    let depth = match region.depth {
+        Distance::Pixels(depth) => depth,
+        Distance::Normalized(fraction) => fraction * thickness,
+        Distance::Millimetres(_) => return false,
+    };
+    output.contains(point)
+        && across <= depth
+        && along >= region.from * length
+        && along < region.to * length
 }
 impl Rect {
     pub fn contains(self, point: Point) -> bool {
@@ -514,6 +543,7 @@ impl Authority {
             if self.console.as_ref() != Some(&source.seat)
                 || !positions.is_empty()
                 || rule.scope != Scope::Everywhere
+                || rule.region.is_some()
                 || rule.output.is_some()
                 || !rule.contexts.contains(&Context::Console)
                 || rule.screen.is_some()
@@ -585,6 +615,16 @@ impl Authority {
             .collect::<Result<_, _>>()?;
         if !points.is_empty() && output.is_none() {
             return Err(Rejection::UnmappedDevice);
+        }
+        if let Some(region) = &rule.region {
+            let output = output.as_ref().ok_or(Rejection::UnmappedDevice)?;
+            if points.is_empty()
+                || points
+                    .iter()
+                    .any(|point| !starts_in(region, output.rect(), *point))
+            {
+                return Err(Rejection::OutsideRegion);
+            }
         }
         if let Some(output) = &output {
             if points.iter().any(|point| !output.rect().contains(*point)) {
@@ -816,6 +856,7 @@ mod tests {
             seats: vec![],
             contexts: vec![Context::Desktop],
             scope: Scope::Everywhere,
+            region: None,
             output: None,
             screen: None,
             require_keys: vec![],
@@ -859,6 +900,74 @@ mod tests {
         assert_eq!(result.unwrap_err(), expected);
     }
 
+    #[test]
+    fn every_finger_must_start_inside_the_rule_edge_strip_of_its_mapped_output() {
+        let authority = authority();
+        let source = source();
+        let map = mapping();
+        let input = input(&source, &map, 10);
+        let strip = |edge, depth, from, to| {
+            let mut rule = rule();
+            rule.region = Some(Region {
+                edge,
+                depth,
+                from,
+                to,
+            });
+            rule
+        };
+        // The output is 500x1000 logical pixels; device (x, y) lands at (x / 2, y / 2).
+        let bottom = strip(Edge::Bottom, Distance::Pixels(20.0), 0.0, 1.0);
+        let mut permit = authority
+            .start(&bottom, input, &[point(500, 1990)])
+            .unwrap();
+        error(
+            authority.start(&bottom, input, &[point(500, 1900)]),
+            Rejection::OutsideRegion,
+        );
+        authority
+            .join(&mut permit, &bottom, input, point(520, 1980))
+            .unwrap();
+        error(
+            authority.join(&mut permit, &bottom, input, point(500, 1000)),
+            Rejection::OutsideRegion,
+        );
+        error(
+            authority.start(
+                &bottom,
+                InputContext {
+                    mapping: None,
+                    ..input
+                },
+                &[],
+            ),
+            Rejection::UnmappedDevice,
+        );
+        let top_left = strip(Edge::Top, Distance::Normalized(0.05), 0.0, 0.5);
+        authority
+            .start(&top_left, input, &[point(100, 80)])
+            .unwrap();
+        for outside in [point(600, 80), point(100, 120)] {
+            error(
+                authority.start(&top_left, input, &[outside]),
+                Rejection::OutsideRegion,
+            );
+        }
+        let lower_right = strip(Edge::Right, Distance::Pixels(20.0), 0.5, 1.0);
+        authority
+            .start(&lower_right, input, &[point(990, 1500)])
+            .unwrap();
+        error(
+            authority.start(&lower_right, input, &[point(990, 600)]),
+            Rejection::OutsideRegion,
+        );
+        let left = strip(Edge::Left, Distance::Pixels(20.0), 0.0, 1.0);
+        authority.start(&left, input, &[point(10, 1000)]).unwrap();
+        error(
+            authority.start(&left, input, &[point(100, 1000)]),
+            Rejection::OutsideRegion,
+        );
+    }
     #[test]
     fn t18_half_open_rectangles_and_scaled_mapping_agree() {
         let r = rect(-500.0, 0.0, 500.0, 1000.0);

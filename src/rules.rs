@@ -3365,6 +3365,7 @@ fn context_free(rule: &Rule) -> bool {
     rule.trigger.recognizers().next().is_none()
         && rule.contexts.is_empty()
         && rule.scope == Scope::Everywhere
+        && rule.region.is_none()
         && rule.screen.is_none()
         && matches!(rule.action, Action::Event { .. })
 }
@@ -4729,6 +4730,7 @@ mod tests {
             seats: vec![],
             contexts: vec![Context::Desktop],
             scope: Scope::Everywhere,
+            region: None,
             output: None,
             screen: Some(Screen::On),
             require_keys: vec![],

@@ -183,6 +183,7 @@ mod tests {
             seats: vec![],
             contexts: vec![crate::config::Context::Desktop],
             scope: crate::config::Scope::Everywhere,
+            region: None,
             output: None,
             screen: None,
             require_keys: vec![],

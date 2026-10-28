@@ -941,9 +941,27 @@ The returned configuration accepts `version`, `mode`, `timing`, `shape_capture`,
 `policy`, `devices`, `layers`, `modes`, `shapes` and `rules`. Rust schema validation remains
 authoritative, including unknown fields, references, priorities, resource bounds,
 activation keys, permitted seats and source selectors. A rule accepts `id`,
-`enabled`, `priority`, `devices`, `seats`, `contexts`, `scope`, `output`, `screen`,
-`require_keys`, `keys_throughout`, `layer`, `delivery`,
+`enabled`, `priority`, `devices`, `seats`, `contexts`, `scope`, `region`, `output`,
+`screen`, `require_keys`, `keys_throughout`, `layer`, `delivery`,
 `trigger` and `action`. Existing defaults and exact units remain in effect.
+
+### Starting regions
+
+`region = {edge = "bottom", depth = "20px"}` limits a touch rule to contacts
+that start in a strip along one edge of the touchscreen's mapped output. `edge`
+is `top`, `bottom`, `left` or `right` of the output as displayed, after its
+rotation. `depth` is in logical pixels (`px`) or a fraction of the output across
+that edge (`norm`, at most 1). `from` and `to` (defaults 0 and 1) select part of
+the edge, measured from its top or left end, so
+`{edge = "top", depth = "20px", to = 0.5}` is the left half of the top edge.
+Every finger, including one that joins later, must start inside the strip;
+otherwise the rule does not apply and the input passes through. A contact that
+starts where no rule applies is forwarded at once, so rules limited to edges do
+not delay ordinary touches elsewhere on the screen. A region needs
+verified desktop context and a device mapped to an output. Rules on the same
+edge with spans that do not overlap, or on opposite edges with `norm` depths
+that sum below 1, may share a priority; other overlapping exclusive rules need
+distinct priorities.
 
 ### Timing, policy, selector and shape fields
 

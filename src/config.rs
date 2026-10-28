@@ -195,6 +195,30 @@ pub enum Screen {
     On,
     Off,
 }
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Edge {
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+/// A strip along one edge of the mapped output in which every finger must start.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Region {
+    pub edge: Edge,
+    /// Logical pixels, or a fraction of the output's extent across the edge.
+    pub depth: Distance,
+    /// Span along the edge as fractions of its length from its top or left end.
+    #[serde(default)]
+    pub from: f64,
+    #[serde(default = "whole_edge")]
+    pub to: f64,
+}
+fn whole_edge() -> f64 {
+    1.0
+}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -775,6 +799,8 @@ pub struct Rule {
     #[serde(default)]
     pub scope: Scope,
     #[serde(default)]
+    pub region: Option<Region>,
+    #[serde(default)]
     pub output: Option<String>,
     #[serde(default)]
     pub screen: Option<Screen>,
@@ -1201,6 +1227,10 @@ impl Config {
                     "{prefix}.delivery: touch reservation requires an explicitly off display"
                 ));
             }
+            if let Some(region) = &rule.region {
+                validate_region(region, &rule.trigger)
+                    .map_err(|message| ConfigError(format!("{prefix}.region: {message}")))?;
+            }
             validate_trigger(&rule.trigger, &shapes, 0)
                 .map_err(|message| ConfigError(format!("{prefix}.trigger: {message}")))?;
             validate_action(&rule.action)
@@ -1311,6 +1341,7 @@ impl Config {
                     seats: vec![],
                     contexts: vec![],
                     scope: Scope::Everywhere,
+                    region: None,
                     output: None,
                     screen: None,
                     require_keys: vec![],
@@ -1489,6 +1520,20 @@ fn validate_distance(distance: Distance) -> Result<(), String> {
         Ok(())
     }
 }
+fn validate_region(region: &Region, trigger: &Trigger) -> Result<(), String> {
+    if !trigger.contains_touch() {
+        return Err("a starting region applies only to touch triggers".into());
+    }
+    match region.depth {
+        Distance::Pixels(depth) if depth > 0.0 && depth.is_finite() => {}
+        Distance::Normalized(depth) if depth > 0.0 && depth <= 1.0 => {}
+        _ => return Err("depth must be positive px or norm of at most 1".into()),
+    }
+    if !((0.0..1.0).contains(&region.from) && region.from < region.to && region.to <= 1.0) {
+        return Err("from and to must satisfy 0 <= from < to <= 1".into());
+    }
+    Ok(())
+}
 pub(crate) fn validate_action(action: &Action) -> Result<(), String> {
     match action {
         Action::Lua { handler, requires }
@@ -1548,7 +1593,25 @@ fn overlaps(a: &Rule, b: &Rule) -> bool {
     {
         return false;
     }
+    if let (Some(a), Some(b)) = (&a.region, &b.region)
+        && disjoint(a, b)
+    {
+        return false;
+    }
     true
+}
+fn disjoint(a: &Region, b: &Region) -> bool {
+    if a.edge == b.edge {
+        return a.to <= b.from || b.to <= a.from;
+    }
+    let opposite = matches!(
+        (a.edge, b.edge),
+        (Edge::Top, Edge::Bottom)
+            | (Edge::Bottom, Edge::Top)
+            | (Edge::Left, Edge::Right)
+            | (Edge::Right, Edge::Left)
+    );
+    matches!((a.depth, b.depth), (Distance::Normalized(a), Distance::Normalized(b)) if opposite && a + b < 1.0)
 }
 
 /// Validation is transactional. The router must acknowledge a neutral/cancelled
@@ -1597,6 +1660,89 @@ mod tests {
         for distance in ["NaNmm", "infpx", "-1norm", "1", "0mm"] {
             assert!(Distance::parse(distance).is_err());
         }
+    }
+    #[test]
+    fn starting_regions_are_touch_edge_strips_in_pixels_or_fractions() {
+        let parse = |region: &str, trigger: &str| {
+            Config::parse(&format!(
+                "version = 1\n[policy]\nallowed_devices = ['touch']\n\
+                 [devices.touch]\nname = 'Touch'\n[[rules]]\nid = 'edge'\n\
+                 devices = ['touch']\ncontexts = ['desktop']\nregion = {region}\n\
+                 trigger = {trigger}\naction = {{ kind = 'event', name = 'edge' }}\n"
+            ))
+        };
+        let swipe = "{ kind = 'swipe', fingers = 1, direction = 'up', travel = '12mm', \
+                     fallback_travel = '0.1norm' }";
+        let config = parse("{ edge = 'bottom', depth = '20px' }", swipe).unwrap();
+        assert_eq!(
+            config.rules[0].region,
+            Some(Region {
+                edge: Edge::Bottom,
+                depth: Distance::Pixels(20.0),
+                from: 0.0,
+                to: 1.0,
+            })
+        );
+        parse("{ edge = 'top', depth = '0.05norm', from = 0.5 }", swipe).unwrap();
+        for region in [
+            "{ edge = 'top', depth = '3mm' }",
+            "{ edge = 'top', depth = '2norm' }",
+            "{ edge = 'top', depth = '20px', from = 0.5, to = 0.5 }",
+            "{ edge = 'top', depth = '20px', to = 1.5 }",
+            "{ edge = 'middle', depth = '20px' }",
+            "{ edge = 'top', depth = '20px', width = 3 }",
+        ] {
+            assert!(parse(region, swipe).is_err(), "{region}");
+        }
+        let pair = |first: &str, second: &str| {
+            let rule = |id: &str, region: &str| {
+                format!(
+                    "[[rules]]\nid = '{id}'\ndevices = ['touch']\ncontexts = ['desktop']\n\
+                     delivery = 'buffer'\nregion = {region}\ntrigger = {swipe}\n\
+                     action = {{ kind = 'event', name = '{id}' }}\n"
+                )
+            };
+            Config::parse(&format!(
+                "version = 1\n[policy]\nallowed_devices = ['touch']\n[devices.touch]\n\
+                 name = 'Touch'\n{}{}",
+                rule("a", first),
+                rule("b", second)
+            ))
+        };
+        pair(
+            "{ edge = 'top', depth = '20px', to = 0.5 }",
+            "{ edge = 'top', depth = '20px', from = 0.5 }",
+        )
+        .unwrap();
+        pair(
+            "{ edge = 'top', depth = '0.1norm' }",
+            "{ edge = 'bottom', depth = '0.1norm' }",
+        )
+        .unwrap();
+        for (first, second) in [
+            (
+                "{ edge = 'top', depth = '20px', to = 0.6 }",
+                "{ edge = 'top', depth = '20px', from = 0.5 }",
+            ),
+            (
+                "{ edge = 'top', depth = '20px' }",
+                "{ edge = 'bottom', depth = '20px' }",
+            ),
+            (
+                "{ edge = 'bottom', depth = '20px' }",
+                "{ edge = 'left', depth = '20px' }",
+            ),
+        ] {
+            assert!(pair(first, second).is_err(), "{first} {second}");
+        }
+        let key = "{ kind = 'button_taps', key = 'volume_up', count = 2 }";
+        let error = parse("{ edge = 'top', depth = '20px' }", key).unwrap_err();
+        assert!(
+            error
+                .0
+                .contains("rules.edge.region: a starting region applies only to touch"),
+            "{error:?}"
+        );
     }
     #[test]
     fn t02_nested_unknown_fields_are_rejected() {
@@ -1673,6 +1819,7 @@ mod tests {
             seats: vec![],
             contexts: vec![Context::Locked, Context::Greeter],
             scope: Scope::Everywhere,
+            region: None,
             output: None,
             screen: Some(Screen::Off),
             require_keys: vec![],

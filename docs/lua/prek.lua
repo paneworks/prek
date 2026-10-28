@@ -14,6 +14,7 @@
 ---@alias prek.Scope 'everywhere'
 ---@alias prek.Direction 'up'|'down'|'left'|'right'|'horizontal'|'vertical'|'any'
 ---@alias prek.Screen 'on'|'off'
+---@alias prek.Edge 'top'|'bottom'|'left'|'right'
 ---@alias prek.LayerActivation 'physical'|'active'|'inactive'
 ---@alias prek.Stage 'discrete'|'begin'|'update'|'end'|'cancel'
 ---@alias prek.TaskState 'pending'|'running'|'sleeping'|'waiting'|'completed'|'cancelled'
@@ -211,6 +212,12 @@
 ---@alias prek.Action prek.EventAction|prek.KeysAction|prek.RemapAction|prek.CommandAction|prek.LuaAction
 ---@alias prek.ActionResult prek.EventAction|prek.CommandAction Only these named-handler effects are currently executable.
 
+---@class (exact) prek.Region
+---@field edge prek.Edge Edge of the mapped output, after its rotation.
+---@field depth string Strip depth in `px` (logical pixels) or `norm` (fraction of the output across the edge).
+---@field from? number Default 0; start of the span along the edge, from its top or left end.
+---@field to? number Default 1; end of the span along the edge.
+
 ---@class (exact) prek.Rule
 ---@field id string
 ---@field enabled? boolean Default true.
@@ -219,6 +226,7 @@
 ---@field seats? string[]
 ---@field contexts? prek.Context[]
 ---@field scope? prek.Scope Default everywhere.
+---@field region? prek.Region Every finger of a touch trigger must start in this edge strip.
 ---@field output? string Explicit output name for keyboard/non-spatial rules; mapping must agree when present.
 ---@field screen? prek.Screen
 ---@field require_keys? prek.Key[]

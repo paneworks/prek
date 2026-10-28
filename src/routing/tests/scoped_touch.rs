@@ -749,3 +749,56 @@ fn scoped_touch_device_loss_and_lock_mid_gesture_release_only_what_the_consumer_
         }
     }
 }
+
+#[test]
+fn an_edge_region_consumes_a_swipe_from_its_strip_and_passes_one_from_mid_screen() {
+    for scoped in [false, true] {
+        for (start, consumed) in [(4080, true), (2000, false)] {
+            let mut config = config();
+            let rule = &mut config.rules[0];
+            rule.trigger = Trigger::Swipe {
+                fingers: 1,
+                direction: Direction::Up,
+                travel: Distance::Millimetres(40.0),
+                fallback_travel: Distance::Normalized(0.2),
+                continuous: false,
+            };
+            rule.region = Some(crate::config::Region {
+                edge: crate::config::Edge::Bottom,
+                depth: Distance::Pixels(20.0),
+                from: 0.0,
+                to: 1.0,
+            });
+            let mut routing = prepared(config, true, scoped);
+            let label = format!("scoped={scoped}, start={start}");
+            frame(
+                &mut routing,
+                1,
+                0,
+                &[
+                    (EV_KEY, 0x14a, 1),
+                    (EV_ABS, ABS_MT_SLOT, 0),
+                    (EV_ABS, ABS_MT_TRACKING_ID, 10),
+                    (EV_ABS, ABS_MT_POSITION_X, 1000),
+                    (EV_ABS, ABS_MT_POSITION_Y, start),
+                ],
+            );
+            let mut forwarded = drain(&mut routing, 0);
+            assert_eq!(forwarded.len(), usize::from(!consumed), "{label}");
+            routing.push(Record::Tick { at: ms(120) }).unwrap();
+            forwarded.extend(drain(&mut routing, 120));
+            movement(&mut routing, 2, 140, start - 1100, 1);
+            forwarded.extend(drain(&mut routing, 140));
+            up(&mut routing, 3, 200, 1);
+            forwarded.extend(drain(&mut routing, 200));
+            let dispatches = routing.take_dispatches(ms(200));
+            if consumed {
+                assert!(forwarded.is_empty(), "{label}: {forwarded:?}");
+                assert_eq!(dispatches.len(), 1, "{label}");
+            } else {
+                assert_eq!(forwarded.len(), 3, "{label}");
+                assert!(dispatches.is_empty(), "{label}");
+            }
+        }
+    }
+}

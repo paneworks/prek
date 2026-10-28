@@ -416,7 +416,10 @@ Rules name device selectors, contexts, scopes, required keys/layers, delivery,
 trigger and action. `require_keys` combines devices on the same permitted seat;
 `keys_throughout` cancels when an activation key/layer is released. The trigger's
 timing overrides apply to that rule, including arbitrary hold durations and repeats.
-Ordinary OS repeat is separate from configured repeat-while-held.
+Ordinary OS repeat is separate from configured repeat-while-held. A touch rule's
+`region` limits it to contacts that start in a strip along one edge of the mapped
+output, such as `{ edge = "bottom", depth = "20px" }`; see
+[starting regions](docs/lua-api.md#starting-regions).
 
 An unbound event rule can be observed without a desktop if it has no context or
 screen condition. Other rules require a verified session provider.
