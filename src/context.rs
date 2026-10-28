@@ -9,8 +9,13 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, time::Duration};
 
-pub const PROVIDER_LEASE: Duration = Duration::from_secs(1);
-pub const SNAPSHOT_MAX_AGE: Duration = Duration::from_millis(250);
+pub const PROVIDER_LEASE: Duration = crate::protocol::LEASE;
+/// How long a context snapshot stays valid without a newer revision; it ends
+/// before every [`crate::protocol::LEASE`].
+pub const SNAPSHOT_MAX_AGE: Duration = Duration::from_millis(2500);
+/// Oldest input event, or context of an action decision, that may still be
+/// acted on.
+pub const DECISION_MAX_AGE: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -926,35 +931,39 @@ mod tests {
         let permit = authority
             .start(&rule(), input(&source, &map, 0), &[point(200, 200)])
             .unwrap();
+        let age = SNAPSHOT_MAX_AGE.as_millis() as u64;
         authority
-            .validate(&permit, input(&source, &map, 250))
+            .validate(&permit, input(&source, &map, age))
             .unwrap();
         assert!(
             authority
-                .validate(&permit, input(&source, &map, 251))
+                .validate(&permit, input(&source, &map, age + 1))
                 .is_err()
         );
         let old = authority.generation();
-        authority.tick(ms(251));
+        authority.tick(ms(age + 1));
         assert_ne!(authority.generation(), old);
-        let fresh = snapshot(authority.generation(), 1, 300);
-        authority.update(fresh, ms(300)).unwrap();
+        let captured = age + 50;
+        let fresh = snapshot(authority.generation(), 1, captured);
+        authority.update(fresh, ms(captured)).unwrap();
         error(
-            authority.validate(&permit, input(&source, &map, 300)),
+            authority.validate(&permit, input(&source, &map, captured)),
             Rejection::StaleGeneration,
         );
         let generation = authority.generation();
-        authority.heartbeat(generation, ms(500)).unwrap();
-        assert_eq!(authority.state(ms(551)), State::Unknown);
-        authority.tick(ms(1500));
+        let renewed = captured + 200;
+        authority.heartbeat(generation, ms(renewed)).unwrap();
+        assert_eq!(authority.state(ms(captured + age + 1)), State::Unknown);
+        authority.tick(ms(renewed) + PROVIDER_LEASE);
         assert_ne!(authority.generation(), generation);
     }
     #[test]
     fn t61_late_refresh_cannot_bypass_expiration_without_tick() {
         let mut authority = authority();
         let old = authority.generation();
+        let late = SNAPSHOT_MAX_AGE.as_millis() as u64 + 50;
         error(
-            authority.update(snapshot(old, 2, 300), ms(300)),
+            authority.update(snapshot(old, 2, late), ms(late)),
             Rejection::StaleGeneration,
         );
         assert_ne!(authority.generation(), old);

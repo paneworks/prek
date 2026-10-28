@@ -15,6 +15,12 @@ pub const MAX_PACKET: usize = 64 * 1024;
 pub const MAX_QUEUED_PACKETS: usize = 128;
 pub const MAX_QUEUED_BYTES: usize = 512 * 1024;
 pub const MAX_PACKET_AGE: Duration = Duration::from_secs(1);
+/// Interval of renewals that only prove a process is still running; changes
+/// are sent as they happen.
+pub const KEEPALIVE: Duration = Duration::from_secs(1);
+/// How long a context snapshot, subscription, agent registration or worker
+/// stays trusted without a renewal.
+pub const LEASE: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(transparent)]

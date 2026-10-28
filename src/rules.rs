@@ -4891,7 +4891,10 @@ mod tests {
     fn t61_stale_provider_cancels_before_rule_completion() {
         let mut engine = phone();
         touch_start(&mut engine, 200);
-        tick(&mut engine, 251);
+        tick(
+            &mut engine,
+            crate::context::SNAPSHOT_MAX_AGE.as_millis() as u64 + 1,
+        );
         assert!(matches(&engine.events).is_empty());
         assert!(
             engine

@@ -77,7 +77,7 @@ impl Metadata {
         Ok(())
     }
     pub fn fresh(&self, now: Duration) -> bool {
-        now >= self.at && now - self.at <= crate::context::SNAPSHOT_MAX_AGE
+        now >= self.at && now - self.at <= crate::context::DECISION_MAX_AGE
     }
     pub(crate) fn validate_for(
         &self,

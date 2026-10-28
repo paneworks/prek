@@ -1681,7 +1681,7 @@ fn run_session(
                         }
                         output.flush()?;
                     }
-                    next = now + Duration::from_millis(250);
+                    next = now + prek::protocol::KEEPALIVE;
                 }
                 Reply::Status {
                     fence: observed,
@@ -1832,7 +1832,7 @@ fn run_session(
                     if inspect && !channel.send(&Request::Status { fence: next_fence }, now)? {
                         return Err(io::ErrorKind::WouldBlock.into());
                     }
-                    next = now + Duration::from_millis(250);
+                    next = now + prek::protocol::KEEPALIVE;
                 }
                 Reply::SessionChanged {
                     fence: next_fence,
@@ -1894,7 +1894,7 @@ fn run_session(
                         return Err(io::ErrorKind::WouldBlock.into());
                     }
                     status_pending = true;
-                    next = now + Duration::from_millis(250);
+                    next = now + prek::protocol::KEEPALIVE;
                 }
                 Reply::Subscribed { fence: subscribed }
                     if (observations || effects) && Some(subscribed) == fence =>
@@ -2360,7 +2360,7 @@ fn run_session(
             }
             status_pending = true;
         }
-        if now.saturating_sub(last_reply) >= Duration::from_secs(1) {
+        if now.saturating_sub(last_reply) >= prek::protocol::LEASE {
             let error = io::Error::new(
                 io::ErrorKind::TimedOut,
                 "broker registration/lease acknowledgement timed out",
@@ -2377,9 +2377,9 @@ fn run_session(
             if !channel.send(&Request::Heartbeat { fence }, now)? {
                 return Err(io::ErrorKind::WouldBlock.into());
             }
-            next = now + Duration::from_millis(250);
+            next = now + prek::protocol::KEEPALIVE;
         }
-        let until = next.min(last_reply + Duration::from_secs(1));
+        let until = next.min(last_reply + prek::protocol::LEASE);
         let until = if context_active && fence.is_some() {
             until.min(
                 context_download

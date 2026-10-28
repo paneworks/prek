@@ -2,7 +2,10 @@
 #![cfg(target_os = "linux")]
 
 use nix::libc;
-use prek::supervisor::{Heartbeat, Reason, Supervisor, TerminationSignals};
+use prek::supervisor::{
+    HEARTBEAT_INTERVAL, Heartbeat, Reason, STALL_TIMEOUT, Supervisor, TERMINATION_GRACE,
+    TerminationSignals,
+};
 use std::{
     fs, io,
     os::{
@@ -186,9 +189,9 @@ fn worker_fixture() {
             _ => 2,
         };
         packet[4..12].copy_from_slice(&sequence.to_be_bytes());
-        let current = health.deadline().unwrap() - prek::supervisor::HEARTBEAT_INTERVAL;
+        let current = health.deadline().unwrap() - HEARTBEAT_INTERVAL;
         let time = match mode {
-            "stale" => current.saturating_sub(Duration::from_secs(2)),
+            "stale" => current.saturating_sub(STALL_TIMEOUT + Duration::from_secs(1)),
             "future" => current + Duration::from_secs(2),
             _ => current,
         };
@@ -361,8 +364,8 @@ fn observation_channel_is_bound_to_the_owned_child_and_does_not_stall_health() {
             .send(&"flood", prek::ipc::monotonic().unwrap())
             .unwrap()
     );
-    // Leave the observation link unread beyond the one-second health timeout.
-    let until = Instant::now() + Duration::from_millis(1250);
+    // Leave the observation link unread beyond the health timeout.
+    let until = Instant::now() + STALL_TIMEOUT + Duration::from_millis(250);
     while Instant::now() < until {
         assert!(
             worker.check().unwrap().is_none(),
@@ -370,7 +373,7 @@ fn observation_channel_is_bound_to_the_owned_child_and_does_not_stall_health() {
         );
         thread::sleep(Duration::from_millis(10));
     }
-    assert!(worker.heartbeats() >= 4);
+    assert!(worker.heartbeats() >= 3);
     worker.request_stop().unwrap();
     let report = worker.wait().unwrap();
     assert_eq!(report.reason(), Reason::Requested);
@@ -401,11 +404,11 @@ fn inherited_observation_writer_cannot_impersonate_the_worker() {
 fn healthy_worker_remains_live_and_acknowledges_orderly_stop() {
     let mut worker = Supervisor::spawn(command("healthy")).unwrap();
     let started = Instant::now();
-    while started.elapsed() < Duration::from_millis(1400) {
+    while started.elapsed() < HEARTBEAT_INTERVAL * 2 + Duration::from_millis(400) {
         assert!(worker.check().unwrap().is_none());
         thread::sleep(Duration::from_millis(20));
     }
-    assert!(worker.heartbeats() >= 4);
+    assert!(worker.heartbeats() >= 2);
     worker.request_stop().unwrap();
     let report = worker.wait().unwrap();
     assert_eq!(report.reason(), Reason::Requested);
@@ -414,11 +417,11 @@ fn healthy_worker_remains_live_and_acknowledges_orderly_stop() {
     assert_eq!(worker.check().unwrap(), Some(report));
 }
 
-fn stalled_forwarding_loop_is_terminated_within_two_seconds() {
+fn stalled_forwarding_loop_is_terminated_after_the_stall_timeout() {
     let mut worker = Supervisor::spawn(command("stall")).unwrap();
     let started = Instant::now();
     let report = worker.wait().unwrap();
-    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(started.elapsed() < STALL_TIMEOUT + Duration::from_secs(1));
     assert_eq!(report.reason(), Reason::Stalled);
     assert_eq!(report.status().signal(), Some(libc::SIGTERM));
     assert_eq!(report.heartbeats(), 1);
@@ -429,8 +432,8 @@ fn unresponsive_worker_is_force_killed_after_termination_grace() {
     let mut worker = Supervisor::spawn(command("ignore-term")).unwrap();
     let started = Instant::now();
     let report = worker.wait().unwrap();
-    assert!(started.elapsed() >= Duration::from_millis(1200));
-    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(started.elapsed() >= STALL_TIMEOUT + TERMINATION_GRACE - Duration::from_millis(50));
+    assert!(started.elapsed() < STALL_TIMEOUT + Duration::from_secs(1));
     assert_eq!(report.reason(), Reason::Stalled);
     assert_eq!(report.status().signal(), Some(libc::SIGKILL));
     assert!(report.forced());
@@ -656,7 +659,7 @@ fn main() {
         ),
         (
             "stalled forwarding",
-            stalled_forwarding_loop_is_terminated_within_two_seconds,
+            stalled_forwarding_loop_is_terminated_after_the_stall_timeout,
         ),
         (
             "forced termination",

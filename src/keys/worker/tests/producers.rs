@@ -292,20 +292,28 @@ fn software_waits_for_earlier_raw_but_blocks_only_later_key_domain_spans() {
 fn software_leases_cannot_extend_past_the_current_context_approval() {
     let (mut seat, writes) = model();
     let mut routing = projected(vec![]);
+    let age = crate::context::SNAPSHOT_MAX_AGE.as_millis() as u64;
+    let at = age - 50;
     assert!(
         !seat
             .producer_request(
                 &routing,
-                &request(7, 1, Op::Open { expires: ms(400) }),
-                ms(200)
+                &request(
+                    7,
+                    1,
+                    Op::Open {
+                        expires: ms(age + 100)
+                    }
+                ),
+                ms(at)
             )
             .unwrap()
     );
     assert!(
         seat.producer_request(
             &routing,
-            &request(7, 1, Op::Open { expires: ms(250) }),
-            ms(200)
+            &request(7, 1, Op::Open { expires: ms(age) }),
+            ms(at)
         )
         .unwrap()
     );
@@ -313,21 +321,33 @@ fn software_leases_cannot_extend_past_the_current_context_approval() {
         !seat
             .producer_request(
                 &routing,
-                &request(7, 2, Op::Renew { expires: ms(400) }),
-                ms(201)
+                &request(
+                    7,
+                    2,
+                    Op::Renew {
+                        expires: ms(age + 100)
+                    }
+                ),
+                ms(at + 1)
             )
             .unwrap()
     );
-    context(&mut routing, 200, 2, ContextState::Desktop);
+    context(&mut routing, at, 2, ContextState::Desktop);
     assert!(
         seat.producer_request(
             &routing,
-            &request(7, 2, Op::Renew { expires: ms(400) }),
-            ms(201)
+            &request(
+                7,
+                2,
+                Op::Renew {
+                    expires: ms(age + 100)
+                }
+            ),
+            ms(at + 1)
         )
         .unwrap()
     );
-    assert_eq!(seat.deadline(), Some(ms(400)));
+    assert_eq!(seat.deadline(), Some(ms(age + 100)));
     assert!(key_events(&writes).is_empty());
 }
 

@@ -149,7 +149,7 @@ impl Event {
         }
     }
     pub fn fresh(&self, now: Duration) -> bool {
-        now >= self.at() && now - self.at() <= crate::context::SNAPSHOT_MAX_AGE
+        now >= self.at() && now - self.at() <= crate::context::DECISION_MAX_AGE
     }
     pub fn selectors(&self) -> &[String] {
         match self {

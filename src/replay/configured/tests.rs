@@ -241,7 +241,11 @@ calls=calls+1;assert(calls==1);return nil
                 })
                 .unwrap();
         } else {
-            replay.push(Record::Tick { at: ms(300) }).unwrap();
+            replay
+                .push(Record::Tick {
+                    at: crate::context::SNAPSHOT_MAX_AGE + ms(50),
+                })
+                .unwrap();
         }
         assert!(matched(&replay).is_empty());
         assert!(

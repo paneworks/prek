@@ -623,7 +623,7 @@ impl Stream {
                     Seat {
                         subscription: subscription.clone(),
                         routing,
-                        expires: now + protocol::MAX_PACKET_AGE,
+                        expires: now + protocol::LEASE,
                         started: now,
                         recognizer_ready: None,
                         input_enabled: false,
@@ -649,7 +649,7 @@ impl Stream {
             seat.routing
                 .actions_available(subscription.fence.session, capabilities, now);
             seat.subscription = subscription;
-            seat.expires = now + protocol::MAX_PACKET_AGE;
+            seat.expires = now + protocol::LEASE;
             let name = seat.subscription.seat.clone();
             self.sync_seat(&name, now)?;
             self.collect(&name, now, None)?;

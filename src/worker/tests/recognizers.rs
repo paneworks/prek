@@ -585,7 +585,10 @@ fn source_loss_and_rule_edits_retire_queued_custom_work() {
 #[test]
 fn context_loss_discards_all_custom_work_and_requires_a_new_registration() {
     let (mut registry, ticket) = issued();
-    tick(&mut registry, 351);
+    tick(
+        &mut registry,
+        101 + crate::context::SNAPSHOT_MAX_AGE.as_millis() as u64,
+    );
     assert!(tickets(&registry).is_empty());
     assert!(registry.observers.is_empty());
     assert!(

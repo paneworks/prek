@@ -234,7 +234,10 @@ fn private_subscription_stale_committed_capture_cannot_gain_receipt_freshness() 
     let mut stream = Stream::new(config(), child).unwrap();
     for command in commands(Subscriptions {
         revision: 1,
-        seats: vec![wide(1, now - Duration::from_secs(2))],
+        seats: vec![wide(
+            1,
+            now - crate::context::SNAPSHOT_MAX_AGE - Duration::from_secs(1),
+        )],
     }) {
         send(&mut stream, &mut parent, command);
     }

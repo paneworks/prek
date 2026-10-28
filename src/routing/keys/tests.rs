@@ -88,8 +88,9 @@ fn expiry_followed_by_regrant_does_not_resurrect_old_work() {
     let mut routing = routing(vec![rule("shift", Action::Remap { key: Key(42) })]);
     let work = push(&mut routing, 1, 1, 10, 1).pop().unwrap();
     assert!(work.available(&routing, ms(20)));
-    routing.actions_available(1, BTreeSet::from([Capability::SyntheticInput]), ms(1000));
-    assert!(!work.available(&routing, ms(1000)));
+    let expired = crate::context::PROVIDER_LEASE;
+    routing.actions_available(1, BTreeSet::from([Capability::SyntheticInput]), expired);
+    assert!(!work.available(&routing, expired));
     assert_ne!(work.dispatch.key_epoch, routing.key_epoch);
 }
 

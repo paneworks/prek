@@ -66,7 +66,9 @@ the resulting evdev capabilities. Complete readiness handoff remains pending.
 
 The session library obtains agent credentials from an established local socket
 and verifies that agent and compositor belong to the same active local logind
-session and seat. Checks retain kernel process handles and expire after 250 ms.
+session and seat. Checks retain kernel process handles and are repeated after
+any logind state or process change and at least once a second; a binding is used
+only within 250 ms of a check.
 Process exit, socket disconnect, compositor replacement or session deactivation
 revokes registration; returning to the seat requires a new registration.
 This proves session membership. Optional live compositor context is sampled
@@ -121,7 +123,7 @@ the [neutral idle takeover](docs/evdev-boundary.md#neutral-idle-takeover).
 
 Configured observation runs in a supervised worker. Only that worker opens input
 devices; the parent watches a private health channel. The input loop reports
-progress every 250 ms, including while idle. One second without progress triggers
+progress every second, including while idle. Three seconds without progress trigger
 termination, followed by a forced kill after a 250 ms grace period. Ctrl-C and
 SIGTERM request orderly shutdown, and parent death kills the worker. Process tests
 use private sockets and subprocesses. Idle observation, exclusive worker input
@@ -144,8 +146,9 @@ sudo prek broker --config /etc/prek/prek.toml \
 ```
 
 Start `session` from the compositor's own login session. It uses
-`WAYLAND_DISPLAY`, or an explicit `--display`, and maintains a
-250 ms acknowledged heartbeat. A second agent for the same seat is refused;
+`WAYLAND_DISPLAY`, or an explicit `--display`, and maintains a one-second
+acknowledged heartbeat; three seconds without one end the registration. A
+second agent for the same seat is refused;
 `status` uses a separate authenticated inspection role. A shared user-manager
 process without session membership is refused, except beside a compositor that
 its user manager runs outside any session: there the agent must
@@ -167,12 +170,16 @@ Wayland socket and screen state from the DRM connector in sysfs, rechecks
 logind, and publishes context on its private worker channel. Caller-supplied
 context snapshots remain refused.
 
-Context refreshes run at 100 ms intervals with an 80 ms Wayland deadline and
-250 ms snapshot freshness. Context loss, restoration or a witnessed lock advances
-the session fence, discards queued outcomes and reconciles held input before
-recognition resumes. Workers expire context independently while idle; delayed
-context cannot stop their input reader. Oversized snapshots disable publication
-and report an error instead of truncating targets or crashing the broker.
+Context is sampled again, with an 80 ms Wayland deadline, as soon as logind's
+state, the session's lock hint, the compositor's outputs or a registered process
+changes, before an action is authorized or context is read, and at least once a
+second. A snapshot stays valid for 2.5 s without a newer revision; input events
+and action decisions must be under 250 ms old. Context loss, restoration or a
+witnessed lock advances the session fence, discards queued outcomes and
+reconciles held input before recognition resumes. Workers expire context
+independently while idle; delayed context cannot stop their input reader.
+Oversized snapshots disable publication and report an error instead of
+truncating targets or crashing the broker.
 
 Every observation is checked against logind's `LockedHint` for the bound session
 before delivery, including agents without `--context`. A locked session
@@ -411,8 +418,8 @@ observation.
 
 The library's context model freezes the first output target and validates later
 fingers against it. Session/lock changes, stale snapshots, output removal and
-relevant geometry changes cancel it. The model requires 250 ms snapshot
-freshness and a one-second provider lease. The Linux session library supplies
+relevant geometry changes cancel it. The model requires 2.5 s snapshot
+freshness and a three-second provider lease. The Linux session library supplies
 verified socket/process/logind membership for agents launched inside the
 compositor's session, or inside the systemd unit of a compositor that logind
 records as the display session's controller. Action integration and delegation

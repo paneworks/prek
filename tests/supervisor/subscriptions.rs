@@ -127,12 +127,12 @@ pub(super) fn parent() {
         assert!(Instant::now() < deadline);
         thread::sleep(Duration::from_millis(1));
     }
-    let until = Instant::now() + Duration::from_millis(1250);
+    let until = Instant::now() + HEARTBEAT_INTERVAL * 2 + Duration::from_millis(250);
     while Instant::now() < until {
         assert!(worker.check().unwrap().is_none());
         thread::sleep(Duration::from_millis(10));
     }
-    assert!(worker.heartbeats() >= 4);
+    assert!(worker.heartbeats() >= 2);
     worker.request_stop().unwrap();
     let report = worker.wait().unwrap();
     assert_eq!(report.reason(), Reason::Requested);

@@ -203,7 +203,7 @@ impl Executor {
             // broker. It never revives work, even if that reply has expired.
             return Ok(());
         }
-        if fence != self.fence || expires > now + crate::context::SNAPSHOT_MAX_AGE {
+        if fence != self.fence || expires > now + crate::context::DECISION_MAX_AGE {
             return Err(protocol::invalid("stale action execution grant"));
         }
         let pending = self

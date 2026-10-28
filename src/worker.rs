@@ -522,7 +522,7 @@ impl Registry {
                     ));
                 }
                 observer.input_enabled = input_enabled;
-                observer.expires = now + protocol::MAX_PACKET_AGE;
+                observer.expires = now + protocol::LEASE;
                 if let Some(authority) = authorities.remove(&subscription.seat) {
                     *observer.engine.authority_mut() = authority;
                 }
@@ -554,7 +554,7 @@ impl Registry {
                 Observer {
                     subscription: subscription.clone(),
                     started: now,
-                    expires: now + protocol::MAX_PACKET_AGE,
+                    expires: now + protocol::LEASE,
                     engine,
                     input_enabled,
                     input_started: now,
@@ -1652,7 +1652,11 @@ mod tests {
             assert!(!permits_input(&config, &copy, ms(100)));
         }
         assert!(!permits_input(&config, &subscription, ms(99)));
-        assert!(!permits_input(&config, &subscription, ms(351)));
+        assert!(!permits_input(
+            &config,
+            &subscription,
+            ms(101) + crate::context::SNAPSHOT_MAX_AGE
+        ));
         config.policy.allowed_devices.clear();
         config.rules.clear();
         let mut registry = registry(config);
@@ -1721,7 +1725,10 @@ mod tests {
         assert!(inputs(&registry).is_empty());
         key(&mut registry, source(1, "seat0"), 153, 3, true, 153);
         assert_eq!(inputs(&registry).len(), 1);
-        tick(&mut registry, 401);
+        tick(
+            &mut registry,
+            151 + crate::context::SNAPSHOT_MAX_AGE.as_millis() as u64,
+        );
         assert!(inputs(&registry).is_empty());
         assert!(
             registry
@@ -2072,21 +2079,39 @@ mod tests {
     #[test]
     fn expired_or_removed_subscribers_cannot_receive_or_resume_old_work() {
         let mut registry = registry(config());
+        let lease = protocol::LEASE.as_millis() as u64;
         update(&mut registry, 1, vec![subscription("seat0", 2)], 0);
-        key(&mut registry, source(1, "seat0"), 500, 1, true, 500);
-        tick(&mut registry, 1100);
+        key(
+            &mut registry,
+            source(1, "seat0"),
+            lease - 500,
+            1,
+            true,
+            lease - 500,
+        );
+        tick(&mut registry, lease + 100);
         assert!(outcomes(&registry).is_empty());
         assert!(matches!(
             &registry.reports.front().unwrap().0,
             Report::Ended { .. }
         ));
-        update(&mut registry, 2, vec![subscription("seat0", 2)], 1200);
+        update(
+            &mut registry,
+            2,
+            vec![subscription("seat0", 2)],
+            lease + 200,
+        );
         assert!(registry.observers.is_empty());
-        update(&mut registry, 3, vec![], 1200);
-        update(&mut registry, 4, vec![subscription("seat0", 3)], 1200);
-        tick(&mut registry, 1800);
+        update(&mut registry, 3, vec![], lease + 200);
+        update(
+            &mut registry,
+            4,
+            vec![subscription("seat0", 3)],
+            lease + 200,
+        );
+        tick(&mut registry, lease + 800);
         assert!(outcomes(&registry).is_empty());
-        update(&mut registry, 5, vec![], 1810);
+        update(&mut registry, 5, vec![], lease + 810);
         assert!(registry.reports.is_empty());
     }
     #[test]
@@ -2236,7 +2261,8 @@ mod tests {
             vec![with_context(subscription("seat0", 7), 2, 0)],
             0,
         );
-        for (revision, at) in [(1, 10), (2, 300)] {
+        let expired = crate::context::SNAPSHOT_MAX_AGE.as_millis() as u64 + 50;
+        for (revision, at) in [(1, 10), (2, expired)] {
             assert!(
                 registry
                     .update(
@@ -2250,7 +2276,7 @@ mod tests {
             );
         }
         assert_eq!(registry.revision, 1);
-        assert_eq!(registry.observers["seat0"].expires, ms(1000));
+        assert_eq!(registry.observers["seat0"].expires, protocol::LEASE);
     }
     #[test]
     fn context_expiry_revokes_observation_before_an_idle_hold_and_keeps_reading() {
@@ -2263,22 +2289,38 @@ mod tests {
             vec![with_context(subscription("seat0", 7), 1, 0)],
             0,
         );
-        key(&mut registry, source(1, "seat0"), 10, 1, true, 10);
-        assert_eq!(registry.deadline(), Some(ms(251)));
-        registry.expire(ms(251)).unwrap();
+        let age = crate::context::SNAPSHOT_MAX_AGE.as_millis() as u64;
+        key(
+            &mut registry,
+            source(1, "seat0"),
+            age - 300,
+            1,
+            true,
+            age - 300,
+        );
+        assert_eq!(registry.deadline(), Some(ms(age + 1)));
+        registry.expire(ms(age + 1)).unwrap();
         assert!(registry.observers.is_empty());
         assert!(
             matches!(&registry.reports.front().unwrap().0, Report::ContextLost { subscription }
             if subscription.context.is_none() && subscription.fence.session == 7)
         );
-        key(&mut registry, source(1, "seat0"), 300, 2, false, 300);
+        let later = age + 50;
+        key(&mut registry, source(1, "seat0"), later, 2, false, later);
         update(
             &mut registry,
             2,
-            vec![with_context(subscription("seat0", 8), 1, 300)],
-            300,
+            vec![with_context(subscription("seat0", 8), 1, later)],
+            later,
         );
-        key(&mut registry, source(1, "seat0"), 310, 3, true, 310);
+        key(
+            &mut registry,
+            source(1, "seat0"),
+            later + 10,
+            3,
+            true,
+            later + 10,
+        );
         assert_eq!(registry.observers["seat0"].subscription.fence.session, 8);
     }
     #[test]

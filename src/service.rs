@@ -5,7 +5,7 @@
 
 use crate::{
     compositor::Compositor,
-    context::{SNAPSHOT_MAX_AGE, State},
+    context::{DECISION_MAX_AGE, SNAPSHOT_MAX_AGE, State},
     ipc::{Channel, Endpoint},
     protocol::{self, Capability, Epoch, Fence, Mode, Reply, Request, Role},
     session::{Logind, Peer, Registration},
@@ -29,8 +29,8 @@ use std::{
 };
 
 pub const MAX_CLIENTS: usize = 8;
-pub const REFRESH: Duration = Duration::from_millis(250);
-pub const CONTEXT_REFRESH: Duration = Duration::from_millis(100);
+pub const REFRESH: Duration = protocol::KEEPALIVE;
+pub const CONTEXT_REFRESH: Duration = protocol::KEEPALIVE;
 const CONTEXT_SAMPLE_TIME: Duration = Duration::from_millis(80);
 
 #[derive(Default)]
@@ -223,7 +223,7 @@ impl Offered {
         !self.cancelled
             && now < self.deadline
             && snapshot.captured_at <= now
-            && now - snapshot.captured_at < SNAPSHOT_MAX_AGE
+            && now - snapshot.captured_at < DECISION_MAX_AGE
             && snapshot.state == State::Desktop
             && snapshot.generation == self.snapshot.generation
             && (self.output.is_none()
@@ -525,8 +525,8 @@ impl Broker {
             published: false,
         })
     }
-    /// Whether a change notification refreshed an agent's context since the
-    /// last call.
+    /// Whether a change notification refreshed an agent's context, or a
+    /// session advanced, since the last call.
     pub fn take_published(&mut self) -> bool {
         std::mem::take(&mut self.published)
     }
@@ -691,7 +691,7 @@ impl Broker {
             };
             let result = if now < bound.checked {
                 Err(protocol::invalid("session timeline moved backward"))
-            } else if now.saturating_sub(bound.renewed) >= protocol::MAX_PACKET_AGE {
+            } else if now.saturating_sub(bound.renewed) >= protocol::LEASE {
                 Err(protocol::invalid("session agent lease expired"))
             } else {
                 bound.registration.check(&mut self.logind, &bound.client)
@@ -803,7 +803,7 @@ impl Broker {
         };
         let mut connection = self.connections.remove(index);
         let bound = connection.bound.as_mut().unwrap();
-        let verification = if now.saturating_sub(bound.renewed) >= protocol::MAX_PACKET_AGE {
+        let verification = if now.saturating_sub(bound.renewed) >= protocol::LEASE {
             Err(protocol::invalid("session agent lease expired"))
         } else {
             bound
@@ -1138,7 +1138,7 @@ impl Broker {
                     |bound| {
                         (bound.checked + REFRESH)
                             .min(bound.recognizers.deadline().unwrap_or(Duration::MAX))
-                            .min(bound.renewed + protocol::MAX_PACKET_AGE)
+                            .min(bound.renewed + protocol::LEASE)
                             .min(match bound.role {
                                 Role::Agent if bound.context.due => Duration::ZERO,
                                 Role::Agent => bound.context.checked + CONTEXT_REFRESH,
@@ -1233,7 +1233,7 @@ impl Broker {
             return Err(protocol::invalid("broker timeline moved backward"));
         }
         if let Some(bound) = connection.bound.as_mut() {
-            if now.saturating_sub(bound.renewed) >= protocol::MAX_PACKET_AGE {
+            if now.saturating_sub(bound.renewed) >= protocol::LEASE {
                 return Err(protocol::invalid("session agent lease expired"));
             }
             if now < bound.checked {
@@ -1426,8 +1426,12 @@ impl Broker {
                             if bound.role == Role::Agent
                                 && bound.capabilities.contains(&Capability::Context) =>
                         {
+                            if offset == 0 && !self.refresh_now(connection)? {
+                                return Ok(());
+                            }
+                            let bound = connection.bound.as_mut().unwrap();
                             let guarded = if offset == 0 {
-                                bound.context.fresh(now)
+                                bound.context.fresh(monotonic()?)
                             } else {
                                 bound
                                     .context_export
@@ -1534,7 +1538,9 @@ impl Broker {
                                 connection.push(Reply::ActionCancelled { fence, id, ordinal })?;
                                 return connection.flush(monotonic()?);
                             }
-                            if !self.guard_observation(connection, monotonic()?)? {
+                            if !self.refresh_now(connection)?
+                                || !self.guard_observation(connection, monotonic()?)?
+                            {
                                 return Ok(());
                             }
                             let bound = connection.bound.as_mut().unwrap();
@@ -1565,8 +1571,8 @@ impl Broker {
                             bound
                                 .actions
                                 .authorize(id, ordinal, &context.snapshot, now)?;
-                            let expires = (now + SNAPSHOT_MAX_AGE)
-                                .min(context.snapshot.captured_at + SNAPSHOT_MAX_AGE);
+                            let expires = (now + DECISION_MAX_AGE)
+                                .min(context.snapshot.captured_at + DECISION_MAX_AGE);
                             connection.push(Reply::Execute {
                                 fence,
                                 id,
@@ -1745,6 +1751,7 @@ impl Broker {
             .session
             .checked_add(1)
             .ok_or_else(|| protocol::invalid("session generation exhausted"))?;
+        self.published = true;
         let bound = connection.bound.as_mut().unwrap();
         bound.previous.remember(bound.fence, now)?;
         bound.fence.session = self.session;
@@ -1762,6 +1769,20 @@ impl Broker {
         connection.bytes = 0;
         connection.push(Reply::SessionChanged { fence, state })
     }
+    /// Refreshes an agent's context before it is acted on; whether its session
+    /// fence is unchanged afterwards.
+    fn refresh_now(&mut self, connection: &mut Connection) -> io::Result<bool> {
+        let fence = connection.bound.as_ref().unwrap().fence;
+        if connection.bound.as_ref().unwrap().role == Role::Agent {
+            self.sample_context(connection, monotonic()?)?;
+        }
+        Ok(connection
+            .bound
+            .as_ref()
+            .is_some_and(|bound| bound.fence == fence))
+    }
+    /// Samples an agent's context once a change notification marked it due or
+    /// its keepalive passed; only a notified change is published.
     fn refresh_context(&mut self, connection: &mut Connection, now: Duration) -> io::Result<()> {
         let bound = connection.bound.as_mut().unwrap();
         if bound.role != Role::Agent
@@ -1770,6 +1791,10 @@ impl Broker {
             return Ok(());
         }
         self.published |= std::mem::take(&mut bound.context.due);
+        self.sample_context(connection, now)
+    }
+    fn sample_context(&mut self, connection: &mut Connection, now: Duration) -> io::Result<()> {
+        let bound = connection.bound.as_mut().unwrap();
         bound.registration.check(&mut self.logind, &bound.client)?;
         let binding = bound.registration.binding()?.clone();
         let was_fresh = bound.context.fresh(now);
@@ -1837,7 +1862,7 @@ impl Broker {
         let checked = monotonic()?;
         bound.context.checked = checked;
         if bound.context.value.as_ref().is_some_and(|value| {
-            checked.saturating_sub(value.snapshot.captured_at) > SNAPSHOT_MAX_AGE
+            checked.saturating_sub(value.snapshot.captured_at) > DECISION_MAX_AGE
         }) {
             bound.context.value = None;
             bound.context.state = State::Unknown;
@@ -2049,12 +2074,13 @@ mod tests {
         feed.checked = Duration::from_millis(10);
         feed.state = State::Desktop;
         assert_eq!(feed.state(Duration::from_millis(20)), State::Desktop);
-        assert_eq!(feed.state(Duration::from_millis(261)), State::Unknown);
+        let expired = feed.checked + SNAPSHOT_MAX_AGE + Duration::from_millis(1);
+        assert_eq!(feed.state(expired), State::Unknown);
         assert!(!feed.fresh(Duration::ZERO));
         feed.state = State::Locked;
         feed.usable = false;
         assert!(!feed.fresh(Duration::from_millis(20)));
-        assert_eq!(feed.state(Duration::from_secs(3)), State::Locked);
+        assert_eq!(feed.state(expired * 2), State::Locked);
     }
     #[test]
     fn private_context_header_limit_rejects_the_whole_snapshot() {
