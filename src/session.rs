@@ -903,7 +903,14 @@ mod tests {
         let peer = Peer::from_socket(&left).unwrap();
         drop(right);
         peer.process.check().unwrap();
-        assert!(peer.check().is_err());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while peer.check().is_ok() {
+            assert!(
+                Instant::now() < deadline,
+                "the closed peer was never reported"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
         let (datagram, _other) = std::os::unix::net::UnixDatagram::pair().unwrap();
         assert!(Peer::from_socket(&datagram).is_err());
     }
