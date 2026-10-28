@@ -1,7 +1,7 @@
 //! Linux virtual-device preparation, metadata import and bounded frame writes.
 //!
-//! Device creation does not grab any original. Production routing still needs
-//! authenticated consumer readiness, a neutral handoff and the supervisor.
+//! Device creation does not grab any original; the supervised route worker
+//! grabs one only after authenticated consumer readiness and a neutral handoff.
 //! Test devices require explicit isolation metadata and root-owned pre-add udev
 //! import, and must be grabbed by their isolated receiver before any injection.
 

@@ -5,15 +5,18 @@ Low-level Linux input tools, named after Albanian **preke** — “touch it”.
 Prek reads evdev input below Wayland. Its recognition core is independent of the
 compositor. The current CLI supports read-only observation, private
 recordings, deterministic offline replay, declarative configuration validation,
-configured rule observation, and authenticated broker/session status.
+configured rule observation, authenticated broker/session status, and an opt-in
+route mode that takes devices over and runs configured command actions.
 
 The library additionally provides seat-scoped chords, layers, repeatable holds,
 reference-counted logical keys, armed path capture and shape matching. These
 primitives are tested. Configured key edges, button taps/holds/repeats, chords,
 layers, wheels, touch gestures and configured shapes now run in observation and
-replay. Ordered temporal sequences now compose those recognizers. Exclusive input
-routing, broker/session integration and desktop actions are still in progress.
-The current executable does not grab devices or execute configured actions.
+replay. Ordered temporal sequences now compose those recognizers.
+`prek broker --mode route` takes allowed devices over from the session's
+compositor and forwards them through equivalent virtual devices;
+`prek session --commands` runs root-configured argv actions for the gestures it
+consumes.
 
 The library also has virtual-device preflight, a bounded raw-frame router and
 a configured routing coordinator.
@@ -25,11 +28,13 @@ uinput devices and writes bounded complete frames. The private worker has a
 [bounded, descriptor-bound LED feedback bridge](docs/feedback.md), with independent
 queries and source writes; its synthetic kernel challenge still needs a user-run
 receipt. Supervised takeover from the session's Wayland compositor at a neutral
-idle cut is implemented but not yet accepted on real hardware. Devices with
-nonzero axis fuzz are refused until transparent forwarding is verified for that
+idle cut has passed bounded trials on a phone touchscreen and buttons and on a
+laptop keyboard: input kept working while taken over and was released cleanly.
+Devices with nonzero axis fuzz are refused until transparent forwarding is verified for that
 capability; a compositor-consumed keyboard is mirrored without kernel repeat,
 since the compositor generates key repeat itself.
-Production routing remains disabled.
+Route mode is opt-in; suspend, hotplug, reboot and rollback have not been
+accepted on real hardware yet.
 
 The configured routing core connects rule candidates to reserve/buffer/observe
 ownership. Consuming candidates require a current context permit and a negotiated
@@ -53,8 +58,8 @@ stalled output or dispatch consumers require transport recovery. The default
 decision delay remains 300 ms; explicit configurations may increase it to five
 seconds and callers can inspect the scheduled delivery offset. Native replay
 and routing-library tests cover configured consumption with model context.
-Local application delivery, live broker bridges, pre-grab handoff and remaining
-application behaviors are required before the CLI can enable routing.
+When the route worker exits, it logs each taken-over device's forwarding delay,
+with frames held for a rule decision reported apart from Prek's own overhead.
 
 The compositor binding is built from kernel facts only: the owner and inode of
 the `WAYLAND_DISPLAY` socket in the user's private runtime directory, the
@@ -72,7 +77,7 @@ only within 250 ms of a check.
 Process exit, socket disconnect, compositor replacement or session deactivation
 revokes registration; returning to the seat requires a new registration.
 This proves session membership. Optional live compositor context is sampled
-separately; bound lock-provider acknowledgements and action dispatch remain pending.
+separately; lock state comes only from logind.
 
 ## Commands
 
@@ -155,8 +160,8 @@ its user manager runs outside any session: there the agent must
 share the compositor's systemd unit, and logind must record that exact
 compositor as the controller of the user's display session. Both commands accept `--socket`
 for a different broker endpoint. Status reports the active agent's current
-context, snapshot revision and any context/reload error. Device ownership/latency
-counters and desktop action dispatch remain pending.
+context, snapshot revision and any context/reload error. It does not report
+device ownership or forwarding delay yet.
 
 `session --observations` subscribes to configured outcomes from its verified seat.
 The worker acknowledges readiness with `subscribed: true` in JSON output after
@@ -245,7 +250,8 @@ NixOS users can import `nixosModules.default` from this flake. It provides the
 supervised observation broker, build-checked Lua/modules and a `prek-session`
 launcher for the compositor's login-session startup hook. Defaults select no
 devices or rules. See [NixOS setup](docs/nixos.md) for configuration, permissions,
-installed presets and start/stop/recovery. Production routing remains gated.
+installed presets and start/stop/recovery. Its route mode requires
+`allowPhysicalTakeover = true`.
 
 Prek embeds onix-os/luna for Lua configuration. `init` writes a minimal
 `config.lua` in the current directory by default; `--preset` and `--output`
@@ -288,8 +294,8 @@ See [geometry queries](docs/lua-api.md#output-and-coordinate-queries).
 Rule declarations support observational `on_begin`, `on_update`, `on_end` and
 `on_cancel` hooks; `rules.on` returns a disposable per-rule subscription.
 See [rule callbacks](docs/lua-api.md#rule-phase-callbacks).
-Production routing remains disabled; named-effect execution currently has model
-grant and helper-process coverage, without authenticated production routing proof.
+Named-effect execution has model grant and helper-process coverage; Lua-driven
+effects have not run on real hardware yet.
 Pending effects are canceled by generation, gesture cancellation and source
 invalidation. A canceled queued Lua callback does not run; bounded in-flight
 results are discarded, while unrelated session work continues. Commands already
@@ -422,8 +428,8 @@ relevant geometry changes cancel it. The model requires 2.5 s snapshot
 freshness and a three-second provider lease. The Linux session library supplies
 verified socket/process/logind membership for agents launched inside the
 compositor's session, or inside the systemd unit of a compositor that logind
-records as the display session's controller. Action integration and delegation
-for other shared user services remain pending. Lock screens, greeters and
+records as the display session's controller. Delegation to other shared user
+services remains pending. Lock screens, greeters and
 authentication are outside Prek.
 
 ## Recording and replay

@@ -6,7 +6,7 @@ native sequences and coordinated custom-step ownership. Full compiled plans
 now survive private worker subscriptions, rule edits and configuration reloads.
 Public source validation accepts composed custom declarations. Offline configured
 replay runs isolated real callbacks without raw transport or live effect authority.
-Production routing remains gated.
+Sequence routing has not run on real hardware yet.
 
 The embedding must verify the active rule step, source incarnation, protected
 policy, frozen target and transport readiness before admitting a group. A token

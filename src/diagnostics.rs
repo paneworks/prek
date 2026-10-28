@@ -112,7 +112,7 @@ impl Report {
                 );
             }
             if crate::rules::requires_context(rule) {
-                add("context_provider_unavailable", None, Some(&rule.id), "Live context snapshots and lock-provider negotiation are not connected yet; observation skips this rule until a verified provider is available".into());
+                add("context_provider_unavailable", None, Some(&rule.id), "Needs live context from a broker-verified session agent (`prek session --context`); observation without one skips this rule".into());
             }
             let finger_count = maximum_fingers(&rule.trigger);
             for (id, selector) in config
@@ -150,7 +150,7 @@ impl Report {
             }
         }
         if config.mode == Mode::Route {
-            add("routing_pending", None, None, "Routing runs only under `prek broker --mode route`, takes over devices held by the bound Wayland compositor at a neutral idle cut and is not yet accepted on real hardware".into());
+            add("routing_pending", None, None, "Routing runs only under `prek broker --mode route`, takes over devices held by the bound Wayland compositor at a neutral idle cut and has passed only bounded trials on real hardware; suspend, hotplug, reboot and rollback are not yet accepted".into());
         }
         Self {
             version: 1,

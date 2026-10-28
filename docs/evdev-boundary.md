@@ -2,8 +2,8 @@
 
 `linux::handoff::Handoff` classifies the evdev-client stream around a grab. It
 does not create a transport `Ready`,
-context permit, neutral-state token or release acknowledgement. Production
-routing remains disabled.
+context permit, neutral-state token or release acknowledgement. The route
+worker uses it to take devices over at a neutral idle cut.
 
 ## Protocol
 
@@ -64,8 +64,7 @@ Display and Debug output include no raw events. `grab_acquired()` is historical,
 not proof of current ownership, successful ungrab or consumer state. Neither a
 matched prefix nor its journal can repair a consumer automatically. Unchecked
 data, `SYN_DROPPED`, incomplete prefixes, native consumer acknowledgement and
-complete rollback still need their explicit lifecycle handling. Production
-routing remains disabled.
+complete rollback still need their explicit lifecycle handling.
 
 Preparation and classification each bound reads to 4,096 calls, aggregate events
 to 65,536 and loop work to 50 ms. Kernel syscall responsiveness is separate.
@@ -304,4 +303,4 @@ recreation, late import requests, strict receipts, replacement/legacy records,
 consumer-evidence fencing and existing transport/discovery models. Actual
 kernel cases remain in the user-launched runner. Neither layer establishes
 compositor/console drain, neutral handoff, physical source incarnation or
-complete rollback. Production routing remains disabled.
+complete rollback.

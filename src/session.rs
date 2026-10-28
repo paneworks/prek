@@ -6,8 +6,8 @@
 //! user's display session only while logind records that exact process as the
 //! session's controller, and its agent must share the compositor's cgroup.
 //! Registration proves membership and activity, never an unlocked desktop.
-//! Callers must still obtain lock-provider evidence and recheck registration
-//! before accepting context or dispatching an action.
+//! Callers must still read logind's lock hint and recheck registration before
+//! accepting context or dispatching an action.
 
 use crate::{
     compositor::Compositor,

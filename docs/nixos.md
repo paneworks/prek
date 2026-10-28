@@ -21,10 +21,10 @@ session. Logs remain in `target/root-routing/latest` or
 
 ## System service
 
-The upstream module currently provides supervised **observation**, approved Lua
-callbacks, permitted normalized input, and acknowledged rule/layer/mode edits.
-Production input routing and physical phone takeover remain unavailable. Enabling
-the module with its defaults selects no devices and declares no rules.
+The upstream module provides supervised **observation**, approved Lua callbacks,
+permitted normalized input, acknowledged rule/layer/mode edits, and an opt-in
+route mode described below. Enabling the module with its defaults selects no
+devices and declares no rules.
 
 Import the module from the same flake revision as the package:
 

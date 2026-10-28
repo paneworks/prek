@@ -3,7 +3,7 @@
 Prek embeds [onix-os/luna](https://github.com/onix-os/luna), pinned to version
 0.5.1. Files ending in `.lua` return one configuration table. Legacy TOML is
 also accepted. Configuration evaluation declares actions and does not execute
-them. Live production routing remains disabled.
+them.
 
 This reference covers configuration, rule queries and host transaction bindings, read-only session context, event subscriptions, timers, tasks and named
 action handlers producing command/event plans. Custom recognizers,
@@ -470,7 +470,7 @@ explicit selector names in `policy.allowed_devices`, and the owning agent to use
 `prek session --lua --input`. The broker negotiates `input_events` together with
 `context`, `observations` and `lua_events`. Source registration alone grants no
 permission. This is implemented for observation brokers; routing brokers reject
-the capability while production takeover remains pending. The protected source
+the capability. The protected source
 must also use `mode="observe"` (the configuration default), so negotiation and
 worker delivery enforce the same mode requirement.
 
@@ -1034,7 +1034,6 @@ Named handlers run in the supervised unprivileged Lua process after an offered
 action receives a fresh broker grant. Use `prek session --lua --commands` to opt
 in. The broker and agent require active desktop context, current fences, source
 and gesture identity, configured authority and declared effect capabilities.
-Production routing remains disabled while its separate handoff gates are pending.
 
 The callback receives `{fence, event}`. `event` is the approved match: `id`,
 `ordinal`, `rule`, `source`, `at`, `stage`, configuration/session generations,

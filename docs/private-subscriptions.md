@@ -45,5 +45,4 @@ inspection data, not camera bounds, rendered input scope or an execution grant.
 
 Run `oslo make test-subscription-transfer` for actual-channel, pressure, whole
 graph, privacy barrier, expiry and both worker integration cases. Isolated
-routing fixtures do not open kernel devices or establish physical acceptance;
-production routing remains disabled.
+routing fixtures do not open kernel devices or establish physical acceptance.

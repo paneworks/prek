@@ -57,12 +57,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Supervise configured observation and authenticated session control.
-    /// Input routing and desktop actions remain unavailable.
+    /// Supervise configured observation or routing and authenticated session control.
     Broker {
         #[arg(long)]
         config: PathBuf,
-        /// Route supervises a routing worker; physical takeover is still refused per device.
+        /// Route supervises a routing worker that takes allowed devices over from the
+        /// session's compositor at a neutral idle cut.
         #[arg(long, default_value = "observe", value_parser = ["observe", "route"])]
         mode: String,
         /// Trusted actual compositor executable (the ELF, rather than a wrapper).

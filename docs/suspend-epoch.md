@@ -110,5 +110,5 @@ Clock bracketing detects only discontinuities distinguishable from its sampling
 uncertainty. It is not an authoritative pre-sleep notification, a proof of every
 possible short suspend, or complete P08.3 recovery. Pre-sleep quiescence,
 fresh source/consumer re-entry and actual hardware/lock/greeter suspend
-acceptance remain required. Production routing
-remains disabled, and consumer neutral/held-prefix/rollback gates are unchanged.
+acceptance remain required. Consumer neutral/held-prefix/rollback gates are
+unchanged.

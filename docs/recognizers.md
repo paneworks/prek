@@ -103,8 +103,8 @@ The [runtime rule example](../examples/lua/custom_runtime.lua) uses
 `allow_runtime_rules=true`. Lua preparation, broker preparation and native
 activation each check original declaration approval; only an accepted native
 receipt advances the rule revision. Route brokers negotiate it too; their worker
-routes only devices the bound Wayland compositor held, taken over at a neutral idle cut, which is
-not yet accepted on real hardware.
+routes only devices the bound Wayland compositor held, taken over at a neutral idle cut.
+Custom recognizers have not run on real hardware yet.
 
 An owning observation session uses `prek session --lua --recognizers`; protected
 system policy must enable `allow_input_events` and the selected devices. This
@@ -158,8 +158,7 @@ Three ordinary helper integration cases also verify native continuous phase orde
 late results after transport loss and exact-once unmatched raw fallback.
 
 These tests open neither evdev nor uinput. This is not
-privileged integration acceptance: CLI routing remains disabled, and the native
-pre/post-grab backlog and authenticated ownership gates remain unresolved.
+privileged integration acceptance; that needs user-launched trials on real devices.
 
 ## Native proposal and delivery contract
 
@@ -219,8 +218,8 @@ old candidates. If delivery cannot be maintained, retire that helper VM.
 The result is a **validated proposal**, not a claim or execution grant. The
 coordinator must still perform ordinary Rust arbitration, enforce its one-owner
 rule and action permissions, and preserve fallback/draining behavior. It must
-retire completed candidates, changed eligibility and lost sources. Existing
-production routing remains disabled; observation negotiation requires the
+retire completed candidates, changed eligibility and lost sources. Observation
+negotiation requires the
 protected source binding and session opt-in described above.
 
 Source constructors create bindings automatically. The older Rust embedding
@@ -457,4 +456,3 @@ they do not verify a live privileged broker/logind registration. Full source
 graphs now run through the sole worker helper across configuration generations,
 and offline replay exercises real held-touch and cross-source composition.
 End-to-end production reload/recovery and physical acceptance remain open.
-Production routing remains gated.
