@@ -872,7 +872,7 @@ case "$1" in
     {"; ".join([matched] * swipes) if swipe else ''}
     {"; ".join([fired] * swipes) if agent in ("swipes", "injects", "misfires") else ''}
     {'for d in up down up down; do echo $d >> ' + repr(str(repo / 'target/takeover-trial/latest/edges.log')) + '; done' if agent == 'edges' else ''}
-    {relocked if agent == "locks" else ''} ;;
+    {relocked if agent in ("locks", "stuck") else ''} ;;
 esac
 """)
             (prek / "bin/prek").chmod(0o755)
@@ -908,7 +908,7 @@ esac
                 console = (run / "console.log").read_text()
                 if agent == "locks":
                     self.assertEqual(result.returncode, 0, console)
-                    self.assertIn("Context losses after takeover: 1; takeovers after the last loss: 1", console)
+                    self.assertIn("Locks reported: 1; releases after takeover: 1; takeovers after a release: 1", console)
                 elif agent == "stuck":
                     self.assertEqual(result.returncode, 1)
                     self.assertIn("was not taken over again after the last unlock", console)

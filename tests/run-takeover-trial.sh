@@ -413,18 +413,30 @@ if ! grep -q 'taken over at a neutral idle cut' "$run/broker.log"; then
   echo "\"$device\" was never taken over." >&2
   exit 1
 fi
-forwarded=$(grep -F "routing worker: $device forwarded " "$run/broker.log" | tail -n 1 || true)
-if [[ -n $inject && ( -z $forwarded || $forwarded == *" forwarded no frames" ) ]]; then
+# Each takeover reports its own forwarding summary.
+forwarded=$(grep -F "routing worker: $device forwarded " "$run/broker.log" \
+  | grep -v ' forwarded no frames$' | tail -n 1 || true)
+if [[ -n $inject && -z $forwarded ]]; then
   echo "The injected one-finger swipe was never forwarded to the compositor." >&2
   exit 1
 fi
 losses=$(sed -n '/taken over at a neutral idle cut/,$p' "$run/broker.log" | grep -c 'lost its context' || true)
 if [[ -n $lock ]]; then
-  retaken=$(awk '/lost its context/ { n = 0 } /taken over at a neutral idle cut/ { n++ } END { print n + 0 }' \
-    "$run/broker.log")
-  printf 'Context losses after takeover: %d; takeovers after the last loss: %d\n' "$losses" "$retaken"
-  if ((losses == 0)); then
+  # A lock tears the seat down, which retires the device's route.
+  locks=$(grep -c '^context Locked;' "$run/session.log" || true)
+  releases=$(sed -n '/taken over at a neutral idle cut/,$p' "$run/broker.log" \
+    | grep -c -e 'lost its context' -e 'retired output for device' || true)
+  retaken=$(awk '/taken over at a neutral idle cut/ { if (released) n++; taken = 1; released = 0 }
+    taken && (/lost its context/ || /retired output for device/) { released = 1 }
+    END { print n + 0 }' "$run/broker.log")
+  printf 'Locks reported: %d; releases after takeover: %d; takeovers after a release: %d\n' \
+    "$locks" "$releases" "$retaken"
+  if ((locks == 0)); then
     echo "The seat never left its desktop, so the lock was not exercised." >&2
+    exit 1
+  fi
+  if ((releases == 0)); then
+    echo "\"$device\" stayed taken over while the session was locked." >&2
     exit 1
   fi
   if ((retaken == 0)); then
