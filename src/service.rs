@@ -1120,7 +1120,14 @@ impl Broker {
                 "transport source belongs to another seat",
             ));
         }
-        bound.registration.check(&mut self.logind, &bound.client)?;
+        // An agent that just exited gets no evidence; its connection closes on its own.
+        if bound
+            .registration
+            .check(&mut self.logind, &bound.client)
+            .is_err()
+        {
+            return Ok(None);
+        }
         let evidence = match bound.client.device_evidence(descriptor, monotonic()?) {
             Ok(evidence) => evidence,
             Err(error) if !descriptor.is_generated_keyboard() => {
@@ -1135,7 +1142,13 @@ impl Broker {
         let Some(evidence) = evidence else {
             return Ok(None);
         };
-        bound.registration.check(&mut self.logind, &bound.client)?;
+        if bound
+            .registration
+            .check(&mut self.logind, &bound.client)
+            .is_err()
+        {
+            return Ok(None);
+        }
         let reply = transport_offer::reply(
             descriptor,
             bound.fence,
