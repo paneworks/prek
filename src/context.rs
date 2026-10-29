@@ -663,6 +663,14 @@ impl Authority {
         if permit.generation != self.generation {
             return Err(Rejection::StaleGeneration);
         }
+        // A newer snapshot of the permit's generation confirms input stamped before it.
+        let at = self
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.captured_at)
+            .into_iter()
+            .chain(self.acknowledged_at)
+            .fold(at, Duration::max);
         let state = self.state(at);
         if state != permit.state {
             return Err(match state {
@@ -1245,7 +1253,7 @@ mod tests {
         assert_eq!(authority.state(ms(100)), State::Desktop);
     }
     #[test]
-    fn t62_validation_reports_why_a_desktop_permit_lost_its_snapshot() {
+    fn t62_a_renewal_confirms_earlier_input_and_validation_names_a_lost_snapshot() {
         let mut authority = authority();
         let source = source();
         let map = mapping();
@@ -1254,15 +1262,15 @@ mod tests {
             .unwrap();
         let generation = authority.generation();
         authority
-            .update(snapshot(generation, 2, 150), ms(150))
+            .update(snapshot(generation, 2, 150), ms(160))
+            .unwrap();
+        authority
+            .validate(&permit, input(&source, &map, 120))
             .unwrap();
         error(
-            authority.validate(&permit, input(&source, &map, 120)),
+            authority.start(&rule(), input(&source, &map, 120), &[point(200, 200)]),
             Rejection::FutureTime,
         );
-        authority
-            .validate(&permit, input(&source, &map, 150))
-            .unwrap();
         let age = SNAPSHOT_MAX_AGE.as_millis() as u64;
         error(
             authority.validate(&permit, input(&source, &map, 151 + age)),
