@@ -17,10 +17,14 @@ exactly as it delivers the hardware's own reports. Steps run in order:
                                  normalized start of their centre, by default
                                  placing the swipe around the screen centre;
                                  with MS the first contact moves alone that
-                                 long before the others land beside it
-  key:CODE                       press and release one key code
+                                 long before the others land beside it;
+                                 contacts press with half the pressure range
+                                 when DEVICE reports pressure
+  key:CODE[+CODE...]             press the key codes in order, then release
+                                 them in reverse, each in its own frame
   wait:MS                        pause
---size sets the contact axis ranges of a DEVICE that cannot report them.
+--size sets the contact axis ranges of a DEVICE that cannot report them;
+DEVICE needs them only for swipe steps.
 Each step prints its start on the monotonic clock in seconds.
 HELP
 
@@ -31,10 +35,12 @@ use constant {
     BTN_TOUCH          => 0x14a,
     ABS_X              => 0x00,
     ABS_Y              => 0x01,
+    ABS_PRESSURE       => 0x18,
     ABS_MT_SLOT        => 0x2f,
     ABS_MT_POSITION_X  => 0x35,
     ABS_MT_POSITION_Y  => 0x36,
     ABS_MT_TRACKING_ID => 0x39,
+    ABS_MT_PRESSURE    => 0x3a,
 };
 # BTN_TOOL_FINGER, DOUBLETAP, TRIPLETAP, QUADTAP and QUINTTAP by contact count.
 my @tools = (0x145, 0x14d, 0x14e, 0x14f, 0x148);
@@ -51,20 +57,29 @@ die $usage unless defined $path && @steps;
 for (@steps) {
     die "Unknown step \"$_\".\n$usage"
         unless /^swipe:[1-5]:(up|down|left|right)(:(0(\.\d+)?|1),(0(\.\d+)?|1)(:\d+)?)?$/
-        || (/^key:(\d+)$/ && $1 <= 0x2ff) || /^wait:\d+$/;
+        || (/^key:(\d+(?:\+\d+)*)$/ && !grep { $_ > 0x2ff } split /\+/, $1) || /^wait:\d+$/;
 }
 sysopen(my $device, $path, O_WRONLY) or die "$path: $!\n";
 
 # EVIOCGABS fills struct input_absinfo: value, minimum, maximum, fuzz, flat, resolution.
-sub range {
+sub axis {
     my ($code) = @_;
     my $info = "\0" x 24;
-    ioctl($device, 0x80184540 + $code, $info) or die "$path reports no axis $code ($!); pass --size.\n";
+    ioctl($device, 0x80184540 + $code, $info) or return;
     my (undef, $minimum, $maximum) = unpack('l3', $info);
     return [$minimum, $maximum];
 }
-$width  //= range(ABS_MT_POSITION_X);
-$height //= range(ABS_MT_POSITION_Y);
+sub range { axis($_[0]) // die "$path reports no axis $_[0] ($!); pass --size.\n" }
+# Contacts press with half the pressure range of each pressure axis the device reports.
+my %pressure;
+if (grep /^swipe:/, @steps) {
+    $width  //= range(ABS_MT_POSITION_X);
+    $height //= range(ABS_MT_POSITION_Y);
+    for my $code (ABS_PRESSURE, ABS_MT_PRESSURE) {
+        my $axis = axis($code);
+        $pressure{$code} = at($axis, 0.5) if $axis && $axis->[1] > $axis->[0];
+    }
+}
 
 sub frame {
     my $bytes = join '', map { pack('l!2 S2 l', 0, 0, @$_) } @_, [EV_SYN, 0, 0];
@@ -99,7 +114,10 @@ sub swipe {
             next if $step < $landing;
             my ($cx, $cy) = @{$contacts[$slot]};
             push @events, [EV_ABS, ABS_MT_SLOT, $slot];
-            push @events, [EV_ABS, ABS_MT_TRACKING_ID, $tracking + $slot] if $step == $landing;
+            if ($step == $landing) {
+                push @events, [EV_ABS, ABS_MT_TRACKING_ID, $tracking + $slot];
+                push @events, [EV_ABS, ABS_MT_PRESSURE, $pressure{+ABS_MT_PRESSURE}] if exists $pressure{+ABS_MT_PRESSURE};
+            }
             push @events, [EV_ABS, ABS_MT_POSITION_X, at($width, $cx + $travel * $dx)],
                 [EV_ABS, ABS_MT_POSITION_Y, at($height, $cy + $travel * $dy)];
         }
@@ -109,10 +127,12 @@ sub swipe {
             if $lead && $step == $lead;
         push @events, [EV_ABS, ABS_X, at($width, $contacts[0][0] + $travel * $dx)],
             [EV_ABS, ABS_Y, at($height, $contacts[0][1] + $travel * $dy)];
+        push @events, [EV_ABS, ABS_PRESSURE, $pressure{+ABS_PRESSURE}] if $step == 0 && exists $pressure{+ABS_PRESSURE};
         frame(@events);
         sleep 0.015;
     }
     frame((map { ([EV_ABS, ABS_MT_SLOT, $_], [EV_ABS, ABS_MT_TRACKING_ID, -1]) } 0 .. $#contacts),
+        (exists $pressure{+ABS_PRESSURE} ? [EV_ABS, ABS_PRESSURE, 0] : ()),
         [EV_KEY, BTN_TOUCH, 0], [EV_KEY, $tools[$fingers - 1], 0]);
     $tracking += $fingers;
 }
@@ -124,9 +144,10 @@ for (@steps) {
     if ($kind eq 'swipe') {
         swipe(@arguments);
     } elsif ($kind eq 'key') {
-        frame([EV_KEY, $arguments[0], 1]);
-        sleep 0.08;
-        frame([EV_KEY, $arguments[0], 0]);
+        my @codes = split /\+/, $arguments[0];
+        for (@codes) { frame([EV_KEY, $_, 1]); sleep 0.02; }
+        sleep 0.06;
+        for (reverse @codes) { frame([EV_KEY, $_, 0]); sleep 0.02; }
     } else {
         sleep $arguments[0] / 1000;
     }

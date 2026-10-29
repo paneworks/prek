@@ -1056,7 +1056,7 @@ esac
         with tempfile.TemporaryDirectory() as temporary:
             node = Path(temporary) / "node"
             node.write_bytes(b"")
-            steps = ["swipe:3:down", "key:115", "swipe:1:left:0.8,1"]
+            steps = ["swipe:3:down", "key:115", "key:42+30", "swipe:1:left:0.8,1"]
             result = subprocess.run(["perl", str(injector), "--size", "1116x2484", str(node), *steps],
                                     capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -1072,7 +1072,7 @@ esac
                 else:
                     frame.append(event)
             self.assertEqual(frame, [])
-            self.assertEqual(len(frames), 21 + 1 + 2 + 21 + 1)
+            self.assertEqual(len(frames), 21 + 1 + 2 + 4 + 21 + 1)
             landing, last, lift = frames[0], frames[20], frames[21]
             tracking = [value for kind, code, value in landing if code == 0x39]
             self.assertEqual(tracking, [tracking[0], tracking[0] + 1, tracking[0] + 2])
@@ -1085,10 +1085,20 @@ esac
             self.assertEqual(lift, [(3, 0x2f, 0), (3, 0x39, -1), (3, 0x2f, 1), (3, 0x39, -1), (3, 0x2f, 2),
                                     (3, 0x39, -1), (1, 0x14a, 0), (1, 0x14e, 0)])
             self.assertEqual(frames[22:24], [[(1, 115, 1)], [(1, 115, 0)]])
-            self.assertIn((3, 0x35, 892), frames[24])
-            self.assertIn((3, 0x36, 2483), frames[24])
-            self.assertIn((3, 0x35, 446), frames[44])
-            self.assertEqual(frames[45][-2:], [(1, 0x14a, 0), (1, 0x145, 0)])
+            self.assertEqual(frames[24:28], [[(1, 42, 1)], [(1, 30, 1)], [(1, 30, 0)], [(1, 42, 0)]])
+            self.assertIn((3, 0x35, 892), frames[28])
+            self.assertIn((3, 0x36, 2483), frames[28])
+            self.assertIn((3, 0x35, 446), frames[48])
+            self.assertEqual(frames[49][-2:], [(1, 0x14a, 0), (1, 0x145, 0)])
+            node.write_bytes(b"")
+            keys = subprocess.run(["perl", str(injector), str(node), "key:29+56+59"], capture_output=True,
+                                  text=True, timeout=30)
+            self.assertEqual(keys.returncode, 0, keys.stderr)
+            data = node.read_bytes()
+            self.assertEqual([struct.unpack("@llHHi", data[offset:offset + 24])[2:]
+                              for offset in range(0, len(data), 24)],
+                             [(1, 29, 1), (0, 0, 0), (1, 56, 1), (0, 0, 0), (1, 59, 1), (0, 0, 0),
+                              (1, 59, 0), (0, 0, 0), (1, 56, 0), (0, 0, 0), (1, 29, 0), (0, 0, 0)])
             node.write_bytes(b"")
             late = subprocess.run(["perl", str(injector), "--size", "1116x2484", str(node),
                                    "swipe:3:down:0.5,0.25:200"], capture_output=True, text=True, timeout=30)
@@ -1111,7 +1121,9 @@ esac
             for arguments, message in ((["--size", "9x9", str(node), "swipe:6:up"], 'Unknown step "swipe:6:up"'),
                                        (["--size", "9x9", str(node), "swipe:1:up:1.5,0"], 'Unknown step'),
                                        (["--size", "9x9", str(node), "key:768"], 'Unknown step "key:768"'),
-                                       ([str(node), "wait:1"], "reports no axis 53")):
+                                       ([str(node), "key:30+768"], 'Unknown step "key:30+768"'),
+                                       ([str(node), "key:30+"], 'Unknown step "key:30+"'),
+                                       ([str(node), "wait:1", "swipe:1:up"], "reports no axis 53")):
                 refused = subprocess.run(["perl", str(injector), *arguments], capture_output=True, text=True,
                                          timeout=30)
                 self.assertNotEqual(refused.returncode, 0)
