@@ -343,7 +343,7 @@ impl Router {
         if let Err(error) = physical.apply(&frame, &self.device) {
             return self.fail(error);
         }
-        let plan = match self
+        let mut plan = match self
             .keyboard
             .as_ref()
             .unwrap_or(&Ledger::default())
@@ -352,6 +352,22 @@ impl Router {
             Ok(plan) => plan,
             Err(error) => return self.fail(error),
         };
+        // Each report carries the persistent values its output still lacks.
+        for report in &mut plan.reports {
+            let repairs = self
+                .physical_absolute
+                .restore_for(&self.planned_absolute, &report.frame);
+            if report.frame.events.len().saturating_add(repairs.len()) > 4096 {
+                return self.fail(Fault::Overflow);
+            }
+            let insert_at = report
+                .frame
+                .events
+                .iter()
+                .position(|event| event.kind == EV_ABS)
+                .unwrap_or(report.frame.events.len() - 1);
+            report.frame.events.splice(insert_at..insert_at, repairs);
+        }
         if self
             .queue
             .len()

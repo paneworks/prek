@@ -981,7 +981,11 @@ impl Router {
                 })
                 || self.pending_keyboard.as_ref().is_some_and(|journal| {
                     journal.tails.enabled() || journal.domains.absolute_enabled()
-                })))
+                })
+                || !self
+                    .physical_absolute
+                    .restore_for(&self.planned_absolute, &frame)
+                    .is_empty()))
         .then(|| self.physical_absolute.clone());
         if absolute_before
             .as_ref()

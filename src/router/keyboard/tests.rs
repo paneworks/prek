@@ -385,6 +385,43 @@ fn scan_metadata_is_dropped_only_with_its_adjacent_consumed_key() {
 }
 
 #[test]
+fn a_projected_touch_frame_carries_the_seeded_values_a_fresh_output_lacks() {
+    use crate::input::{
+        ABS_MT_POSITION_X, ABS_MT_POSITION_Y, AbsoluteSlot, AbsoluteState, Normalizer,
+    };
+    let mut device = crate::transport::tests::touch();
+    device.product = 1;
+    let mut router = prepared(Limits::default(), device.clone());
+    let initial = AbsoluteState {
+        values: BTreeMap::from([(ABS_MT_SLOT, 1)]),
+        slots: BTreeMap::from([(
+            1,
+            AbsoluteSlot {
+                values: BTreeMap::from([(ABS_MT_POSITION_X, 30), (ABS_MT_POSITION_Y, 40)]),
+            },
+        )]),
+    };
+    router.seed_absolute(&initial).unwrap();
+    // The consumer reads a newly created virtual device: slot 0, zeros.
+    let mut application = Normalizer::new(&device);
+    application
+        .seed_absolute(&device, initial.pristine())
+        .unwrap();
+    // Linux omits the slot selector and coordinates the source already holds.
+    let start = packet(1, &[(EV_ABS, ABS_MT_TRACKING_ID, 11), (EV_KEY, 0x14a, 1)]);
+    push(&mut router, start, &[], &[]);
+    let frames = delivered(&mut router, 1);
+    assert_eq!(frames.len(), 1);
+    let result = application.process(frames[0].frame.clone()).unwrap();
+    assert_eq!(result.contacts.len(), 1);
+    assert_eq!(result.contacts[0].id.slot, 1);
+    assert_eq!((result.contacts[0].x, result.contacts[0].y), (30, 40));
+    let moved = packet(2, &[(EV_ABS, ABS_MT_POSITION_X, 35)]);
+    push(&mut router, moved.clone(), &[], &[]);
+    assert_eq!(delivered(&mut router, 2)[0].frame, moved);
+}
+
+#[test]
 fn reports_without_effects_keep_unknown_metadata_and_hybrid_data_intact() {
     for frame in [
         packet(

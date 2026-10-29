@@ -379,9 +379,10 @@ impl Router {
             .validate(&self.device.axes)
             .map_err(|_| Fault::InvalidFrame)?;
         self.physical.slot = state.selected_slot();
-        self.delivered.slot = state.selected_slot();
         self.physical_absolute = Arc::new(state.clone());
-        self.planned_absolute = state.clone();
+        // The output is a newly created virtual device; repairs supply every
+        // seeded value an ordinary frame relies on.
+        self.planned_absolute = state.pristine();
         Ok(())
     }
 
@@ -1234,6 +1235,73 @@ mod tests {
                 .collect::<BTreeSet<_>>(),
             BTreeSet::from([0, 1])
         );
+    }
+
+    #[test]
+    fn a_fresh_virtual_device_receives_the_seeded_values_a_delta_only_contact_needs() {
+        use crate::input::{AbsoluteSlot, AbsoluteState, Normalizer};
+        let device = crate::transport::tests::touch();
+        let initial = AbsoluteState {
+            values: BTreeMap::from([(ABS_MT_SLOT, 1)]),
+            slots: BTreeMap::from([
+                (
+                    0,
+                    AbsoluteSlot {
+                        values: BTreeMap::from([(ABS_MT_POSITION_X, 10), (ABS_MT_POSITION_Y, 20)]),
+                    },
+                ),
+                (
+                    1,
+                    AbsoluteSlot {
+                        values: BTreeMap::from([(ABS_MT_POSITION_X, 30), (ABS_MT_POSITION_Y, 40)]),
+                    },
+                ),
+            ]),
+        };
+        let mut router = router_for(device.clone(), Limits::default());
+        router.seed_absolute(&initial).unwrap();
+        // The consumer reads a newly created virtual device: slot 0, zeros.
+        let mut application = Normalizer::new(&device);
+        application
+            .seed_absolute(&device, initial.pristine())
+            .unwrap();
+        // Linux omits the slot selector and coordinates the source already holds.
+        router
+            .push(
+                frame(1, 0, &[(EV_ABS, ABS_MT_TRACKING_ID, 11)]),
+                None,
+                ms(0),
+            )
+            .unwrap();
+        let received = deliver(&mut router, 0).unwrap();
+        let first = application.process(received).unwrap();
+        assert_eq!(first.contacts.len(), 1);
+        assert_eq!(first.contacts[0].id.slot, 1);
+        assert_eq!((first.contacts[0].x, first.contacts[0].y), (30, 40));
+        router
+            .push(
+                frame(
+                    2,
+                    10,
+                    &[
+                        (EV_ABS, ABS_MT_SLOT, 0),
+                        (EV_ABS, ABS_MT_TRACKING_ID, 12),
+                        (EV_ABS, ABS_MT_POSITION_Y, 25),
+                    ],
+                ),
+                None,
+                ms(10),
+            )
+            .unwrap();
+        let second = application
+            .process(deliver(&mut router, 10).unwrap())
+            .unwrap();
+        let positions: BTreeMap<_, _> = second
+            .contacts
+            .iter()
+            .map(|contact| (contact.id.slot, (contact.x, contact.y)))
+            .collect();
+        assert_eq!(positions, BTreeMap::from([(0, (10, 25)), (1, (30, 40))]));
     }
 
     #[test]

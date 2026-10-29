@@ -71,6 +71,29 @@ impl AbsoluteState {
         self.values.get(&ABS_MT_SLOT).copied().unwrap_or_default() as u16
     }
 
+    /// The same axes and slots as a newly created virtual device holds them:
+    /// every value zero.
+    pub(crate) fn pristine(&self) -> Self {
+        let zero = |values: &BTreeMap<u16, i32>| -> BTreeMap<u16, i32> {
+            values.keys().map(|&code| (code, 0)).collect()
+        };
+        Self {
+            values: zero(&self.values),
+            slots: self
+                .slots
+                .iter()
+                .map(|(&slot, state)| {
+                    (
+                        slot,
+                        AbsoluteSlot {
+                            values: zero(&state.values),
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
     pub(crate) fn update(&mut self, event: RawEvent) {
         if event.kind != EV_ABS || event.code > 0x3f || event.code == ABS_MT_TRACKING_ID {
             return;

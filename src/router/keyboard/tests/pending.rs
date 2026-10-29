@@ -42,6 +42,48 @@ fn settle(router: &mut Router, decisions: &[KeyDecision], at: u64) {
 }
 
 #[test]
+fn a_staged_touch_frame_carries_the_seeded_values_a_fresh_output_lacks() {
+    use crate::input::{
+        ABS_MT_POSITION_X, ABS_MT_POSITION_Y, AbsoluteSlot, AbsoluteState, Normalizer,
+    };
+    let mut device = crate::transport::tests::touch();
+    device.product = 1;
+    let mut router = prepared(Limits::default(), device.clone());
+    let initial = AbsoluteState {
+        values: BTreeMap::from([(ABS_MT_SLOT, 1)]),
+        slots: BTreeMap::from([(
+            1,
+            AbsoluteSlot {
+                values: BTreeMap::from([(ABS_MT_POSITION_X, 30), (ABS_MT_POSITION_Y, 40)]),
+            },
+        )]),
+    };
+    router.seed_absolute(&initial).unwrap();
+    // The consumer reads a newly created virtual device: slot 0, zeros.
+    let mut application = Normalizer::new(&device);
+    application
+        .seed_absolute(&device, initial.pristine())
+        .unwrap();
+    // Linux omits the slot selector and coordinates the source already holds.
+    stage(
+        &mut router,
+        packet(1, &[(EV_ABS, ABS_MT_TRACKING_ID, 11), (EV_KEY, 0x14a, 1)]),
+        &[],
+    );
+    router.advance(ms(1)).unwrap();
+    let frames = delivered(&mut router, 1);
+    assert_eq!(frames.len(), 1);
+    let result = application.process(frames[0].frame.clone()).unwrap();
+    assert_eq!(result.contacts.len(), 1);
+    assert_eq!(result.contacts[0].id.slot, 1);
+    assert_eq!((result.contacts[0].x, result.contacts[0].y), (30, 40));
+    let moved = packet(2, &[(EV_ABS, ABS_MT_POSITION_X, 35)]);
+    stage(&mut router, moved.clone(), &[]);
+    router.advance(ms(2)).unwrap();
+    assert_eq!(delivered(&mut router, 2)[0].frame.events, moved.events);
+}
+
+#[test]
 fn fallback_preserves_down_up_cadence_and_fifo_without_neutral_epoch_reset() {
     let mut router = model(Limits::default(), false);
     stage(&mut router, frame(1, 1, &[(30, 1)]), &[waiting(0, 100)]);

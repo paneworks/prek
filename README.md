@@ -52,8 +52,10 @@ claim on coherent motion before final travel succeeds; failure or extra fingers
 after claim drain without replay or a trailing click.
 
 Persistent touch coordinates and the selected slot can change during consumed
-input. Before forwarding an ordinary delta frame, the router restores the
-cursor and missing coordinates needed by that frame. Explicit raw values take
+input, and a newly created mirror starts with every axis and slot at zero while
+the kernel omits values the source already held at the cut. Before forwarding
+an ordinary delta frame, the router restores the cursor and missing coordinates
+needed by that frame. Explicit raw values take
 precedence. Repairs add no contacts, keys or SYN frames, preserve the original
 timestamp/sequence and count toward frame/storage limits. Buffered repairs keep
 the state of each original frame rather than using a later gesture's position.
