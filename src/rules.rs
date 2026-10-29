@@ -714,8 +714,10 @@ impl Engine {
     pub fn config(&self) -> &Config {
         &self.config
     }
-    pub(crate) fn devices(&self) -> impl Iterator<Item = &Device> {
-        self.devices.values().map(|state| &state.device)
+    pub(crate) fn mappings(&self) -> impl Iterator<Item = (&Device, Option<&Mapping>)> {
+        self.devices
+            .values()
+            .map(|state| (&state.device, state.mapping.as_ref()))
     }
     pub fn rule_revision(&self) -> u64 {
         self.rule_revision

@@ -198,17 +198,20 @@ struct Observer {
 }
 
 impl Observer {
-    /// Maps each touch device onto this subscription's output geometry; the
-    /// engine ignores a mapping that did not change.
+    /// Maps each touch device onto this subscription's output geometry when
+    /// the target's geometry generation advances.
     fn map_touch(&mut self, config: &Config, now: Duration) -> io::Result<()> {
         let records: Vec<_> = self
             .engine
-            .devices()
-            .filter_map(|device| {
-                Some(Record::Mapping {
-                    source: device.source.clone(),
-                    at: now,
-                    mapping: self.subscription.touch_mapping(config, device)?,
+            .mappings()
+            .filter_map(|(device, current)| {
+                let mapping = self.subscription.touch_mapping(config, device)?;
+                (mapping.generation > current.map_or(0, |current| current.generation)).then(|| {
+                    Record::Mapping {
+                        source: device.source.clone(),
+                        at: now,
+                        mapping,
+                    }
                 })
             })
             .collect();

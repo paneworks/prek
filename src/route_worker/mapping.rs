@@ -12,7 +12,8 @@ pub(super) fn target(mapping: &Mapping) -> Option<(String, u64)> {
 
 impl Stream {
     /// Pushes a new mapping for each routed touch source of a seat whose
-    /// target output or its geometry changed.
+    /// target output or its geometry changed with an advanced generation; a
+    /// stale mapping otherwise stays and its rules skip with `OutputChanged`.
     pub(super) fn remap(&mut self, name: &str, now: Duration) -> io::Result<()> {
         let Some(seat) = self.seats.get_mut(name) else {
             return Ok(());
@@ -32,7 +33,10 @@ impl Stream {
                 continue;
             };
             let current = target(&mapping);
-            if self.mapped.get(&source) != Some(&current) {
+            let previous = self.mapped.get(&source).cloned().flatten();
+            if current != previous
+                && mapping.generation > previous.map_or(0, |(_, generation)| generation)
+            {
                 self.mapped.insert(source.clone(), current);
                 seat.routing.push(Record::Mapping {
                     source,

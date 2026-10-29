@@ -137,9 +137,11 @@ impl Position {
     }
 }
 impl Mapping {
+    /// The unmapped generation-0 mapping of a device's contact axes; any output
+    /// mapping, whose generation is its geometry generation, advances it.
     pub fn from_device(device: &Device) -> Result<Self, &'static str> {
         let mapping = Self {
-            generation: 1,
+            generation: 0,
             x: *device
                 .axes
                 .get(&ABS_MT_POSITION_X)

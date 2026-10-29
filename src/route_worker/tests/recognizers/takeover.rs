@@ -267,7 +267,7 @@ fn a_taken_over_touchscreen_maps_onto_the_only_output_and_dispatches_its_swipe()
             origin: crate::gestures::Point { x: 0.0, y: 0.0 },
             transform: crate::gestures::Transform::Normal,
         },
-        geometry_generation: 2,
+        geometry_generation: 1,
         screen: crate::config::Screen::On,
     }];
     let mut fixture = Fixture::subscribed(config, owner);
@@ -288,7 +288,7 @@ fn a_taken_over_touchscreen_maps_onto_the_only_output_and_dispatches_its_swipe()
     fixture.stream.attach_takeover(&touch.source).unwrap();
     assert_eq!(
         fixture.stream.mapped[&touch.source],
-        Some(("DSI-1".into(), 2))
+        Some(("DSI-1".into(), 1))
     );
     let mut push = |sequence: u64, wait: u64, values: Vec<(u16, u16, i32)>| {
         std::thread::sleep(Duration::from_millis(wait));
