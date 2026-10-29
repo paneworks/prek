@@ -167,6 +167,9 @@ impl Stream {
             .committed
             .remove(source)
             .ok_or_else(|| invalid("reader cutover has no committed takeover"))?;
+        // Routing starts from the axis and slot coordinates the observed
+        // stream left at the cut.
+        let absolute = self.baseline.absolute_state(source).cloned();
         let seat = self
             .seats
             .get_mut(&source.seat)
@@ -180,7 +183,8 @@ impl Stream {
         if let Some(mapping) = &mapping {
             self.mapped.insert(source.clone(), mapping::target(mapping));
         }
-        seat.routing.attach(device, &ready, mapping, at)?;
+        seat.routing
+            .attach_with_state(device, &ready, mapping, absolute, at)?;
         self.grabbed.insert(source.clone());
         self.settle_forwarding();
         self.forwarding

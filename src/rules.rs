@@ -1039,6 +1039,10 @@ impl Engine {
         next.last_at = Some(at);
         Ok(next)
     }
+    /// The source's absolute axes and slot coordinates after its last frame.
+    pub(crate) fn absolute_state(&self, source: &Source) -> Option<&crate::input::AbsoluteState> {
+        self.replay.absolute_state(source)
+    }
     pub(crate) fn reconciliation(&self, source: &Source, at: Duration) -> Option<Record> {
         self.devices
             .get(&source.device)

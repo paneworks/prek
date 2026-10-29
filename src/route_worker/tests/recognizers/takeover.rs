@@ -228,6 +228,30 @@ fn a_failed_grab_classification_or_readiness_refuses_the_source_and_removes_its_
 
 #[test]
 fn a_taken_over_touchscreen_maps_onto_the_only_output_and_dispatches_its_swipe() {
+    let messages = touch_swipe_after_takeover(false);
+    assert!(dispatched(&messages), "{messages:?}");
+}
+
+#[test]
+fn a_takeover_keeps_the_slot_coordinates_that_the_kernel_omits_as_unchanged() {
+    let messages = touch_swipe_after_takeover(true);
+    assert!(dispatched(&messages), "{messages:?}");
+}
+
+fn dispatched(messages: &[Message]) -> bool {
+    messages.iter().any(|message| {
+        matches!(
+            message,
+            Message::Outcome {
+                report: Report::Dispatch { .. }
+            }
+        )
+    })
+}
+
+/// Swipes three contacts down after a takeover. With `seeded`, slot 1 last
+/// held the X its new contact lands on, so that X is absent from the frame.
+fn touch_swipe_after_takeover(seeded: bool) -> Vec<Message> {
     use crate::input::{ABS_MT_POSITION_X, ABS_MT_POSITION_Y, ABS_MT_SLOT, ABS_MT_TRACKING_ID};
     let mut touch = crate::transport::tests::touch();
     for axis in touch.axes.values_mut() {
@@ -279,6 +303,23 @@ fn a_taken_over_touchscreen_maps_onto_the_only_output_and_dispatches_its_swipe()
             contacts: vec![],
         })
         .unwrap();
+    if seeded {
+        fixture
+            .stream
+            .push(Record::Absolute {
+                source: touch.source.clone(),
+                state: crate::input::AbsoluteState {
+                    values: BTreeMap::from([(ABS_MT_SLOT, 0)]),
+                    slots: BTreeMap::from([(
+                        1,
+                        crate::input::AbsoluteSlot {
+                            values: BTreeMap::from([(ABS_MT_POSITION_X, 1500)]),
+                        },
+                    )]),
+                },
+            })
+            .unwrap();
+    }
     prepared_device(&mut fixture, &touch);
     let disposition = fixture
         .stream
@@ -320,9 +361,11 @@ fn a_taken_over_touchscreen_maps_onto_the_only_output_and_dispatches_its_swipe()
         down.extend([
             (crate::input::EV_ABS, ABS_MT_SLOT, slot),
             (crate::input::EV_ABS, ABS_MT_TRACKING_ID, slot + 10),
-            (crate::input::EV_ABS, ABS_MT_POSITION_X, 1000 + slot * 500),
-            (crate::input::EV_ABS, ABS_MT_POSITION_Y, 1000),
         ]);
+        if !(seeded && slot == 1) {
+            down.push((crate::input::EV_ABS, ABS_MT_POSITION_X, 1000 + slot * 500));
+        }
+        down.push((crate::input::EV_ABS, ABS_MT_POSITION_Y, 1000));
         moved.extend([
             (crate::input::EV_ABS, ABS_MT_SLOT, slot),
             (crate::input::EV_ABS, ABS_MT_POSITION_Y, 2500),
@@ -335,14 +378,5 @@ fn a_taken_over_touchscreen_maps_onto_the_only_output_and_dispatches_its_swipe()
     push(1, 0, down);
     push(2, 140, moved);
     push(3, 40, up);
-    let messages = fixture.drain();
-    assert!(
-        messages.iter().any(|message| matches!(
-            message,
-            Message::Outcome {
-                report: Report::Dispatch { .. }
-            }
-        )),
-        "{messages:?}"
-    );
+    fixture.drain()
 }
