@@ -78,7 +78,7 @@ fn acknowledgement_requires_a_post_quiescence_nonfuture_sample_before_the_deadli
 }
 
 #[test]
-fn consumer_wait_and_local_write_share_one_unrenewable_retirement_budget() {
+fn an_unacknowledged_drain_removes_the_output_at_the_shared_retirement_deadline() {
     let (mut slot, state) = closing();
     state.borrow_mut().blocked = true;
     slot.advance(ms(21)).unwrap();
@@ -88,15 +88,16 @@ fn consumer_wait_and_local_write_share_one_unrenewable_retirement_budget() {
     assert_eq!(slot.deadline(), Some(ms(270)));
     let request = slot.drain_request().unwrap();
     assert_eq!(request.deadline, ms(270));
-    assert_eq!(
-        slot.advance(ms(270)).unwrap_err().kind(),
-        io::ErrorKind::TimedOut
+    assert!(!slot.closed());
+    assert_eq!(state.borrow().dropped, 0);
+    slot.advance(ms(270)).unwrap();
+    assert!(slot.closed());
+    assert!(
+        slot.take_notice()
+            .is_some_and(|notice| notice.contains("removed after writing"))
     );
     assert!(!slot.acknowledge_drain(&request, ms(270), ms(270)));
-    assert!(!slot.closed());
     assert_eq!(keys(&state), [(42, 1), (42, 0)]);
-    assert_eq!(state.borrow().dropped, 0);
-    drop(slot);
     assert_eq!(state.borrow().dropped, 1);
 }
 

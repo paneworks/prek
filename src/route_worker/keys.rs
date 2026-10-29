@@ -64,6 +64,7 @@ pub(super) struct Slot<P: Preparation = Prepared> {
     retirement: Option<Duration>,
     drain: Option<crate::keys::drain::Request>,
     drain_offered: bool,
+    notice: Option<&'static str>,
 }
 impl<P: Preparation> Slot<P> {
     pub(super) fn new(fence: Fence, consumer: Consumer, prepared: P) -> io::Result<Self> {
@@ -90,6 +91,7 @@ impl<P: Preparation> Slot<P> {
             retirement: None,
             drain: None,
             drain_offered: false,
+            notice: None,
         })
     }
     pub(super) fn matches(&self, fence: Fence, source: &Source, marker: &str) -> bool {
@@ -236,17 +238,23 @@ impl<P: Preparation> Slot<P> {
         }
         if matches!(self.phase, Phase::Active(_)) && !self.available(at) {
             self.retire(at)?;
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "generated consumer or execution lease lost; worker recovery required",
-            ));
+            self.notice = Some("generated keyboard lost its consumer lease; retiring it");
         }
+        // Once every release is written, an unacknowledged deadline removes the
+        // device, and its consumer releases whatever it still holds from it.
         if matches!(self.phase, Phase::Closing(_))
             && self.retirement.is_some_and(|deadline| at >= deadline)
         {
+            if self.drain.take().is_some() {
+                self.phase = Phase::Closed;
+                self.notice = Some(
+                    "generated keyboard removed after writing its releases; no consumer acknowledged the drain",
+                );
+                return Ok(());
+            }
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
-                "generated consumer did not acknowledge neutral drain",
+                "generated keyboard could not write its releases before its retirement deadline",
             ));
         }
         if let Phase::Closing(actor) = &mut self.phase
@@ -290,6 +298,9 @@ impl<P: Preparation> Slot<P> {
     }
     pub(super) fn closed(&self) -> bool {
         matches!(self.phase, Phase::Closed)
+    }
+    pub(super) fn take_notice(&mut self) -> Option<&'static str> {
+        self.notice.take()
     }
     pub(super) fn drain_request(&mut self) -> Option<crate::keys::drain::Request> {
         if self.drain_offered {
@@ -483,6 +494,7 @@ impl Slot<Prepared> {
             retirement: None,
             drain: None,
             drain_offered: false,
+            notice: None,
         })
     }
 }

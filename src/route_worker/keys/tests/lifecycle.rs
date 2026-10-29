@@ -16,7 +16,7 @@ fn a_fresh_sample_after_expiry_cannot_resurrect_the_old_output() {
 }
 
 #[test]
-fn consumer_loss_abandons_unwritten_chord_tails_then_requires_worker_recovery() {
+fn consumer_loss_abandons_unwritten_chord_tails_and_retires_the_output() {
     let (mut slot, state) = model();
     activate(&mut slot, &state, 0);
     let mut routing = routing(vec![rule(
@@ -31,9 +31,10 @@ fn consumer_loss_abandons_unwritten_chord_tails_then_requires_worker_recovery() 
     state.borrow_mut().prefix = 1;
     slot.poll(&mut routing, ms(11)).unwrap();
     assert_eq!(keys(&state), [(42, 1)]);
+    slot.advance(ms(251)).unwrap();
     assert_eq!(
-        slot.advance(ms(251)).unwrap_err().kind(),
-        io::ErrorKind::TimedOut
+        slot.take_notice(),
+        Some("generated keyboard lost its consumer lease; retiring it")
     );
     assert!(!slot.available(ms(251)));
     assert!(slot.retiring());

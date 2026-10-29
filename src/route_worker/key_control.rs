@@ -82,7 +82,7 @@ impl Stream {
             return Err(io::Error::new(error.kind(), error.to_string()));
         }
         for keys in &mut self.closing_keys {
-            keys.advance(now)?;
+            advance(keys, now)?;
         }
         self.closing_keys.retain(|keys| !keys.closed());
         self.retire_closing_outputs(now);
@@ -103,7 +103,7 @@ impl Stream {
                 {
                     keys.retire(now)?;
                 }
-                keys.advance(now)?;
+                advance(keys, now)?;
             }
             let available = permitted && seat.keys.as_ref().is_some_and(|keys| keys.available(now));
             seat.routing.key_output_available(available);
@@ -187,20 +187,27 @@ impl Stream {
         if let Some(error) = &self.key_failure {
             eprintln!("generated keyboard failed; consumer neutrality unproven: {error}");
         }
-        let until = monotonic()
-            .unwrap_or(Duration::ZERO)
-            .saturating_add(Duration::from_millis(250));
+        let until = self
+            .closing_keys
+            .iter()
+            .filter_map(keys::Slot::deadline)
+            .max()
+            .unwrap_or_else(|| {
+                monotonic()
+                    .unwrap_or(Duration::ZERO)
+                    .saturating_add(Duration::from_millis(250))
+            });
         while !self.closing_keys.is_empty() {
             let result = (|| {
                 let now = monotonic()?;
-                if now >= until {
+                if now > until {
                     return Err(io::Error::new(
                         io::ErrorKind::TimedOut,
                         "generated keyboard shutdown did not drain",
                     ));
                 }
                 for keys in &mut self.closing_keys {
-                    keys.advance(now)?;
+                    advance(keys, now)?;
                 }
                 self.offer_key_drains()?;
                 self.messages.flush(&mut self.channel)?;
@@ -236,4 +243,13 @@ impl Stream {
         self.closing_keys.clear();
         self.retire_closing_outputs(monotonic().unwrap_or(until));
     }
+}
+
+/// Advances one generated keyboard and logs what its slot reports.
+fn advance(keys: &mut keys::Slot, now: Duration) -> io::Result<()> {
+    let result = keys.advance(now);
+    if let Some(notice) = keys.take_notice() {
+        eprintln!("routing worker: {notice}");
+    }
+    result
 }

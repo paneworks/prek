@@ -598,8 +598,9 @@ agent registration before and after obtaining its device evidence.
 
 Consumer identity, marker, name, class, seat and timestamp remain
 checked after activation. A fresh sample cannot revive an expired active lease.
-Consumer loss seals the output, cancels unwritten tails and requires worker
-recovery, not an inventory-only resume. Cancellation and source-recovery reports
+Consumer loss seals and retires the output and cancels unwritten tails; the
+worker keeps running, and the seat has no key output until it is subscribed
+again. It is never an inventory-only resume. Cancellation and source-recovery reports
 are applied before new work. New reader incarnations remain necessary after
 raw-route replacement; a retained physical source generation is not reusable.
 
@@ -611,13 +612,19 @@ source incarnation, publication, consumer and nonce. The trusted consumer must
 consume complete final reports and verify live neutral state before replying;
 inventory evidence cannot acknowledge drain. Local writes and consumer waiting
 share the same 250 ms retirement deadline. Stale, foreign, early, future and
-duplicate receipts cannot close another slot. Shutdown pumps private receipts
-within that bound, destroys outputs on failure, and reports neutrality unproven
-before releasing original readers. A retired slot never resumes in place.
+duplicate receipts cannot close another slot. A stock compositor has no way to
+acknowledge drain, so when every release is written but no receipt arrives by
+that deadline the slot closes and destroys the generated keyboard: its
+libinput consumer returns a removed device to neutral, releasing any key it
+still holds, and only then are dependent raw outputs and original readers
+released. A local drain that cannot write its releases by the deadline still
+fails and reports neutrality unproven. Shutdown pumps private receipts until
+the latest retirement deadline. A retired slot never resumes in place.
 
-This binding does not complete native acceptance. The consumer boundary
-still refuses takeover, public `SyntheticInput` negotiation stays disabled, and
-the complete native consumer prefix/drain/neutral boundary remains unproven.
+`SyntheticInput` is negotiated only beside `context` for enabled routed `keys`
+or `remap` rules (`prek session --keys`). In a physical trial on the phone every
+recognized swipe queued its keys to the generated keyboard, and the teardown
+closed by device removal without stopping the worker.
 Mixed press/release/repeat reports use canonical merged admission, which rejects
 unrecorded or modified repeat frames before admitting new work.
 Authenticated provider-owned repeat, native neutral reentry and the complete Lua input-effect APIs
