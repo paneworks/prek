@@ -801,6 +801,10 @@ impl Facts {
     }
 }
 
+/// How long a passed registration check covers the further checks of one
+/// request burst, such as an agent's context renewal.
+const RECHECK: Duration = Duration::from_millis(100);
+
 /// Private membership proof; a failed recheck permanently revokes this token.
 #[derive(Debug)]
 pub struct Registration {
@@ -849,8 +853,13 @@ impl Registration {
         if self.revoked {
             return Err(denied("session registration has been revoked"));
         }
-        let checked_at = Instant::now();
         let generation = logind.generation();
+        // A check that passed within RECHECK stands while both processes live
+        // and logind's state is unchanged.
+        if self.checked_at.elapsed() < RECHECK && generation == self.generation && !self.exited() {
+            return Ok(());
+        }
+        let checked_at = Instant::now();
         let result = (|| {
             client.check_binding()?;
             if client.uid() != self.binding.uid || client.consumer() != self.consumer {
