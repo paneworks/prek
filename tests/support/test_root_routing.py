@@ -811,6 +811,7 @@ exec "$@"
 """,
                 "git": "#!/bin/sh\nexit 0\n",
                 "udevadm": "#!/bin/sh\nexit 0\n",
+                "systemd-inhibit": "#!/bin/sh\nexit 0\n",
                 "perl": f"""#!/bin/sh
 printf '%s\\n' "$*" >> '{injected}'
 """,
@@ -976,6 +977,10 @@ esac
             self.assertIn('name = "Prek test keyboard"', (run / "config.toml").read_text())
             sudo = calls.read_text().splitlines()
             self.assertEqual(sudo[0], "-v")
+            inhibitor = next(line for line in sudo if line.startswith("systemd-inhibit "))
+            self.assertTrue(inhibitor.startswith("systemd-inhibit --what=sleep:idle --who=prek-trial "
+                                                 "--why=A takeover trial is running --mode=block tail --pid="))
+            self.assertTrue(inhibitor.endswith(" -f /dev/null"))
             self.assertIn(f"ss -Hxlp src {temporary}/wayland-test", sudo)
             self.assertIn(f"readlink -e /proc/{os.getpid()}/exe", sudo)
             self.assertIn(f"tee -a {procs}", sudo)

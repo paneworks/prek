@@ -9,7 +9,8 @@ Launch as your regular user from a terminal of the Wayland session under test;
 WAYLAND_DISPLAY and XDG_RUNTIME_DIR select the compositor. The compositor is
 the process listening on that display socket, and the session agent joins the
 compositor's cgroup so it shares the compositor's login session or unit.
-Prompts for sudo before building. Routes only the named device through a
+Prompts for sudo before building, then blocks system sleep and idle locking
+until it exits; a manual lock still works. Routes only the named device through a
 temporary route broker for N seconds (default 60, 10..300) with no rules, so
 input should behave exactly as before. The broker takes the device over only
 after it has been neutral and idle for 100 ms, and exits by itself when the
@@ -147,6 +148,9 @@ git -C "$repo" status --short
 sudo -v
 while sleep 60; do sudo -n -v || exit; done </dev/null >/dev/null 2>&1 &
 keepalive=$!
+# Blocks system sleep and idle locking until this script exits.
+sudo systemd-inhibit --what=sleep:idle --who=prek-trial --why="A takeover trial is running" --mode=block \
+  tail --pid=$$ -f /dev/null </dev/null >/dev/null 2>&1 &
 nix --option eval-cache false --extra-experimental-features 'nix-command flakes' \
   --max-jobs 1 --cores 2 build --no-write-lock-file --out-link "$run/prek" "$repo#default"
 prek="$run/prek/bin/prek"
