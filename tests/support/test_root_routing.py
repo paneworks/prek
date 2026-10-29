@@ -938,13 +938,14 @@ esac
                 if agent == "injects":
                     self.assertEqual(result.returncode, 0, console)
                     self.assertEqual(writes, [f"{step} wait:1000" for step in
-                                              ["swipe:1:up", *["swipe:3:down"] * 3, *["swipe:3:up"] * 3]])
+                                              ["swipe:1:up", *["swipe:3:down"] * 3, "swipe:3:down:0.5,0.25:200",
+                                               *["swipe:3:up"] * 3]])
                     self.assertIn("Swipes recognized: 3; commands run: 3", console)
                     self.assertIn("Swipes up recognized: 3;", console)
                 elif agent == "misfires":
                     self.assertEqual(result.returncode, 1)
-                    self.assertEqual(len(writes), 4)
-                    self.assertIn("ran its command 1 times for 3 injected swipes", console)
+                    self.assertEqual(len(writes), 5)
+                    self.assertIn("ran its command 1 times for 3 injected swipes and 1 late-joining", console)
                 elif edges:
                     self.assertEqual(writes, [f"{step} wait:1000" for step in
                                               ["swipe:1:up", *["swipe:1:up:0.5,0.995", "swipe:1:down:0.5,0.005"] * 2]])
@@ -1070,6 +1071,25 @@ esac
             self.assertIn((3, 0x36, 2483), frames[24])
             self.assertIn((3, 0x35, 446), frames[44])
             self.assertEqual(frames[45][-2:], [(1, 0x14a, 0), (1, 0x145, 0)])
+            node.write_bytes(b"")
+            late = subprocess.run(["perl", str(injector), "--size", "1116x2484", str(node),
+                                   "swipe:3:down:0.5,0.25:200"], capture_output=True, text=True, timeout=30)
+            self.assertEqual(late.returncode, 0, late.stderr)
+            data = node.read_bytes()
+            events = [struct.unpack("@llHHi", data[offset:offset + 24])[2:] for offset in range(0, len(data), 24)]
+            late_frames, frame = [], []
+            for event in events:
+                if event == (0, 0, 0):
+                    late_frames.append(frame)
+                    frame = []
+                else:
+                    frame.append(event)
+            landings = [[value for kind, code, value in frame if code == 0x39 and value >= 0]
+                        for frame in late_frames]
+            self.assertEqual(len(late_frames), 14 + 21 + 1)
+            self.assertEqual(len(landings[0]), 1)
+            self.assertTrue(all(not landing for landing in landings[1:14]))
+            self.assertEqual(len(landings[14]), 2)
             for arguments, message in ((["--size", "9x9", str(node), "swipe:6:up"], 'Unknown step "swipe:6:up"'),
                                        (["--size", "9x9", str(node), "swipe:1:up:1.5,0"], 'Unknown step'),
                                        (["--size", "9x9", str(node), "key:768"], 'Unknown step "key:768"'),

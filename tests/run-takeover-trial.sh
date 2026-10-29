@@ -32,7 +32,10 @@ by writing synthetic contacts into its kernel event node with
 tests/support/inject-input.pl (needs perl): a one-finger swipe up mid-screen that
 must be forwarded, then three swipes for each of --swipe and --keys and two per
 edge for --edges, which must all be recognized exactly once each, and nothing
-else may run. A gesture is skipped once the device is no longer taken over,
+else may run. --swipe also injects a three-finger swipe down whose first finger
+moves alone for 200 ms, past the join window, before the others land; it stays
+with the application and must not run the command. A gesture is skipped once
+the device is no longer taken over,
 so none reaches a lock screen. Leave the touchscreen alone meanwhile.
 --binary uses a prek executable built elsewhere instead of building the package:
 it is installed root-owned under /run/prek-trial, and the udev rule is generated
@@ -355,6 +358,7 @@ held() {
     "$run/broker.log"
 }
 downs=0
+lates=0
 ups=0
 edge_ups=0
 edge_downs=0
@@ -365,7 +369,9 @@ if [[ -n $inject ]]; then
   done
   sleep 1
   steps=(swipe:1:up)
-  if [[ -n $swipe ]]; then steps+=(swipe:3:down swipe:3:down swipe:3:down); fi
+  if [[ -n $swipe ]]; then
+    steps+=(swipe:3:down swipe:3:down swipe:3:down "swipe:3:down:0.5,0.25:200")
+  fi
   if [[ -n $keys ]]; then steps+=(swipe:3:up swipe:3:up swipe:3:up); fi
   if [[ -n $edges ]]; then
     for _ in 1 2; do steps+=("swipe:1:up:0.5,0.995" "swipe:1:down:0.5,0.005"); done
@@ -378,6 +384,7 @@ if [[ -n $inject ]]; then
     sudo "$perl" "$repo/tests/support/inject-input.pl" "$node" "$step" wait:1000 | tee -a "$run/inject.log"
     case "$step" in
       swipe:3:down) downs=$((downs + 1)) ;;
+      swipe:3:down:*) lates=$((lates + 1)) ;;
       swipe:3:up) ups=$((ups + 1)) ;;
       swipe:1:up:*) edge_ups=$((edge_ups + 1)) ;;
       swipe:1:down:*) edge_downs=$((edge_downs + 1)) ;;
@@ -456,7 +463,8 @@ if [[ -n $swipe ]]; then
     exit 1
   fi
   if [[ -n $inject ]] && ((fired != downs)); then
-    echo "The three-finger swipe ran its command $fired times for $downs injected swipes." >&2
+    echo "The three-finger swipe ran its command $fired times for $downs injected swipes" \
+      "and $lates late-joining ones that must not run it." >&2
     exit 1
   fi
 fi

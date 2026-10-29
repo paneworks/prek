@@ -10,11 +10,14 @@ Usage: inject-input.pl [--size WIDTHxHEIGHT] DEVICE STEP...
 Writes input events into DEVICE, an existing /dev/input/eventN node. The kernel
 delivers them to the client grabbing that device, or else to all its readers,
 exactly as it delivers the hardware's own reports. Steps run in order:
-  swipe:FINGERS:DIRECTION[:X,Y]  one to five contacts land in one frame, move
+  swipe:FINGERS:DIRECTION[:X,Y[:MS]]
+                                 one to five contacts land in one frame, move
                                  40% of the screen up, down, left or right in
                                  20 frames 15 ms apart, then lift; X,Y is the
                                  normalized start of their centre, by default
-                                 placing the swipe around the screen centre
+                                 placing the swipe around the screen centre;
+                                 with MS the first contact moves alone that
+                                 long before the others land beside it
   key:CODE                       press and release one key code
   wait:MS                        pause
 --size sets the contact axis ranges of a DEVICE that cannot report them.
@@ -47,7 +50,7 @@ my ($path, @steps) = @ARGV;
 die $usage unless defined $path && @steps;
 for (@steps) {
     die "Unknown step \"$_\".\n$usage"
-        unless /^swipe:[1-5]:(up|down|left|right)(:(0(\.\d+)?|1),(0(\.\d+)?|1))?$/
+        unless /^swipe:[1-5]:(up|down|left|right)(:(0(\.\d+)?|1),(0(\.\d+)?|1)(:\d+)?)?$/
         || (/^key:(\d+)$/ && $1 <= 0x2ff) || /^wait:\d+$/;
 }
 sysopen(my $device, $path, O_WRONLY) or die "$path: $!\n";
@@ -78,7 +81,7 @@ sub at {
 my $tracking = 1 + $$ % 30000;
 
 sub swipe {
-    my ($fingers, $direction, $start) = @_;
+    my ($fingers, $direction, $start, $late) = @_;
     my ($dx, $dy) = @{$directions{$direction}};
     my ($x, $y) = $start ? split(/,/, $start) : (0.5 - 0.2 * $dx, 0.5 - 0.2 * $dy);
     # Contacts sit 12% of the screen apart across the motion.
@@ -86,17 +89,24 @@ sub swipe {
         my $offset = 0.12 * ($_ - ($fingers - 1) / 2);
         [$x + $offset * abs($dy), $y + $offset * abs($dx)]
     } 0 .. $fingers - 1;
-    for my $step (0 .. 20) {
-        my $travel = 0.4 * $step / 20;
+    # Frames the first contact moves alone before the others land.
+    my $lead = $late ? int(($late + 14) / 15) : 0;
+    for my $step (0 .. 20 + $lead) {
+        my $travel = 0.02 * $step;
         my @events;
         for my $slot (0 .. $#contacts) {
+            my $landing = $slot ? $lead : 0;
+            next if $step < $landing;
             my ($cx, $cy) = @{$contacts[$slot]};
             push @events, [EV_ABS, ABS_MT_SLOT, $slot];
-            push @events, [EV_ABS, ABS_MT_TRACKING_ID, $tracking + $slot] if $step == 0;
+            push @events, [EV_ABS, ABS_MT_TRACKING_ID, $tracking + $slot] if $step == $landing;
             push @events, [EV_ABS, ABS_MT_POSITION_X, at($width, $cx + $travel * $dx)],
                 [EV_ABS, ABS_MT_POSITION_Y, at($height, $cy + $travel * $dy)];
         }
-        push @events, [EV_KEY, BTN_TOUCH, 1], [EV_KEY, $tools[$fingers - 1], 1] if $step == 0;
+        push @events, [EV_KEY, BTN_TOUCH, 1], [EV_KEY, $tools[$lead ? 0 : $fingers - 1], 1]
+            if $step == 0;
+        push @events, [EV_KEY, $tools[0], 0], [EV_KEY, $tools[$fingers - 1], 1]
+            if $lead && $step == $lead;
         push @events, [EV_ABS, ABS_X, at($width, $contacts[0][0] + $travel * $dx)],
             [EV_ABS, ABS_Y, at($height, $contacts[0][1] + $travel * $dy)];
         frame(@events);
