@@ -29,18 +29,22 @@ uinput devices and writes bounded complete frames. The private worker has a
 [bounded, descriptor-bound LED feedback bridge](docs/feedback.md), with independent
 queries and source writes; its synthetic kernel challenge still needs a user-run
 receipt. Supervised takeover from the session's Wayland compositor at a neutral
-idle cut has passed bounded trials on a phone touchscreen and buttons and on a
-laptop keyboard: input kept working while taken over and was released cleanly.
-On the phone, injected trials also passed for consuming touch rules
-(three-finger swipes and swipes from 20 px edge strips, which forward other
-touches with no join wait) and for key output through a generated keyboard; a
-broker killed mid-takeover released its devices, and the next one removed its
-records.
+idle cut has passed bounded trials on a phone touchscreen and buttons, two
+laptop touchscreens, two laptop keyboards and two touchpads: input kept working while
+taken over and was released cleanly, and modifier chords and touchpad motion
+arrived unchanged. On the phone, injected trials also passed for consuming touch
+rules (three-finger swipes and swipes from 20 px edge strips, which forward other
+touches with no join wait) and for key output through a generated keyboard,
+including one hour of continuous use. Edge rules followed the output across live
+rotations, a blanked screen refused them, and while a lock screen that sets
+logind's lock hint was up the touchscreen went back to the compositor. A broker killed
+mid-takeover released its devices, and the next one removed its records; a
+driver rebind and a laptop suspend and resume were taken over again.
 Devices with nonzero axis fuzz are refused until transparent forwarding is verified for that
 capability; a compositor-consumed keyboard is mirrored without kernel repeat,
 since the compositor generates key repeat itself.
-Route mode is opt-in; suspend, hotplug, reboot and rollback of a deployed
-configuration have not been accepted on real hardware yet.
+Route mode is opt-in; reboot and rollback of a deployed configuration have not
+been accepted on real hardware yet.
 
 The configured routing core connects rule candidates to reserve/buffer/observe
 ownership. Consuming candidates require a current context permit and a negotiated
