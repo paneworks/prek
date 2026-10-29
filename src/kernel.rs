@@ -581,6 +581,10 @@ fn prepare(parent: &Path, owner: u32) -> io::Result<()> {
 fn registry_marker(name: &str) -> Option<String> {
     let parts: Vec<_> = name.strip_suffix(".json")?.split('-').collect();
     let marker = match parts.as_slice() {
+        ["prek", "keys", device, generation] => format!("prek/keys/{device}/{generation}"),
+        ["prek", "test", "keys", device, generation] => {
+            format!("prek/test/keys/{device}/{generation}")
+        }
         ["prek", device, generation] => format!("prek/{device}/{generation}"),
         ["prek", "test", device, generation] => format!("prek/test/{device}/{generation}"),
         _ => return None,
@@ -1439,6 +1443,42 @@ mod tests {
             registry.directory.read(&unmanaged.metadata.marker).unwrap(),
             unmanaged.metadata
         );
+    }
+
+    #[test]
+    fn orphan_recovery_removes_a_dead_workers_generated_keyboard_records() {
+        let temporary = Temporary::new();
+        let registry = temporary.registry();
+        let mut command = Command::new("sleep");
+        command.arg("10");
+        let supervisor = crate::supervisor::Supervisor::spawn(command).unwrap();
+        let keyboard = |isolated: bool| {
+            let descriptor = Descriptor::generated_keyboard(crate::input::Source {
+                device: 1,
+                generation: 1,
+                seat: "seat0".into(),
+            })
+            .unwrap();
+            let descriptor = match isolated {
+                true => descriptor.for_isolated().unwrap(),
+                false => descriptor,
+            };
+            registry
+                .publish(descriptor, isolated, Some(supervisor.worker_identity()))
+                .unwrap()
+        };
+        let markers = [keyboard(false), keyboard(true)].map(|publication| {
+            let marker = publication.metadata.marker.clone();
+            std::mem::forget(publication);
+            marker
+        });
+        assert_eq!(registry.recover_orphans().unwrap(), 0);
+        drop(supervisor);
+        assert_eq!(registry.recover_orphans().unwrap(), 2);
+        for marker in markers {
+            assert!(registry.directory.read(&marker).is_err());
+        }
+        assert_eq!(fs::read_dir(&temporary.path).unwrap().count(), 0);
     }
 
     #[test]

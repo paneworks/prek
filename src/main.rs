@@ -919,6 +919,10 @@ fn run_broker(
     )?;
     if route {
         prek::kernel::Registry::prepare_system()?;
+        let recovered = prek::kernel::Registry::system()?.recover_orphans()?;
+        if recovered > 0 {
+            eprintln!("broker: removed {recovered} device records left by exited workers");
+        }
         broker.enable_routing(config.clone())?;
     }
     broker.install_lua_source(runtime_definition.as_ref())?;

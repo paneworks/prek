@@ -291,6 +291,11 @@ properties, event codes and axes must also match. Node/database and private
 pre-add record identity are rechecked after ABI inspection. The private record
 must retain its original inode as well as its exact contents.
 
+A route broker starts by removing version-2 records, mirrors and generated
+keyboards alike, whose owning worker is confirmed exited by a kernel PID handle
+and process birth, so a killed broker does not hold their slots. Records of live
+workers and unmanaged records stay.
+
 Registry records now use version 2. Version-1 records are not imported, reused,
 silently upgraded or automatically removed by recovery. Inspect any retained
 legacy record and its original owner before attempting an upgrade; no migration
