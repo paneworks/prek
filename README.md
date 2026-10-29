@@ -31,11 +31,16 @@ queries and source writes; its synthetic kernel challenge still needs a user-run
 receipt. Supervised takeover from the session's Wayland compositor at a neutral
 idle cut has passed bounded trials on a phone touchscreen and buttons and on a
 laptop keyboard: input kept working while taken over and was released cleanly.
+On the phone, injected trials also passed for consuming touch rules
+(three-finger swipes and swipes from 20 px edge strips, which forward other
+touches with no join wait) and for key output through a generated keyboard; a
+broker killed mid-takeover released its devices, and the next one removed its
+records.
 Devices with nonzero axis fuzz are refused until transparent forwarding is verified for that
 capability; a compositor-consumed keyboard is mirrored without kernel repeat,
 since the compositor generates key repeat itself.
-Route mode is opt-in; suspend, hotplug, reboot and rollback have not been
-accepted on real hardware yet.
+Route mode is opt-in; suspend, hotplug, reboot and rollback of a deployed
+configuration have not been accepted on real hardware yet.
 
 The configured routing core connects rule candidates to reserve/buffer/observe
 ownership. Consuming candidates require a current context permit and a negotiated
@@ -563,6 +568,21 @@ cargo build --release --target aarch64-unknown-linux-musl --bin prek
 The shell supplies the ARM standard library and cross linker. It uses dynamic
 musl linking with `/lib/ld-musl-aarch64.so.1`, allowing runtime system libraries
 to load on the phone. Run device acceptance on the actual ARM phone.
+
+A glibc phone such as NixOS needs a glibc build, since the broker loads the
+system's libsystemd at run time. `nix develop .#cross-aarch64-gnu` builds one
+in under a minute; point it at the phone's own glibc and copy it over:
+
+```sh
+cargo build --release --target aarch64-unknown-linux-gnu --bin prek
+patchelf --set-interpreter <phone glibc>/lib/ld-linux-aarch64.so.1 \
+  --set-rpath <phone glibc>/lib:<phone gcc-lib>/lib \
+  target/aarch64-unknown-linux-gnu/release/prek
+```
+
+`ldd` of a Prek built on the phone names both store paths. The cross and phone
+glibc must be the same version. `tests/run-takeover-trial.sh --binary PATH`
+runs such a build instead of building the package on the device.
 
 For Nix builds of a Git checkout, add new source files to Git's index so they are
 included. The package source excludes recordings, sockets and local build output.

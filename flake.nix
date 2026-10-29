@@ -302,6 +302,20 @@
             PREK_TEST_SYSTEMD_LIBRARY = "${pkgs.systemd}/lib/libsystemd.so.0";
           };
           cross-aarch64 = crossShell pkgs.rust-bin.stable.latest.default "target/cross-aarch64";
+          cross-aarch64-gnu =
+            let
+              gnuPkgs = import nixpkgs { inherit system; crossSystem.config = "aarch64-unknown-linux-gnu"; };
+              gnuCc = "${gnuPkgs.stdenv.cc}/bin/${gnuPkgs.stdenv.cc.targetPrefix}cc";
+            in
+            pkgs.mkShell {
+              packages = [
+                (pkgs.rust-bin.stable.latest.default.override { targets = [ "aarch64-unknown-linux-gnu" ]; })
+                gnuPkgs.stdenv.cc
+                pkgs.patchelf
+              ];
+              CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER = gnuCc;
+              CC_aarch64_unknown_linux_gnu = gnuCc;
+            };
           cross-aarch64-msrv = crossShell pkgs.rust-bin.stable."1.88.0".default "target/cross-aarch64-msrv";
           default = pkgs.mkShell {
             PREK_TEST_SYSTEMD_LIBRARY = "${pkgs.systemd}/lib/libsystemd.so.0";
