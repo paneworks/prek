@@ -4,7 +4,7 @@ set -euo pipefail
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 usage() {
   cat <<'HELP'
-Usage: ./tests/run-takeover-trial.sh --device "<exact kernel device name>" [--seconds N] [--swipe] [--keys] [--lock] [--inject]
+Usage: ./tests/run-takeover-trial.sh --device "<exact kernel device name>" [--seconds N] [--swipe] [--keys] [--lock] [--inject] [--binary PATH]
 Launch as your regular user from a terminal of the Wayland session under test;
 WAYLAND_DISPLAY and XDG_RUNTIME_DIR select the compositor. The compositor is
 the process listening on that display socket, and the session agent joins the
@@ -30,6 +30,9 @@ tests/support/inject-input.pl (needs perl): a one-finger swipe up mid-screen tha
 must be forwarded, then three swipes for each of --swipe and --keys, which must
 all be recognized. A gesture is skipped once the device is no longer taken over,
 so none reaches a lock screen. Leave the touchscreen alone meanwhile.
+--binary uses a prek executable built elsewhere instead of building the package:
+it is installed root-owned under /run/prek-trial, and the udev rule is generated
+from udev/70-prek.rules for it.
 Temporarily installs Prek's udev metadata rule under /run/udev/rules.d and a
 root-owned trial configuration under /run/prek-trial; both are removed on exit,
 as is the broker's /run/prek device registry when the trial created it.
@@ -44,6 +47,7 @@ swipe=""
 keys=""
 lock=""
 inject=""
+binary=""
 while (($#)); do
   case "$1" in
     --device) device=${2:-}; shift 2 ;;
@@ -52,6 +56,7 @@ while (($#)); do
     --keys) keys=1; shift ;;
     --lock) lock=1; shift ;;
     --inject) inject=1; shift ;;
+    --binary) binary=${2:-}; shift 2 ;;
     --help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac
@@ -65,6 +70,13 @@ fi
 if [[ $repo =~ [^A-Za-z0-9_./-] ]]; then
   echo "The checkout path \"$repo\" has characters the agent launcher cannot quote safely." >&2
   exit 2
+fi
+if [[ -n $binary ]]; then
+  binary=$(realpath -e -- "$binary" 2>/dev/null) || binary=""
+  if [[ -z $binary || ! -f $binary || ! -x $binary || $binary =~ [^A-Za-z0-9_./-] ]]; then
+    echo "--binary needs an executable file whose path has only letters, digits and _ . / -." >&2
+    exit 2
+  fi
 fi
 if [[ $WAYLAND_DISPLAY =~ [^A-Za-z0-9_.-] || $WAYLAND_DISPLAY == . || $WAYLAND_DISPLAY == .. ]]; then
   echo "WAYLAND_DISPLAY \"$WAYLAND_DISPLAY\" is not a socket name inside XDG_RUNTIME_DIR." >&2
@@ -151,9 +163,14 @@ keepalive=$!
 # Blocks system sleep and idle locking until this script exits.
 sudo systemd-inhibit --what=sleep:idle --who=prek-trial --why="A takeover trial is running" --mode=block \
   tail --pid=$$ -f /dev/null </dev/null >/dev/null 2>&1 &
-nix --option eval-cache false --extra-experimental-features 'nix-command flakes' \
-  --max-jobs 1 --cores 2 build --no-write-lock-file --out-link "$run/prek" "$repo#default"
-prek="$run/prek/bin/prek"
+if [[ -n $binary ]]; then
+  printf 'Prebuilt binary: %s\n' "$(sha256sum "$binary")"
+  prek=$binary
+else
+  nix --option eval-cache false --extra-experimental-features 'nix-command flakes' \
+    --max-jobs 1 --cores 2 build --no-write-lock-file --out-link "$run/prek" "$repo#default"
+  prek="$run/prek/bin/prek"
+fi
 cat > "$run/config.toml" <<CONFIG
 version = 1
 mode = "route"
@@ -216,12 +233,19 @@ logind=$(readlink -f "${PREK_TRIAL_LOGIND:-/run/current-system/sw/lib/libsystemd
 printf 'Compositor: %s (pid %s, cgroup %s)\nlibsystemd: %s\n' "$compositor" "$pid" "$cgroup" "$logind"
 sudo install -d -m 0755 -o root -g root "$trial"
 sudo install -m 0644 -o root -g root "$run/config.toml" "$trial/config.toml"
+udev_rule=$run/prek/lib/udev/rules.d/70-prek.rules
+if [[ -n $binary ]]; then
+  sudo install -m 0755 -o root -g root "$binary" "$trial/prek"
+  prek=$trial/prek
+  udev_rule=$run/70-prek.rules
+  sed "s|@prek@|$prek|" "$repo/udev/70-prek.rules" > "$udev_rule"
+fi
 # udev reads /run/udev/rules.d but does not create it.
 if [[ ! -d $rules ]]; then
   sudo install -d -m 0755 -o root -g root "$rules"
   made_rules=1
 fi
-sudo install -m 0644 -o root -g root "$run/prek/lib/udev/rules.d/70-prek.rules" "$rule"
+sudo install -m 0644 -o root -g root "$udev_rule" "$rule"
 sudo udevadm control --reload-rules
 # The broker creates its device registry under /run/prek when it is missing.
 if [[ ! -d $run_root/prek ]]; then made_registry=1; fi

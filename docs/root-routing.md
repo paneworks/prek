@@ -220,3 +220,8 @@ into its kernel event node, which the kernel delivers to the grabbing broker
 like the hardware's own reports. The trial then requires the one-finger swipe to
 be forwarded and every injected rule swipe to be recognized, and it stops
 injecting as soon as the device is no longer taken over.
+
+`--binary PATH` runs a prek executable built elsewhere, such as an aarch64 build
+cross-compiled for a phone, instead of building the package on the device. The
+trial installs it root-owned under `/run/prek-trial` and generates the udev rule
+from `udev/70-prek.rules` for that path.

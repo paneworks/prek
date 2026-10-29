@@ -224,7 +224,8 @@
           root-routing-receipts = pkgs.runCommand "prek-root-routing-receipts-check" {
             nativeBuildInputs = [ pkgs.python3 pkgs.bash pkgs.shellcheck pkgs.perl ];
           } ''
-            mkdir -p receipts/tests/support
+            mkdir -p receipts/tests/support receipts/udev
+            cp ${./udev/70-prek.rules} receipts/udev/70-prek.rules
             cp ${./tests/support/root_routing.py} receipts/tests/support/root_routing.py
             cp ${./tests/support/test_root_routing.py} receipts/tests/support/test_root_routing.py
             cp ${./tests/support/inject-input.pl} receipts/tests/support/inject-input.pl

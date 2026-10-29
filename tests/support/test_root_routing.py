@@ -766,7 +766,8 @@ os._exit(0)
                 (True, False, True, 1, "presses"), (True, False, True, 1, "unpressed"),
                 (True, False, False, 1, "locks"), (True, False, False, 1, "stuck"), (True, False, True, 1, "unlocked"),
                 (True, False, True, 1, "injects"), (True, False, True, 1, "misfires"),
-                (True, False, True, 1, "unforwarded"), (True, False, True, 1, "crashes")):
+                (True, False, True, 1, "unforwarded"), (True, False, True, 1, "crashes"),
+                (True, False, True, 1, "prebuilt")):
             with self.subTest(opens_socket=opens_socket, provisioned=provisioned, holds=holds, listeners=listeners,
                               agent=agent):
                 self.takeover_trial(opens_socket, provisioned, holds, listeners, agent)
@@ -780,6 +781,8 @@ os._exit(0)
         with tempfile.TemporaryDirectory() as temporary:
             repo, mocks, run_root = Path(temporary), Path(temporary) / "bin", Path(temporary) / "run"
             (repo / "tests").mkdir()
+            (repo / "udev").mkdir()
+            shutil.copyfile(trial.parent.parent / "udev/70-prek.rules", repo / "udev/70-prek.rules")
             (run_root / "udev").mkdir(parents=True)
             if provisioned:
                 (run_root / "udev/rules.d").mkdir()
@@ -826,6 +829,7 @@ done
 if [ "$directory" = 1 ]; then mkdir -p "$1"; else cp "$1" "$2"; fi
 """,
                 "nix": f"""#!/bin/sh
+printf '%s\\n' "$*" >> '{repo}/nix-calls'
 while [ $# -gt 0 ]; do
   if [ "$1" = --out-link ]; then ln -s '{prek}' "$2"; fi
   shift
@@ -875,7 +879,8 @@ esac
                    "PREK_TRIAL_RUN_ROOT": str(run_root), "PREK_TRIAL_CGROUP_ROOT": str(cgroups)}
             result = subprocess.run(["bash", str(script), "--device", "Prek test keyboard", "--seconds", "10",
                                      *(["--swipe"] if swipe else []), *(["--keys"] if keys else []),
-                                     *(["--lock"] if lock else []), *(["--inject"] if inject else [])],
+                                     *(["--lock"] if lock else []), *(["--inject"] if inject else []),
+                                     *(["--binary", str(prek / "bin/prek")] if agent == "prebuilt" else [])],
                                     env=env, capture_output=True, text=True, timeout=60)
             run = (repo / "target/takeover-trial/latest").resolve(strict=True)
             self.assertFalse((run_root / "udev/rules.d/70-prek-trial.rules").exists())
@@ -967,6 +972,18 @@ esac
                 self.assertIn('action = { kind = "keys", keys = ["volume_up"] }', config)
                 self.assertNotIn("trial-swipe", config)
                 return
+            if agent == "prebuilt":
+                console = (run / "console.log").read_text()
+                self.assertEqual(result.returncode, 0, console)
+                self.assertIn("Prebuilt binary: ", console)
+                self.assertFalse((repo / "nix-calls").exists())
+                installed = f"{run_root}/prek-trial/prek"
+                sudo = calls.read_text().splitlines()
+                self.assertIn(f"install -m 0755 -o root -g root {prek}/bin/prek {installed}", sudo)
+                self.assertTrue(next(line for line in sudo if " broker " in line).startswith(f"{installed} broker "))
+                self.assertIn(f'IMPORT{{program}}="{installed} udev-import', (run / "70-prek.rules").read_text())
+                return
+            self.assertTrue((repo / "nix-calls").exists())
             if agent != "ok":
                 self.assertEqual(result.returncode, 1)
                 self.assertEqual(json.loads((run / "status.json").read_text())["status"], "failed")
