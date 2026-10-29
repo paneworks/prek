@@ -22,8 +22,8 @@ use std::{
     time::Duration,
 };
 
-pub const HEARTBEAT_INTERVAL: Duration = crate::protocol::KEEPALIVE;
-pub const STALL_TIMEOUT: Duration = crate::protocol::LEASE;
+pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
+pub const STALL_TIMEOUT: Duration = Duration::from_secs(3);
 pub const TERMINATION_GRACE: Duration = Duration::from_millis(250);
 const LINK_ENV: &str = "PREK_WORKER_LINK_FD";
 const PARENT_ENV: &str = "PREK_WORKER_PARENT";

@@ -183,8 +183,8 @@ context snapshots remain refused.
 
 Context is sampled again, with an 80 ms Wayland deadline, as soon as logind's
 state, the session's lock hint, the compositor's outputs or a registered process
-changes, before an action is authorized or context is read, and at least once a
-second. A snapshot stays valid for 2.5 s without a newer revision; input events
+changes, before an action is authorized or context is read, and at least every
+two seconds. A snapshot stays valid for 5 s without a newer revision; input events
 and action decisions must be under 250 ms old. Context loss, restoration or a
 witnessed lock advances the session fence, discards queued outcomes and
 reconciles held input before recognition resumes. Workers expire context
@@ -435,8 +435,8 @@ observation.
 
 The library's context model freezes the first output target and validates later
 fingers against it. Session/lock changes, stale snapshots, output removal and
-relevant geometry changes cancel it. The model requires 2.5 s snapshot
-freshness and a three-second provider lease. The Linux session library supplies
+relevant geometry changes cancel it. The model requires 5 s snapshot
+freshness and a six-second provider lease. The Linux session library supplies
 verified socket/process/logind membership for agents launched inside the
 compositor's session, or inside the systemd unit of a compositor that logind
 records as the display session's controller. Delegation to other shared user

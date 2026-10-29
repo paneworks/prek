@@ -12,7 +12,7 @@ use std::{collections::BTreeSet, time::Duration};
 pub const PROVIDER_LEASE: Duration = crate::protocol::LEASE;
 /// How long a context snapshot stays valid without a newer revision; it ends
 /// before every [`crate::protocol::LEASE`].
-pub const SNAPSHOT_MAX_AGE: Duration = Duration::from_millis(2500);
+pub const SNAPSHOT_MAX_AGE: Duration = Duration::from_millis(5000);
 /// Oldest input event, or context of an action decision, that may still be
 /// acted on.
 pub const DECISION_MAX_AGE: Duration = Duration::from_millis(250);
