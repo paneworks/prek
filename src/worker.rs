@@ -2676,4 +2676,133 @@ mod tests {
             }
         ));
     }
+    #[test]
+    fn a_desktop_touch_rule_observes_only_once_the_touchscreen_maps_onto_an_output() {
+        use crate::input::{
+            ABS_MT_POSITION_X, ABS_MT_POSITION_Y, ABS_MT_SLOT, ABS_MT_TRACKING_ID, Axis, EV_ABS,
+        };
+        for mapped in [true, false] {
+            let mut config = config();
+            config.devices.get_mut("keyboard").unwrap().keys.clear();
+            config.devices.get_mut("keyboard").unwrap().absolute_axes =
+                vec![ABS_MT_POSITION_X, ABS_MT_POSITION_Y];
+            config.rules[0].contexts = vec![crate::config::Context::Desktop];
+            config.rules[0].trigger = Trigger::TouchHold {
+                fingers: 1,
+                after: Millis(600),
+            };
+            let mut registry = registry(config);
+            let source = source(3, "seat0");
+            let axis = |minimum, maximum| Axis {
+                minimum,
+                maximum,
+                resolution: 0,
+                fuzz: 0,
+                flat: 0,
+            };
+            let device = Device {
+                source: source.clone(),
+                identity: "touch-fixture".into(),
+                name: "fixture".into(),
+                path: "fixture".into(),
+                physical: "fixture".into(),
+                unique: String::new(),
+                vendor: 1,
+                product: 1,
+                properties: vec![],
+                capabilities: BTreeMap::from([(
+                    EV_ABS,
+                    vec![
+                        ABS_MT_SLOT,
+                        ABS_MT_TRACKING_ID,
+                        ABS_MT_POSITION_X,
+                        ABS_MT_POSITION_Y,
+                    ],
+                )]),
+                axes: BTreeMap::from([
+                    (ABS_MT_SLOT, axis(0, 0)),
+                    (ABS_MT_TRACKING_ID, axis(-1, 65535)),
+                    (ABS_MT_POSITION_X, axis(0, 999)),
+                    (ABS_MT_POSITION_Y, axis(0, 999)),
+                ]),
+                virtual_device: false,
+            };
+            registry
+                .push(
+                    Record::Device {
+                        device,
+                        keys: BTreeSet::new(),
+                        contacts: vec![],
+                    },
+                    ms(0),
+                )
+                .unwrap();
+            let owner = |revision, at| {
+                let mut owner = with_context(subscription("seat0", 5), revision, at);
+                if mapped {
+                    owner.context.as_mut().unwrap().snapshot.outputs =
+                        vec![crate::context::OutputState {
+                            geometry: crate::gestures::Output {
+                                name: "panel".into(),
+                                pixel_width: 1000.0,
+                                pixel_height: 1000.0,
+                                scale: 1.0,
+                                origin: crate::gestures::Point { x: 0.0, y: 0.0 },
+                                transform: crate::gestures::Transform::Normal,
+                            },
+                            geometry_generation: 1,
+                            screen: crate::config::Screen::On,
+                        }];
+                }
+                owner
+            };
+            update(&mut registry, 1, vec![owner(1, 200)], 200);
+            let mut events: Vec<_> = [
+                (ABS_MT_SLOT, 0),
+                (ABS_MT_TRACKING_ID, 8),
+                (ABS_MT_POSITION_X, 500),
+                (ABS_MT_POSITION_Y, 500),
+            ]
+            .into_iter()
+            .map(|(code, value)| RawEvent {
+                kind: EV_ABS,
+                code,
+                value,
+            })
+            .collect();
+            events.push(RawEvent {
+                kind: EV_SYN,
+                code: SYN_REPORT,
+                value: 0,
+            });
+            registry
+                .push(
+                    Record::Frame {
+                        frame: Frame {
+                            source: source.clone(),
+                            at: ms(300),
+                            sequence: 1,
+                            events,
+                        },
+                    },
+                    ms(300),
+                )
+                .unwrap();
+            update(&mut registry, 2, vec![owner(2, 850)], 850);
+            tick(&mut registry, 950);
+            let held = outcomes(&registry).iter().any(|event| {
+                matches!(
+                    event,
+                    Event::Matched {
+                        evidence: Evidence::Touch {
+                            gesture: crate::gestures::TouchGesture::Hold { fingers: 1, .. },
+                            ..
+                        },
+                        ..
+                    }
+                )
+            });
+            assert_eq!(held, mapped, "mapped={mapped}: {:?}", outcomes(&registry));
+        }
+    }
 }
