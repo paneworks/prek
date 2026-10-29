@@ -766,7 +766,7 @@ os._exit(0)
                 (True, False, True, 1, "presses"), (True, False, True, 1, "unpressed"),
                 (True, False, False, 1, "locks"), (True, False, False, 1, "stuck"), (True, False, True, 1, "unlocked"),
                 (True, False, True, 1, "injects"), (True, False, True, 1, "misfires"),
-                (True, False, True, 1, "unforwarded")):
+                (True, False, True, 1, "unforwarded"), (True, False, True, 1, "crashes")):
             with self.subTest(opens_socket=opens_socket, provisioned=provisioned, holds=holds, listeners=listeners,
                               agent=agent):
                 self.takeover_trial(opens_socket, provisioned, holds, listeners, agent)
@@ -859,7 +859,7 @@ case "$1" in
     {retaken if agent == "locks" else ''}
     {pressed if agent in ("presses", "injects") else ''}
     {forwarded if inject else ''}
-    sleep 1 ;;
+    sleep 1{'; echo "prek: broker worker Exited: exit status: 1" >&2; exit 1' if agent == "crashes" else ''} ;;
   session) echo "$*" > '{arguments}'; sleep 0.2
     {'exit 1' if agent == "fails" else ''}
     {'echo "context Unknown; previous gesture progress cancelled"' if agent == "leaves" else ''}
@@ -912,6 +912,12 @@ esac
                 self.assertEqual(json.loads((run / "status.json").read_text())["status"], "failed")
                 self.assertIn("lost its context 1 times, so the takeover did not hold",
                               (run / "console.log").read_text())
+                return
+            if agent == "crashes":
+                console = (run / "console.log").read_text()
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("The broker exited with status 1:\nprek: broker worker Exited: exit status: 1", console)
+                self.assertIn("so the trial did not end cleanly", console)
                 return
             if inject:
                 console = (run / "console.log").read_text()

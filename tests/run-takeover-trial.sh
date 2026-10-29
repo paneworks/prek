@@ -334,10 +334,15 @@ if [[ $agent_status != 0 ]]; then
   echo "session agent exited with status $agent_status:"
   tail -n 5 "$run/session.log" || true
 fi
-wait "$broker"
+broker_status=0
+wait "$broker" || broker_status=$?
 broker=""
 grep -E 'taken over|stays with its original consumer|keeps no consumer evidence|forwarded' \
   "$run/broker.log" || true
+if ((broker_status != 0)); then
+  echo "The broker exited with status $broker_status:"
+  grep -E '^prek:|failed' "$run/broker.log" | tail -n 5 || true
+fi
 if ! grep -q 'taken over at a neutral idle cut' "$run/broker.log"; then
   echo "\"$device\" was never taken over." >&2
   exit 1
@@ -408,4 +413,8 @@ if [[ -n $keys ]]; then
     echo "The three-finger swipe up was recognized $pressed times for $ups injected swipes." >&2
     exit 1
   fi
+fi
+if ((broker_status != 0)); then
+  echo "The broker exited with status $broker_status, so the trial did not end cleanly." >&2
+  exit 1
 fi
