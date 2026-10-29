@@ -4,7 +4,7 @@ set -euo pipefail
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 usage() {
   cat <<'HELP'
-Usage: ./tests/run-takeover-trial.sh --device "<exact kernel device name>" [--seconds N] [--swipe] [--keys] [--lock] [--inject] [--binary PATH]
+Usage: ./tests/run-takeover-trial.sh --device "<exact kernel device name>" [--seconds N] [--swipe] [--keys] [--lock] [--edges] [--inject] [--binary PATH]
 Launch as your regular user from a terminal of the Wayland session under test;
 WAYLAND_DISPLAY and XDG_RUNTIME_DIR select the compositor. The compositor is
 the process listening on that display socket, and the session agent joins the
@@ -24,11 +24,15 @@ keyboard; the trial fails unless that swipe was recognized at least once.
 --lock expects the session to be locked and unlocked during the trial: the
 device must return to its compositor while locked, be taken over again after
 the last unlock, and the session must end on its desktop.
+--edges adds two one-finger rules that start only in a 20 px edge strip: a swipe
+up from the bottom edge and a swipe down from the top edge, each appending its
+direction to edges.log; the trial fails unless at least one ran.
 --inject performs the touchscreen gestures itself once the device is taken over,
 by writing synthetic contacts into its kernel event node with
 tests/support/inject-input.pl (needs perl): a one-finger swipe up mid-screen that
-must be forwarded, then three swipes for each of --swipe and --keys, which must
-all be recognized. A gesture is skipped once the device is no longer taken over,
+must be forwarded, then three swipes for each of --swipe and --keys and two per
+edge for --edges, which must all be recognized exactly once each, and nothing
+else may run. A gesture is skipped once the device is no longer taken over,
 so none reaches a lock screen. Leave the touchscreen alone meanwhile.
 --binary uses a prek executable built elsewhere instead of building the package:
 it is installed root-owned under /run/prek-trial, and the udev rule is generated
@@ -48,6 +52,7 @@ keys=""
 lock=""
 inject=""
 binary=""
+edges=""
 while (($#)); do
   case "$1" in
     --device) device=${2:-}; shift 2 ;;
@@ -57,6 +62,7 @@ while (($#)); do
     --lock) lock=1; shift ;;
     --inject) inject=1; shift ;;
     --binary) binary=${2:-}; shift 2 ;;
+    --edges) edges=1; shift ;;
     --help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac
@@ -183,8 +189,8 @@ allowed_seats = ["seat0"]
 name = "$device"
 CONFIG
 agent_flags=(--observations --context)
+sh=$(command -v sh)
 if [[ -n $swipe ]]; then
-  sh=$(command -v sh)
   cat >> "$run/config.toml" <<CONFIG
 
 [[rules]]
@@ -210,6 +216,24 @@ trigger = { kind = "swipe", fingers = 3, direction = "up", travel = "15mm", fall
 action = { kind = "keys", keys = ["volume_up"] }
 CONFIG
   agent_flags+=(--keys)
+fi
+if [[ -n $edges ]]; then
+  for edge in "bottom up 3" "top down 4"; do
+    read -r side direction priority <<< "$edge"
+    cat >> "$run/config.toml" <<CONFIG
+
+[[rules]]
+id = "trial-edge-$direction"
+priority = $priority
+devices = ["trial"]
+contexts = ["desktop"]
+delivery = "buffer"
+region = { edge = "$side", depth = "20px" }
+trigger = { kind = "swipe", fingers = 1, direction = "$direction", travel = "10mm", fallback_travel = "0.05norm" }
+action = { kind = "command", argv = ["$sh", "-c", "echo $direction >> $run/edges.log"] }
+CONFIG
+  done
+  if [[ -z $swipe ]]; then agent_flags+=(--commands); fi
 fi
 "$prek" check --config "$run/config.toml" --json > "$run/check.json"
 # The compositor holding capabilities is not dumpable, so only root sees its descriptors.
@@ -317,6 +341,10 @@ if [[ -n $keys && -z $inject ]]; then
   printf 'Also swipe up with three fingers a few times; each swipe should raise\n'
   printf 'the volume one step instead of reaching the application under your fingers.\n\n'
 fi
+if [[ -n $edges && -z $inject ]]; then
+  printf 'Also swipe up with one finger from the very bottom edge and down from the\n'
+  printf 'very top edge; each should be logged instead of reaching the application.\n\n'
+fi
 if [[ -n $lock ]]; then
   printf 'Lock the session (power key), wait a few seconds, wake and unlock it,\n'
   printf 'then keep using "%s" until the timer ends.\n\n' "$device"
@@ -328,6 +356,8 @@ held() {
 }
 downs=0
 ups=0
+edge_ups=0
+edge_downs=0
 if [[ -n $inject ]]; then
   for _ in $(seq "$((seconds * 10))"); do
     if held || [[ -s $run/session.status ]]; then break; fi
@@ -337,6 +367,9 @@ if [[ -n $inject ]]; then
   steps=(swipe:1:up)
   if [[ -n $swipe ]]; then steps+=(swipe:3:down swipe:3:down swipe:3:down); fi
   if [[ -n $keys ]]; then steps+=(swipe:3:up swipe:3:up swipe:3:up); fi
+  if [[ -n $edges ]]; then
+    for _ in 1 2; do steps+=("swipe:1:up:0.5,0.995" "swipe:1:down:0.5,0.005"); done
+  fi
   for step in "${steps[@]}"; do
     if ! held; then
       echo "\"$device\" is not taken over, so $step and later gestures were not injected."
@@ -346,6 +379,8 @@ if [[ -n $inject ]]; then
     case "$step" in
       swipe:3:down) downs=$((downs + 1)) ;;
       swipe:3:up) ups=$((ups + 1)) ;;
+      swipe:1:up:*) edge_ups=$((edge_ups + 1)) ;;
+      swipe:1:down:*) edge_downs=$((edge_downs + 1)) ;;
     esac
   done
 fi
@@ -435,6 +470,23 @@ if [[ -n $keys ]]; then
   fi
   if [[ -n $inject ]] && ((pressed != ups)); then
     echo "The three-finger swipe up was recognized $pressed times for $ups injected swipes." >&2
+    exit 1
+  fi
+fi
+if [[ -n $edges ]]; then
+  seen_ups=0
+  seen_downs=0
+  if [[ -f $run/edges.log ]]; then
+    seen_ups=$(grep -cx up "$run/edges.log" || true)
+    seen_downs=$(grep -cx down "$run/edges.log" || true)
+  fi
+  printf 'Edge swipes run: %d up from the bottom, %d down from the top\n' "$seen_ups" "$seen_downs"
+  if ((seen_ups + seen_downs == 0)); then
+    echo "No edge swipe ran its command." >&2
+    exit 1
+  fi
+  if [[ -n $inject ]] && ((seen_ups != edge_ups || seen_downs != edge_downs)); then
+    echo "Injected $edge_ups bottom and $edge_downs top edge swipes." >&2
     exit 1
   fi
 fi

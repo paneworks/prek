@@ -767,7 +767,8 @@ os._exit(0)
                 (True, False, False, 1, "locks"), (True, False, False, 1, "stuck"), (True, False, True, 1, "unlocked"),
                 (True, False, True, 1, "injects"), (True, False, True, 1, "misfires"),
                 (True, False, True, 1, "unforwarded"), (True, False, True, 1, "crashes"),
-                (True, False, True, 1, "prebuilt")):
+                (True, False, True, 1, "prebuilt"), (True, False, True, 1, "edges"),
+                (True, False, True, 1, "edgeless")):
             with self.subTest(opens_socket=opens_socket, provisioned=provisioned, holds=holds, listeners=listeners,
                               agent=agent):
                 self.takeover_trial(opens_socket, provisioned, holds, listeners, agent)
@@ -776,7 +777,8 @@ os._exit(0)
         swipe = agent in ("swipes", "silent", "injects", "misfires")
         keys = agent in ("presses", "unpressed", "injects")
         lock = agent in ("locks", "stuck", "unlocked")
-        inject = agent in ("injects", "misfires", "unforwarded")
+        inject = agent in ("injects", "misfires", "unforwarded", "edges", "edgeless")
+        edges = agent in ("edges", "edgeless")
         trial = Path(__file__).resolve().parents[1] / "run-takeover-trial.sh"
         with tempfile.TemporaryDirectory() as temporary:
             repo, mocks, run_root = Path(temporary), Path(temporary) / "bin", Path(temporary) / "run"
@@ -869,6 +871,7 @@ case "$1" in
     {'echo "context Unknown; previous gesture progress cancelled"' if agent == "leaves" else ''}
     {"; ".join([matched] * swipes) if swipe else ''}
     {"; ".join([fired] * swipes) if agent in ("swipes", "injects", "misfires") else ''}
+    {'for d in up down up down; do echo $d >> ' + repr(str(repo / 'target/takeover-trial/latest/edges.log')) + '; done' if agent == 'edges' else ''}
     {relocked if agent == "locks" else ''} ;;
 esac
 """)
@@ -880,7 +883,8 @@ esac
             result = subprocess.run(["bash", str(script), "--device", "Prek test keyboard", "--seconds", "10",
                                      *(["--swipe"] if swipe else []), *(["--keys"] if keys else []),
                                      *(["--lock"] if lock else []), *(["--inject"] if inject else []),
-                                     *(["--binary", str(prek / "bin/prek")] if agent == "prebuilt" else [])],
+                                     *(["--binary", str(prek / "bin/prek")] if agent == "prebuilt" else []),
+                                     *(["--edges"] if edges else [])],
                                     env=env, capture_output=True, text=True, timeout=60)
             run = (repo / "target/takeover-trial/latest").resolve(strict=True)
             self.assertFalse((run_root / "udev/rules.d/70-prek-trial.rules").exists())
@@ -941,6 +945,19 @@ esac
                     self.assertEqual(result.returncode, 1)
                     self.assertEqual(len(writes), 4)
                     self.assertIn("ran its command 1 times for 3 injected swipes", console)
+                elif edges:
+                    self.assertEqual(writes, [f"{step} wait:1000" for step in
+                                              ["swipe:1:up", *["swipe:1:up:0.5,0.995", "swipe:1:down:0.5,0.005"] * 2]])
+                    config = (run / "config.toml").read_text()
+                    self.assertIn('region = { edge = "bottom", depth = "20px" }', config)
+                    self.assertIn('trigger = { kind = "swipe", fingers = 1, direction = "down"', config)
+                    self.assertIn("--observations --context --commands", arguments.read_text())
+                    if agent == "edges":
+                        self.assertEqual(result.returncode, 0, console)
+                        self.assertIn("Edge swipes run: 2 up from the bottom, 2 down from the top", console)
+                    else:
+                        self.assertEqual(result.returncode, 1)
+                        self.assertIn("No edge swipe ran its command.", console)
                 else:
                     self.assertEqual(result.returncode, 1)
                     self.assertEqual(writes, ["swipe:1:up wait:1000"])
