@@ -1,7 +1,7 @@
 use super::*;
 use std::io::Read;
 
-const DATABASE: &str = "/run/udev/data";
+pub(crate) const DATABASE: &str = "/run/udev/data";
 const MAX_DATABASE: u64 = 65_536;
 
 #[derive(Clone, Debug, Eq, PartialEq)]

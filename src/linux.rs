@@ -103,6 +103,11 @@ impl StateProbe {
 
 use crate::diagnostics::Entry;
 
+/// Device rescan interval without a directory watch.
+const RESCAN: Duration = Duration::from_millis(250);
+/// Fallback rescan interval while `/dev/input` and the udev database are watched.
+const WATCHED_RESCAN: Duration = Duration::from_secs(5);
+
 pub fn inventory() -> io::Result<Vec<Entry>> {
     Ok(discover()?.into_iter().map(|value| value.entry).collect())
 }
@@ -805,6 +810,14 @@ fn observe_loop(
         .map(|reader| (reader.device.source.device, 1))
         .collect();
     let mut scan_at = monotonic()?;
+    // Node and udev record changes wake a rescan; the timed one is a fallback.
+    let watched = [
+        PathBuf::from("/dev/input"),
+        PathBuf::from(discovery::DATABASE),
+    ];
+    let mut changes = sink
+        .device_policy()
+        .and_then(|_| crate::session::Changes::open(&watched).ok());
     let mut discovered = DiscoveryCache::default();
     let mut policy_generation = 0;
     let mut input_at = Duration::ZERO;
@@ -836,7 +849,12 @@ fn observe_loop(
                 input_at,
             )?;
             policy_generation = generation;
-            scan_at = monotonic()? + Duration::from_millis(250);
+            scan_at = monotonic()?
+                + if changes.is_some() {
+                    WATCHED_RESCAN
+                } else {
+                    RESCAN
+                };
         }
         monotonic()?;
         sink.flush()?;
@@ -901,6 +919,9 @@ fn observe_loop(
                 fds.push(PollFd::new(health.as_fd(), PollFlags::POLLIN));
             }
             fds.extend(sink.poll_sources());
+            if let Some(changes) = &changes {
+                fds.push(PollFd::new(changes.as_fd(), PollFlags::POLLIN));
+            }
             match poll(&mut fds, timeout) {
                 Ok(_) => fds
                     .iter()
@@ -910,6 +931,16 @@ fn observe_loop(
                 Err(error) => return Err(error.into()),
             }
         };
+        if let Some(watch) = &changes
+            && flags
+                .last()
+                .is_some_and(|flag| flag.contains(PollFlags::POLLIN))
+        {
+            if watch.drain().is_err() {
+                changes = crate::session::Changes::open(&watched).ok();
+            }
+            scan_at = Duration::ZERO;
+        }
         // Sample before draining all sources. Later frames stay pending so
         // no source can advance timers beyond another source's unread input.
         let watermark = monotonic()?;

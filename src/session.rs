@@ -227,9 +227,14 @@ impl Generation {
 }
 
 /// Inotify watch on directories whose entries may change.
-struct Changes(OwnedFd);
+pub(crate) struct Changes(OwnedFd);
+impl AsFd for Changes {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.0.as_fd()
+    }
+}
 impl Changes {
-    fn open(directories: &[PathBuf]) -> io::Result<Self> {
+    pub(crate) fn open(directories: &[PathBuf]) -> io::Result<Self> {
         // SAFETY: inotify_init1 takes scalar flags and returns a new descriptor.
         let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
         if fd < 0 {
@@ -259,7 +264,7 @@ impl Changes {
     }
     /// Drains queued events; whether any arrived. A lost watch or an overflowed
     /// queue is an error, after which the watch must be reopened.
-    fn drain(&self) -> io::Result<bool> {
+    pub(crate) fn drain(&self) -> io::Result<bool> {
         const HEADER: usize = size_of::<libc::inotify_event>();
         let mut buffer = [0u8; 4096];
         let mut changed = false;
@@ -295,7 +300,7 @@ impl Changes {
                         | libc::IN_UNMOUNT)
                     != 0
                 {
-                    return Err(invalid("logind state watch was lost"));
+                    return Err(invalid("directory watch was lost"));
                 }
                 offset += HEADER + event.len as usize;
             }
