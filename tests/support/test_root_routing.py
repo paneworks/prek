@@ -8,6 +8,7 @@ import select
 import shutil
 import signal
 import stat
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -763,15 +764,18 @@ os._exit(0)
                 (True, False, False, 1, "ok"), (True, False, True, 2, "ok"), (True, False, True, 1, "fails"),
                 (True, False, True, 1, "leaves"), (True, False, True, 1, "swipes"), (True, False, True, 1, "silent"),
                 (True, False, True, 1, "presses"), (True, False, True, 1, "unpressed"),
-                (True, False, False, 1, "locks"), (True, False, False, 1, "stuck"), (True, False, True, 1, "unlocked")):
+                (True, False, False, 1, "locks"), (True, False, False, 1, "stuck"), (True, False, True, 1, "unlocked"),
+                (True, False, True, 1, "injects"), (True, False, True, 1, "misfires"),
+                (True, False, True, 1, "unforwarded")):
             with self.subTest(opens_socket=opens_socket, provisioned=provisioned, holds=holds, listeners=listeners,
                               agent=agent):
                 self.takeover_trial(opens_socket, provisioned, holds, listeners, agent)
 
     def takeover_trial(self, opens_socket, provisioned, holds, listeners, agent):
-        swipe = agent in ("swipes", "silent")
-        keys = agent in ("presses", "unpressed")
+        swipe = agent in ("swipes", "silent", "injects", "misfires")
+        keys = agent in ("presses", "unpressed", "injects")
         lock = agent in ("locks", "stuck", "unlocked")
+        inject = agent in ("injects", "misfires", "unforwarded")
         trial = Path(__file__).resolve().parents[1] / "run-takeover-trial.sh"
         with tempfile.TemporaryDirectory() as temporary:
             repo, mocks, run_root = Path(temporary), Path(temporary) / "bin", Path(temporary) / "run"
@@ -784,8 +788,8 @@ os._exit(0)
             script = repo / "tests/run-takeover-trial.sh"
             shutil.copyfile(trial, script)
             devices = repo / "devices"
-            devices.write_text('N: Name="Prek test keyboard"\n')
-            calls, arguments = repo / "sudo-calls", repo / "agent-arguments"
+            devices.write_text('N: Name="Prek test keyboard"\nH: Handlers=sysrq kbd event7\n')
+            calls, arguments, injected = repo / "sudo-calls", repo / "agent-arguments", repo / "inject-calls"
             cgroup = next(line[3:] for line in Path("/proc/self/cgroup").read_text().splitlines()
                           if line.startswith("0::"))
             cgroups = repo / "cgroups"
@@ -807,6 +811,9 @@ exec "$@"
 """,
                 "git": "#!/bin/sh\nexit 0\n",
                 "udevadm": "#!/bin/sh\nexit 0\n",
+                "perl": f"""#!/bin/sh
+printf '%s\\n' "$*" >> '{injected}'
+""",
                 "ss": f"""#!/bin/sh
 echo 'u_str LISTEN 0 128 {temporary}/wayland-test 1 * 0 {owners}'
 """,
@@ -829,7 +836,10 @@ done
                 (mocks / name).chmod(0o755)
             matched = "echo 'action offered: trial-swipe 1/1 Discrete'"
             fired = f"date >> '{repo}/target/takeover-trial/latest/fired.log'"
-            pressed = 'echo "routing worker: rule trial-keys queued its keys 1 times" >&2'
+            swipes = 3 if agent == "injects" else 1
+            pressed = f'echo "routing worker: rule trial-keys queued its keys {swipes} times" >&2'
+            forwarded = ('echo "routing worker: Prek test keyboard forwarded no frames" >&2' if agent == "unforwarded"
+                         else 'echo "routing worker: Prek test keyboard forwarded 22 frames; Prek overhead" >&2')
             retaken = 'echo "routing worker: Prek test keyboard taken over at a neutral idle cut" >&2'
             relocked = ('echo "context Locked; previous gesture progress cancelled"; '
                         'echo "context Desktop; previous gesture progress cancelled"')
@@ -846,13 +856,14 @@ case "$1" in
     echo "routing worker: Prek test keyboard taken over at a neutral idle cut" >&2
     {"" if holds else 'echo "routing worker: seat seat0 lost its context: state Unknown" >&2'}
     {retaken if agent == "locks" else ''}
-    {pressed if agent == "presses" else ''}
+    {pressed if agent in ("presses", "injects") else ''}
+    {forwarded if inject else ''}
     sleep 1 ;;
   session) echo "$*" > '{arguments}'; sleep 0.2
     {'exit 1' if agent == "fails" else ''}
     {'echo "context Unknown; previous gesture progress cancelled"' if agent == "leaves" else ''}
-    {matched if swipe else ''}
-    {fired if agent == "swipes" else ''}
+    {"; ".join([matched] * swipes) if swipe else ''}
+    {"; ".join([fired] * swipes) if agent in ("swipes", "injects", "misfires") else ''}
     {relocked if agent == "locks" else ''} ;;
 esac
 """)
@@ -863,7 +874,7 @@ esac
                    "PREK_TRIAL_RUN_ROOT": str(run_root), "PREK_TRIAL_CGROUP_ROOT": str(cgroups)}
             result = subprocess.run(["bash", str(script), "--device", "Prek test keyboard", "--seconds", "10",
                                      *(["--swipe"] if swipe else []), *(["--keys"] if keys else []),
-                                     *(["--lock"] if lock else [])],
+                                     *(["--lock"] if lock else []), *(["--inject"] if inject else [])],
                                     env=env, capture_output=True, text=True, timeout=60)
             run = (repo / "target/takeover-trial/latest").resolve(strict=True)
             self.assertFalse((run_root / "udev/rules.d/70-prek-trial.rules").exists())
@@ -900,6 +911,28 @@ esac
                 self.assertEqual(json.loads((run / "status.json").read_text())["status"], "failed")
                 self.assertIn("lost its context 1 times, so the takeover did not hold",
                               (run / "console.log").read_text())
+                return
+            if inject:
+                console = (run / "console.log").read_text()
+                writes = [line.split(" ", 2)[2] for line in injected.read_text().splitlines()]
+                self.assertTrue(all(line.startswith(f"{repo}/tests/support/inject-input.pl /dev/input/event7 ")
+                                    for line in injected.read_text().splitlines()))
+                self.assertIn("Injecting gestures into /dev/input/event7", console)
+                self.assertNotIn("Also swipe", console)
+                if agent == "injects":
+                    self.assertEqual(result.returncode, 0, console)
+                    self.assertEqual(writes, [f"{step} wait:1000" for step in
+                                              ["swipe:1:up", *["swipe:3:down"] * 3, *["swipe:3:up"] * 3]])
+                    self.assertIn("Swipes recognized: 3; commands run: 3", console)
+                    self.assertIn("Swipes up recognized: 3;", console)
+                elif agent == "misfires":
+                    self.assertEqual(result.returncode, 1)
+                    self.assertEqual(len(writes), 4)
+                    self.assertIn("ran its command 1 times for 3 injected swipes", console)
+                else:
+                    self.assertEqual(result.returncode, 1)
+                    self.assertEqual(writes, ["swipe:1:up wait:1000"])
+                    self.assertIn("one-finger swipe was never forwarded to the compositor", console)
                 return
             if agent == "silent":
                 self.assertEqual(result.returncode, 1)
@@ -953,6 +986,53 @@ esac
             self.assertIn("--mode route", broker)
             self.assertIn("--duration 10", broker)
             self.assertIn(f"--compositor-executable {os.path.realpath(sys.executable)}", broker)
+
+    def test_injector_writes_whole_contact_frames_that_lift_every_slot(self):
+        injector = Path(__file__).resolve().parent / "inject-input.pl"
+        with tempfile.TemporaryDirectory() as temporary:
+            node = Path(temporary) / "node"
+            node.write_bytes(b"")
+            steps = ["swipe:3:down", "key:115", "swipe:1:left:0.8,1"]
+            result = subprocess.run(["perl", str(injector), "--size", "1116x2484", str(node), *steps],
+                                    capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual([line.split()[1] for line in result.stdout.splitlines()], steps)
+            data = node.read_bytes()
+            self.assertEqual(len(data) % 24, 0)
+            frames, frame = [], []
+            for offset in range(0, len(data), 24):
+                event = struct.unpack("@llHHi", data[offset:offset + 24])[2:]
+                if event == (0, 0, 0):
+                    frames.append(frame)
+                    frame = []
+                else:
+                    frame.append(event)
+            self.assertEqual(frame, [])
+            self.assertEqual(len(frames), 21 + 1 + 2 + 21 + 1)
+            landing, last, lift = frames[0], frames[20], frames[21]
+            tracking = [value for kind, code, value in landing if code == 0x39]
+            self.assertEqual(tracking, [tracking[0], tracking[0] + 1, tracking[0] + 2])
+            self.assertGreater(tracking[0], 0)
+            self.assertIn((1, 0x14a, 1), landing)
+            self.assertIn((1, 0x14e, 1), landing)
+            self.assertEqual([value for kind, code, value in landing if code == 0x35], [424, 558, 691])
+            self.assertEqual({value for kind, code, value in landing if code == 0x36}, {745})
+            self.assertEqual({value for kind, code, value in last if code == 0x36}, {1738})
+            self.assertEqual(lift, [(3, 0x2f, 0), (3, 0x39, -1), (3, 0x2f, 1), (3, 0x39, -1), (3, 0x2f, 2),
+                                    (3, 0x39, -1), (1, 0x14a, 0), (1, 0x14e, 0)])
+            self.assertEqual(frames[22:24], [[(1, 115, 1)], [(1, 115, 0)]])
+            self.assertIn((3, 0x35, 892), frames[24])
+            self.assertIn((3, 0x36, 2483), frames[24])
+            self.assertIn((3, 0x35, 446), frames[44])
+            self.assertEqual(frames[45][-2:], [(1, 0x14a, 0), (1, 0x145, 0)])
+            for arguments, message in ((["--size", "9x9", str(node), "swipe:6:up"], 'Unknown step "swipe:6:up"'),
+                                       (["--size", "9x9", str(node), "swipe:1:up:1.5,0"], 'Unknown step'),
+                                       (["--size", "9x9", str(node), "key:768"], 'Unknown step "key:768"'),
+                                       ([str(node), "wait:1"], "reports no axis 53")):
+                refused = subprocess.run(["perl", str(injector), *arguments], capture_output=True, text=True,
+                                         timeout=30)
+                self.assertNotEqual(refused.returncode, 0)
+                self.assertIn(message, refused.stderr)
 
     def test_launcher_authenticates_first_and_retains_failed_build_logs(self):
         launcher = Path(__file__).resolve().parents[1] / "run-root-routing.sh"

@@ -4,7 +4,7 @@ set -euo pipefail
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 usage() {
   cat <<'HELP'
-Usage: ./tests/run-takeover-trial.sh --device "<exact kernel device name>" [--seconds N] [--swipe] [--keys] [--lock]
+Usage: ./tests/run-takeover-trial.sh --device "<exact kernel device name>" [--seconds N] [--swipe] [--keys] [--lock] [--inject]
 Launch as your regular user from a terminal of the Wayland session under test;
 WAYLAND_DISPLAY and XDG_RUNTIME_DIR select the compositor. The compositor is
 the process listening on that display socket, and the session agent joins the
@@ -23,6 +23,12 @@ keyboard; the trial fails unless that swipe was recognized at least once.
 --lock expects the session to be locked and unlocked during the trial: the
 device must return to its compositor while locked, be taken over again after
 the last unlock, and the session must end on its desktop.
+--inject performs the touchscreen gestures itself once the device is taken over,
+by writing synthetic contacts into its kernel event node with
+tests/support/inject-input.pl (needs perl): a one-finger swipe up mid-screen that
+must be forwarded, then three swipes for each of --swipe and --keys, which must
+all be recognized. A gesture is skipped once the device is no longer taken over,
+so none reaches a lock screen. Leave the touchscreen alone meanwhile.
 Temporarily installs Prek's udev metadata rule under /run/udev/rules.d and a
 root-owned trial configuration under /run/prek-trial; both are removed on exit,
 as is the broker's /run/prek device registry when the trial created it.
@@ -36,6 +42,7 @@ seconds=60
 swipe=""
 keys=""
 lock=""
+inject=""
 while (($#)); do
   case "$1" in
     --device) device=${2:-}; shift 2 ;;
@@ -43,6 +50,7 @@ while (($#)); do
     --swipe) swipe=1; shift ;;
     --keys) keys=1; shift ;;
     --lock) lock=1; shift ;;
+    --inject) inject=1; shift ;;
     --help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac
@@ -71,6 +79,25 @@ fi
 if [[ $device == *[\'\"\\]* ]]; then
   echo "Device names with quotes or backslashes are not supported by this trial." >&2
   exit 2
+fi
+if [[ -n $inject ]]; then
+  if ! perl=$(command -v perl); then
+    echo "--inject needs perl on PATH." >&2
+    exit 2
+  fi
+  nodes=$(awk -v name="N: Name=\"$device\"" '
+    $0 == name { found = 1 }
+    found && /^H: Handlers=/ {
+      count = split($0, words, /[ =]/)
+      for (i = 1; i <= count; i++) if (words[i] ~ /^event[0-9]+$/) print words[i]
+      found = 0
+    }
+    /^$/ { found = 0 }' "$devices")
+  if [[ $(printf '%s\n' "$nodes" | grep -c '^event') != 1 ]]; then
+    echo "--inject needs exactly one event node named \"$device\"." >&2
+    exit 2
+  fi
+  node=/dev/input/$nodes
 fi
 mkdir -p "$repo/target/takeover-trial"
 run=$(mktemp -d "$repo/target/takeover-trial/run-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")
@@ -247,19 +274,52 @@ if [[ ! -s $run/session.pid ]]; then
   echo "The session agent did not start within 5 s." >&2
   exit 1
 fi
-printf '\nType and use "%s" normally for %d seconds. If it stops responding,\n' "$device" "$seconds"
-printf 'wait for the timer or press Ctrl-C; the broker then releases it.\n\n'
-if [[ -n $swipe ]]; then
+if [[ -n $inject ]]; then
+  printf '\nInjecting gestures into %s once "%s" is taken over; leave it alone\n' "$node" "$device"
+  printf 'for %d seconds, or press Ctrl-C; the broker then releases it.\n\n' "$seconds"
+else
+  printf '\nType and use "%s" normally for %d seconds. If it stops responding,\n' "$device" "$seconds"
+  printf 'wait for the timer or press Ctrl-C; the broker then releases it.\n\n'
+fi
+if [[ -n $swipe && -z $inject ]]; then
   printf 'Also swipe down with three fingers a few times; each swipe should run\n'
   printf 'the trial command instead of reaching the application under your fingers.\n\n'
 fi
-if [[ -n $keys ]]; then
+if [[ -n $keys && -z $inject ]]; then
   printf 'Also swipe up with three fingers a few times; each swipe should raise\n'
   printf 'the volume one step instead of reaching the application under your fingers.\n\n'
 fi
 if [[ -n $lock ]]; then
   printf 'Lock the session (power key), wait a few seconds, wake and unlock it,\n'
   printf 'then keep using "%s" until the timer ends.\n\n' "$device"
+fi
+# Holds while the last takeover is newer than the last context loss.
+held() {
+  awk '/lost its context/ { n = 0 } /taken over at a neutral idle cut/ { n = 1 } END { exit !n }' \
+    "$run/broker.log"
+}
+downs=0
+ups=0
+if [[ -n $inject ]]; then
+  for _ in $(seq "$((seconds * 10))"); do
+    if held || [[ -s $run/session.status ]]; then break; fi
+    sleep 0.1
+  done
+  sleep 1
+  steps=(swipe:1:up)
+  if [[ -n $swipe ]]; then steps+=(swipe:3:down swipe:3:down swipe:3:down); fi
+  if [[ -n $keys ]]; then steps+=(swipe:3:up swipe:3:up swipe:3:up); fi
+  for step in "${steps[@]}"; do
+    if ! held; then
+      echo "\"$device\" is not taken over, so $step and later gestures were not injected."
+      break
+    fi
+    sudo "$perl" "$repo/tests/support/inject-input.pl" "$node" "$step" wait:1000 | tee -a "$run/inject.log"
+    case "$step" in
+      swipe:3:down) downs=$((downs + 1)) ;;
+      swipe:3:up) ups=$((ups + 1)) ;;
+    esac
+  done
 fi
 for _ in $(seq "$((seconds * 10 + 100))"); do
   if [[ -s $run/session.status ]]; then break; fi
@@ -276,6 +336,11 @@ grep -E 'taken over|stays with its original consumer|keeps no consumer evidence|
   "$run/broker.log" || true
 if ! grep -q 'taken over at a neutral idle cut' "$run/broker.log"; then
   echo "\"$device\" was never taken over." >&2
+  exit 1
+fi
+forwarded=$(grep -F "routing worker: $device forwarded " "$run/broker.log" | tail -n 1 || true)
+if [[ -n $inject && ( -z $forwarded || $forwarded == *" forwarded no frames" ) ]]; then
+  echo "The injected one-finger swipe was never forwarded to the compositor." >&2
   exit 1
 fi
 losses=$(sed -n '/taken over at a neutral idle cut/,$p' "$run/broker.log" | grep -c 'lost its context' || true)
@@ -322,6 +387,10 @@ if [[ -n $swipe ]]; then
     echo "The three-finger swipe never ran its command." >&2
     exit 1
   fi
+  if [[ -n $inject ]] && ((fired != downs)); then
+    echo "The three-finger swipe ran its command $fired times for $downs injected swipes." >&2
+    exit 1
+  fi
 fi
 if [[ -n $keys ]]; then
   pressed=$(sed -n 's/.*rule trial-keys queued its keys \([0-9]*\) times.*/\1/p' "$run/broker.log" | tail -n 1)
@@ -329,6 +398,10 @@ if [[ -n $keys ]]; then
   printf 'Swipes up recognized: %d; each should have raised the volume\n' "$pressed"
   if ((pressed == 0)); then
     echo "The three-finger swipe up was never recognized." >&2
+    exit 1
+  fi
+  if [[ -n $inject ]] && ((pressed != ups)); then
+    echo "The three-finger swipe up was recognized $pressed times for $ups injected swipes." >&2
     exit 1
   fi
 fi

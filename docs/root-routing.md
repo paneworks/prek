@@ -211,3 +211,12 @@ routed: each is taken over only after it is neutral and idle for 100 ms, and the
 broker releases it when it exits. Input should behave exactly as before. Logs
 are under `target/takeover-trial/latest/`; `broker.log` records each takeover
 or the reason a device stayed with the compositor.
+
+`--swipe`, `--keys` and `--lock` add a three-finger swipe rule that runs a
+command, one that presses volume up through a generated keyboard, and a lock
+and unlock check. `--inject` performs the touchscreen gestures itself: once the
+device is taken over, `tests/support/inject-input.pl` writes synthetic contacts
+into its kernel event node, which the kernel delivers to the grabbing broker
+like the hardware's own reports. The trial then requires the one-finger swipe to
+be forwarded and every injected rule swipe to be recognized, and it stops
+injecting as soon as the device is no longer taken over.

@@ -222,11 +222,12 @@
             touch "$out"
           '';
           root-routing-receipts = pkgs.runCommand "prek-root-routing-receipts-check" {
-            nativeBuildInputs = [ pkgs.python3 pkgs.bash pkgs.shellcheck ];
+            nativeBuildInputs = [ pkgs.python3 pkgs.bash pkgs.shellcheck pkgs.perl ];
           } ''
             mkdir -p receipts/tests/support
             cp ${./tests/support/root_routing.py} receipts/tests/support/root_routing.py
             cp ${./tests/support/test_root_routing.py} receipts/tests/support/test_root_routing.py
+            cp ${./tests/support/inject-input.pl} receipts/tests/support/inject-input.pl
             cp ${./tests/run-root-routing.sh} receipts/tests/run-root-routing.sh
             cp ${./tests/run-takeover-trial.sh} receipts/tests/run-takeover-trial.sh
             python3 -m unittest discover -s receipts/tests/support -p test_root_routing.py -v > "$out" 2>&1
