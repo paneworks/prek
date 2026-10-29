@@ -4,7 +4,7 @@ set -euo pipefail
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 usage() {
   cat <<'HELP'
-Usage: ./tests/run-takeover-trial.sh --device "<exact kernel device name>" [--seconds N] [--swipe] [--keys] [--lock] [--edges] [--inject] [--binary PATH]
+Usage: ./tests/run-takeover-trial.sh --device "<exact kernel device name>" [--seconds N] [--swipe] [--keys] [--lock] [--edges] [--inject] [--suspend] [--binary PATH]
 Launch as your regular user from a terminal of the Wayland session under test;
 WAYLAND_DISPLAY and XDG_RUNTIME_DIR select the compositor. The compositor is
 the process listening on that display socket, and the session agent joins the
@@ -37,6 +37,12 @@ moves alone for 200 ms, past the join window, before the others land; it stays
 with the application and must not run the command. A gesture is skipped once
 the device is no longer taken over,
 so none reaches a lock screen. Leave the touchscreen alone meanwhile.
+--suspend (with --swipe and --inject) restarts a failed broker as its systemd
+unit does and runs the agent with --reconnect. After the first gestures it
+suspends the system with a 20 s RTC wake alarm, bypassing its own sleep
+inhibitor, then injects two more three-finger swipes down. The broker must
+quiesce at the sleep boundary, its replacement must take the device over again,
+and every swipe must run its command. Needs rtcwake and an RTC that wakes.
 --binary uses a prek executable built elsewhere instead of building the package:
 it is installed root-owned under /run/prek-trial, and the udev rule is generated
 from udev/70-prek.rules for it.
@@ -56,6 +62,7 @@ lock=""
 inject=""
 binary=""
 edges=""
+suspend=""
 while (($#)); do
   case "$1" in
     --device) device=${2:-}; shift 2 ;;
@@ -66,12 +73,18 @@ while (($#)); do
     --inject) inject=1; shift ;;
     --binary) binary=${2:-}; shift 2 ;;
     --edges) edges=1; shift ;;
+    --suspend) suspend=1; shift ;;
     --help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac
 done
-if ((EUID == 0)) || [[ -z $device ]] || ! [[ $seconds =~ ^[0-9]+$ ]] || ((seconds < 10 || seconds > 300)); then
+if ((EUID == 0)) || [[ -z $device ]] || ! [[ $seconds =~ ^[0-9]+$ ]] || ((seconds < 10 || seconds > 300)) \
+  || [[ -n $suspend && ( -z $swipe || -z $inject ) ]]; then
   usage >&2
+  exit 2
+fi
+if [[ -n $suspend ]] && ! command -v rtcwake > /dev/null; then
+  echo "--suspend needs rtcwake on PATH." >&2
   exit 2
 fi
 : "${XDG_RUNTIME_DIR:?Run as your regular user with a runtime directory}"
@@ -276,10 +289,18 @@ sudo install -m 0644 -o root -g root "$udev_rule" "$rule"
 sudo udevadm control --reload-rules
 # The broker creates its device registry under /run/prek when it is missing.
 if [[ ! -d $run_root/prek ]]; then made_registry=1; fi
-# shellcheck disable=SC2024
-sudo "$prek" broker --mode route --config "$trial/config.toml" --runtime-dir "$trial/runtime" \
-  --compositor-executable "$compositor" --logind-library "$logind" --json --duration "$seconds" \
-  > "$run/broker.log" 2>&1 &
+broker_command=("$prek" broker --mode route --config "$trial/config.toml" --runtime-dir "$trial/runtime"
+  --compositor-executable "$compositor" --logind-library "$logind" --json --duration "$seconds")
+if [[ -n $suspend ]]; then
+  # Restarts a failed broker as its systemd unit does; a clean exit or TERM ends it.
+  # shellcheck disable=SC2016,SC2024
+  sudo sh -c 'trap "kill \$child 2>/dev/null; exit 143" TERM
+    while :; do "$@" & child=$!; wait "$child" && exit 0; sleep 1; done' sh "${broker_command[@]}" \
+    >> "$run/broker.log" 2>&1 &
+else
+  # shellcheck disable=SC2024
+  sudo "${broker_command[@]}" > "$run/broker.log" 2>&1 &
+fi
 broker=$!
 socket="$trial/runtime/control.sock"
 for _ in $(seq 100); do
@@ -298,12 +319,14 @@ if ! sudo -n test -S "$socket"; then
   exit 1
 fi
 # The launcher waits until it is in the compositor's cgroup, then starts the agent.
+lifetime="--duration $((seconds - 2))"
+if [[ -n $suspend ]]; then lifetime="--reconnect --logind-library $logind"; fi
 cat > "$run/agent.sh" <<AGENT
 #!/bin/sh
 echo \$\$ > "$run/launcher.pid"
 while [ ! -e "$run/agent.go" ]; do sleep 0.05; done
 "$prek" session --socket "$socket" --display "$WAYLAND_DISPLAY" ${agent_flags[*]} \\
-  --duration $((seconds - 2)) > "$run/session.log" 2>&1 &
+  $lifetime > "$run/session.log" 2>&1 &
 echo \$! > "$run/session.pid"
 wait \$!
 echo \$? > "$run/session.status"
@@ -352,12 +375,13 @@ if [[ -n $lock ]]; then
   printf 'Lock the session (power key), wait a few seconds, wake and unlock it,\n'
   printf 'then keep using "%s" until the timer ends.\n\n' "$device"
 fi
-# Holds while the last takeover is newer than the last context loss.
+# Holds while the last takeover is newer than the last release of the device.
 held() {
-  awk '/lost its context/ { n = 0 } /taken over at a neutral idle cut/ { n = 1 } END { exit !n }' \
-    "$run/broker.log"
+  awk '/lost its context|sleep boundary quiesced|retired output for device/ { n = 0 }
+    /taken over at a neutral idle cut/ { n = 1 } END { exit !n }' "$run/broker.log"
 }
 downs=0
+resumed=0
 lates=0
 ups=0
 edge_ups=0
@@ -390,19 +414,48 @@ if [[ -n $inject ]]; then
       swipe:1:down:*) edge_downs=$((edge_downs + 1)) ;;
     esac
   done
+  if [[ -n $suspend ]] && held; then
+    sudo rtcwake -m no -s 20 > /dev/null
+    echo "Suspending for about 20 s."
+    sudo systemctl suspend --check-inhibitors=no
+    # The restarted broker must take the device over after the quiesced one.
+    for _ in $(seq 1200); do
+      if held && grep -q 'sleep boundary quiesced' "$run/broker.log"; then break; fi
+      sleep 0.1
+    done
+    sleep 1
+    for step in swipe:3:down swipe:3:down; do
+      if ! held; then
+        echo "\"$device\" was not taken over again after the suspend, so $step was not injected."
+        break
+      fi
+      sudo "$perl" "$repo/tests/support/inject-input.pl" "$node" "$step" wait:1000 | tee -a "$run/inject.log"
+      downs=$((downs + 1))
+      resumed=$((resumed + 1))
+    done
+  fi
+fi
+if [[ -n $suspend ]]; then
+  # The reconnecting agent and the restarting broker run until the trial stops them.
+  sleep 2
+  kill "$(cat "$run/session.pid")" 2>/dev/null || true
 fi
 for _ in $(seq "$((seconds * 10 + 100))"); do
   if [[ -s $run/session.status ]]; then break; fi
   sleep 0.1
 done
 agent_status=$(cat "$run/session.status" 2>/dev/null || echo unknown)
+# The trial itself terminates a reconnecting agent and the restarting broker.
+if [[ -n $suspend && $agent_status == 143 ]]; then agent_status=0; fi
 if [[ $agent_status != 0 ]]; then
   echo "session agent exited with status $agent_status:"
   tail -n 5 "$run/session.log" || true
 fi
+if [[ -n $suspend ]]; then sudo -n kill -TERM "$broker" 2>/dev/null || true; fi
 broker_status=0
 wait "$broker" || broker_status=$?
 broker=""
+if [[ -n $suspend && $broker_status == 143 ]]; then broker_status=0; fi
 grep -E 'taken over|stays with its original consumer|keeps no consumer evidence|forwarded' \
   "$run/broker.log" || true
 if ((broker_status != 0)); then
@@ -507,6 +560,18 @@ if [[ -n $edges ]]; then
   fi
   if [[ -n $inject ]] && ((seen_ups != edge_ups || seen_downs != edge_downs)); then
     echo "Injected $edge_ups bottom and $edge_downs top edge swipes." >&2
+    exit 1
+  fi
+fi
+if [[ -n $suspend ]]; then
+  quiesced=$(grep -c 'sleep boundary quiesced' "$run/broker.log" || true)
+  printf 'Sleep boundaries quiesced: %d; swipes injected after resume: %d\n' "$quiesced" "$resumed"
+  if ((quiesced == 0)); then
+    echo "The broker never quiesced at a sleep boundary, so the suspend was not exercised." >&2
+    exit 1
+  fi
+  if ((resumed == 0)); then
+    echo "\"$device\" was not taken over again after the suspend." >&2
     exit 1
   fi
 fi

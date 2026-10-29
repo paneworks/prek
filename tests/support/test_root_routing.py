@@ -768,16 +768,16 @@ os._exit(0)
                 (True, False, True, 1, "injects"), (True, False, True, 1, "misfires"),
                 (True, False, True, 1, "unforwarded"), (True, False, True, 1, "crashes"),
                 (True, False, True, 1, "prebuilt"), (True, False, True, 1, "edges"),
-                (True, False, True, 1, "edgeless")):
+                (True, False, True, 1, "edgeless"), (True, False, True, 1, "suspends")):
             with self.subTest(opens_socket=opens_socket, provisioned=provisioned, holds=holds, listeners=listeners,
                               agent=agent):
                 self.takeover_trial(opens_socket, provisioned, holds, listeners, agent)
 
     def takeover_trial(self, opens_socket, provisioned, holds, listeners, agent):
-        swipe = agent in ("swipes", "silent", "injects", "misfires")
+        swipe = agent in ("swipes", "silent", "injects", "misfires", "suspends")
         keys = agent in ("presses", "unpressed", "injects")
         lock = agent in ("locks", "stuck", "unlocked")
-        inject = agent in ("injects", "misfires", "unforwarded", "edges", "edgeless")
+        inject = agent in ("injects", "misfires", "unforwarded", "edges", "edgeless", "suspends")
         edges = agent in ("edges", "edgeless")
         trial = Path(__file__).resolve().parents[1] / "run-takeover-trial.sh"
         with tempfile.TemporaryDirectory() as temporary:
@@ -816,6 +816,8 @@ exec "$@"
 """,
                 "git": "#!/bin/sh\nexit 0\n",
                 "udevadm": "#!/bin/sh\nexit 0\n",
+                "rtcwake": "#!/bin/sh\nexit 0\n",
+                "systemctl": "#!/bin/sh\nexit 0\n",
                 "systemd-inhibit": "#!/bin/sh\nexit 0\n",
                 "perl": f"""#!/bin/sh
 printf '%s\\n' "$*" >> '{injected}'
@@ -843,7 +845,7 @@ done
                 (mocks / name).chmod(0o755)
             matched = "echo 'action offered: trial-swipe 1/1 Discrete'"
             fired = f"date >> '{repo}/target/takeover-trial/latest/fired.log'"
-            swipes = 3 if agent == "injects" else 1
+            swipes = {"injects": 3, "suspends": 5}.get(agent, 1)
             pressed = f'echo "routing worker: rule trial-keys queued its keys {swipes} times" >&2'
             forwarded = ('echo "routing worker: Prek test keyboard forwarded no frames" >&2' if agent == "unforwarded"
                          else 'echo "routing worker: Prek test keyboard forwarded 22 frames; Prek overhead" >&2')
@@ -865,12 +867,14 @@ case "$1" in
     {retaken if agent == "locks" else ''}
     {pressed if agent in ("presses", "injects") else ''}
     {forwarded if inject else ''}
+    {'echo "prek: sleep boundary quiesced; restart broker with fresh process/input authority" >&2; ' + retaken
+     if agent == "suspends" else ''}
     sleep 1{'; echo "prek: broker worker Exited: exit status: 1" >&2; exit 1' if agent == "crashes" else ''} ;;
   session) echo "$*" > '{arguments}'; sleep 0.2
     {'exit 1' if agent == "fails" else ''}
     {'echo "context Unknown; previous gesture progress cancelled"' if agent == "leaves" else ''}
     {"; ".join([matched] * swipes) if swipe else ''}
-    {"; ".join([fired] * swipes) if agent in ("swipes", "injects", "misfires") else ''}
+    {"; ".join([fired] * swipes) if agent in ("swipes", "injects", "misfires", "suspends") else ''}
     {'for d in up down up down; do echo $d >> ' + repr(str(repo / 'target/takeover-trial/latest/edges.log')) + '; done' if agent == 'edges' else ''}
     {relocked if agent in ("locks", "stuck") else ''} ;;
 esac
@@ -884,7 +888,8 @@ esac
                                      *(["--swipe"] if swipe else []), *(["--keys"] if keys else []),
                                      *(["--lock"] if lock else []), *(["--inject"] if inject else []),
                                      *(["--binary", str(prek / "bin/prek")] if agent == "prebuilt" else []),
-                                     *(["--edges"] if edges else [])],
+                                     *(["--edges"] if edges else []),
+                                     *(["--suspend"] if agent == "suspends" else [])],
                                     env=env, capture_output=True, text=True, timeout=60)
             run = (repo / "target/takeover-trial/latest").resolve(strict=True)
             self.assertFalse((run_root / "udev/rules.d/70-prek-trial.rules").exists())
@@ -946,6 +951,19 @@ esac
                     self.assertEqual(result.returncode, 1)
                     self.assertEqual(len(writes), 5)
                     self.assertIn("ran its command 1 times for 3 injected swipes and 1 late-joining", console)
+                elif agent == "suspends":
+                    self.assertEqual(result.returncode, 0, console)
+                    self.assertEqual(writes, [f"{step} wait:1000" for step in
+                                              ["swipe:1:up", *["swipe:3:down"] * 3, "swipe:3:down:0.5,0.25:200",
+                                               *["swipe:3:down"] * 2]])
+                    self.assertIn("Sleep boundaries quiesced: 1; swipes injected after resume: 2", console)
+                    self.assertIn("Swipes recognized: 5; commands run: 5", console)
+                    self.assertIn(f"--reconnect --logind-library {os.path.realpath(sys.executable)}",
+                                  arguments.read_text())
+                    sudo = calls.read_text().splitlines()
+                    self.assertIn("rtcwake -m no -s 20", sudo)
+                    self.assertIn("systemctl suspend --check-inhibitors=no", sudo)
+                    self.assertTrue(any(line.startswith("sh -c trap ") for line in sudo))
                 elif edges:
                     self.assertEqual(writes, [f"{step} wait:1000" for step in
                                               ["swipe:1:up", *["swipe:1:up:0.5,0.995", "swipe:1:down:0.5,0.005"] * 2]])
