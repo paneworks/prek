@@ -751,6 +751,25 @@ fn scoped_touch_device_loss_and_lock_mid_gesture_release_only_what_the_consumer_
 }
 
 #[test]
+fn a_pixel_travel_swipe_is_recognized_once_its_device_maps_onto_an_output() {
+    for scoped in [false, true] {
+        let mut config = config();
+        let Trigger::Swipe { travel, .. } = &mut config.rules[0].trigger else {
+            unreachable!()
+        };
+        *travel = Distance::Pixels(200.0);
+        // The device registers with its own axis mapping before its output mapping.
+        let mut routing = prepared(config, true, scoped);
+        contact(&mut routing, 1, 0, 2);
+        movement(&mut routing, 2, 140, 1500, 2);
+        movement(&mut routing, 3, 180, 2000, 2);
+        up(&mut routing, 4, 200, 2);
+        assert!(drain(&mut routing, 200).is_empty(), "scoped={scoped}");
+        assert_eq!(routing.take_dispatches(ms(200)).len(), 1, "scoped={scoped}");
+    }
+}
+
+#[test]
 fn an_edge_region_consumes_a_swipe_from_its_strip_and_passes_one_from_mid_screen() {
     for scoped in [false, true] {
         for (start, consumed) in [(4080, true), (2000, false)] {

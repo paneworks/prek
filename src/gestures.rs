@@ -354,6 +354,23 @@ impl Default for TouchSettings {
     }
 }
 impl TouchSettings {
+    fn distances(&self) -> [Distance; 7] {
+        [
+            self.timing.tap_motion,
+            self.timing.fallback_motion,
+            self.timing.pan_slop,
+            self.swipe_travel,
+            self.fallback_travel,
+            self.tap_location,
+            self.fallback_location,
+        ]
+    }
+    /// Whether a threshold is in logical pixels, which only an output mapping defines.
+    pub(crate) fn needs_output(&self) -> bool {
+        self.distances()
+            .iter()
+            .any(|distance| matches!(distance, Distance::Pixels(_)))
+    }
     fn validate(&self, mapping: &Mapping) -> Result<(), &'static str> {
         for duration in [
             self.timing.tap_max,
@@ -367,15 +384,7 @@ impl TouchSettings {
                 return Err("touch duration outside supported bounds");
             }
         }
-        for distance in [
-            self.timing.tap_motion,
-            self.timing.fallback_motion,
-            self.timing.pan_slop,
-            self.swipe_travel,
-            self.fallback_travel,
-            self.tap_location,
-            self.fallback_location,
-        ] {
+        for distance in self.distances() {
             let maximum = if matches!(distance, Distance::Normalized(_)) {
                 2.0
             } else {
@@ -559,6 +568,10 @@ impl TouchRecognizer {
         self.last_at = Some(at);
         self.blocked = false;
         Ok(())
+    }
+    /// Whether `mapping` defines every unit this recognizer's thresholds use.
+    pub fn admits(&self, mapping: &Mapping) -> bool {
+        mapping.output.is_some() || !self.settings.needs_output()
     }
     pub fn replace_mapping(
         &mut self,

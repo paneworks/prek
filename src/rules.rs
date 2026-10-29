@@ -540,6 +540,10 @@ impl Worker {
                     Trigger::Rotate { degrees, .. } => settings.rotation_slop = degrees,
                     _ => {}
                 }
+                // Pixel thresholds wait for a mapping onto an output.
+                if mapping.output.is_none() && settings.needs_output() {
+                    return Ok(());
+                }
                 let mut touch =
                     TouchRecognizer::new(state.device.source.clone(), mapping, settings)
                         .map_err(invalid)?;
@@ -1212,13 +1216,20 @@ impl Engine {
                     if matches!(worker.recognizer, Recognizer::Shape { .. }) {
                         worker.register(state, &self.config)?;
                     }
-                    if let Recognizer::Touch(touches) = &mut worker.recognizer
-                        && let Some(touch) = touches.get_mut(&source.device)
-                    {
-                        touch
-                            .replace_mapping(mapping.clone(), *at)
-                            .map_err(invalid)?;
-                        touch.reconcile(*at, !state.contacts.is_empty());
+                    let Recognizer::Touch(touches) = &mut worker.recognizer else {
+                        continue;
+                    };
+                    match touches.get_mut(&source.device) {
+                        Some(touch) if touch.admits(mapping) => {
+                            touch
+                                .replace_mapping(mapping.clone(), *at)
+                                .map_err(invalid)?;
+                            touch.reconcile(*at, !state.contacts.is_empty());
+                        }
+                        Some(_) => {
+                            touches.remove(&source.device);
+                        }
+                        None => worker.register(state, &self.config)?,
                     }
                 }
             }
