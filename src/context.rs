@@ -663,8 +663,12 @@ impl Authority {
         if permit.generation != self.generation {
             return Err(Rejection::StaleGeneration);
         }
-        if self.state(at) != permit.state {
-            return Err(Rejection::ContextDenied);
+        let state = self.state(at);
+        if state != permit.state {
+            return Err(match state {
+                State::Unknown => self.fresh(at).err().unwrap_or(Rejection::ContextDenied),
+                _ => Rejection::ContextDenied,
+            });
         }
         if permit.state == State::Console {
             return if self.console.as_ref() == Some(&source.seat) && self.active {
@@ -1239,5 +1243,30 @@ mod tests {
             Rejection::InvalidGeometry,
         );
         assert_eq!(authority.state(ms(100)), State::Desktop);
+    }
+    #[test]
+    fn t62_validation_reports_why_a_desktop_permit_lost_its_snapshot() {
+        let mut authority = authority();
+        let source = source();
+        let map = mapping();
+        let permit = authority
+            .start(&rule(), input(&source, &map, 100), &[point(200, 200)])
+            .unwrap();
+        let generation = authority.generation();
+        authority
+            .update(snapshot(generation, 2, 150), ms(150))
+            .unwrap();
+        error(
+            authority.validate(&permit, input(&source, &map, 120)),
+            Rejection::FutureTime,
+        );
+        authority
+            .validate(&permit, input(&source, &map, 150))
+            .unwrap();
+        let age = SNAPSHOT_MAX_AGE.as_millis() as u64;
+        error(
+            authority.validate(&permit, input(&source, &map, 151 + age)),
+            Rejection::StaleSnapshot,
+        );
     }
 }
