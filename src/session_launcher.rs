@@ -14,6 +14,8 @@ use std::{
 
 const READY_FD: &str = "PREK_SESSION_READY_FD";
 const PARENT: &str = "PREK_SESSION_LAUNCH_PARENT";
+/// Launcher handshake variables, private to the agent it starts.
+pub(crate) const PRIVATE_VARIABLES: [&str; 2] = [READY_FD, PARENT];
 const RETRY_EXIT: u8 = 75;
 const POLL: Duration = Duration::from_millis(25);
 const RETRY: Duration = Duration::from_millis(500);

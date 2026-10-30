@@ -1113,6 +1113,14 @@ rejected. Source-time registration performs no effect.
 
 The current session executor performs `commands` and `observations` effects.
 Command arguments are exact argv entries without implicit shell expansion.
+Each command, configured or returned by a named action, inherits the agent's
+environment plus a description of its gesture: `PREK_RULE`, `PREK_OUTPUT` when
+the rule targets an output, and for touch evidence `PREK_SPACE` (`normalized`,
+`logical`, `millimetres` or `relative`), `PREK_FINGERS`, `PREK_START_X`/`PREK_START_Y`
+and `PREK_X`/`PREK_Y`. A swipe or pan also sets `PREK_DIRECTION`; its start is
+the contact centroid minus its travel and `PREK_X`/`PREK_Y` is the centroid
+when it was recognized. Taps and holds report their position in both. A
+sequence describes its final step. Pinch and rotate report only their fingers.
 Commands in a plan spawn in order and run concurrently, under the existing
 eight-child/session bound. The broker receives one completion for the whole
 plan after its children finish. Failure or grant expiry after an earlier effect

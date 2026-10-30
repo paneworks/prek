@@ -20,6 +20,74 @@ use std::{
 pub const MAX_RUNNING: usize = 8;
 const MAX_PENDING: usize = 64;
 const MAX_GESTURES: usize = 4096;
+
+/// Environment describing a matched gesture to the commands it runs. Touch
+/// coordinates are in `PREK_SPACE`; a swipe or pan starts at its centroid
+/// minus its travel. A sequence describes its final step.
+fn gesture_environment(event: &Event) -> Vec<(&'static str, String)> {
+    use crate::{gestures::TouchGesture, rules::Evidence};
+    fn name(value: &impl serde::Serialize) -> String {
+        serde_json::to_value(value)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_default()
+    }
+    let Event::Matched {
+        rule,
+        output,
+        evidence,
+        ..
+    } = event
+    else {
+        return Vec::new();
+    };
+    let mut environment = vec![("PREK_RULE", rule.clone())];
+    if let Some(output) = output {
+        environment.push(("PREK_OUTPUT", output.clone()));
+    }
+    let evidence = match evidence {
+        Evidence::Sequence { steps } => steps.last().unwrap_or(evidence),
+        evidence => evidence,
+    };
+    let Evidence::Touch { space, gesture } = evidence else {
+        return environment;
+    };
+    environment.push(("PREK_SPACE", name(space)));
+    let (fingers, start, end) = match gesture {
+        TouchGesture::Pan {
+            fingers,
+            direction,
+            total,
+            centroid,
+            ..
+        } => {
+            environment.push(("PREK_DIRECTION", name(direction)));
+            let start = crate::gestures::Point {
+                x: centroid.x - total.x,
+                y: centroid.y - total.y,
+            };
+            (fingers, Some(start), Some(*centroid))
+        }
+        TouchGesture::Taps {
+            fingers, position, ..
+        }
+        | TouchGesture::Hold { fingers, position } => (fingers, Some(*position), Some(*position)),
+        TouchGesture::Pinch { fingers, .. } | TouchGesture::Rotate { fingers, .. } => {
+            (fingers, None, None)
+        }
+        TouchGesture::Cancelled { .. } => return environment,
+    };
+    environment.push(("PREK_FINGERS", fingers.to_string()));
+    if let Some(start) = start {
+        environment.push(("PREK_START_X", start.x.to_string()));
+        environment.push(("PREK_START_Y", start.y.to_string()));
+    }
+    if let Some(end) = end {
+        environment.push(("PREK_X", end.x.to_string()));
+        environment.push(("PREK_Y", end.y.to_string()));
+    }
+    environment
+}
 struct Pending {
     event: Box<Event>,
     expires: Option<Duration>,
@@ -408,6 +476,7 @@ impl Executor {
                 self.complete(id, ordinal, Completion::Unavailable)?;
                 continue;
             }
+            let environment = gesture_environment(&pending.event);
             let mut count = 0;
             let mut applied = false;
             let mut emitted_event = false;
@@ -434,6 +503,9 @@ impl Executor {
                 // Command output cannot stall the agent or become its JSON stream.
                 match Command::new(&argv[0])
                     .args(&argv[1..])
+                    .envs(environment.iter().map(|(key, value)| (key, value)))
+                    .env_remove(crate::session_launcher::PRIVATE_VARIABLES[0])
+                    .env_remove(crate::session_launcher::PRIVATE_VARIABLES[1])
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
@@ -1018,13 +1090,83 @@ mod tests {
         fs::write(
             output,
             serde_json::to_vec(&serde_json::json!({
-                "uid": unsafe { libc::geteuid() }, "payload": field("payload=").unwrap()
+                "uid": unsafe { libc::geteuid() }, "payload": field("payload=").unwrap(),
+                "rule": std::env::var("PREK_RULE").ok(),
             }))
             .unwrap(),
         )
         .unwrap();
     }
 
+    #[test]
+    fn commands_learn_the_gesture_rule_output_and_start_point() {
+        use crate::gestures::{Phase, Point, Space, TouchGesture};
+        let mut matched = *event(1, &path());
+        let Event::Matched {
+            evidence, output, ..
+        } = &mut matched
+        else {
+            unreachable!()
+        };
+        *output = Some("DSI-1".into());
+        *evidence = Evidence::Touch {
+            space: Space::Logical,
+            gesture: TouchGesture::Pan {
+                fingers: 2,
+                phase: Phase::Begin,
+                direction: crate::config::Direction::Up,
+                total: Point { x: 5.0, y: -400.0 },
+                delta: Point { x: 0.0, y: -40.0 },
+                velocity: Point { x: 0.0, y: -900.0 },
+                centroid: Point { x: 305.0, y: 900.5 },
+                swipe: true,
+            },
+        };
+        let environment: BTreeMap<_, _> = gesture_environment(&matched).into_iter().collect();
+        let expected = [
+            ("PREK_RULE", "fixture"),
+            ("PREK_OUTPUT", "DSI-1"),
+            ("PREK_SPACE", "logical"),
+            ("PREK_DIRECTION", "up"),
+            ("PREK_FINGERS", "2"),
+            ("PREK_START_X", "300"),
+            ("PREK_START_Y", "1300.5"),
+            ("PREK_X", "305"),
+            ("PREK_Y", "900.5"),
+        ];
+        assert_eq!(
+            environment,
+            expected
+                .iter()
+                .map(|(key, value)| (*key, value.to_string()))
+                .collect()
+        );
+        let Event::Matched { evidence, .. } = &mut matched else {
+            unreachable!()
+        };
+        *evidence = Evidence::Sequence {
+            steps: vec![
+                Evidence::Key { down: true },
+                Evidence::Touch {
+                    space: Space::Normalized,
+                    gesture: TouchGesture::Taps {
+                        fingers: 1,
+                        count: 2,
+                        position: Point { x: 0.25, y: 0.75 },
+                    },
+                },
+            ],
+        };
+        let environment: BTreeMap<_, _> = gesture_environment(&matched).into_iter().collect();
+        assert_eq!(environment["PREK_SPACE"], "normalized");
+        assert_eq!(environment["PREK_START_X"], "0.25");
+        assert_eq!(environment["PREK_Y"], "0.75");
+        assert!(!environment.contains_key("PREK_DIRECTION"));
+        let key: BTreeMap<_, _> = gesture_environment(&event(1, &path()))
+            .into_iter()
+            .collect();
+        assert_eq!(key.keys().copied().collect::<Vec<_>>(), ["PREK_RULE"]);
+    }
     #[test]
     fn exact_argv_requires_a_fresh_grant_and_runs_once_as_the_session_user() {
         let output = path();
@@ -1050,6 +1192,7 @@ mod tests {
         assert_eq!(written["uid"], unsafe { libc::geteuid() });
         assert_ne!(written["uid"], 0);
         assert_eq!(written["payload"], "$(echo shell-expanded);*'literal'");
+        assert_eq!(written["rule"], "fixture");
         assert!(
             executor
                 .offer(fence(), event(1, &output), monotonic().unwrap())
