@@ -247,3 +247,38 @@ fn repeated_failed_scans_do_not_retain_descriptors_to_private_files() {
         );
     }
 }
+
+#[test]
+fn input_devices_of_one_hid_interface_get_distinct_identities() {
+    let props = BTreeMap::from([("ID_SERIAL".into(), "Microsoft_Surface_Type_Cover".into())]);
+    let id = [3, 0x045e, 0x09c0];
+    let phys = "usb-0000:00:14.0-7/input0";
+    let keyboard = device_identity(
+        id,
+        "Microsoft Surface Type Cover Keyboard",
+        phys,
+        "",
+        &props,
+    );
+    let touchpad = device_identity(
+        id,
+        "Microsoft Surface Type Cover Touchpad",
+        phys,
+        "",
+        &props,
+    );
+    assert_ne!(keyboard, touchpad);
+    assert_eq!(
+        keyboard,
+        "0003:045e:09c0:serial:Microsoft_Surface_Type_Cover:usb-0000:00:14.0-7/input0:Microsoft Surface Type Cover Keyboard"
+    );
+    let unknown = device_identity(id, "Microsoft Surface Type Cover UNKNOWN", phys, "", &props);
+    assert_eq!(
+        unknown,
+        device_identity(id, "Microsoft Surface Type Cover UNKNOWN", phys, "", &props)
+    );
+    assert_eq!(
+        device_identity(id, "touch", "", "", &BTreeMap::new()),
+        "0003:045e:09c0:ambiguous:touch"
+    );
+}

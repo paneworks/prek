@@ -237,6 +237,11 @@ Managed admission requires an initialized publication and the same complete
 device description at discovery and open: seat, identity, name, path, physical
 and unique identifiers, vendor/product, properties, capabilities, axes and
 virtual-device status. Only the newly assigned source generation may differ.
+A source identity is bus, vendor and product, the first available location
+(unique identifier, udev serial, udev path or physical path, each with the
+physical path) and the device name, so the keyboard and touchpad of one HID
+interface stay distinct. Selected devices that still share an identity are
+refused as ambiguous.
 Node and publication checks run before reader hooks, around draining and after
 startup state queries. Replaced, removed or republished metadata retires the old
 source, removes its pending frames and cancels its recognizers. Rediscovery

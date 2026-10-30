@@ -246,6 +246,28 @@ fn describe_snapshot(
     }
     Ok((device, publication))
 }
+/// A device's kernel location plus its name, which separates the input devices
+/// of one HID interface.
+fn device_identity(
+    [bus, vendor, product]: [u16; 3],
+    name: &str,
+    physical: &str,
+    unique: &str,
+    props: &BTreeMap<String, String>,
+) -> String {
+    let location = if !unique.is_empty() {
+        format!("unique:{unique}:{physical}:{name}")
+    } else if let Some(serial) = props.get("ID_SERIAL").filter(|value| !value.is_empty()) {
+        format!("serial:{serial}:{physical}:{name}")
+    } else if let Some(path) = props.get("ID_PATH").filter(|value| !value.is_empty()) {
+        format!("path:{path}:{physical}:{name}")
+    } else if !physical.is_empty() {
+        format!("physical:{physical}:{name}")
+    } else {
+        format!("ambiguous:{name}")
+    };
+    format!("{bus:04x}:{vendor:04x}:{product:04x}:{location}")
+}
 fn describe_properties(
     path: &Path,
     raw: &RawDevice,
@@ -256,22 +278,12 @@ fn describe_properties(
     let physical = raw.physical_path().unwrap_or_default().to_owned();
     let unique = raw.unique_name().unwrap_or_default().to_owned();
     let id = raw.input_id();
-    let location = if !unique.is_empty() {
-        format!("unique:{unique}:{physical}")
-    } else if let Some(serial) = props.get("ID_SERIAL").filter(|value| !value.is_empty()) {
-        format!("serial:{serial}:{physical}")
-    } else if let Some(path) = props.get("ID_PATH").filter(|value| !value.is_empty()) {
-        format!("path:{path}:{physical}")
-    } else if !physical.is_empty() {
-        format!("physical:{physical}")
-    } else {
-        format!("ambiguous:{name}")
-    };
-    let identity = format!(
-        "{:04x}:{:04x}:{:04x}:{location}",
-        id.bus_type().0,
-        id.vendor(),
-        id.product()
+    let identity = device_identity(
+        [id.bus_type().0, id.vendor(), id.product()],
+        &name,
+        &physical,
+        &unique,
+        props,
     );
     let seat = props
         .get("ID_SEAT")
