@@ -1014,10 +1014,12 @@ impl Broker {
                     self.connections.insert(index, connection);
                     return Ok(());
                 }
-                let config = self
+                let root = self
                     .routing
                     .as_ref()
                     .ok_or_else(|| protocol::invalid("observe broker cannot dispatch actions"))?;
+                // Accepted runtime rule edits on this seat apply over the root rules.
+                let config = bound.rules.current().unwrap_or(root);
                 let crate::rules::Event::Matched {
                     rule,
                     source,
@@ -1039,7 +1041,7 @@ impl Broker {
                             && configured.action == *action
                     })
                     .ok_or_else(|| {
-                        protocol::invalid("worker action differs from root configuration")
+                        protocol::invalid("worker action differs from the seat's configured rules")
                     })?;
                 let context = bound
                     .context
