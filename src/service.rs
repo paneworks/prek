@@ -101,6 +101,11 @@ impl ContextFeed {
                     && now - context.snapshot.captured_at <= SNAPSHOT_MAX_AGE
             })
     }
+    /// Freshness for a caller that took `now` before refreshing this context
+    /// in the same step: a later sample is judged from its own time.
+    fn fresh_after_sample(&self, now: Duration) -> bool {
+        self.fresh(now.max(self.checked))
+    }
     fn state(&self, now: Duration) -> State {
         if matches!(self.state, State::Locking | State::Locked) || self.fresh(now) {
             self.state
@@ -1750,7 +1755,7 @@ impl Broker {
         now: Duration,
     ) -> io::Result<bool> {
         let bound = connection.bound.as_mut().unwrap();
-        if !bound.context.fresh(now) {
+        if !bound.context.fresh_after_sample(now) {
             if !matches!(bound.context.state, State::Locking | State::Locked) {
                 bound.context.state = State::Unknown;
             }
@@ -1940,6 +1945,26 @@ mod tests {
         input::Source,
         rules::{Event, Evidence, Stage},
     };
+    #[test]
+    fn a_context_sampled_after_the_caller_took_its_time_stays_fresh() {
+        let ms = Duration::from_millis;
+        let context = ContextFeed {
+            usable: true,
+            state: State::Desktop,
+            checked: ms(10_000),
+            ..ContextFeed::default()
+        };
+        // The caller read its clock just before refreshing the context.
+        assert!(!context.fresh(ms(9_999)));
+        assert!(context.fresh_after_sample(ms(9_999)));
+        assert!(context.fresh_after_sample(ms(10_000) + SNAPSHOT_MAX_AGE));
+        assert!(!context.fresh_after_sample(ms(10_001) + SNAPSHOT_MAX_AGE));
+        let unusable = ContextFeed {
+            usable: false,
+            ..context
+        };
+        assert!(!unusable.fresh_after_sample(ms(9_999)));
+    }
     #[test]
     fn action_receipts_require_a_fresh_offer_grant_and_actual_delivery() {
         let fence = Fence {
