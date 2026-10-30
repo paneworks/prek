@@ -542,6 +542,7 @@ impl Worker {
                 }
                 // Pixel thresholds wait for a mapping onto an output.
                 if mapping.output.is_none() && settings.needs_output() {
+                    touches.remove(&state.device.source.device);
                     return Ok(());
                 }
                 let mut touch =

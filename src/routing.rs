@@ -2034,6 +2034,94 @@ mod tests {
         assert_eq!(routing.rule_revision(), 2);
     }
     #[test]
+    fn an_edited_pixel_travel_rule_recognizes_on_the_reattached_source() {
+        use crate::rule_transactions::{Change, Transaction};
+        let mut config = config();
+        let Trigger::Swipe { travel, .. } = &mut config.rules[0].trigger else {
+            unreachable!()
+        };
+        *travel = Distance::Pixels(200.0);
+        let mut routing = routing(config.clone(), true);
+        let mut rule = config.rules[0].clone();
+        rule.action = Action::Event {
+            name: "edited".into(),
+        };
+        let edit = Transaction {
+            revision: 1,
+            changes: vec![Change::Replace {
+                rule: Box::new(rule),
+            }],
+        };
+        assert_eq!(routing.transact_rules(&edit, ms(10)).unwrap(), 2);
+        assert_eq!(routing.take_recoveries().len(), 1);
+        // The edit retired the route; the device returns as a newer incarnation.
+        let mut device = device();
+        device.source.generation = 2;
+        let mut mapping = Mapping::from_device(&device).unwrap();
+        mapping.output = Some(output());
+        mapping.generation = 2;
+        routing
+            .attach(device.clone(), &ready(&device), Some(mapping), ms(20))
+            .unwrap();
+        let push = |routing: &mut Routing, sequence: u64, at: u64, data: &[(u16, u16, i32)]| {
+            let mut events: Vec<_> = data
+                .iter()
+                .map(|&(kind, code, value)| RawEvent { kind, code, value })
+                .collect();
+            events.push(RawEvent {
+                kind: EV_SYN,
+                code: SYN_REPORT,
+                value: 0,
+            });
+            routing
+                .push(Record::Frame {
+                    frame: Frame {
+                        source: device.source.clone(),
+                        at: ms(at),
+                        sequence,
+                        events,
+                    },
+                })
+                .unwrap();
+        };
+        let mut contact = vec![(EV_KEY, 0x14a, 1)];
+        for slot in 0..2 {
+            contact.extend([
+                (EV_ABS, ABS_MT_SLOT, slot),
+                (EV_ABS, ABS_MT_TRACKING_ID, slot + 10),
+                (EV_ABS, ABS_MT_POSITION_X, 1000 + slot * 500),
+                (EV_ABS, ABS_MT_POSITION_Y, 1000),
+            ]);
+        }
+        push(&mut routing, 1, 30, &contact);
+        for (sequence, at, y) in [(2, 170, 1500), (3, 210, 2000)] {
+            push(
+                &mut routing,
+                sequence,
+                at,
+                &[
+                    (EV_ABS, ABS_MT_SLOT, 0),
+                    (EV_ABS, ABS_MT_POSITION_Y, y),
+                    (EV_ABS, ABS_MT_SLOT, 1),
+                    (EV_ABS, ABS_MT_POSITION_Y, y),
+                ],
+            );
+        }
+        push(
+            &mut routing,
+            4,
+            230,
+            &[
+                (EV_KEY, 0x14a, 0),
+                (EV_ABS, ABS_MT_SLOT, 0),
+                (EV_ABS, ABS_MT_TRACKING_ID, -1),
+                (EV_ABS, ABS_MT_SLOT, 1),
+                (EV_ABS, ABS_MT_TRACKING_ID, -1),
+            ],
+        );
+        assert_eq!(routing.take_dispatches(ms(230)).len(), 1);
+    }
+    #[test]
     fn decision_timeout_commits_once_and_later_motion_cannot_claim() {
         let mut routing = routing(config(), true);
         down(&mut routing, 2);
