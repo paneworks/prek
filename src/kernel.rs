@@ -1238,16 +1238,19 @@ impl Virtual {
                 "uinput feedback stream ended",
             )),
             Ok(length) => {
-                let events = decode_events(&bytes[..length])?;
+                let capabilities = &self.publication.descriptor.capabilities;
+                let declared = |kind, code| {
+                    capabilities
+                        .get(&kind)
+                        .is_some_and(|codes| codes.contains(&code))
+                };
+                // The kernel returns every EV_MSC event this device emits to its own descriptor.
+                let events: Vec<_> = decode_events(&bytes[..length])?
+                    .into_iter()
+                    .filter(|event| event.kind != 4 || !declared(4, event.code))
+                    .collect();
                 if events.iter().any(|event| {
-                    event.kind != 17
-                        || !self
-                            .publication
-                            .descriptor
-                            .capabilities
-                            .get(&17)
-                            .is_some_and(|codes| codes.contains(&event.code))
-                        || !matches!(event.value, 0 | 1)
+                    event.kind != 17 || !declared(17, event.code) || !matches!(event.value, 0 | 1)
                 }) {
                     return Err(invalid("unsupported or malformed uinput feedback"));
                 }
@@ -1864,5 +1867,57 @@ mod tests {
             })
             .collect();
         assert_eq!(kinds, [1, EV_SYN]);
+    }
+
+    #[test]
+    fn keyboard_feedback_skips_its_own_scan_codes_and_keeps_led_requests() {
+        use std::os::unix::fs::PermissionsExt;
+        let registry = Temporary::new();
+        let files = Temporary::new();
+        let mut device = crate::transport::tests::touch();
+        device.identity = "test:keyboard".into();
+        device.name = "Prek test keyboard".into();
+        device.physical = "fixture/keyboard".into();
+        device.path.clear();
+        device.properties.clear();
+        device.axes.clear();
+        device.capabilities =
+            BTreeMap::from([(0, vec![0]), (1, vec![30]), (4, vec![4]), (17, vec![0, 1])]);
+        let identity = KernelIdentity {
+            bus: 3,
+            vendor: 1,
+            product: 2,
+            version: 1,
+        };
+        let descriptor = Descriptor::mirror(&device, identity, None, &BTreeMap::new()).unwrap();
+        let event = |kind, code, value| RawEvent { kind, code, value };
+        let read = |name: &str, events: &[RawEvent]| {
+            let path = files.path.join(name);
+            fs::write(&path, encode_events(events).unwrap()).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            let publication = registry
+                .registry()
+                .prepare_isolated(descriptor.clone())
+                .unwrap();
+            Virtual::ordinary_file_fixture(publication, file)
+                .unwrap()
+                .feedback()
+        };
+        assert_eq!(
+            read(
+                "echo",
+                &[event(4, 4, 0x1e), event(17, 0, 1), event(4, 4, 0x1e)]
+            )
+            .unwrap(),
+            [event(17, 0, 1)]
+        );
+        assert!(read("only-echo", &[event(4, 4, 0x1e)]).unwrap().is_empty());
+        assert!(read("undeclared", &[event(4, 5, 7)]).is_err());
+        assert!(read("key", &[event(1, 30, 1)]).is_err());
     }
 }
