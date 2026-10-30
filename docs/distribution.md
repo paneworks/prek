@@ -144,9 +144,13 @@ repository identity, not unrelated credentials. The archive itself supplies a
 file binary cache.
 
 The same tag runs `nix-cache`. Each native job builds `.#default`, runs the
-native gate, pushes the runtime closure to the `paneworks` Cachix cache (the
-cache Morf and its consumers substitute from) and pins it as `prek-<system>`
-with five revisions kept; it fails without a `CACHIX_AUTH_TOKEN` write token.
+native gate, and the shared
+[`attic-push`](https://github.com/bresilla/nixos/tree/main/.github/actions/attic-push)
+action uploads the paths cache.nixos.org does not have to the
+`https://cache.bresilla.com/bresilla` cache (the cache Morf and its consumers
+substitute from) and pins it as `prek-<system>`; only the pinned build is kept.
+It fails without the `ATTIC_TOKEN` and `PIN_TOKEN` organization secrets;
+`NETBIRD_SETUP_KEY` is only needed for uploads over 95 MB.
 Fresh jobs then substitute that output with builders disabled and run the
 installed `--version`, `init` and `check` commands. A consumer's updater can
 resolve the `prek-x86_64-linux` and `prek-aarch64-linux` pins only after a tag
