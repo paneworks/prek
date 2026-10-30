@@ -140,10 +140,18 @@ Release jobs accept only existing `vVERSION` tags whose version matches both
 Cargo.toml and the installed executable. Both native bundles must pass their
 fresh-runner imports before publication. No source-crate archive is published
 as an architecture-specific application. Publication uses the workflow's
-repository identity, not an assumed external cache or unrelated credentials.
-The archive itself supplies a file binary cache; public external cache
-hosting/signing and successful published/download-only acceptance remain
-separate evidence gates.
+repository identity, not unrelated credentials. The archive itself supplies a
+file binary cache.
+
+The same tag runs `nix-cache`. Each native job builds `.#default`, runs the
+native gate, pushes the runtime closure to the `paneworks` Cachix cache (the
+cache Morf and its consumers substitute from) and pins it as `prek-<system>`
+with five revisions kept; it fails without a `CACHIX_AUTH_TOKEN` write token.
+Fresh jobs then substitute that output with builders disabled and run the
+installed `--version`, `init` and `check` commands. A consumer's updater can
+resolve the `prek-x86_64-linux` and `prek-aarch64-linux` pins only after a tag
+has run; successful published/download-only acceptance remains a separate
+evidence gate.
 
 Local CLI/configuration checks do not prove physical routing, kernel tests,
 compositor behavior, native phone execution or device/session integration.

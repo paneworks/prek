@@ -1,0 +1,89 @@
+name: nix-cache
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nix-cache
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'paneworks/prek' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            system: x86_64-linux
+          - runner: ubuntu-24.04-arm
+            system: aarch64-linux
+    steps:
+      - name: Check publishing credentials
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          if [ -z "$CACHIX_AUTH_TOKEN" ]; then
+            echo "::error::Add a paneworks cache write token as CACHIX_AUTH_TOKEN."
+            exit 1
+          fi
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@b85815f71a6de0ddee80b8a80a98d43f4bcc66c7
+      - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866
+        with:
+          name: paneworks
+          skipPush: true
+      - name: Build the application and its native gates
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
+          test "$TAG" = "v$version"
+          nix build --no-update-lock-file --print-build-logs --max-jobs 1 --cores 2 \
+            --no-link --print-out-paths .#default > "$RUNNER_TEMP/prek-store-paths"
+          test "$(wc -l < "$RUNNER_TEMP/prek-store-paths")" -eq 1
+          bash tests/run-nix-gate.sh
+      - name: Publish the runtime closure and retain five revisions
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          SYSTEM: ${{ matrix.system }}
+        run: |
+          set -euo pipefail
+          cachix push paneworks < "$RUNNER_TEMP/prek-store-paths"
+          cachix pin paneworks "prek-$SYSTEM" "$(cat "$RUNNER_TEMP/prek-store-paths")" --keep-revisions 5
+
+  verify-download:
+    needs: publish
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@b85815f71a6de0ddee80b8a80a98d43f4bcc66c7
+      - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866
+        with:
+          name: paneworks
+          skipPush: true
+      - name: Download the application without builders and run installed checks
+        run: |
+          set -euo pipefail
+          prek=$(nix build --no-update-lock-file --max-jobs 0 --builders '' \
+            --no-link --print-out-paths .#default)
+          "$prek/bin/prek" --version
+          test -f "$prek/share/prek/lua/prek.lua"
+          "$prek/bin/prek" init --preset minimal --output "$RUNNER_TEMP/init.lua"
+          "$prek/bin/prek" check --config "$RUNNER_TEMP/init.lua" --json > /dev/null
