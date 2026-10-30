@@ -416,8 +416,13 @@ It also reports `touch_start_delay` for each consuming touch rule without a
 Timing values have explicit `ms`, `s`, or `m` units. Distances use `mm`, `px`, or
 `norm`. Pixel thresholds require mapped output geometry; millimetre thresholds
 have explicit normalized fallbacks. Unknown fields are errors. Root policy and
-user overlays are separate: an overlay may replace/disable a rule but cannot
-expand permitted devices or seats.
+user shortcuts are separate: `prek session --lua --rule-mutations --shortcuts FILE`
+layers a user's own `shortcuts.new { ... }` file over the system rules on that
+user's seat and reapplies it when the file changes. Shortcuts default to desktop
+context and buffer delivery, may add, replace or disable rules, and cannot expand
+permitted devices or seats; the system configuration must be Lua with
+`policy.allow_runtime_rules = true`. See
+[user shortcut files](docs/lua-api.md#user-shortcut-files).
 
 The configured engine compiles a whole replacement before activating it, retains
 the last good configuration on failure, cancels previous candidates and reconciles

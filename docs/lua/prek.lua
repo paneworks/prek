@@ -257,6 +257,12 @@
 ---@field shapes? prek.ShapeTemplate[]
 ---@field recognizers? prek.RecognizerDeclaration[] Canonical source-approved declarations retained for runtime rule additions; at most 64.
 ---@field rules? prek.Rule[]
+---@class prek.ShortcutFields: prek.Rule[]
+---@field disable? string[] Rule IDs to disable for this user's seat.
+---@class (exact) prek.Shortcuts
+---@field version integer
+---@field rules prek.Rule[] Defaults applied: desktop context, buffer delivery, priority by position.
+---@field disabled_rules string[]
 ---@class (exact) prek.Preset: prek.Config
 ---@field version integer
 ---@field mode prek.Mode
@@ -622,6 +628,8 @@ function RuleTransaction:status() error("Prek editor definition") end
 
 ---@class prek.ConfigAPI
 local ConfigAPI = {}
+---@class prek.ShortcutsAPI
+local ShortcutsAPI = {}
 ---@class prek.RulesAPI
 local RulesAPI = {}
 ---@class prek.LayersAPI
@@ -672,6 +680,7 @@ local PolicyAPI = {}
 ---@field version string
 ---@field api table<string, unknown> Implemented manifest, including limits and partial runtime status.
 ---@field config prek.ConfigAPI
+---@field shortcuts prek.ShortcutsAPI
 ---@field rules prek.RulesAPI
 ---@field layers prek.LayersAPI
 ---@field modes prek.ModesAPI
@@ -693,7 +702,7 @@ local PolicyAPI = {}
 ---@field policy prek.PolicyAPI
 local prek = {
     api_version = 1, version = "0.1.0", api = {},
-    config = ConfigAPI, rules = RulesAPI, layers = LayersAPI, modes = ModesAPI, triggers = TriggersAPI, recognizers = RecognizersAPI, actions = ActionsAPI,
+    config = ConfigAPI, shortcuts = ShortcutsAPI, rules = RulesAPI, layers = LayersAPI, modes = ModesAPI, triggers = TriggersAPI, recognizers = RecognizersAPI, actions = ActionsAPI,
     units = UnitsAPI, events = EventsAPI, log = LogAPI, scheduler = SchedulerAPI, context = ContextAPI,
     capabilities = CapabilitiesAPI,
     devices = DevicesAPI, seats = SeatsAPI,
@@ -767,6 +776,10 @@ function Replay:close() error("Prek editor definition") end
 ---@param fields prek.Config
 ---@return prek.Config
 function ConfigAPI.new(fields) error("Prek editor definition") end
+---Return a user shortcut file's rules with defaults applied. No effects or I/O.
+---@param fields prek.ShortcutFields
+---@return prek.Shortcuts
+function ShortcutsAPI.new(fields) error("Prek editor definition") end
 ---@param name 'minimal'|'desktop'|'phone'
 ---@return prek.Preset
 function ConfigAPI.preset(name) error("Prek editor definition") end

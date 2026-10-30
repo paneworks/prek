@@ -153,23 +153,26 @@ fn registration_capabilities(
     role: Role,
     capabilities: &BTreeSet<Capability>,
 ) -> io::Result<()> {
+    // Permitted runtime rules may bring their own command and key actions.
     let commands = routing.is_some_and(|config| {
-        config.rules.iter().any(|rule| {
-            rule.enabled
-                && matches!(
-                    rule.action,
-                    crate::config::Action::Command { .. } | crate::config::Action::Lua { .. }
-                )
-        })
+        config.policy.allow_runtime_rules
+            || config.rules.iter().any(|rule| {
+                rule.enabled
+                    && matches!(
+                        rule.action,
+                        crate::config::Action::Command { .. } | crate::config::Action::Lua { .. }
+                    )
+            })
     });
     let keys = routing.is_some_and(|config| {
-        config.rules.iter().any(|rule| {
-            rule.enabled
-                && matches!(
-                    rule.action,
-                    crate::config::Action::Keys { .. } | crate::config::Action::Remap { .. }
-                )
-        })
+        config.policy.allow_runtime_rules
+            || config.rules.iter().any(|rule| {
+                rule.enabled
+                    && matches!(
+                        rule.action,
+                        crate::config::Action::Keys { .. } | crate::config::Action::Remap { .. }
+                    )
+            })
     });
     if capabilities.iter().any(|capability| {
         !(matches!(capability, Capability::Observations | Capability::Context)

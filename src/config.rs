@@ -937,7 +937,7 @@ pub struct Config {
     pub rules: Vec<Rule>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Overlay {
     pub version: u32,

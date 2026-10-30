@@ -22,6 +22,7 @@ use std::{
 
 const MAX_PENDING: usize = 64;
 const MAX_BYTES: usize = 512 * 1024;
+const SHORTCUT_BYTES: usize = 48 * 1024;
 const RESPONSE_TIMEOUT: Duration = Duration::from_millis(250);
 #[derive(Default)]
 pub struct PendingEvents {
@@ -78,6 +79,10 @@ enum Work {
         fence: Fence,
         receipt: super::RuleReceipt,
     },
+    Shortcuts {
+        fence: Fence,
+        overlay: Box<crate::config::Overlay>,
+    },
     Context {
         fence: Fence,
         offset: usize,
@@ -132,6 +137,11 @@ enum Message {
     RulesApplied {
         fence: Fence,
         id: u64,
+        logs: Vec<LogRecord>,
+    },
+    /// User shortcuts that needed no proposal: unchanged or refused locally.
+    Shortcuts {
+        fence: Fence,
         logs: Vec<LogRecord>,
     },
     ContextLogs {
@@ -234,6 +244,8 @@ pub struct Session {
     rule_pending: Option<RulePending>,
     rule_receipt: Option<super::RuleReceipt>,
     rule_proposals: VecDeque<super::RuleProposal>,
+    shortcuts_next: Option<crate::config::Overlay>,
+    shortcuts_sent: Option<Duration>,
     stopping: bool,
 }
 impl Session {
@@ -336,6 +348,8 @@ impl Session {
             rule_pending: None,
             rule_receipt: None,
             rule_proposals: VecDeque::new(),
+            shortcuts_next: None,
+            shortcuts_sent: None,
             stopping: false,
         };
         session.notify(
@@ -762,6 +776,28 @@ impl Session {
             && self.rules_ready
             && self.rule_pending.is_none()
             && self.rule_proposals.is_empty()
+            && self.shortcuts_sent.is_none()
+    }
+    /// Replace the user shortcuts to layer over this generation's rules once
+    /// rule transactions are ready; results arrive as Lua log records.
+    pub fn set_shortcuts(&mut self, overlay: crate::config::Overlay) -> io::Result<()> {
+        if !self.rule_mutations {
+            return Err(io::Error::other(
+                "user shortcuts require policy.allow_runtime_rules and the session's --rule-mutations",
+            ));
+        }
+        if serde_json::to_vec(&overlay)
+            .map_err(io::Error::other)?
+            .len()
+            > SHORTCUT_BYTES
+        {
+            return Err(io::Error::other(format!(
+                "user shortcuts exceed {} KiB of rules",
+                SHORTCUT_BYTES / 1024
+            )));
+        }
+        self.shortcuts_next = Some(overlay);
+        Ok(())
     }
     pub fn stop(&mut self) -> io::Result<()> {
         self.stopping = true;
@@ -773,6 +809,8 @@ impl Session {
         self.rule_proposals.clear();
         self.rule_pending = None;
         self.rule_receipt = None;
+        self.shortcuts_next = None;
+        self.shortcuts_sent = None;
         self.context_source.clear();
         self.context_next = None;
         self.context_offset = 0;
@@ -832,6 +870,20 @@ impl Session {
                 && self.rule_pending.is_none()
                 && self.pending.is_none()
                 && (!self.notices.is_empty() || !self.actions.is_empty())
+            || self.shortcuts_writable()
+    }
+    fn shortcuts_writable(&self) -> bool {
+        self.shortcuts_next.is_some()
+            && self.shortcuts_sent.is_none()
+            && self.ready
+            && self.initialized
+            && self.rules_ready
+            && self.rule_mutations
+            && self.pending.is_none()
+            && self.context_pending.is_none()
+            && self.context_offset == 0
+            && self.rule_pending.is_none()
+            && self.rule_receipt.is_none()
     }
     pub fn step(&mut self, now: Duration) -> io::Result<Vec<LogRecord>> {
         if let Some(report) = self.supervisor.check()? {
@@ -848,6 +900,7 @@ impl Session {
                 .capabilities_pending
                 .is_some_and(|(_, expiry)| now >= expiry)
             || self.rules_handshake.is_some_and(|expiry| now >= expiry)
+            || self.shortcuts_sent.is_some_and(|expiry| now >= expiry)
             || self
                 .rule_pending
                 .as_ref()
@@ -878,7 +931,14 @@ impl Session {
                 Message::RulesEnabled { .. }
                 | Message::RuleProposal { .. }
                 | Message::RulesApplied { .. }
+                | Message::Shortcuts { .. }
                     if self.stopping => {}
+                Message::Shortcuts { fence, logs: batch }
+                    if fence == self.fence && self.shortcuts_sent.is_some() =>
+                {
+                    self.shortcuts_sent = None;
+                    logs.extend(batch);
+                }
                 Message::RulesEnabled { fence }
                     if fence == self.fence
                         && self.rule_mutations
@@ -912,6 +972,7 @@ impl Session {
                         sent: false,
                     });
                     self.rule_proposals.push_back(proposal);
+                    self.shortcuts_sent = None;
                 }
                 Message::RulesApplied {
                     fence,
@@ -1092,6 +1153,18 @@ impl Session {
             )? {
                 self.rule_receipt = None;
                 self.rule_pending.as_mut().unwrap().sent = true;
+            }
+        } else if self.shortcuts_writable() {
+            let overlay = Box::new(self.shortcuts_next.clone().unwrap());
+            if self.channel.send(
+                &Work::Shortcuts {
+                    fence: self.fence,
+                    overlay,
+                },
+                now,
+            )? {
+                self.shortcuts_next = None;
+                self.shortcuts_sent = Some(now + RESPONSE_TIMEOUT);
             }
         } else if self.ready
             && self.rules_ready
@@ -1338,17 +1411,41 @@ pub fn worker() -> io::Result<()> {
                         .acknowledge_rules(receipt)
                         .map_err(io::Error::other)?;
                     runtime.set_clock(monotonic()?).map_err(io::Error::other)?;
+                    let outcome = runtime.take_shortcut_outcome();
                     outgoing = Some(match runtime.dispatch(EventKind::RulesChanged, &payload) {
                         Ok(logs) => Message::RulesApplied {
                             fence: incoming,
                             id,
-                            logs,
+                            logs: outcome.into_iter().chain(logs).collect(),
                         },
                         Err(error) => Message::Failed {
                             fence: incoming,
                             reason: error.0.chars().take(512).collect(),
                         },
                     });
+                }
+                Work::Shortcuts {
+                    fence: incoming,
+                    overlay,
+                } if fence == Some(incoming) && rules_enabled && runtime.is_some() => {
+                    crate::lua_compiler::runtime_cpu_budget()?;
+                    let runtime = runtime.as_mut().unwrap();
+                    outgoing = match runtime.submit_shortcuts(*overlay) {
+                        Ok(true) => None,
+                        Ok(false) => Some(Message::Shortcuts {
+                            fence: incoming,
+                            logs: runtime.take_shortcut_outcome().into_iter().collect(),
+                        }),
+                        Err(error) => Some(Message::Shortcuts {
+                            fence: incoming,
+                            logs: vec![LogRecord {
+                                message: "shortcuts rejected".into(),
+                                fields: serde_json::json!({
+                                    "detail": error.0.chars().take(512).collect::<String>()
+                                }),
+                            }],
+                        }),
+                    };
                 }
                 Work::Context {
                     fence: incoming,

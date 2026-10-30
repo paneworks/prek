@@ -327,3 +327,124 @@ return p.config.new{{modes={{p.modes.define{{id='normal',active=true}},p.modes.d
     );
     ready(&mut unavailable).unwrap();
 }
+
+#[test]
+fn user_shortcuts_layer_over_system_rules_and_restore_them_when_removed() {
+    let source = format!(
+        "{BASE}\nlocal b=p.rules.define{{id='b',priority=1,delivery='reserve',trigger=p.triggers.key{{key='KEY_B'}},action=p.actions.event{{name='b'}}}}\nreturn p.config.new{{rules={{rule,b}}}}"
+    );
+    let mut runtime = Runtime::load(&source, "shortcuts.lua").unwrap();
+    let mut engine = crate::rules::Engine::new(runtime.config.clone()).unwrap();
+    let overlay = |rules: &str| {
+        crate::lua::compile_shortcuts(&crate::lua::Sources::single(
+            format!("local p=require('prek')\nreturn p.shortcuts.new{{{rules}}}"),
+            "init.lua".into(),
+        ))
+        .unwrap()
+    };
+    let rule = |id: &str, key: &str, name: &str| {
+        format!(
+            "p.rules.define{{id='{id}',trigger=p.triggers.key{{key='{key}'}},action=p.actions.event{{name='{name}'}}}},"
+        )
+    };
+    let describe = |proposal: &RuleProposal| -> Vec<String> {
+        proposal
+            .transaction
+            .changes
+            .iter()
+            .map(|change| match change {
+                Change::Replace { rule } => format!("replace {}", rule.id),
+                Change::Remove { id } => format!("remove {id}"),
+                Change::Enabled { id, enabled } => format!("{id} {enabled}"),
+                _ => "other".into(),
+            })
+            .collect()
+    };
+    let layered = overlay(&format!(
+        "{}{}disable={{'b'}}",
+        rule("a", "KEY_X", "a2"),
+        rule("c", "KEY_C", "c")
+    ));
+    assert!(runtime.submit_shortcuts(layered.clone()).is_err());
+    runtime.enable_rule_transactions();
+    assert!(runtime.submit_shortcuts(layered.clone()).unwrap());
+    let proposal = runtime.take_rule_proposal().unwrap();
+    assert_eq!(describe(&proposal), ["replace a", "replace c", "b false"]);
+    let revision = engine
+        .transact_rules(&proposal.transaction, Duration::ZERO)
+        .unwrap();
+    runtime
+        .acknowledge_rules(RuleReceipt {
+            id: proposal.id,
+            revision,
+            error: None,
+        })
+        .unwrap();
+    let applied = runtime.take_shortcut_outcome().unwrap();
+    assert_eq!(applied.message, "shortcuts applied");
+    assert_eq!(
+        applied.fields,
+        serde_json::json!({"rules": 2, "disabled": 1})
+    );
+    assert!(!runtime.submit_shortcuts(layered).unwrap());
+    assert_eq!(
+        runtime.take_shortcut_outcome().unwrap().message,
+        "shortcuts unchanged"
+    );
+
+    // Dropping a shortcut restores the system rule; dropping a disable restores it.
+    assert!(
+        runtime
+            .submit_shortcuts(overlay(&rule("c", "KEY_D", "c")))
+            .unwrap()
+    );
+    let proposal = runtime.take_rule_proposal().unwrap();
+    assert_eq!(describe(&proposal), ["replace a", "replace c", "b true"]);
+    let revision = engine
+        .transact_rules(&proposal.transaction, Duration::ZERO)
+        .unwrap();
+    runtime
+        .acknowledge_rules(RuleReceipt {
+            id: proposal.id,
+            revision,
+            error: None,
+        })
+        .unwrap();
+    runtime.take_shortcut_outcome().unwrap();
+
+    for (text, message) in [
+        ("disable={'missing'}".to_string(), "unknown runtime rule missing"),
+        (
+            "p.rules.define{id='d',devices={'touch'},trigger=p.triggers.key{key='KEY_D'},action=p.actions.event{name='d'}}"
+                .to_string(),
+            "exceeds system policy",
+        ),
+        (format!("{}{}", rule("e", "KEY_E", "e"), rule("e", "KEY_F", "e")), "duplicate shortcut e"),
+    ] {
+        let error = runtime.submit_shortcuts(overlay(&text)).unwrap_err().to_string();
+        assert!(error.contains(message), "{text}: {error}");
+    }
+
+    // A refused proposal reports why and keeps the applied shortcuts.
+    assert!(runtime.submit_shortcuts(overlay("")).unwrap());
+    let proposal = runtime.take_rule_proposal().unwrap();
+    assert_eq!(describe(&proposal), ["remove c"]);
+    runtime
+        .acknowledge_rules(RuleReceipt {
+            id: proposal.id,
+            revision,
+            error: Some("worker refused".into()),
+        })
+        .unwrap();
+    let rejected = runtime.take_shortcut_outcome().unwrap();
+    assert_eq!(rejected.message, "shortcuts rejected");
+    assert_eq!(
+        rejected.fields,
+        serde_json::json!({"detail": "worker refused"})
+    );
+    assert!(runtime.submit_shortcuts(overlay("")).unwrap());
+    assert_eq!(
+        describe(&runtime.take_rule_proposal().unwrap()),
+        ["remove c"]
+    );
+}

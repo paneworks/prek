@@ -65,6 +65,7 @@ pub fn api() -> serde_json::Value {
         serde_json::json!({"name":"config.current", "signature":"config.current() -> ConfigurationView | nil", "phase":"runtime", "description":"Copy the owning VM's acknowledged validated configuration and exact rule revision; no source closures or live effect authority."}),
         serde_json::json!({"name":"policy.current", "signature":"policy.current() -> PolicyView | nil", "phase":"runtime", "description":"Copy protected policy from the acknowledged configuration and its revision; negotiated execution grants remain separate."}),
         serde_json::json!({"name":"config.export", "signature":"config.export(config) -> string", "phase":"configuration", "description":"Validate and export a complete declarative model as bounded Lua source; performs no I/O and requires original source for named handlers."}),
+        serde_json::json!({"name":"shortcuts.new", "signature":"shortcuts.new(table) -> Shortcuts", "description":"Return a user shortcut file's rules and disabled rule IDs; rules default to desktop context and buffer delivery and are validated against the system configuration when the session applies them."}),
         serde_json::json!({"name":"rules.define", "signature":"rules.define(table) -> Rule", "description":"Declare a rule; strict validation occurs at compilation."}),
         serde_json::json!({"name":"rules.on", "signature":"rules.on(id, phase, callback) -> Subscription", "phase":"configuration", "description":"Register a generation-scoped observational rule-phase callback for an existing configured rule; phases are discrete, begin, update, end and cancel; dispose with Subscription.dispose."}),
         serde_json::json!({"name":"layers.define", "signature":"layers.define(table) -> Layer", "description":"Declare a physical-key layer with physical, active or inactive activation; strict validation occurs at compilation."}),
@@ -543,6 +544,22 @@ function api.config.new(value)
     if value.version == nil then value.version = 1 end
     return value
 end
+function api.shortcuts.new(value)
+    assert(type(value) == "table", "shortcuts.new expects a list of rules")
+    assert(value.policy == nil and value.devices == nil and value.mode == nil,
+        "shortcuts hold rules only; devices and policy belong in the system configuration")
+    local rules, count = {}, #value
+    for index, rule in ipairs(value) do
+        assert(type(rule) == "table", "shortcuts entry " .. index .. " must be a rule")
+        if rule.contexts == nil then rule.contexts = {"desktop"} end
+        if rule.delivery == nil then rule.delivery = "buffer" end
+        if rule.priority == nil then rule.priority = 1000 + count - index end
+        rules[index] = rule
+    end
+    local disabled = value.disable or {}
+    assert(type(disabled) == "table", "shortcuts disable lists rule IDs")
+    return {version = 1, rules = rules, disabled_rules = disabled}
+end
 function api.rules.define(value)
     assert(type(value) == "table", "rules.define expects a table")
     rule_sites[value] = rule_site()
@@ -700,11 +717,36 @@ pub fn compile(source: &str, name: &str) -> Result<Config, ConfigError> {
     Ok(runtime.config)
 }
 
+/// Evaluate a user shortcut file into rules layered over the system configuration.
+/// Its rules are validated against that configuration only when applied.
+pub fn compile_shortcuts(sources: &Sources) -> Result<crate::config::Overlay, ConfigError> {
+    sources.validate()?;
+    let runtime = evaluate(
+        &sources.source,
+        &sources.name,
+        &sources.modules,
+        &mut || Ok(()),
+        true,
+    )?;
+    let overlay = runtime.host.borrow_mut().shortcuts.take();
+    overlay.ok_or_else(|| error("shortcut file returned no shortcuts"))
+}
+
 fn instantiate(
     source: &str,
     name: &str,
     modules: &std::collections::BTreeMap<String, Module>,
     progress: &mut dyn FnMut() -> io::Result<()>,
+) -> Result<Runtime, ConfigError> {
+    evaluate(source, name, modules, progress, false)
+}
+
+fn evaluate(
+    source: &str,
+    name: &str,
+    modules: &std::collections::BTreeMap<String, Module>,
+    progress: &mut dyn FnMut() -> io::Result<()>,
+    shortcuts: bool,
 ) -> Result<Runtime, ConfigError> {
     modules::validate(name, source, modules)?;
     let mut lua = Lua::core();
@@ -726,6 +768,7 @@ fn instantiate(
             )?;
             for namespace in [
                 "config",
+                "shortcuts",
                 "rules",
                 "layers",
                 "modes",
@@ -946,6 +989,11 @@ fn instantiate(
             if values.0.len() != 1 {
                 return Err(io::Error::other("Lua configuration must return one table").into());
             }
+            if shortcuts {
+                let overlay = self::values::shortcuts(ctx, values.0[0], ctx.fetch(&rule_sites))?;
+                host.borrow_mut().shortcuts = Some(overlay);
+                return Ok(Config::preset("minimal").map_err(io::Error::other)?);
+            }
             let config =
                 self::values::located_configuration(ctx, values.0[0], ctx.fetch(&rule_sites))?;
             config.validate().map_err(io::Error::other)?;
@@ -967,6 +1015,16 @@ fn instantiate(
         recognition_last: None,
         recognition_candidates: Default::default(),
     };
+    if shortcuts
+        && (!runtime.registrations()?.is_empty()
+            || !runtime.timer_registrations()?.is_empty()
+            || !runtime.handler_registrations()?.is_empty()
+            || !runtime.task_registrations()?.is_empty())
+    {
+        return Err(error(
+            "shortcut files are declarative; callbacks, events, timers, tasks and named actions belong in the system configuration",
+        ));
+    }
     let handlers = runtime.handler_registrations()?;
     let registrations = runtime.registrations()?;
     hooks::validate(&registrations, &runtime.config)?;
@@ -1144,6 +1202,64 @@ return {{version=1,policy={{allow_runtime_rules=true}}}}
         .unwrap_err()
         .to_string();
         assert!(!error.contains("rules["), "{error}");
+    }
+    #[test]
+    fn shortcut_files_default_to_desktop_buffer_and_stay_declarative() {
+        let overlay = compile_shortcuts(&Sources::single(
+            r#"
+            local p = require("prek")
+            return p.shortcuts.new {
+                p.rules.define { id = "close", devices = {"touch"},
+                    trigger = p.triggers.swipe { fingers = 3, direction = "up", travel = "70px", fallback_travel = "0.05norm" },
+                    action = p.actions.command { argv = {"phone-window-gestures", "close"} } },
+                p.rules.define { id = "watch", devices = {"touch"}, contexts = {"locked"}, delivery = "observe",
+                    trigger = p.triggers.swipe { fingers = 2, direction = "down", travel = "70px", fallback_travel = "0.05norm" },
+                    action = p.actions.event { name = "watch" } },
+                disable = {"system-rule"},
+            }
+            "#
+            .into(),
+            "init.lua".into(),
+        ))
+        .unwrap();
+        assert_eq!(overlay.version, 1);
+        assert_eq!(overlay.disabled_rules, vec!["system-rule".to_string()]);
+        assert_eq!(
+            overlay.rules[0].contexts,
+            vec![crate::config::Context::Desktop]
+        );
+        assert_eq!(overlay.rules[0].delivery, crate::config::Delivery::Buffer);
+        assert_eq!(
+            overlay.rules[1].contexts,
+            vec![crate::config::Context::Locked]
+        );
+        assert_eq!(overlay.rules[1].delivery, crate::config::Delivery::Observe);
+        let key =
+            "trigger = p.triggers.key { key = 'KEY_A' }, action = p.actions.event { name = 'x' }";
+        for (source, message) in [
+            (
+                "return require('prek').config.new { policy = {}, rules = {} }".to_string(),
+                "devices and policy belong",
+            ),
+            (
+                "local p = require('prek'); p.events.on('ready', function() end); return p.shortcuts.new {}"
+                    .into(),
+                "declarative",
+            ),
+            (
+                format!("local p = require('prek'); return p.shortcuts.new {{ p.rules.define {{ id = 'x', on_begin = function() end, {key} }} }}"),
+                "declarative",
+            ),
+            (
+                format!("local p = require('prek'); return p.shortcuts.new {{ p.rules.define {{ id = 'x', bogus = 1, {key} }} }}"),
+                "(\"x\")",
+            ),
+        ] {
+            let error = compile_shortcuts(&Sources::single(source.clone(), "init.lua".into()))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(message), "{source}: {error}");
+        }
     }
     #[test]
     fn every_manifest_symbol_is_cited_by_the_reference() {

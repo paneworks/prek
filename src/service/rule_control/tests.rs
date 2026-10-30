@@ -832,4 +832,26 @@ fn runtime_rules_negotiate_with_observation_and_route_brokers_under_policy() {
             expected
         );
     }
+    // A device-only route configuration negotiates commands and keys under the policy.
+    config.rules.clear();
+    for effect in [Capability::Commands, Capability::SyntheticInput] {
+        let caps = BTreeSet::from([effect, Capability::Context, Capability::Observations]);
+        for (allowed, expected) in [(true, true), (false, false)] {
+            config.policy.allow_runtime_rules = allowed;
+            assert_eq!(
+                registration_capabilities(
+                    Some(&config),
+                    Some(&config),
+                    true,
+                    false,
+                    true,
+                    Role::Agent,
+                    &caps
+                )
+                .is_ok(),
+                expected,
+                "{effect:?}, allow_runtime_rules={allowed}"
+            );
+        }
+    }
 }

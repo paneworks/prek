@@ -62,7 +62,7 @@ let
     ++ lib.optional cfg.session.recognizers "--recognizers"
     ++ lib.optional cfg.session.ruleMutations "--rule-mutations";
   sessionPackage = pkgs.writeShellScriptBin "prek-session" ''
-    exec ${lib.escapeShellArgs sessionArgs} "$@"
+    exec ${lib.escapeShellArgs sessionArgs} ${lib.optionalString (cfg.session.shortcuts != null) ''--shortcuts "${cfg.session.shortcuts}"''} "$@"
   '';
 in {
   options.services.prek = {
@@ -130,6 +130,12 @@ in {
       input = mkEnableOption "permitted normalized Lua input events; protected Lua policy must also allow them";
       recognizers = mkEnableOption "source-bound custom Lua recognizers; protected input policy and owning desktop context are required";
       ruleMutations = mkEnableOption "acknowledged Lua rule/layer/mode transactions; protected Lua policy must also allow them";
+      shortcuts = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "\${XDG_CONFIG_HOME:-$HOME/.config}/prek/init.lua";
+        description = "User shortcut file (shortcuts.new) the session agent layers over the system rules and reapplies on change; the launcher's shell expands it. Requires ruleMutations and policy.allow_runtime_rules.";
+      };
       package = mkOption {
         type = types.package;
         readOnly = true;
@@ -144,6 +150,7 @@ in {
       { assertion = lib.all moduleName (builtins.attrNames cfg.luaModules); message = "services.prek.luaModules: use bounded dotted identifiers outside the reserved prek namespace."; }
       { assertion = cfg.session.lua || !(cfg.session.input || cfg.session.recognizers || cfg.session.ruleMutations); message = "services.prek.session: input, recognizers and ruleMutations require lua."; }
       { assertion = route || !(cfg.session.commands || cfg.session.keys); message = "services.prek.session: commands and keys require route mode."; }
+      { assertion = cfg.session.shortcuts == null || cfg.session.lua && cfg.session.ruleMutations; message = "services.prek.session: shortcuts require lua and ruleMutations."; }
     ];
     services.prek.configurationPackage = configuration;
     services.prek.session.package = sessionPackage;

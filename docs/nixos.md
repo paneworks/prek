@@ -127,7 +127,11 @@ must also set `allow_input_events=true`. `session.ruleMutations = true` adds
 `--rule-mutations`, requiring `allow_runtime_rules=true`.
 `session.recognizers = true` adds `--recognizers` for source-bound custom
 callbacks under the same protected input permission. All three options require
-`session.lua=true`; they default false. These options cannot widen protected
+`session.lua=true`; they default false. `session.shortcuts` names a user shortcut
+file the agent layers over the system rules and reapplies on change, for example
+`"\${XDG_CONFIG_HOME:-$HOME/.config}/prek/init.lua"`; the launcher's shell expands
+it, and it requires `session.ruleMutations` (see
+[user shortcut files](lua-api.md#user-shortcut-files)). These options cannot widen protected
 source policy. `session.enable=false` omits the launcher from the system profile
 while retaining the broker, useful when an existing session hook starts the
 selected `prek` executable directly. `session.package` exposes the generated

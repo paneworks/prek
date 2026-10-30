@@ -117,6 +117,10 @@ enum Command {
         /// Permit Lua rule transactions when the system policy grants them.
         #[arg(long, requires = "lua")]
         rule_mutations: bool,
+        /// Layer this user's shortcut file (shortcuts.new) over the system rules,
+        /// reapplying it whenever the file or its modules change.
+        #[arg(long, requires = "rule_mutations")]
+        shortcuts: Option<PathBuf>,
         /// Deliver permitted normalized input to approved Lua subscriptions.
         #[arg(long, requires = "lua")]
         input: bool,
@@ -435,6 +439,7 @@ fn run(command: Command) -> io::Result<()> {
             keys,
             lua,
             rule_mutations,
+            shortcuts,
             input,
             recognizers,
         } => {
@@ -448,6 +453,7 @@ fn run(command: Command) -> io::Result<()> {
                 keys,
                 lua,
                 rule_mutations,
+                shortcuts,
                 input,
                 recognizers,
             };
@@ -1363,8 +1369,102 @@ struct SessionOptions {
     keys: bool,
     lua: bool,
     rule_mutations: bool,
+    shortcuts: Option<PathBuf>,
     input: bool,
     recognizers: bool,
+}
+
+/// Device, inode, size and modification time of each watched file.
+#[cfg(target_os = "linux")]
+type ShortcutStamp = Vec<(u64, u64, u64, i64, i64)>;
+
+/// A user shortcut file, recompiled after it or its modules change.
+#[cfg(target_os = "linux")]
+struct ShortcutFile {
+    path: PathBuf,
+    stamp: Option<ShortcutStamp>,
+    next_check: Duration,
+    serial: u64,
+    overlay: Option<prek::config::Overlay>,
+}
+
+#[cfg(target_os = "linux")]
+impl ShortcutFile {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            stamp: None,
+            next_check: Duration::ZERO,
+            serial: 0,
+            overlay: None,
+        }
+    }
+    /// Checks once a second. A failed compile keeps the last good shortcuts.
+    fn poll(&mut self, now: Duration) -> Option<Result<(), String>> {
+        if now < self.next_check {
+            return None;
+        }
+        self.next_check = now + Duration::from_secs(1);
+        let stamp = shortcut_stamp(&self.path);
+        if self.stamp.as_ref() == Some(&stamp) {
+            return None;
+        }
+        self.stamp = Some(stamp);
+        let compiled = std::fs::read_to_string(&self.path)
+            .and_then(|text| prek::lua::Sources::capture(text, &self.path))
+            .map_err(|error| format!("{}: {error}", self.path.display()))
+            .and_then(|sources| {
+                prek::lua::compile_shortcuts(&sources).map_err(|error| error.to_string())
+            });
+        Some(compiled.map(|overlay| {
+            self.serial += 1;
+            self.overlay = Some(overlay);
+        }))
+    }
+    fn current(&self) -> Option<(u64, &prek::config::Overlay)> {
+        self.overlay.as_ref().map(|overlay| (self.serial, overlay))
+    }
+}
+
+/// Identity and modification times of the entry file and every module beside it.
+#[cfg(target_os = "linux")]
+fn shortcut_stamp(path: &std::path::Path) -> ShortcutStamp {
+    use std::os::unix::fs::MetadataExt;
+    let mut stamp = Vec::new();
+    let mut pending = vec![(path.to_owned(), 0)];
+    if let Some(parent) = path.parent() {
+        pending.push((parent.join("modules"), 1));
+    }
+    while let Some((path, depth)) = pending.pop() {
+        let Ok(metadata) = std::fs::metadata(&path) else {
+            stamp.push((0, 0, 0, 0, 0));
+            continue;
+        };
+        stamp.push((
+            metadata.dev(),
+            metadata.ino(),
+            metadata.len(),
+            metadata.mtime(),
+            metadata.mtime_nsec(),
+        ));
+        if metadata.is_dir()
+            && depth <= 16
+            && let Ok(entries) = std::fs::read_dir(&path)
+        {
+            let mut entries: Vec<_> = entries.flatten().map(|entry| entry.path()).collect();
+            entries.sort();
+            pending.extend(
+                entries
+                    .into_iter()
+                    .take(256)
+                    .map(|entry| (entry, depth + 1)),
+            );
+        }
+        if stamp.len() > 1024 {
+            break;
+        }
+    }
+    stamp
 }
 
 #[cfg(target_os = "linux")]
@@ -1399,6 +1499,9 @@ impl SessionOptions {
                 command.arg(flag);
             }
         }
+        if let Some(path) = &self.shortcuts {
+            command.arg("--shortcuts").arg(path);
+        }
         command
     }
 }
@@ -1425,6 +1528,7 @@ mod session_launcher_tests {
             keys: true,
             lua: true,
             rule_mutations: true,
+            shortcuts: Some("/home/owned path/init.lua".into()),
             input: true,
             recognizers: true,
             ..Default::default()
@@ -1453,7 +1557,9 @@ mod session_launcher_tests {
                 "--lua",
                 "--rule-mutations",
                 "--input",
-                "--recognizers"
+                "--recognizers",
+                "--shortcuts",
+                "/home/owned path/init.lua"
             ]
         );
     }
@@ -1500,9 +1606,12 @@ fn run_session(
         keys,
         lua,
         rule_mutations,
+        shortcuts,
         input,
         recognizers,
     } = options;
+    let mut shortcut_file = shortcuts.map(ShortcutFile::new);
+    let mut shortcuts_delivered = None;
     let effects = commands;
     use nix::{
         libc,
@@ -2118,6 +2227,7 @@ fn run_session(
                                     )
                                 })
                                 .transpose();
+                            shortcuts_delivered = None;
                             lua_runtime = match loaded {
                                 Ok(runtime) => runtime,
                                 Err(error) => {
@@ -2243,7 +2353,10 @@ fn run_session(
                         runtime.update_context(view.clone())?;
                     }
                     match std::mem::take(&mut lua_pending).drain_into(&mut runtime) {
-                        Ok(()) => lua_runtime = Some(runtime),
+                        Ok(()) => {
+                            lua_runtime = Some(runtime);
+                            shortcuts_delivered = None;
+                        }
                         Err(error) => eprintln!("Lua runtime unavailable: {error}"),
                     }
                 }
@@ -2337,6 +2450,31 @@ fn run_session(
                 lua_runtime.as_ref(),
                 &mut channel,
             )?;
+        }
+        if let Some(file) = shortcut_file.as_mut() {
+            if let Some(Err(error)) = file.poll(monotonic()?) {
+                if json {
+                    serde_json::to_writer(
+                        &mut *output,
+                        &serde_json::json!({"version":1,"kind":"shortcuts","error":error}),
+                    )?;
+                    writeln!(output)?;
+                } else {
+                    writeln!(output, "Shortcuts: {error}")?;
+                }
+                output.flush()?;
+            }
+            // Each Lua runtime receives the current shortcuts once per change.
+            if let (Some(runtime), Some(current)) = (lua_runtime.as_mut(), fence)
+                && let Some((serial, overlay)) = file.current()
+                && shortcuts_delivered != Some((current, serial))
+            {
+                shortcuts_delivered = Some((current, serial));
+                if let Err(error) = runtime.set_shortcuts(overlay.clone()) {
+                    writeln!(output, "Shortcuts: {error}")?;
+                    output.flush()?;
+                }
+            }
         }
         if let Some(proposal) = lua_rule_request.as_ref()
             && channel.send(

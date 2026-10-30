@@ -295,11 +295,14 @@ impl Job {
             }
             let config = definition.validate().map_err(io::Error::other)?;
             let text = definition.model.clone();
+            // The session runtime also carries permitted runtime rule edits,
+            // such as user shortcuts.
             let runtime = (!definition.registrations.is_empty()
                 || !definition.timers.is_empty()
                 || !definition.handlers.is_empty()
-                || !definition.tasks.is_empty())
-            .then_some(definition);
+                || !definition.tasks.is_empty()
+                || config.policy.allow_runtime_rules)
+                .then_some(definition);
             return Ok(Some(Compiled {
                 text,
                 config,

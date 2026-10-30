@@ -945,6 +945,46 @@ activation keys, permitted seats and source selectors. A rule accepts `id`,
 `screen`, `require_keys`, `keys_throughout`, `layer`, `delivery`,
 `trigger` and `action`. Existing defaults and exact units remain in effect.
 
+### User shortcut files
+
+A user keeps personal bindings in their own file, such as
+`~/.config/prek/init.lua`, with private modules in `modules/` beside it. The
+system configuration still owns devices, seats and policy. The file returns
+`shortcuts.new { rule, rule, ..., disable = {"rule-id", ...} }`:
+
+```lua
+local p = require("prek")
+return p.shortcuts.new {
+    p.rules.define { id = "close", devices = {"touch"},
+        trigger = p.triggers.swipe { fingers = 3, direction = "up", travel = "70px", fallback_travel = "0.05norm" },
+        action = p.actions.command { argv = {"phone-window-gestures", "close"} } },
+    disable = {"system-rule"},
+}
+```
+
+Each listed rule without `contexts` gets `{"desktop"}`, without `delivery` gets
+`buffer`, and without `priority` gets 1000 plus the number of rules after it, so
+earlier shortcuts win over later ones and over rules at lower priorities. The
+result has `version`, `rules` and `disabled_rules`. The file is declarative:
+events, rule callbacks, timers, tasks and named actions are rejected.
+
+`prek session --lua --rule-mutations --shortcuts FILE` compiles the file as the
+session user and layers it over the system rules as one runtime rule
+transaction on the session's seat. It requires a Lua system configuration with
+`policy.allow_runtime_rules`; that policy also lets the session negotiate
+`--commands` and `--keys` in route mode without a system rule using them.
+A shortcut whose ID matches a system rule replaces that rule. A removed
+shortcut restores the system rule or disappears, and an ID removed from
+`disable` regains its system state. The agent rechecks the file and its modules
+every second and applies a change as a new transaction; the session log reports
+`shortcuts applied`, `shortcuts unchanged` or `shortcuts rejected` with the
+reason, and a failure keeps the previous shortcuts. Rules are validated against
+the system configuration: devices and seats outside its policy, unknown disabled
+IDs, unapproved named handlers and actions beyond the session's negotiated
+capabilities (`--commands`, `--keys`) are refused. A reload of the system
+configuration starts a new generation and reapplies the shortcuts. At most 64
+rule operations and 48 KiB of rules apply at once.
+
 ### Starting regions
 
 `region = {edge = "bottom", depth = "20px"}` limits a touch rule to contacts

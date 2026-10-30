@@ -228,6 +228,7 @@ pub(super) struct Host {
     pub(super) task_joins: std::collections::BTreeMap<u64, u64>,
     pub(super) task_clock: Option<(Duration, Instant)>,
     pub(super) rules: super::rule_api::State,
+    pub(super) shortcuts: Option<crate::config::Overlay>,
     #[cfg(target_os = "linux")]
     pub(super) capabilities: Option<super::CapabilityView>,
     #[cfg(target_os = "linux")]

@@ -477,6 +477,11 @@
       "signature": "config.export(config) -> string"
     },
     {
+      "description": "Return a user shortcut file's rules and disabled rule IDs; rules default to desktop context and buffer delivery and are validated against the system configuration when the session applies them.",
+      "name": "shortcuts.new",
+      "signature": "shortcuts.new(table) -> Shortcuts"
+    },
+    {
       "description": "Declare a rule; strict validation occurs at compilation.",
       "name": "rules.define",
       "signature": "rules.define(table) -> Rule"

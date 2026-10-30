@@ -33,8 +33,19 @@ pub(super) struct State {
     recognizers: Vec<crate::recognition::Definition>,
     next_id: u64,
     builders: Vec<Weak<RefCell<Builder>>>,
-    pending: Option<(RuleProposal, Rc<RefCell<Builder>>)>,
+    /// A proposal without a builder was submitted by the host for user shortcuts.
+    pending: Option<(RuleProposal, Option<Rc<RefCell<Builder>>>)>,
     outgoing: Option<RuleProposal>,
+    baseline: Option<Config>,
+    shortcuts: Shortcuts,
+    shortcuts_next: Option<Shortcuts>,
+    shortcut_outcome: Option<super::LogRecord>,
+}
+/// Rule IDs that the applied user shortcut file replaced, added or disabled.
+#[derive(Clone, Default)]
+struct Shortcuts {
+    rules: std::collections::BTreeSet<String>,
+    disabled: std::collections::BTreeSet<String>,
 }
 struct Builder {
     transaction: Transaction,
@@ -45,17 +56,26 @@ struct Builder {
 impl State {
     pub(super) fn initialize(&mut self, config: Config, handlers: Vec<HandlerRegistration>) {
         self.recognizers = config.recognizer_definitions();
+        self.baseline = Some(config.clone());
         self.config = Some(config);
         self.handlers = handlers;
         self.revision = 1;
+        self.shortcuts = Shortcuts::default();
     }
     pub(super) fn discard(&mut self, reason: &str) {
         self.outgoing = None;
-        if let Some((_, builder)) = self.pending.take() {
-            let mut builder = builder.borrow_mut();
-            builder.state = "rejected";
-            builder.error = Some(reason.into());
-            builder.transaction.changes.clear();
+        match self.pending.take() {
+            Some((_, Some(builder))) => {
+                let mut builder = builder.borrow_mut();
+                builder.state = "rejected";
+                builder.error = Some(reason.into());
+                builder.transaction.changes.clear();
+            }
+            Some((_, None)) => {
+                self.shortcuts_next = None;
+                self.shortcut_outcome = Some(shortcut_log("shortcuts rejected", reason));
+            }
+            None => {}
         }
     }
     pub(super) fn pending_id(&self) -> Option<u64> {
@@ -221,7 +241,7 @@ pub(super) fn register<'gc>(
                         host.rules.next_id = id;
                         let proposal = RuleProposal { id, transaction: builder.transaction.clone() };
                         host.rules.outgoing = Some(proposal.clone());
-                        host.rules.pending = Some((proposal, retained));
+                        host.rules.pending = Some((proposal, Some(retained)));
                         builder.state = "pending";
                         stack.replace(ctx, ());
                     }
@@ -421,7 +441,8 @@ impl Runtime {
         } else {
             None
         };
-        {
+        let submitted_by_host = builder.is_none();
+        if let Some(builder) = builder {
             let mut builder = builder.borrow_mut();
             builder.state = if config.is_some() {
                 "accepted"
@@ -429,9 +450,10 @@ impl Runtime {
                 "rejected"
             };
             builder.revision = Some(receipt.revision.to_string());
-            builder.error = receipt.error;
+            builder.error = receipt.error.clone();
             builder.transaction.changes.clear();
         }
+        let accepted = config.is_some();
         if let Some(config) = config {
             host.rules.config = Some(config);
             host.rules.revision = receipt.revision;
@@ -439,7 +461,132 @@ impl Runtime {
             host.rules.config = None;
         }
         host.rules.pending = None;
+        if submitted_by_host {
+            let next = host.rules.shortcuts_next.take().unwrap_or_default();
+            host.rules.shortcut_outcome = Some(if accepted {
+                let outcome = super::LogRecord {
+                    message: "shortcuts applied".into(),
+                    fields: serde_json::json!({"rules": next.rules.len(), "disabled": next.disabled.len()}),
+                };
+                host.rules.shortcuts = next;
+                outcome
+            } else {
+                shortcut_log(
+                    "shortcuts rejected",
+                    receipt.error.as_deref().unwrap_or("rejected"),
+                )
+            });
+        }
         Ok(())
+    }
+    /// Layer user shortcuts over the current rules as one host transaction:
+    /// shortcuts dropped since the last file return to their system rule,
+    /// and IDs no longer disabled regain their system state. Returns false
+    /// when nothing changed.
+    pub fn submit_shortcuts(
+        &mut self,
+        overlay: crate::config::Overlay,
+    ) -> Result<bool, ConfigError> {
+        let mut host = self.host.borrow_mut();
+        let state = &mut host.rules;
+        if !state.enabled {
+            return Err(error("user shortcuts require runtime rule transactions"));
+        }
+        if state.pending.is_some() {
+            return Err(error("another runtime rule proposal is pending"));
+        }
+        let current = state
+            .config
+            .as_ref()
+            .ok_or_else(|| error("runtime rule view unavailable"))?;
+        let baseline = state.baseline.as_ref().unwrap_or(current);
+        let mut next = Shortcuts::default();
+        for rule in &overlay.rules {
+            if !next.rules.insert(rule.id.clone()) {
+                return Err(error(format!("duplicate shortcut {}", rule.id)));
+            }
+        }
+        next.disabled = overlay.disabled_rules.iter().cloned().collect();
+        let system = |id: &str| baseline.rules.iter().find(|rule| rule.id == id);
+        let mut changes = Vec::new();
+        for id in state.shortcuts.rules.difference(&next.rules) {
+            changes.push(match system(id) {
+                Some(original) => Change::Replace {
+                    rule: Box::new(original.clone()),
+                },
+                None => Change::Remove { id: id.clone() },
+            });
+        }
+        for rule in &overlay.rules {
+            if current.rules.iter().find(|old| old.id == rule.id) != Some(rule) {
+                changes.push(Change::Replace {
+                    rule: Box::new(rule.clone()),
+                });
+            }
+        }
+        for id in state.shortcuts.disabled.difference(&next.disabled) {
+            if let Some(original) = system(id).filter(|_| !next.rules.contains(id)) {
+                changes.push(Change::Enabled {
+                    id: id.clone(),
+                    enabled: original.enabled,
+                });
+            }
+        }
+        for id in &next.disabled {
+            let enabled = current
+                .rules
+                .iter()
+                .find(|rule| rule.id == *id)
+                .is_none_or(|rule| rule.enabled);
+            if enabled || next.rules.contains(id) {
+                changes.push(Change::Enabled {
+                    id: id.clone(),
+                    enabled: false,
+                });
+            }
+        }
+        if changes.is_empty() {
+            state.shortcuts = next;
+            state.shortcut_outcome = Some(shortcut_log("shortcuts unchanged", ""));
+            return Ok(false);
+        }
+        if changes.len() > crate::rule_transactions::MAX_OPERATIONS {
+            return Err(error(format!(
+                "shortcut changes exceed {} rule operations",
+                crate::rule_transactions::MAX_OPERATIONS
+            )));
+        }
+        let transaction = crate::rule_transactions::Transaction {
+            revision: state.revision,
+            changes,
+        };
+        let prepared = transaction.prepare(current, state.revision)?;
+        state.validate_handlers(&prepared).map_err(error)?;
+        let id = state
+            .next_id
+            .checked_add(1)
+            .ok_or_else(|| error("rule proposal identity exhausted"))?;
+        state.next_id = id;
+        let proposal = RuleProposal { id, transaction };
+        state.outgoing = Some(proposal.clone());
+        state.pending = Some((proposal, None));
+        state.shortcuts_next = Some(next);
+        Ok(true)
+    }
+    /// The result of the last shortcut submission, once.
+    pub fn take_shortcut_outcome(&mut self) -> Option<super::LogRecord> {
+        self.host.borrow_mut().rules.shortcut_outcome.take()
+    }
+}
+
+fn shortcut_log(message: &str, detail: &str) -> super::LogRecord {
+    super::LogRecord {
+        message: message.into(),
+        fields: if detail.is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::json!({ "detail": detail })
+        },
     }
 }
 

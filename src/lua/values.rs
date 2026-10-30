@@ -49,6 +49,43 @@ pub(super) fn located_configuration<'gc>(
     .map_err(|error| locate_rule(ctx, value, sites, io::Error::other(error).into()))
 }
 
+/// Decode a returned shortcut overlay; schema failures name the first failing rule.
+pub(super) fn shortcuts<'gc>(
+    ctx: Context<'gc>,
+    value: Value<'gc>,
+    sites: Table<'gc>,
+) -> Result<crate::config::Overlay, luna::Error<'gc>> {
+    let Value::Table(table) = value else {
+        return Err(io::Error::other("a shortcut file returns shortcuts.new { ... }").into());
+    };
+    for field in ["policy", "devices", "mode"] {
+        if !table.get::<_, Value>(ctx, field)?.is_nil() {
+            return Err(io::Error::other(
+                "a shortcut file returns shortcuts.new { ... }; devices and policy belong in the system configuration",
+            )
+            .into());
+        }
+    }
+    for field in ["rules", "disabled_rules"] {
+        if let Value::Table(collection) = table.get(ctx, field)?
+            && collection
+                .iter(ctx)
+                .take(crate::config::MAX_RULES + 1)
+                .count()
+                > crate::config::MAX_RULES
+        {
+            return Err(io::Error::other("shortcut collection limit exceeded").into());
+        }
+    }
+    budget(ctx, value, 64, CONFIG_VALUES, CONFIG_EXPANDED_BYTES)?;
+    luna_util::serde::from_value_with(
+        ctx,
+        value,
+        luna_util::serde::DeOptions::default().max_depth(64),
+    )
+    .map_err(|error| locate_rule(ctx, value, sites, io::Error::other(error).into()))
+}
+
 /// Name the first rule that fails on its own, with its `rules.define` call site.
 fn locate_rule<'gc>(
     ctx: Context<'gc>,
