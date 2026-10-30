@@ -1068,9 +1068,7 @@ impl Broker {
                     || *at > now
                     || now - *at > protocol::MAX_PACKET_AGE
                     || context.snapshot.state != State::Desktop
-                    || !configured
-                        .contexts
-                        .contains(&crate::config::Context::Desktop)
+                    || !dispatches_on_desktop(configured)
                     || output.as_ref().is_some_and(|name| {
                         !context
                             .snapshot
@@ -1941,9 +1939,31 @@ impl AsFd for Broker {
     }
 }
 
+/// Whether a rule's contexts include the desktop; no contexts include every one.
+fn dispatches_on_desktop(rule: &crate::config::Rule) -> bool {
+    rule.contexts.is_empty() || rule.contexts.contains(&crate::config::Context::Desktop)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn an_action_rule_without_contexts_dispatches_on_the_desktop() {
+        use crate::config::Context;
+        let mut rule = crate::config::Config::preset("desktop")
+            .unwrap()
+            .rules
+            .remove(0);
+        rule.action = Action::Command {
+            argv: vec!["true".into()],
+        };
+        rule.contexts.clear();
+        assert!(dispatches_on_desktop(&rule));
+        rule.contexts = vec![Context::Locked, Context::Desktop];
+        assert!(dispatches_on_desktop(&rule));
+        rule.contexts = vec![Context::Locked, Context::Greeter];
+        assert!(!dispatches_on_desktop(&rule));
+    }
     use crate::{
         config::{Action, Direction},
         gestures::{Phase, Point, Space, TouchGesture},
