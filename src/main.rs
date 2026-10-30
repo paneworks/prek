@@ -1400,6 +1400,8 @@ impl ShortcutFile {
         }
     }
     /// Checks once a second. A failed compile keeps the last good shortcuts.
+    /// The file and its modules are read from its resolved path, so the file
+    /// may sit in a linked folder.
     fn poll(&mut self, now: Duration) -> Option<Result<(), String>> {
         if now < self.next_check {
             return None;
@@ -1410,8 +1412,11 @@ impl ShortcutFile {
             return None;
         }
         self.stamp = Some(stamp);
-        let compiled = std::fs::read_to_string(&self.path)
-            .and_then(|text| prek::lua::Sources::capture(text, &self.path))
+        let compiled = std::fs::canonicalize(&self.path)
+            .and_then(|path| {
+                let text = std::fs::read_to_string(&path)?;
+                prek::lua::Sources::capture(text, &path)
+            })
             .map_err(|error| format!("{}: {error}", self.path.display()))
             .and_then(|sources| {
                 prek::lua::compile_shortcuts(&sources).map_err(|error| error.to_string())
@@ -1562,6 +1567,36 @@ mod session_launcher_tests {
                 "/home/owned path/init.lua"
             ]
         );
+    }
+
+    #[test]
+    fn a_shortcut_file_in_a_linked_folder_compiles_from_its_resolved_path() {
+        let root = std::env::temp_dir().join(format!("prek-shortcut-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let real = root.join("dot/prek");
+        std::fs::create_dir_all(real.join("modules")).unwrap();
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::os::unix::fs::symlink(&real, root.join("config/prek")).unwrap();
+        std::fs::write(
+            real.join("modules/swipes.lua"),
+            r#"local p = require("prek")
+            return p.rules.define { id = "close", devices = {"touch"},
+                trigger = p.triggers.swipe { fingers = 3, direction = "up", travel = "70px", fallback_travel = "0.05norm" },
+                action = p.actions.command { argv = {"close"} } }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            real.join("init.lua"),
+            r#"local p = require("prek")
+            return p.shortcuts.new { require("swipes") }"#,
+        )
+        .unwrap();
+        let mut file = ShortcutFile::new(root.join("config/prek/init.lua"));
+        assert_eq!(file.poll(Duration::ZERO), Some(Ok(())));
+        let (serial, overlay) = file.current().unwrap();
+        assert_eq!(serial, 1);
+        assert_eq!(overlay.rules[0].id, "close");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }
 

@@ -975,8 +975,11 @@ transaction on the session's seat. It requires a Lua system configuration with
 `--commands` and `--keys` in route mode without a system rule using them.
 A shortcut whose ID matches a system rule replaces that rule. A removed
 shortcut restores the system rule or disappears, and an ID removed from
-`disable` regains its system state. The agent rechecks the file and its modules
-every second and applies a change as a new transaction; the session log reports
+`disable` regains its system state. The agent reads the file and its modules
+from the file's resolved path, so the folder may be a link (for example a
+dotfiles checkout linked to `~/.config/prek`); the modules themselves may not
+be links. It rechecks them every second and applies a change as a new
+transaction; the session log reports
 `shortcuts applied`, `shortcuts unchanged` or `shortcuts rejected` with the
 reason, and a failure keeps the previous shortcuts. Rules are validated against
 the system configuration: devices and seats outside its policy, unknown disabled
