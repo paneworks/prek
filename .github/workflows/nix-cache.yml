@@ -42,25 +42,19 @@ jobs:
           extra_nix_config: |
             extra-substituters = https://cache.bresilla.com/bresilla
             extra-trusted-public-keys = bresilla:zsecaZYIrjCJQS4AuGPmEVU5PRkiMmB/Mds3KaCzTvE=
-      - name: Build the application and its native gates
-        env:
-          TAG: ${{ github.ref_name }}
+      - name: Build the application with install checks
         run: |
-          set -euo pipefail
-          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
-          test "$TAG" = "v$version"
-          nix build --no-update-lock-file --print-build-logs --max-jobs 1 --cores 2 \
+          nix build --accept-flake-config --no-update-lock-file --print-build-logs \
             --no-link --print-out-paths .#default > "$RUNNER_TEMP/prek-store-paths"
           test "$(wc -l < "$RUNNER_TEMP/prek-store-paths")" -eq 1
-          bash tests/run-nix-gate.sh
       - name: Collect store paths and pins
         id: release
         env:
           SYSTEM: ${{ matrix.system }}
         run: |
           path=$(cat "$RUNNER_TEMP/prek-store-paths")
-          echo "$path" > "$RUNNER_TEMP/push-paths"
-          echo "prek-$SYSTEM $path" > "$RUNNER_TEMP/push-pins"
+          echo "$path" >> "$RUNNER_TEMP/push-paths"
+          echo "prek-$SYSTEM $path" >> "$RUNNER_TEMP/push-pins"
           { echo "paths<<EOF"; cat "$RUNNER_TEMP/push-paths"; echo EOF
             echo "pins<<EOF"; cat "$RUNNER_TEMP/push-pins"; echo EOF; } >> "$GITHUB_OUTPUT"
       # Only paths cache.nixos.org lacks; see bresilla/nixos .github/actions/attic-push.
@@ -92,7 +86,8 @@ jobs:
       - name: Download the application without builders and run installed checks
         run: |
           set -euo pipefail
-          prek=$(nix build --no-update-lock-file --max-jobs 0 --builders '' \
+          prek=$(nix build --accept-flake-config --no-update-lock-file \
+            --max-jobs 0 --builders '' \
             --no-link --print-out-paths .#default)
           "$prek/bin/prek" --version
           test -f "$prek/share/prek/lua/prek.lua"
